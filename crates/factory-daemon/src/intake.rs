@@ -1387,7 +1387,7 @@ mod tests {
         assert!(engine.store.due(far).await.unwrap().is_empty(), "never due");
         let why = refused(
             engine
-                .handle_request(Request::TaskRun { id: item.id.clone(), reason: None, continue_run: false })
+                .handle_request(Request::TaskRun { id: item.id.clone(), reason: None, continue_run: false, start_waiting: false })
                 .await,
         );
         assert!(why.contains("still in intake"), "{why}");

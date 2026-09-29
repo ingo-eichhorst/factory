@@ -552,6 +552,7 @@ mod tests {
             failure: None,
             closure: None,
             slot_wait: None,
+            after: None,
         }
     }
 

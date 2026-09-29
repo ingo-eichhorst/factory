@@ -11,7 +11,7 @@ import { describeWorkflowOrigin } from "./workflows.js";
 import { entryKindLabel, entryTone } from "./operations-model.js";
 import { estimateComparisonView, newestRead, runUsageView, taskUsageLine } from "./usage-model.js";
 import { columnFor, standing, taskActions, isSettled, CLOSE_REASONS, closeBody, runRoundLabel, runFeedback } from "./task-model.js";
-import { notStartedNote } from "./pending-model.js";
+import { notStartedNote, waitingLabel } from "./pending-model.js";
 
 export { scheduleLabel };
 
@@ -93,7 +93,9 @@ function standingDetail(detail, full) {
 /// and how long the newest run has been going.
 function taskCard(t) {
   const bits = [];
-  bits.push(t.schedule ? scheduleLabel(t.schedule) : (t.runs ? `${t.runs} run${t.runs === 1 ? "" : "s"}` : "no runs yet"));
+  // `#178`: a task waiting on another names what it waits on where a
+  // scheduled one names its rule.
+  bits.push(t.after ? waitingLabel(t) : t.schedule ? scheduleLabel(t.schedule) : (t.runs ? `${t.runs} run${t.runs === 1 ? "" : "s"}` : "no runs yet"));
   if (t.estimate_seconds) bits.push(`est. ${shortSpan(t.estimate_seconds)}`);
   if (!isSettled(t) && t.status !== "pending" && t.last_run_at) bits.push(since(t.last_run_at));
   const wt = t.worktree ? ` <span class="tag" title="runs in a git worktree of its own">worktree</span>` : "";
@@ -139,7 +141,7 @@ export function renderTasks() {
   $("tasks").innerHTML = rows.map(t => `
     <tr class="row" data-id="${esc(t.id)}">
       <td><div class="title">${esc(t.title)}</div>
-          <div class="sub">${esc(scheduleLabel(t.schedule))}${pausedTag(t)}</div></td>
+          <div class="sub">${esc(t.after ? waitingLabel(t) : scheduleLabel(t.schedule))}${pausedTag(t)}</div></td>
       <td>${statusBadge(t.status)}${standingHtml(t)}</td>
       <td class="sub">${t.runs || 0}</td>
       <td class="sub">${esc(t.scope)}</td>

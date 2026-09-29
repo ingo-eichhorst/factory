@@ -1048,6 +1048,7 @@ mod tests {
             failure: None,
             closure: None,
             slot_wait: None,
+            after: None,
         };
         let task = engine.store.create(&task).await.unwrap();
         let run = engine
@@ -1475,6 +1476,7 @@ mod tests {
             failure: None,
             closure: None,
             slot_wait: None,
+            after: None,
         };
         engine.store.create(&task).await.unwrap();
 

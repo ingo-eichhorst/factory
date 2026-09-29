@@ -158,6 +158,11 @@ pub enum Request {
         reason: Option<String>,
         #[serde(default, rename = "continue", skip_serializing_if = "std::ops::Not::not")]
         continue_run: bool,
+        /// Start a task that is waiting on other tasks (`Task::after`,
+        /// `#178`) now anyway, ahead of what it waits on -- refused without
+        /// this, journaled with it. The workflow counts the step as started.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        start_waiting: bool,
     },
     /// Journaled with who asked, and `reason` when there is one (`#106`).
     #[serde(rename = "task.cancel")]

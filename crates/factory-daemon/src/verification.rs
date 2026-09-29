@@ -821,10 +821,12 @@ mod tests {
         assert_eq!(run.required_steps.len(), 1);
         assert_eq!(run.required_steps[0].node_id.as_deref(), Some("a.tests"));
         let wf_now = engine.workflow_run(&wf.id).await.unwrap();
-        assert!(
-            wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap().task_id.is_none(),
-            "b does not start on a's word alone"
-        );
+        let b = wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap();
+        assert!(!b.launched(true), "b does not start on a's word alone");
+        // `#178`: its task exists all the same, waiting on a.
+        let b_task = engine.require(b.task_id.as_deref().unwrap()).await.unwrap();
+        assert_eq!(b_task.runs, 0);
+        assert!(b_task.after.is_some());
 
         settled(&engine, &run.id).await;
         engine.sync_workflow_for_task(&a_task).await;
@@ -832,7 +834,7 @@ mod tests {
         let gate = wf_now.nodes.iter().find(|n| n.node_id == "a.tests").unwrap();
         assert_eq!(gate.status, WorkflowNodeStatus::Done, "the gate mirrors its attestation");
         assert!(gate.task_id.is_none(), "a gate never spawns a task");
-        assert!(wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap().task_id.is_some(), "b starts on verified work");
+        assert!(wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap().launched(true), "b starts on verified work");
     }
 
     // -- attested_runs (#158) ------------------------------------------------

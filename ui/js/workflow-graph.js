@@ -196,6 +196,8 @@ export function freePosition(nodes, x, y) {
 /// `unstarted` rather than drawing nothing.
 export const NODE_STATUSES = [
   "unstarted",
+  // `#178`: its task exists, waiting on the steps before it.
+  "waiting",
   "pending",
   "dispatching",
   "running",

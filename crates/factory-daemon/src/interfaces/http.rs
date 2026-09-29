@@ -1435,6 +1435,9 @@ struct RunTaskBody {
     reason: Option<String>,
     #[serde(default, rename = "continue")]
     continue_run: bool,
+    /// `#178`: the CLI's `--ignore-wait`, the socket's `start_waiting`.
+    #[serde(default)]
+    start_waiting: bool,
 }
 
 /// Read the same way `reason_of` reads `ReasonBody` -- an empty body is
@@ -1452,7 +1455,12 @@ async fn run_task(
     body: axum::body::Bytes,
 ) -> AxumResponse {
     match run_task_body_of(&body) {
-        Ok(body) => run(&engine, Request::TaskRun { id, reason: body.reason, continue_run: body.continue_run }).await,
+        Ok(body) => run(&engine, Request::TaskRun {
+                id,
+                reason: body.reason,
+                continue_run: body.continue_run,
+                start_waiting: body.start_waiting,
+            }).await,
         Err(why) => refused(why),
     }
 }

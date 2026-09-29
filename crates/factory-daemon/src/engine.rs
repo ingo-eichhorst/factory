@@ -1114,7 +1114,7 @@ impl Engine {
                 }
                 Ok(Payload::Deleted { deleted })
             }
-            Request::TaskRun { id, reason, continue_run } => {
+            Request::TaskRun { id, reason, continue_run, start_waiting } => {
                 let task = self.require(&id).await?;
                 // The gate (`#119`): an item still in intake has not been
                 // released, and nothing but a decision releases it.
@@ -1141,6 +1141,31 @@ impl Engine {
                         wait.agent,
                         wait.since.to_rfc3339(),
                     )));
+                }
+                // `#178`: a task waiting on other tasks starts when they
+                // finish; starting it by hand ahead of them is refused
+                // unless asked for in so many words, and then the workflow
+                // is told the step has started, so it is not started again
+                // when its turn comes.
+                if let Some(after) = &task.after {
+                    if !start_waiting {
+                        return Err(FactoryError::BadRequest(format!(
+                            "this task is waiting on {} and starts when they finish; \
+                             to start it now anyway, ahead of them, pass --ignore-wait",
+                            after.titles()
+                        )));
+                    }
+                    let asked = crate::operations::Asked::new(caller, reason.clone());
+                    self.claim_waiting_node(&task).await?;
+                    self.entry(
+                        &id,
+                        asked.entry(
+                            "wait_overridden",
+                            format!("started ahead of {} {}", after.titles(), asked.words()),
+                            serde_json::json!({ "after": after }),
+                        ),
+                    )
+                    .await;
                 }
                 // `#178`: `--continue` is refused outright -- not merely
                 // fallen back from -- unless the task's newest run is
@@ -2383,7 +2408,7 @@ impl Engine {
     // -- creating ----------------------------------------------------------
 
     pub async fn create(&self, new: NewTask) -> Result<Task> {
-        self.create_task(new, None, None, None, None).await
+        self.create_task(new, None, None, None, None, None).await
     }
 
     /// A task born inside the intake gate (`#119`): `TaskStatus::Intake`
@@ -2398,16 +2423,20 @@ impl Engine {
                 "an intake item has no schedule; release it first, then schedule the task".into(),
             ));
         }
-        self.create_task(new, None, None, None, Some(intake)).await
+        self.create_task(new, None, None, None, Some(intake), None).await
     }
 
+    /// A workflow node's task. `after` is set when it is created ahead of
+    /// its turn (`#178`): it exists from the moment the workflow run starts,
+    /// waiting on the tasks named there.
     pub(crate) async fn create_workflow_task(
         &self,
         new: NewTask,
         origin: WorkflowOrigin,
         id: String,
+        after: Option<factory_core::task::After>,
     ) -> Result<Task> {
-        self.create_task(new, Some(origin), None, Some(id), None).await
+        self.create_task(new, Some(origin), None, Some(id), None, after).await
     }
 
     pub(crate) async fn create_bench_task(
@@ -2416,7 +2445,7 @@ impl Engine {
         origin: factory_core::bench::BenchOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, None, Some(origin), Some(id), None).await
+        self.create_task(new, None, Some(origin), Some(id), None, None).await
     }
 
     async fn create_task(
@@ -2426,6 +2455,7 @@ impl Engine {
         bench_origin: Option<factory_core::bench::BenchOrigin>,
         id: Option<String>,
         intake: Option<factory_core::intake::Intake>,
+        after: Option<factory_core::task::After>,
     ) -> Result<Task> {
         let factory = self.factory_snapshot();
         if new.title.trim().is_empty() {
@@ -2493,6 +2523,7 @@ impl Engine {
         if let Some(id) = id { task.id = id; }
         task.workflow_origin = workflow_origin;
         task.bench_origin = bench_origin;
+        task.after = after;
         if let Some(intake) = intake {
             task.status = TaskStatus::Intake;
             task.intake = Some(intake);
@@ -8158,7 +8189,7 @@ mod tests {
             dispatched_then_failed(&engine, &task, FailKind::AgentFailed).await;
 
             let response = engine
-                .handle_request(Request::TaskRun { id: task.id.clone(), reason: None, continue_run: true })
+                .handle_request(Request::TaskRun { id: task.id.clone(), reason: None, continue_run: true, start_waiting: false })
                 .await;
             let message = match response {
                 Response::Error { message, .. } => message,
@@ -8175,7 +8206,7 @@ mod tests {
             let task = task_for(&engine, false).await;
 
             let response = engine
-                .handle_request(Request::TaskRun { id: task.id.clone(), reason: None, continue_run: true })
+                .handle_request(Request::TaskRun { id: task.id.clone(), reason: None, continue_run: true, start_waiting: false })
                 .await;
             let message = match response {
                 Response::Error { message, .. } => message,

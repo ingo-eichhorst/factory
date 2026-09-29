@@ -1409,6 +1409,7 @@ mod tests {
                 },
                 origin,
                 "wf-task-1".into(),
+                None,
             )
             .await
             .unwrap();

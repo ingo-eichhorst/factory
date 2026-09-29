@@ -67,3 +67,28 @@ test("a task that has been started gets no note", () => {
   assert.equal(notStartedNote(running), null);
   assert.equal(notStartedNote(null), null);
 });
+
+test("#178: a task waiting on another is scheduled later, never due or manual", async () => {
+  const { notStarted, isDue, notStartedNote, waitingLabel, afterTitles } = await import("../js/pending-model.js");
+  const now = Date.parse("2026-09-29T12:00:00Z");
+  const waiting = {
+    id: "b", status: "pending",
+    after: { tasks: [{ id: "a", title: "Implement #119" }] },
+  };
+  const conditional = {
+    id: "c", status: "pending",
+    after: { tasks: [{ id: "a", title: "Implement #119" }, { id: "r", title: "Review #119" }], conditional: "runs only if Review #119 routes the work this way" },
+  };
+  const manual = { id: "m", status: "pending" };
+  assert.equal(isDue(waiting, now), false);
+  const buckets = notStarted([waiting, conditional, manual], now);
+  assert.deepEqual(buckets.later.map(t => t.id), ["b", "c"]);
+  assert.deepEqual(buckets.manual.map(t => t.id), ["m"]);
+  assert.deepEqual(buckets.due, []);
+  assert.equal(waitingLabel(waiting), "waiting on Implement #119");
+  assert.equal(afterTitles(conditional.after), "Implement #119 and Review #119");
+  assert.equal(waitingLabel(manual), "");
+  assert.match(notStartedNote(waiting), /^Waiting on Implement #119: it starts when that finishes\. Starting it now/);
+  assert.match(notStartedNote(conditional), /conditional: it runs only if Review #119 routes the work this way/);
+  assert.match(notStartedNote(waiting), /--ignore-wait b/);
+});

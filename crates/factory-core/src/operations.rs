@@ -1740,6 +1740,7 @@ mod tests {
             failure: None,
             closure: None,
             slot_wait: None,
+            after: None,
         }
     }
 
@@ -2116,6 +2117,22 @@ mod tests {
         assert_eq!(r.flow[0].queue_depth, 1);
         let queued = r.aging.items.iter().find(|i| i.stage == Stage::Queued).unwrap();
         assert_eq!(queued.age_s, 20.0 * 60.0, "aged from slot_wait.since, not queued_at");
+    }
+
+    /// `#178`: a workflow node's task waiting on its upstream is scheduled
+    /// work, not queued work -- it is not due until what it waits on
+    /// finishes, however long that takes. `pending-model.js`'s `isDue`
+    /// agrees.
+    #[test]
+    fn a_task_waiting_on_another_task_is_not_in_the_queue() {
+        let mut t = task("waiting-on-upstream", "demo");
+        t.after = Some(crate::task::After {
+            tasks: vec![crate::task::AfterTask { id: "up".into(), title: "Implement #119".into() }],
+            conditional: None,
+        });
+        let r = report(&input(&[t], &[]));
+        assert_eq!(r.flow.iter().map(|f| f.queue_depth).sum::<u32>(), 0);
+        assert!(r.aging.items.iter().all(|i| i.stage != Stage::Queued));
     }
 
     /// A scheduled task's own next slot can pass while it is still waiting

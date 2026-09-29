@@ -565,6 +565,47 @@ pub struct Task {
     /// reads as not waiting, exactly what those tasks were doing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_wait: Option<SlotWait>,
+    /// Waiting on other tasks (`#178`): a workflow node whose upstream has
+    /// not finished. Its trigger is "those tasks finished", not a cron slot
+    /// -- exclusive with `schedule`, which a workflow node never has -- and
+    /// the workflow engine fires it the moment the node becomes eligible,
+    /// clearing this as it does. `due()` never fires it, `task run` refuses
+    /// it unless told to start it anyway, and a board files it under
+    /// *scheduled*. Absent on every other task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<After>,
+}
+
+/// See [`Task::after`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct After {
+    /// The tasks it waits on, with the titles they had when it started
+    /// waiting -- enough to say "waiting on *Implement #119*" without a
+    /// lookup.
+    pub tasks: Vec<AfterTask>,
+    /// Set when the task may never run at all: it lies below a step that
+    /// routes the work one way or another, and is closed as not planned if
+    /// the workflow ends without taking its branch. Says which step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditional: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AfterTask {
+    pub id: String,
+    pub title: String,
+}
+
+impl After {
+    /// "Implement #119 and Review #119".
+    pub fn titles(&self) -> String {
+        let titles: Vec<&str> = self.tasks.iter().map(|t| t.title.as_str()).collect();
+        match titles.as_slice() {
+            [] => "nothing".into(),
+            [one] => (*one).into(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        }
+    }
 }
 
 impl Task {
@@ -793,6 +834,11 @@ pub struct TaskPatch {
     pub slot_wait: Option<SlotWait>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_slot_wait: bool,
+    /// See `Task::after` (`#178`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<After>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_after: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

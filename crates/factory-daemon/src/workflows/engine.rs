@@ -446,15 +446,22 @@ mod tests {
         engine.store.list(&TaskFilter::default()).await.unwrap()
     }
 
+    /// The tasks that have been handed a run. Every node's task exists from
+    /// the moment its workflow run starts (`#178`), so "which nodes have
+    /// started" is which tasks have runs, not which tasks exist.
+    async fn started(engine: &Arc<Engine>) -> Vec<factory_core::Task> {
+        tasks(engine).await.into_iter().filter(|t| t.runs > 0).collect()
+    }
+
     async fn wait_for_tasks(engine: &Arc<Engine>, count: usize) -> Vec<factory_core::Task> {
-        for _ in 0..100 {
-            let found = tasks(engine).await;
+        for _ in 0..200 {
+            let found = started(engine).await;
             if found.len() == count {
                 return found;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        panic!("expected {count} tasks, got {}", tasks(engine).await.len());
+        panic!("expected {count} started tasks, got {}", started(engine).await.len());
     }
 
     async fn finish(engine: &Arc<Engine>, task_id: &str, status: RunStatus) {
@@ -684,7 +691,7 @@ mod tests {
         );
         engine.advance_workflow(&run.id).await.unwrap();
         assert_eq!(
-            tasks(&engine).await.len(),
+            started(&engine).await.len(),
             1,
             "reconciliation does not duplicate the root"
         );
@@ -722,7 +729,7 @@ mod tests {
             .find(|task| task.workflow_origin.as_ref().unwrap().node_id == "c")
             .unwrap();
         finish(&engine, &b.id, RunStatus::Done).await;
-        assert_eq!(tasks(&engine).await.len(), 3, "fan-in still waits for c");
+        assert_eq!(started(&engine).await.len(), 3, "fan-in still waits for c");
         finish(&engine, &c.id, RunStatus::Done).await;
         wait_for_tasks(&engine, 4).await;
         let run = engine.workflow_run(&run.id).await.unwrap();
@@ -753,7 +760,7 @@ mod tests {
                 .status,
             WorkflowNodeStatus::Skipped
         );
-        assert_eq!(tasks(&engine).await.len(), 1);
+        assert_eq!(started(&engine).await.len(), 1);
     }
 
     #[tokio::test]
@@ -767,7 +774,7 @@ mod tests {
         assert_eq!(paused.status, WorkflowRunStatus::Running);
         assert_eq!(paused.nodes[0].status, WorkflowNodeStatus::Blocked);
         assert_eq!(
-            tasks(&engine).await.len(),
+            started(&engine).await.len(),
             1,
             "blocked never unlocks the child"
         );
@@ -803,7 +810,7 @@ mod tests {
         engine.recover_workflows().await;
         engine.recover_workflows().await;
         assert_eq!(
-            tasks(&engine).await.len(),
+            started(&engine).await.len(),
             1,
             "recovery keeps the persisted node-to-task decision"
         );
@@ -846,7 +853,7 @@ mod tests {
             engine.workflows.active_runs().await.unwrap().is_empty(),
             "a denial at start persists no run at all"
         );
-        assert!(tasks(&engine).await.is_empty());
+        assert!(tasks(&engine).await.is_empty(), "nor any task");
     }
 
     #[tokio::test]
@@ -898,17 +905,18 @@ mod tests {
         assert_eq!(run.failure_node_id.as_deref(), Some("b"));
         let b = run.nodes.iter().find(|n| n.node_id == "b").unwrap();
         assert_eq!(b.status, WorkflowNodeStatus::Failed);
-        assert!(b.task_id.is_none(), "a denial never mints a task id");
         assert!(
             b.error.as_deref().unwrap_or("").contains("create tasks"),
             "{:?}",
             b.error
         );
-        assert_eq!(
-            tasks(&engine).await.len(),
-            1,
-            "no task is created for the denied node"
-        );
+        // `#178`: b's task was made up front, when the role still allowed
+        // it; the denial at its turn means it never runs, and it does not
+        // linger either -- it is closed as not planned with the run.
+        let b_task = engine.store.get(b.task_id.as_deref().unwrap()).await.unwrap().unwrap();
+        assert_eq!(b_task.runs, 0, "the denied node's task never ran");
+        assert_eq!(b_task.close_reason(), Some(factory_core::task::CloseReason::NotPlanned));
+        assert_eq!(started(&engine).await.len(), 1, "nothing ran for the denied node");
     }
 
     // -- B2: overlays keep moving after the run is terminal ------------------
@@ -990,7 +998,7 @@ mod tests {
             run.nodes.iter().find(|n| n.node_id == "b").unwrap().status,
             WorkflowNodeStatus::Skipped
         );
-        assert_eq!(tasks(&engine).await.len(), 0);
+        assert_eq!(started(&engine).await.len(), 0);
     }
 
     // -- B6: further execution coverage the issue asks for --------------------
@@ -1033,7 +1041,7 @@ mod tests {
             engine.sync_workflow_for_task(&root.id).await;
         }
         assert_eq!(
-            tasks(&engine).await.len(),
+            started(&engine).await.len(),
             2,
             "replayed advances never duplicate a child"
         );
@@ -1098,7 +1106,7 @@ mod tests {
         let a = run.nodes.iter().find(|n| n.node_id == "a").unwrap();
         assert!(a.task_id.is_none());
         assert!(a.error.as_deref().unwrap_or("").contains("no agent named"));
-        assert_eq!(tasks(&engine).await.len(), 0);
+        assert_eq!(started(&engine).await.len(), 0);
     }
 
     #[tokio::test]
@@ -1189,7 +1197,7 @@ mod tests {
         engine2.recover_workflows().await;
         engine2.recover_workflows().await;
         assert_eq!(
-            tasks(&engine2).await.len(),
+            started(&engine2).await.len(),
             1,
             "recovery never recreates the root"
         );
@@ -1217,6 +1225,7 @@ mod tests {
         let phantom_id = uuid::Uuid::new_v4().to_string();
         let mut run = WorkflowRun::new(definition.clone(), WorkflowActor::Owner);
         run.nodes[0].task_id = Some(phantom_id.clone());
+        run.nodes[0].launched_round = Some(0);
         run.nodes[0].status = WorkflowNodeStatus::Pending;
         engine.workflows.put_run(&run).await.unwrap();
 
@@ -1225,7 +1234,7 @@ mod tests {
         assert_eq!(created[0].id, phantom_id, "recovery fills in exactly the persisted id");
 
         engine.recover_workflows().await;
-        assert_eq!(tasks(&engine).await.len(), 1, "a second recovery does not duplicate it");
+        assert_eq!(started(&engine).await.len(), 1, "a second recovery does not duplicate it");
     }
 
     #[tokio::test]
@@ -1259,7 +1268,7 @@ mod tests {
             "the stale node overlay is corrected to match its task"
         );
         assert_eq!(
-            tasks(&engine).await.len(),
+            started(&engine).await.len(),
             1,
             "reconciling a terminal run never spawns anything"
         );
@@ -1340,14 +1349,15 @@ mod tests {
         assert!(refused.contains("implement (concrete findings the implementer can fix alone)"), "{refused}");
         review_fails(&engine, &review.id, "the parser test is missing").await;
 
+        let verdict = engine.store.runs(&review.id, 1).await.unwrap().remove(0);
+        assert_eq!(verdict.status, RunStatus::Done, "sending work back is a successful review verdict");
+        assert_eq!(verdict.routed_to.as_deref(), Some("implement"));
         let routed_review = engine.store.get(&review.id).await.unwrap().unwrap();
-        assert_eq!(
-            routed_review.status,
-            TaskStatus::Done,
-            "sending work back is a successful review verdict"
-        );
-        assert_eq!(routed_review.routed_to.as_deref(), Some("implement"));
         assert!(routed_review.failure.is_none());
+        // `#178`: its own next round waits on the implementation's.
+        assert_eq!(routed_review.status, TaskStatus::Pending);
+        let after = routed_review.after.clone().expect("the review waits on implement's round");
+        assert_eq!(after.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec![first.id.as_str()]);
         let review_entries = engine.store.entries(&review.id, 20).await.unwrap();
         assert!(review_entries.iter().any(|entry| {
             entry.kind == "routed_to"
@@ -1361,7 +1371,7 @@ mod tests {
         // no `(rework 1)` task beside it, the title untouched, the round and
         // the findings on the run itself.
         let second = wait_for_run(&engine, &first.id, 2).await;
-        assert_eq!(tasks(&engine).await.len(), 2, "a round never creates a task");
+        assert_eq!(started(&engine).await.len(), 2, "a round never creates a task");
         let again = engine.store.get(&first.id).await.unwrap().unwrap();
         assert_eq!(again.title, "implement");
         assert_eq!(second.round, 1);
@@ -1386,14 +1396,14 @@ mod tests {
         assert_eq!(node_run(&midway, "implement").task_id.as_deref(), Some(first.id.as_str()));
         assert_eq!(node_run(&midway, "review").task_id.as_deref(), Some(review.id.as_str()));
         assert_eq!(node_run(&midway, "review").round, 1);
-        assert_eq!(node_run(&midway, "review").status, WorkflowNodeStatus::Unstarted);
-        assert_eq!(node_run(&midway, "ship").status, WorkflowNodeStatus::Unstarted);
+        assert_eq!(node_run(&midway, "review").status, WorkflowNodeStatus::Waiting);
+        assert_eq!(node_run(&midway, "ship").status, WorkflowNodeStatus::Waiting);
 
         // The review's own last-round task state says nothing about round 1.
         engine.record_workflow_task_state(&review.id).await;
         assert_eq!(
             node_run(&engine.workflow_run(&run.id).await.unwrap(), "review").status,
-            WorkflowNodeStatus::Unstarted
+            WorkflowNodeStatus::Waiting
         );
 
         finish_with_result(&engine, &first.id, "PR https://example.test/pr/1, fixed").await;
@@ -1416,13 +1426,13 @@ mod tests {
     async fn a_legacy_run_in_flight_still_gives_a_round_a_task_of_its_own() {
         let engine = engine();
         let definition = review_loop(&engine, 5).await;
-        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
-        let mut legacy = engine.workflow_run(&run.id).await.unwrap();
-        legacy.rounds_as_runs = false;
-        for node in &mut legacy.nodes {
-            node.launched_round = None;
-        }
-        engine.workflows.put_run(&legacy).await.unwrap();
+        // As a run from before this build was stored: no shape flag, and
+        // each node's task made only when its turn came.
+        let mut run = WorkflowRun::new(definition.clone(), WorkflowActor::Owner);
+        run.rounds_as_runs = false;
+        engine.workflows.put_run(&run).await.unwrap();
+        engine.advance_workflow(&run.id).await.unwrap();
+        assert_eq!(tasks(&engine).await.len(), 1, "a legacy run makes a task only when its turn comes");
 
         let first = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish(&engine, &first.id, RunStatus::Done).await;
@@ -1490,7 +1500,7 @@ mod tests {
         let run = engine.workflow_run(&run.id).await.unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Running);
         assert_eq!(
-            tasks(&engine).await.len(),
+            started(&engine).await.len(),
             2,
             "nothing spawned past the budget"
         );
@@ -1533,7 +1543,7 @@ mod tests {
         let run = engine.workflow_run(&run.id).await.unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Failed);
         assert_eq!(node_run(&run, "review").round, 0);
-        assert_eq!(tasks(&engine).await.len(), 2);
+        assert_eq!(started(&engine).await.len(), 2);
     }
 
     #[tokio::test]
@@ -1552,7 +1562,7 @@ mod tests {
         assert_eq!(settled.status, WorkflowRunStatus::Failed);
         assert_eq!(node_run(&settled, "review").round, 0);
         assert_eq!(
-            tasks(&engine).await.len(),
+            started(&engine).await.len(),
             2,
             "failure spawned no new implementation task"
         );
@@ -1873,6 +1883,138 @@ mod tests {
         assert!(wait_for_run(&engine, &implement.id, 2).await.resumed_session.is_none());
     }
 
+    // --- #178: nodes waiting on their upstream exist as tasks from the start ---
+
+    fn task_of(all: &[factory_core::Task], node: &str) -> factory_core::Task {
+        all.iter().find(|t| t.workflow_origin.as_ref().unwrap().node_id == node).unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn every_node_has_its_task_from_the_start_and_a_waiting_one_starts_when_its_upstream_finishes() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let all = tasks(&engine).await;
+        assert_eq!(all.len(), 2, "b's task exists before a has finished");
+        let (a, b) = (task_of(&all, "a"), task_of(&all, "b"));
+        assert_eq!(b.status, TaskStatus::Pending);
+        assert_eq!(b.runs, 0);
+        assert!(b.schedule.is_none());
+        let after = b.after.clone().expect("b waits on a");
+        assert_eq!(after.tasks, vec![factory_core::task::AfterTask { id: a.id.clone(), title: "a".into() }]);
+        assert!(after.conditional.is_none(), "nothing routes around b");
+        assert_eq!(node_run(&engine.workflow_run(&run.id).await.unwrap(), "b").status, WorkflowNodeStatus::Waiting);
+        let entries = engine.store.entries(&b.id, 20).await.unwrap();
+        assert!(entries.iter().any(|e| e.kind == "waiting" && e.message == "waiting on a"), "{entries:#?}");
+
+        finish(&engine, &a.id, RunStatus::Done).await;
+        let b_run = wait_for_run(&engine, &b.id, 1).await;
+        assert_eq!(b_run.trigger, Trigger::Workflow);
+        let b = engine.store.get(&b.id).await.unwrap().unwrap();
+        assert!(b.after.is_none(), "the wait is over");
+        let entries = engine.store.entries(&b.id, 20).await.unwrap();
+        assert!(entries.iter().any(|e| e.kind == "released" && e.message.contains("a finished")), "{entries:#?}");
+        assert_eq!(tasks(&engine).await.len(), 2, "b was never created twice");
+    }
+
+    #[tokio::test]
+    async fn a_restart_never_starts_a_task_that_is_still_waiting() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let b = task_of(&tasks(&engine).await, "b");
+        engine.recover_workflows().await;
+        engine.recover_workflows().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let b = engine.store.get(&b.id).await.unwrap().unwrap();
+        assert_eq!(b.runs, 0, "recovery dispatches a launched node, never a waiting one");
+        assert!(b.after.is_some());
+        assert_eq!(tasks(&engine).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_branch_the_route_never_takes_reads_as_conditional_and_is_closed_as_not_planned() {
+        let engine = engine();
+        let mut a = node("a");
+        a.exits = vec![WorkflowExit { to: "c".into(), check: Some("true".into()), agent: None, max_rounds: None }];
+        let definition = create(
+            &engine,
+            vec![a, node("b"), node("c")],
+            vec![edge("a", "b"), edge("b", "c"), edge("a", "c")],
+        )
+        .await;
+        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let all = tasks(&engine).await;
+        let b = task_of(&all, "b");
+        let conditional = b.after.as_ref().and_then(|a| a.conditional.clone()).expect("b may never run");
+        assert!(conditional.contains("runs only if a routes"), "{conditional}");
+
+        finish(&engine, &task_of(&all, "a").id, RunStatus::Done).await;
+        let c = task_of(&all, "c");
+        wait_for_run(&engine, &c.id, 1).await;
+        finish(&engine, &c.id, RunStatus::Done).await;
+        let settled = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(settled.status, WorkflowRunStatus::Done);
+        assert_eq!(node_run(&settled, "b").status, WorkflowNodeStatus::SkippedByRoute);
+        let b = engine.store.get(&b.id).await.unwrap().unwrap();
+        assert_eq!(b.runs, 0);
+        assert_eq!(b.close_reason(), Some(factory_core::task::CloseReason::NotPlanned));
+        assert!(b.closure.as_ref().unwrap().note.as_deref().unwrap_or("").contains("another branch"), "{:?}", b.closure);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_workflow_closes_its_waiting_tasks_with_it() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let b = task_of(&tasks(&engine).await, "b");
+        let cancelled = engine.cancel_workflow(&run.id).await.unwrap();
+        assert_eq!(node_run(&cancelled, "b").status, WorkflowNodeStatus::Skipped);
+        let b = engine.store.get(&b.id).await.unwrap().unwrap();
+        assert_eq!(b.close_reason(), Some(factory_core::task::CloseReason::NotPlanned));
+        assert_eq!(b.runs, 0);
+    }
+
+    #[tokio::test]
+    async fn running_a_waiting_task_by_hand_is_refused_unless_asked_and_then_counts_as_the_step() {
+        use factory_core::protocol::{Request, Response};
+        let engine = engine();
+        let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let all = tasks(&engine).await;
+        let (a, b) = (task_of(&all, "a"), task_of(&all, "b"));
+
+        let refused = engine
+            .handle_request(Request::TaskRun { id: b.id.clone(), reason: None, continue_run: false, start_waiting: false })
+            .await;
+        match refused {
+            Response::Error { message, .. } => {
+                assert!(message.contains("waiting on a") && message.contains("--ignore-wait"), "{message}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(engine.store.get(&b.id).await.unwrap().unwrap().runs, 0);
+
+        let started = engine
+            .handle_request(Request::TaskRun {
+                id: b.id.clone(),
+                reason: Some("unblock the demo".into()),
+                continue_run: false,
+                start_waiting: true,
+            })
+            .await;
+        assert!(matches!(started, Response::Ok { .. }), "{started:?}");
+        wait_for_run(&engine, &b.id, 1).await;
+        let entries = engine.store.entries(&b.id, 20).await.unwrap();
+        assert!(entries.iter().any(|e| e.kind == "wait_overridden" && e.message.contains("unblock the demo")), "{entries:#?}");
+        assert!(node_run(&engine.workflow_run(&run.id).await.unwrap(), "b").launched(true));
+
+        finish(&engine, &b.id, RunStatus::Done).await;
+        finish(&engine, &a.id, RunStatus::Done).await;
+        assert_eq!(engine.store.runs(&b.id, 10).await.unwrap().len(), 1, "a's finishing never starts b a second time");
+        assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Done);
+    }
+
     #[tokio::test]
     async fn a_run_is_started_with_its_inputs_written_into_every_node() {
         let engine = engine();
@@ -2172,6 +2314,8 @@ impl Engine {
         self.workflows.put_run(&run).await?;
         self.bus
             .publish(Event::WorkflowRunUpdated { run: run.clone() });
+        // Its waiting tasks close with it (`#178`).
+        self.settle_unreached_tasks(&run).await;
         Ok(run)
     }
 
@@ -2249,9 +2393,16 @@ impl Engine {
             // mirror does, and that alone is worth persisting and publishing.
             run.updated_at = Utc::now();
             self.workflows.put_run(&run).await?;
-            self.bus.publish(Event::WorkflowRunUpdated { run });
+            self.bus.publish(Event::WorkflowRunUpdated { run: run.clone() });
+            // Idempotent, and a restart's repair of one that never got done.
+            self.settle_unreached_tasks(&run).await;
             return Ok(());
         }
+
+        // `#178`: every task node of a current run has its task from the
+        // moment the run starts, waiting on the steps before it -- so the
+        // board shows what is queued behind the work in progress.
+        self.materialize_node_tasks(&mut run).await?;
 
         // A completed task and its route are separate facts (#149). Evaluate
         // each done node's ordered exits exactly once. A backwards match
@@ -2296,21 +2447,22 @@ impl Engine {
             run.status = WorkflowRunStatus::Done;
         }
         if run.status.is_terminal() {
-            for node in &mut run.nodes {
-                if node.status == WorkflowNodeStatus::Unstarted {
-                    node.status = WorkflowNodeStatus::Skipped;
-                }
-            }
+            run.skip_unreached();
             run.updated_at = Utc::now();
             self.workflows.put_run(&run).await?;
-            self.bus.publish(Event::WorkflowRunUpdated { run });
+            self.bus.publish(Event::WorkflowRunUpdated { run: run.clone() });
+            self.settle_unreached_tasks(&run).await;
             return Ok(());
         }
 
+        let rounds_as_runs = run.rounds_as_runs;
         let eligible: Vec<String> = run
             .nodes
             .iter()
-            .filter(|node| node.status == WorkflowNodeStatus::Unstarted)
+            .filter(|node| {
+                matches!(node.status, WorkflowNodeStatus::Unstarted | WorkflowNodeStatus::Waiting)
+                    && !(rounds_as_runs && node.launched(true))
+            })
             .filter(|node| {
                 run.definition
                     .nodes
@@ -2426,15 +2578,16 @@ impl Engine {
                 continue;
             }
 
-            // `#178`: the node already has a task -- work sent back for
-            // another round -- so the round is that task's next run. The
-            // task goes back to `pending` first, with the journal saying
-            // why, so that from the moment the node is persisted as
-            // launched its mirror reads the round that is coming rather
-            // than the last one's `done`; a crash in between leaves the node
-            // unlaunched and the next advance simply does this again.
+            // `#178`: the node already has its task -- made up front and
+            // waiting, or sent back for another round -- so this is that
+            // task's next run. The task is put back to `pending`, its wait
+            // over, with the journal saying why, before the node is
+            // persisted as launched: from then on its mirror reads the run
+            // that is coming, never a last round's `done`. A crash in
+            // between leaves the node unlaunched, and the next advance
+            // simply does this again.
             if let (Some(task_id), true) = (existing, run.rounds_as_runs) {
-                if let Err(error) = self.reopen_for_round(&run, &node_id, &task_id, round).await {
+                if let Err(error) = self.release_node_task(&run, &node_id, &task_id, round).await {
                     let node = run.nodes.iter_mut().find(|node| node.node_id == node_id).expect("snapshot node");
                     node.status = WorkflowNodeStatus::Failed;
                     node.error = Some(error.to_string());
@@ -2476,7 +2629,7 @@ impl Engine {
                 node_id: node_id.clone(),
             };
             match self
-                .create_workflow_task(template, origin, task_id.clone())
+                .create_workflow_task(template, origin, task_id.clone(), None)
                 .await
             {
                 Ok(_) => to_start.push(task_id),
@@ -2504,9 +2657,23 @@ impl Engine {
         // sibling that never got its turn this pass reads `skipped` rather
         // than lingering `unstarted`.
         if run.status.is_terminal() {
-            for node in &mut run.nodes {
-                if node.status == WorkflowNodeStatus::Unstarted {
-                    node.status = WorkflowNodeStatus::Skipped;
+            run.skip_unreached();
+        } else if run.rounds_as_runs {
+            // `#178`: a node with its task that is still not its turn --
+            // waiting since the run started, or sent back for a round
+            // behind another step's -- has that task read so: pending,
+            // waiting on the steps before it.
+            for node_id in run
+                .nodes
+                .iter()
+                .filter(|n| !n.launched(true) && n.task_id.is_some())
+                .filter(|n| matches!(n.status, WorkflowNodeStatus::Unstarted | WorkflowNodeStatus::Waiting))
+                .map(|n| n.node_id.clone())
+                .collect::<Vec<_>>()
+            {
+                self.hold_node_task(&run, &node_id).await;
+                if let Some(node) = run.nodes.iter_mut().find(|n| n.node_id == node_id) {
+                    node.status = WorkflowNodeStatus::Waiting;
                 }
             }
         }
@@ -2514,6 +2681,9 @@ impl Engine {
         self.workflows.put_run(&run).await?;
         self.bus
             .publish(Event::WorkflowRunUpdated { run: run.clone() });
+        if run.status.is_terminal() {
+            self.settle_unreached_tasks(&run).await;
+        }
         drop(_guard);
         for task_id in to_start {
             let engine = self.clone();
@@ -2771,40 +2941,260 @@ impl Engine {
         }
     }
 
-    /// `#178`: put a node's task back on the line for another round -- a
-    /// `done` task running again, which the journal says, and why. The run
-    /// itself is asked for by the caller once the node's launch is
-    /// persisted; this only makes the task read as the round to come.
-    async fn reopen_for_round(&self, run: &WorkflowRun, node_id: &str, task_id: &str, round: u32) -> Result<()> {
+    /// A node's task template as this run spawns it: the snapshot's task,
+    /// carrying the category it was planned as so its own record says what
+    /// its run was held to.
+    fn node_template(run: &WorkflowRun, node_id: &str) -> Option<factory_core::task::NewTask> {
+        let node = run.definition.nodes.iter().find(|n| n.id == node_id)?;
+        let mut template = node.task.clone();
+        template.category = Some(run.definition.node_category(node));
+        Some(template)
+    }
+
+    /// `#178`: give every task node of a current run that has none yet its
+    /// task, up front -- a node with steps before it waits on them
+    /// (`Task::after`), a root starts in this same pass. Each is authorized
+    /// exactly as a spawn always was, and every id is persisted before any
+    /// task is created, so a restart fills in exactly those ids. A denial or
+    /// a creation failure fails that node and the run, the same as it did
+    /// when the node was reached.
+    async fn materialize_node_tasks(&self, run: &mut WorkflowRun) -> Result<()> {
+        if !run.rounds_as_runs || run.status.is_terminal() {
+            return Ok(());
+        }
+        let missing: Vec<String> = run
+            .nodes
+            .iter()
+            .filter(|n| n.task_id.is_none() && n.status == WorkflowNodeStatus::Unstarted)
+            .filter(|n| run.definition.nodes.iter().any(|d| d.id == n.node_id && d.kind == WorkflowNodeKind::Task))
+            .map(|n| n.node_id.clone())
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let caller = self.caller_for_actor(&run.started_by).await;
+        let mut decided = Vec::new();
+        for node_id in missing {
+            let Some(template) = Self::node_template(run, &node_id) else { continue };
+            let node = run.nodes.iter_mut().find(|n| n.node_id == node_id).expect("snapshot node");
+            match self.authorize_workflow_spawn(&caller, &template).await {
+                Ok(()) => {
+                    node.task_id = Some(uuid::Uuid::new_v4().to_string());
+                    decided.push(node_id);
+                }
+                Err(denial) => {
+                    node.status = WorkflowNodeStatus::Failed;
+                    node.error = Some(denial.to_string());
+                    run.status = WorkflowRunStatus::Failed;
+                    run.failure_node_id = Some(node_id);
+                    run.error = Some(denial.to_string());
+                    break;
+                }
+            }
+        }
+        // Persist the decisions before creating or publishing any task. A
+        // restart can fill in these exact ids; it must never choose others.
+        run.updated_at = Utc::now();
+        self.workflows.put_run(run).await?;
+        self.bus.publish(Event::WorkflowRunUpdated { run: run.clone() });
+        for node_id in decided {
+            if run.status.is_terminal() {
+                break;
+            }
+            let Some(template) = Self::node_template(run, &node_id) else { continue };
+            let after = run.after_for(&node_id);
+            let task_id = run.nodes.iter().find(|n| n.node_id == node_id).and_then(|n| n.task_id.clone()).expect("decided");
+            let origin = WorkflowOrigin {
+                workflow_id: run.workflow_id.clone(),
+                workflow_run_id: run.id.clone(),
+                node_id: node_id.clone(),
+            };
+            let waiting = after.is_some();
+            let result = self.create_workflow_task(template, origin, task_id.clone(), after.clone()).await;
+            let node = run.nodes.iter_mut().find(|n| n.node_id == node_id).expect("snapshot node");
+            match result {
+                Ok(_) => {
+                    if waiting {
+                        node.status = WorkflowNodeStatus::Waiting;
+                        if let Some(after) = &after {
+                            self.entry(
+                                &task_id,
+                                TaskEntry::new("daemon", "waiting", format!("waiting on {}", after.titles()))
+                                    .with_data(serde_json::json!({ "after": after })),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                Err(error) => {
+                    // No task exists at this id and none ever will: leaving
+                    // it set would make recovery try to create it again.
+                    node.task_id = None;
+                    node.status = WorkflowNodeStatus::Failed;
+                    node.error = Some(error.to_string());
+                    run.status = WorkflowRunStatus::Failed;
+                    run.failure_node_id = Some(node_id);
+                    run.error = Some(error.to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `#178`: a node's task, its turn come -- the steps it waited on have
+    /// finished, or its work was sent back for another round. Pending, the
+    /// wait over, and the journal says which. The run itself is asked for
+    /// by the caller once the node's launch is persisted.
+    async fn release_node_task(&self, run: &WorkflowRun, node_id: &str, task_id: &str, round: u32) -> Result<()> {
         let request = run.nodes.iter().find(|n| n.node_id == node_id).and_then(|n| n.rework_request.clone());
-        let was = self.require(task_id).await?.status;
+        let task = self.require(task_id).await?;
+        let was = task.status;
         self.store
-            .update(task_id, &TaskPatch { status: Some(TaskStatus::Pending), ..Default::default() })
+            .update(task_id, &TaskPatch { status: Some(TaskStatus::Pending), clear_after: true, ..Default::default() })
             .await?;
-        let words = match &request {
-            Some(r) => format!(
+        let words = match (&request, round) {
+            (_, 0) => task.after.as_ref().map(|after| format!("{} finished: its turn", after.titles())),
+            (Some(r), _) => Some(format!(
                 "rework round {round} of {}: {} sent the work back, so this task runs again (it was {})",
                 r.max_rounds,
                 r.from_node,
                 was.as_str()
-            ),
-            None => format!(
+            )),
+            (None, _) => Some(format!(
                 "rework round {round}: work was sent back through this step, so this task runs again (it was {})",
                 was.as_str()
-            ),
+            )),
         };
-        self.entry(
-            task_id,
-            TaskEntry::new("daemon", "round", words).with_data(serde_json::json!({
-                "round": round,
-                "max_rounds": request.as_ref().map(|r| r.max_rounds),
-                "sent_back_by": request.as_ref().map(|r| r.from_node.clone()),
-                "workflow_run": run.id,
-                "was": was.as_str(),
-            })),
-        )
-        .await;
+        if let Some(words) = words {
+            let kind = if round > 0 { "round" } else { "released" };
+            self.entry(
+                task_id,
+                TaskEntry::new("daemon", kind, words).with_data(serde_json::json!({
+                    "round": round,
+                    "max_rounds": request.as_ref().map(|r| r.max_rounds),
+                    "sent_back_by": request.as_ref().map(|r| r.from_node.clone()),
+                    "workflow_run": run.id,
+                    "was": was.as_str(),
+                })),
+            )
+            .await;
+        }
         self.publish_task(task_id).await;
+        Ok(())
+    }
+
+    /// `#178`: a node's task that is not its turn reads as waiting on the
+    /// steps before it -- written only when it does not already, so an
+    /// advance that changes nothing writes nothing. A task sent back behind
+    /// another step (a review waiting for the implementation's next round)
+    /// is how a `done` task comes to wait again; the journal says so.
+    async fn hold_node_task(&self, run: &WorkflowRun, node_id: &str) {
+        let Some(task_id) = run.nodes.iter().find(|n| n.node_id == node_id).and_then(|n| n.task_id.clone()) else {
+            return;
+        };
+        let Some(after) = run.after_for(node_id) else { return };
+        let Ok(Some(task)) = self.store.get(&task_id).await else { return };
+        if task.status == TaskStatus::Pending && task.after.as_ref() == Some(&after) {
+            return;
+        }
+        if task.status.is_terminal() && task.closure.is_some() {
+            return; // closed on purpose; not the engine's to put back
+        }
+        if self.store.active_run(&task_id).await.ok().flatten().is_some() {
+            return;
+        }
+        if self
+            .store
+            .update(&task_id, &TaskPatch { status: Some(TaskStatus::Pending), after: Some(after.clone()), ..Default::default() })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let round = run.nodes.iter().find(|n| n.node_id == node_id).map_or(0, |n| n.round);
+        let words = if task.status == TaskStatus::Pending {
+            format!("waiting on {}", after.titles())
+        } else {
+            format!("rework round {round}: runs again once {} finishes (it was {})", after.titles(), task.status.as_str())
+        };
+        self.entry(&task_id, TaskEntry::new("daemon", "waiting", words).with_data(serde_json::json!({ "after": after, "round": round })))
+            .await;
+        self.publish_task(&task_id).await;
+    }
+
+    /// `#178`: the run is over, and some of its nodes' tasks never got their
+    /// turn -- a branch the route did not take, or steps the run ended
+    /// before. None of them lingers as pending. One that never ran is
+    /// closed as not planned, saying why; one that ran in an earlier round
+    /// keeps its last run's outcome. Idempotent: a closed task, or one
+    /// whose node was launched, is left alone.
+    async fn settle_unreached_tasks(&self, run: &WorkflowRun) {
+        if !run.rounds_as_runs {
+            return;
+        }
+        for node in run.nodes.iter().filter(|n| !n.launched(true)) {
+            let Some(task_id) = &node.task_id else { continue };
+            let Ok(Some(task)) = self.store.get(task_id).await else { continue };
+            if task.close_reason().is_some() || task.status != TaskStatus::Pending {
+                continue;
+            }
+            if self.store.active_run(task_id).await.ok().flatten().is_some() {
+                continue;
+            }
+            let why = match (&node.status, &node.skip_reason) {
+                (WorkflowNodeStatus::SkippedByRoute, Some(reason)) => format!("the route took another branch: {reason}"),
+                (WorkflowNodeStatus::SkippedByRoute, None) => "the route took another branch".to_string(),
+                _ => format!("the workflow run ended ({}) before this step's turn", serde_json::to_value(run.status).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()),
+            };
+            if task.runs == 0 {
+                let asked = crate::operations::Asked { by: "the workflow".into(), source: "daemon", reason: Some(why) };
+                if let Err(error) = self.close_task(task_id, factory_core::task::CloseReason::NotPlanned, None, &asked).await {
+                    tracing::warn!(workflow_run = run.id, task = task_id, "could not close an unreached workflow task: {error}");
+                }
+            } else {
+                let last = self.store.runs(task_id, 1).await.ok().and_then(|r| r.into_iter().next());
+                let Some(last) = last else { continue };
+                let _ = self
+                    .store
+                    .update(task_id, &TaskPatch { status: Some(last.status.as_task_status()), clear_after: true, ..Default::default() })
+                    .await;
+                self.entry(
+                    task_id,
+                    TaskEntry::new("daemon", "round_skipped", format!("{why}; the task keeps attempt {}'s outcome", last.attempt)),
+                )
+                .await;
+                self.publish_task(task_id).await;
+            }
+        }
+    }
+
+    /// `#178`: a person (or an agent) starting a waiting node's task by
+    /// hand, ahead of what it waits on. The node is marked launched for its
+    /// round and the task's wait cleared, under the same lock every advance
+    /// takes, so the workflow follows that run from here and never starts
+    /// the step a second time when its upstream does finish.
+    pub(crate) async fn claim_waiting_node(&self, task: &Task) -> Result<()> {
+        let _guard = self.workflow_edit.lock().await;
+        if let Some(origin) = &task.workflow_origin {
+            let mut run = self.workflow_run(&origin.workflow_run_id).await?;
+            if run.status.is_terminal() {
+                return Err(FactoryError::BadRequest(
+                    "this task's workflow run has already ended; it will not run as part of it".into(),
+                ));
+            }
+            if let Some(node) = run
+                .nodes
+                .iter_mut()
+                .find(|n| n.node_id == origin.node_id && n.task_id.as_deref() == Some(task.id.as_str()))
+            {
+                node.launched_round = Some(node.round);
+                node.status = WorkflowNodeStatus::Pending;
+                run.updated_at = Utc::now();
+                self.workflows.put_run(&run).await?;
+                self.bus.publish(Event::WorkflowRunUpdated { run });
+            }
+        }
+        self.store.update(&task.id, &TaskPatch { clear_after: true, ..Default::default() }).await?;
         Ok(())
     }
 
@@ -2873,15 +3263,15 @@ impl Engine {
                 .error
                 .clone()
                 .or_else(|| Some("task dispatch failed".into()));
-            for other in &mut run.nodes {
-                if other.status == WorkflowNodeStatus::Unstarted {
-                    other.status = WorkflowNodeStatus::Skipped;
-                }
-            }
+            run.skip_unreached();
         }
         run.updated_at = Utc::now();
         if self.workflows.put_run(&run).await.is_ok() {
-            self.bus.publish(Event::WorkflowRunUpdated { run });
+            self.bus.publish(Event::WorkflowRunUpdated { run: run.clone() });
+        }
+        if run.status.is_terminal() {
+            drop(_guard);
+            self.settle_unreached_tasks(&run).await;
         }
     }
 
@@ -2959,8 +3349,13 @@ impl Engine {
                     workflow_run_id: run.id.clone(),
                     node_id: node.node_id.clone(),
                 };
+                // A node made up front and not yet launched is recreated
+                // waiting, exactly as it was decided (`#178`).
+                let after = (run.rounds_as_runs && !node.launched(true))
+                    .then(|| run.after_for(&node.node_id))
+                    .flatten();
                 if let Err(error) = self
-                    .create_workflow_task(template, origin, task_id.clone())
+                    .create_workflow_task(template, origin, task_id.clone(), after)
                     .await
                 {
                     tracing::warn!(

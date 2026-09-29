@@ -19,6 +19,7 @@ export function isDue(t, now) {
   return (
     t.status === "pending" &&
     !t.slot_wait &&
+    !t.after &&
     !!t.schedule &&
     !t.schedule_paused &&
     !!t.next_run_at &&
@@ -33,7 +34,11 @@ export function isDue(t, now) {
 ///   "its slot has come" and "already waiting", and the wait is the more
 ///   specific -- and more urgent -- of the two.
 /// - `due`: its slot has come and the scheduler will fire it -- the queue.
-/// - `later`: scheduled, the slot not here yet, or the schedule paused.
+/// - `later`: scheduled, the slot not here yet, or the schedule paused --
+///   or waiting on other tasks (`after`, `#178`): a workflow step whose
+///   upstream has not finished. Its trigger is "those finished", not a cron
+///   slot, and it fires the same way a slot that has come does. Checked
+///   before `manual`: it has no schedule, but something will start it.
 /// - `manual`: no schedule, so nothing will ever start it but a person (or
 ///   an agent) calling `task run`.
 export function notStarted(tasks, now) {
@@ -41,6 +46,7 @@ export function notStarted(tasks, now) {
   for (const t of tasks) {
     if (t.status !== "pending") continue;
     if (t.slot_wait) out.waiting.push(t);
+    else if (t.after) out.later.push(t);
     else if (!t.schedule) out.manual.push(t);
     else if (isDue(t, now)) out.due.push(t);
     else out.later.push(t);
@@ -56,6 +62,7 @@ export function notStartedNote(t) {
   if (t.slot_wait) {
     return `Waiting for a slot: ${t.slot_wait.agent} already has \`max_sessions\` in use, since ${t.slot_wait.since}. It starts as soon as one opens.`;
   }
+  if (t.after) return waitingOn(t);
   if (!t.schedule) {
     return `Created, not dispatched. Nothing starts this task on its own -- press Run, or \`factory task run ${t.id}\`.`;
   }
@@ -63,4 +70,24 @@ export function notStartedNote(t) {
     return "Not dispatched: its schedule is paused, so nothing fires until it is resumed. Run starts it now.";
   }
   return "Not dispatched until its schedule fires. Run starts it now.";
+}
+
+/// "Implement #119 and Review #119" -- the titles a waiting task names.
+export function afterTitles(after) {
+  const titles = (after?.tasks ?? []).map(task => task.title);
+  if (titles.length <= 1) return titles[0] ?? "nothing";
+  return `${titles.slice(0, -1).join(", ")} and ${titles[titles.length - 1]}`;
+}
+
+/// `#178`: what a board or the modal says about a task waiting on others,
+/// where a scheduled one names its next slot -- or "" for any other task.
+/// A conditional one says it may never run at all.
+export function waitingLabel(t) {
+  if (!t?.after) return "";
+  return `waiting on ${afterTitles(t.after)}`;
+}
+
+function waitingOn(t) {
+  const conditional = t.after.conditional ? ` It is conditional: it ${t.after.conditional}, and is closed as not planned if the workflow ends without taking its branch.` : "";
+  return `Waiting on ${afterTitles(t.after)}: it starts when ${t.after.tasks.length === 1 ? "that finishes" : "they finish"}.${conditional} Starting it now, ahead of them, needs \`factory task run --ignore-wait ${t.id}\`.`;
 }

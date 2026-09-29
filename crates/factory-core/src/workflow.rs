@@ -985,6 +985,10 @@ impl WorkflowRunStatus {
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowNodeStatus {
     Unstarted,
+    /// Its task exists and waits on the steps before it (`#178`): created up
+    /// front when the run started, or sent back for a round it has not been
+    /// handed yet. The task says what it waits on (`Task::after`).
+    Waiting,
     Pending,
     Dispatching,
     Running,
@@ -1220,10 +1224,16 @@ impl WorkflowRun {
             };
             if downstream.contains(&id) {
                 // Waits on `from`, so it never started -- only a mirror
-                // may have marked it.
-                if node.task_id.is_none() {
-                    node.status = WorkflowNodeStatus::Unstarted;
+                // may have marked it. On a current run it may already have
+                // its task, waiting (`#178`); it goes back to waiting.
+                if !node.launched(self.rounds_as_runs) {
+                    node.status = if node.task_id.is_some() {
+                        WorkflowNodeStatus::Waiting
+                    } else {
+                        WorkflowNodeStatus::Unstarted
+                    };
                     node.error = None;
+                    node.skip_reason = None;
                 }
                 continue;
             }
@@ -1251,6 +1261,57 @@ impl WorkflowRun {
         SendBack::Sent { round, max_rounds }
     }
 
+    /// The run has ended: every node it never reached -- unstarted, or
+    /// waiting on steps that will now never finish (`#178`) -- is skipped.
+    pub fn skip_unreached(&mut self) {
+        for node in &mut self.nodes {
+            if matches!(node.status, WorkflowNodeStatus::Unstarted | WorkflowNodeStatus::Waiting) {
+                node.status = WorkflowNodeStatus::Skipped;
+            }
+        }
+    }
+
+    /// What `node_id`'s task waits on (`#178`): the tasks of its direct
+    /// parents -- a gate parent stands for the step it checks -- titled as
+    /// this run's snapshot titles them, and, when it lies below a step that
+    /// routes the work forward one way or another, which steps those are.
+    /// `None` for a node nothing comes before.
+    pub fn after_for(&self, node_id: &str) -> Option<crate::task::After> {
+        let task_of = |id: &str| {
+            let node = self.definition.nodes.iter().find(|n| n.id == id)?;
+            let task_node = if node.kind == WorkflowNodeKind::Gate { self.definition.gate_subject(id)? } else { id.to_string() };
+            let title = self.definition.nodes.iter().find(|n| n.id == task_node)?.task.title.clone();
+            let task_id = self.nodes.iter().find(|n| n.node_id == task_node)?.task_id.clone()?;
+            Some(crate::task::AfterTask { id: task_id, title })
+        };
+        let mut tasks: Vec<crate::task::AfterTask> = Vec::new();
+        for edge in self.definition.edges.iter().filter(|e| e.to == node_id) {
+            if let Some(t) = task_of(&edge.from) {
+                if !tasks.iter().any(|known| known.id == t.id) {
+                    tasks.push(t);
+                }
+            }
+        }
+        if tasks.is_empty() {
+            return None;
+        }
+        let ancestors = self.definition.ancestors(node_id);
+        let routers: Vec<String> = self
+            .definition
+            .nodes
+            .iter()
+            .filter(|n| ancestors.contains(&n.id))
+            .filter(|n| {
+                let above = self.definition.ancestors(&n.id);
+                n.exits.iter().any(|exit| !above.contains(&exit.to))
+            })
+            .map(|n| n.task.title.clone())
+            .collect();
+        let conditional = (!routers.is_empty())
+            .then(|| format!("runs only if {} route{} the work this way", routers.join(" and "), if routers.len() == 1 { "s" } else { "" }));
+        Some(crate::task::After { tasks, conditional })
+    }
+
     /// Take a forward exit exclusively. Nodes downstream of `from` that are
     /// not the target or downstream of it are bypassed by this route.
     pub fn route_forward(&mut self, from: &str, to: &str) {
@@ -1260,7 +1321,7 @@ impl WorkflowRun {
         for node in &mut self.nodes {
             if below_from.contains(&node.node_id)
                 && !kept.contains(&node.node_id)
-                && node.status == WorkflowNodeStatus::Unstarted
+                && matches!(node.status, WorkflowNodeStatus::Unstarted | WorkflowNodeStatus::Waiting)
             {
                 node.status = WorkflowNodeStatus::SkippedByRoute;
                 node.skip_reason = Some(format!("skipped ({from} -> {to})"));

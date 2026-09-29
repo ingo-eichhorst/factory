@@ -503,6 +503,12 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.slot_wait {
                 task.slot_wait = Some(v);
             }
+            if patch.clear_after {
+                task.after = None;
+            }
+            if let Some(v) = patch.after {
+                task.after = Some(v);
+            }
             task.updated_at = Utc::now();
 
             write_task(conn, &task)?;
@@ -611,6 +617,9 @@ impl TaskStore for SqliteStore {
                 // The wait, if there was one, is over: a run now exists
                 // (`#179`).
                 task.slot_wait = None;
+                // Likewise a wait on other tasks (`#178`): whatever it
+                // waited on, this run is what it was waiting for.
+                task.after = None;
                 task.updated_at = Utc::now();
                 write_task(&tx, &task)?;
             }
@@ -1140,6 +1149,7 @@ mod tests {
             failure: None,
             closure: None,
             slot_wait: None,
+            after: None,
         }
     }
 

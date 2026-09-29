@@ -1061,6 +1061,7 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
    treatment so the difference reads even to someone who cannot tell two
    hues apart -- solid vs dashed vs hatched vs faint, not colour alone. */
 .workflow-node.wf-s-unstarted { border-left: 3px solid var(--faint); }
+.workflow-node.wf-s-waiting { border-left: 3px dashed var(--faint); }
 .workflow-node.wf-s-pending, .workflow-node.wf-s-dispatching {
   border-left: 3px dashed var(--signal); background: var(--signal-wash);
 }
@@ -1088,6 +1089,7 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
   font: 600 8px/1.4 var(--cond); letter-spacing: .09em; text-transform: uppercase; color: var(--muted);
 }
 .wf-badge.wf-s-unstarted { color: var(--faint); }
+.wf-badge.wf-s-waiting { color: var(--muted); border-style: dashed; }
 .wf-badge.wf-s-pending, .wf-badge.wf-s-dispatching { color: var(--signal); border-color: transparent; background: var(--signal-wash); }
 .wf-badge.wf-s-running { color: var(--run); border-color: transparent; background: var(--run-wash); font-weight: 700; }
 .wf-badge.wf-s-blocked { color: var(--wait); border-color: transparent; background: var(--wait-wash); }

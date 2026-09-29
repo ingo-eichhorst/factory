@@ -1127,6 +1127,11 @@ enum TaskCmd {
         /// itself from going through.
         #[arg(long = "continue")]
         continue_run: bool,
+        /// Start a task that is waiting on other tasks in its workflow
+        /// (`#178`) now, ahead of them. Refused without this; journaled
+        /// with it, and the workflow counts the step as started.
+        #[arg(long = "ignore-wait")]
+        start_waiting: bool,
     },
     /// Stop a running task and close its session. Journaled with who
     /// asked, and why if you say.
@@ -4484,6 +4489,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                         id: created.id.clone(),
                         reason: None,
                         continue_run: false,
+                        start_waiting: false,
                     })
                     .await?;
             }
@@ -4617,9 +4623,9 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             })
         }
 
-        TaskCmd::Run { id, reason, continue_run } => {
+        TaskCmd::Run { id, reason, continue_run, start_waiting } => {
             let id = need_id(id)?;
-            client.send(Request::TaskRun { id: id.clone(), reason, continue_run }).await?;
+            client.send(Request::TaskRun { id: id.clone(), reason, continue_run, start_waiting }).await?;
             if continue_run {
                 println!("continuing {id}");
             } else {
@@ -5846,6 +5852,16 @@ fn detail(t: &Task) -> String {
     if let Some(next) = t.next_run_at {
         s.push_str(&format!("  next run   {}\n", next.to_rfc3339()));
     }
+    // `#178`: a workflow step waiting on its upstream -- the trigger it has
+    // in place of a schedule.
+    if let Some(after) = &t.after {
+        s.push_str(&format!("  waiting    on {}", after.titles()));
+        let ids: Vec<&str> = after.tasks.iter().map(|t| t.id.as_str()).collect();
+        s.push_str(&format!(" ({})\n", ids.join(", ")));
+        if let Some(conditional) = &after.conditional {
+            s.push_str(&format!("  condition  {conditional}\n"));
+        }
+    }
     // The one thing `AGENTS.md` warns loudest about getting wrong: a task
     // sitting `pending` on a stale `error` from an attempt a retry already
     // superseded. Surfaced here, right next to `next run`, so a retry in
@@ -5891,7 +5907,7 @@ fn detail(t: &Task) -> String {
         s.push('\n');
     }
     if t.worktree {
-        s.push_str("  worktree   yes, a fresh one before each run\n");
+        s.push_str("  worktree   yes, its own: fresh for a new attempt, kept for a rework round or --continue\n");
     }
     if t.knowledge_hints {
         s.push_str("  knowledge  matching pages handed to each run\n");

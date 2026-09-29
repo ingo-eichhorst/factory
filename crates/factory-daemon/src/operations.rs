@@ -1296,7 +1296,7 @@ mod tests {
         assert!(e.message.contains("by the owner: stop the line"), "{}", e.message);
 
         let response = engine
-            .handle_request(Request::TaskRun { id: task.id.clone(), reason: Some("try again".into()), continue_run: false })
+            .handle_request(Request::TaskRun { id: task.id.clone(), reason: Some("try again".into()), continue_run: false, start_waiting: false })
             .await;
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
         let entries = engine.store.entries(&task.id, 50).await.unwrap();
