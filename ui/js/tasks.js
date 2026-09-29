@@ -375,7 +375,7 @@ export function renderModal() {
     b.onclick = () => {
       state.run = b.dataset.run;
       writeHash();
-      renderModal(); loadJournal(); retimeTerminal();
+      renderModal(); void loadJournal(); retimeTerminal();
     };
   }
 }

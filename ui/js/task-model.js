@@ -87,6 +87,17 @@ export function columnFor(t) {
 /// retrying, or how it was closed. `{ tone, text, detail }` or `null`.
 /// `tone` is `fault`, `wait` or `closed`; `detail` is the last error or
 /// the closer's note, when there is one.
+function pendingStanding(t) {
+  if (t.status !== "pending") return null;
+  if (t.pending_retry) {
+    const kind = t.failure ? failKindLabel(t.failure.kind) : "a failure";
+    return { tone: "wait", text: `retrying after ${kind} (retry ${t.pending_retry.attempts})`, detail: t.error || null };
+  }
+  const count = (t.depends_on || []).length;
+  if (!count) return null;
+  return { tone: "wait", text: `waiting for ${count} prerequisite${count === 1 ? "" : "s"}`, detail: null };
+}
+
 export function standing(t) {
   if (!t) return null;
   if (hasFailed(t)) {
@@ -96,14 +107,8 @@ export function standing(t) {
   }
   // Keyed off the queued retry, never off `failure` alone: a pending task
   // with a failure and no retry is not mid-retry.
-  if (t.status === "pending" && t.pending_retry) {
-    const kind = t.failure ? failKindLabel(t.failure.kind) : "a failure";
-    return { tone: "wait", text: `retrying after ${kind} (retry ${t.pending_retry.attempts})`, detail: t.error || null };
-  }
-  if (t.status === "pending" && (t.depends_on || []).length) {
-    const count = t.depends_on.length;
-    return { tone: "wait", text: `waiting for ${count} prerequisite${count === 1 ? "" : "s"}`, detail: null };
-  }
+  const pending = pendingStanding(t);
+  if (pending) return pending;
   if (t.status === "done" && t.routed_to) {
     return { tone: "closed", text: `done → ${t.routed_to}`, detail: null };
   }
