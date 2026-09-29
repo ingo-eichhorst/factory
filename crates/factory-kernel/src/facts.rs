@@ -167,16 +167,15 @@ pub const KNOWN_DAEMON_FACTS: &[&str] =
 
 /// One verification of a snapshot still present in a backup destination --
 /// carried by [`BackupFact::last_verified`] whatever
-/// [`BackupFact::verified`] itself decided, so a reader can say why.
+/// [`BackupFact::verified`] itself decided, so a reader can say why. Not a
+/// [`Fact`] of its own: nothing reads a `VerifySummary` except as part of
+/// the `BackupFact` it travels inside, so it is not a row of
+/// [`FACT_CATALOGUE`] either.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifySummary {
     pub snapshot: String,
     pub at: DateTime<Utc>,
     pub ok: bool,
-}
-
-impl Fact for VerifySummary {
-    type Producer = L1;
 }
 
 /// The one L1 fact a policy `daemon` check or a registry metric reads about
