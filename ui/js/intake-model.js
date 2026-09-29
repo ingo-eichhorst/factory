@@ -219,6 +219,16 @@ export function securityFlag(card) {
   return (card && card.security) || null;
 }
 
+/// Whether `board` holds a confirmed security report anywhere in its open
+/// columns (`possible`/`dismissed` never do -- the reporting clock
+/// (`#157`/`#170` phase 2, `factory_core::reporting_clock`) only ever has a
+/// `report:` item for a *confirmed* one). `intake.js`'s `loadIntake` reads
+/// this to decide whether the clock is worth a second request at all: the
+/// common case, a board with no security report, costs nothing extra.
+export function hasConfirmedSecurityReport(board) {
+  return COLUMNS.some((c) => cards(board, c.key).some((card) => securityFlag(card)?.state === "confirmed"));
+}
+
 /// A decided GitHub item with something to publish (`#171`): the daemon
 /// only ever records `outbound` for a GitHub-sourced item once it carries
 /// both a decision and the assessment behind it, and never for a possible
