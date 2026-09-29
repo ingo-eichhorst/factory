@@ -2540,6 +2540,16 @@ impl Engine {
                 && task.parent_task_id.is_some()
                 && task.decomposition_part.is_some()
         }) {
+            if let Some(origin) = &task.workflow_origin {
+                if self
+                    .workflows
+                    .get_run(&origin.workflow_run_id)
+                    .await?
+                    .is_some_and(|run| run.integration.is_some())
+                {
+                    continue;
+                }
+            }
             if self.dependency_blockers(&task).await?.is_empty() {
                 ready.push(task);
             }
@@ -3154,7 +3164,11 @@ impl Engine {
         let dir = self.factory_snapshot().worktrees_dir().join(&run.id);
         let base = match &task.bench_origin {
             Some(origin) => self.bench_case_base(origin).await,
-            None => None,
+            None => task
+                .workflow_origin
+                .as_ref()
+                .and_then(|origin| origin.workspace.as_ref())
+                .map(|workspace| workspace.base_ref.clone()),
         };
         worktree::create(scope_path, &dir, &branch, base.as_deref())
             .await
@@ -3293,27 +3307,39 @@ impl Engine {
             .find(|node| node.node_id == origin.node_id && node.task_id.as_deref() == Some(task.id.as_str()))
             .and_then(|node| node.rework_request.clone());
         if let Some(request) = request {
-            match self.store.get(&request.from_task).await {
-                Ok(Some(reviewer)) => {
-                    let said: Vec<&str> = [reviewer.error.as_deref(), reviewer.result.as_deref()]
-                        .into_iter()
-                        .flatten()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    outputs.push(UpstreamOutput {
-                        node_id: request.from_node.clone(),
-                        task_id: reviewer.id.clone(),
-                        title: format!(
-                            "{} sent this work back -- rework round {} of {}",
-                            reviewer.title, request.round, request.max_rounds
-                        ),
-                        result: (!said.is_empty())
-                            .then(|| truncate_tail(&said.join("\n\n"), UPSTREAM_RESULT_BYTE_CAP).into_owned()),
-                    });
+            if let Some(feedback) = request.feedback.as_deref() {
+                outputs.push(UpstreamOutput {
+                    node_id: request.from_node.clone(),
+                    task_id: request.from_task.clone(),
+                    title: format!(
+                        "Integration sent this work back -- rework round {} of {}",
+                        request.round, request.max_rounds
+                    ),
+                    result: Some(truncate_tail(feedback, UPSTREAM_RESULT_BYTE_CAP).into_owned()),
+                });
+            } else {
+                match self.store.get(&request.from_task).await {
+                    Ok(Some(reviewer)) => {
+                        let said: Vec<&str> = [reviewer.error.as_deref(), reviewer.result.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        outputs.push(UpstreamOutput {
+                            node_id: request.from_node.clone(),
+                            task_id: reviewer.id.clone(),
+                            title: format!(
+                                "{} sent this work back -- rework round {} of {}",
+                                reviewer.title, request.round, request.max_rounds
+                            ),
+                            result: (!said.is_empty())
+                                .then(|| truncate_tail(&said.join("\n\n"), UPSTREAM_RESULT_BYTE_CAP).into_owned()),
+                        });
+                    }
+                    Ok(None) => tracing::warn!(task = task.id, from_task = request.from_task, "rework source no longer exists"),
+                    Err(error) => tracing::warn!(task = task.id, from_task = request.from_task, "reading rework source: {error}"),
                 }
-                Ok(None) => tracing::warn!(task = task.id, from_task = request.from_task, "rework source no longer exists"),
-                Err(error) => tracing::warn!(task = task.id, from_task = request.from_task, "reading rework source: {error}"),
             }
         }
         outputs

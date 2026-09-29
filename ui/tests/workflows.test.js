@@ -41,6 +41,7 @@ import {
   setInputField,
   supersededTasks,
   validate,
+  workflowNodeKindLabel,
   workflowRouteTail,
 } from "../js/workflow-model.js";
 
@@ -91,6 +92,18 @@ test("a new task node gets an id nothing else has and Factory's ordinary default
   assert.equal(a.task.worktree, true);
   assert.equal(a.task.schedule, undefined);
   assert.deepEqual(a.position, { x: 10, y: 20 });
+});
+
+test("generated expand nodes stay distinct and expose their fan-out on the canvas", () => {
+  assert.equal(
+    workflowNodeKindLabel({ kind: "expand", expand: { children: ["api", "ui"] } }),
+    "EXPAND · 2 children",
+  );
+  assert.equal(
+    workflowNodeKindLabel({ kind: "gate", gate: { locked: true, required_by: ["policy"] } }),
+    "GATE 🔒 · required by policy",
+  );
+  assert.equal(workflowNodeKindLabel(node("work")), "TASK");
 });
 
 test("duplicating a node gets a new id and an offset, non-overlapping position", () => {

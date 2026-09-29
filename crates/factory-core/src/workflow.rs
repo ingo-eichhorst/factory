@@ -31,6 +31,9 @@ pub struct WorkflowNode {
     /// none holds the node's ordinary outgoing edges remain the default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exits: Vec<WorkflowExit>,
+    /// Fan-out/join policy for an `Expand` node.  Absent everywhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expand: Option<ExpandSpec>,
 }
 
 /// One ordered conditional route out of a task node (`#149`). Exactly one of
@@ -62,6 +65,8 @@ struct WorkflowNodeWire {
     pub gate: Option<GateSpec>,
     #[serde(default)]
     pub exits: Vec<WorkflowExit>,
+    #[serde(default)]
+    pub expand: Option<ExpandSpec>,
     #[serde(default)]
     pub rework: Option<LegacyReworkSpec>,
 }
@@ -97,6 +102,7 @@ impl<'de> Deserialize<'de> for WorkflowNode {
             task: wire.task,
             gate: wire.gate,
             exits: wire.exits,
+            expand: wire.expand,
         })
     }
 }
@@ -120,6 +126,49 @@ pub enum WorkflowNodeKind {
     /// attestation behind. Never spawns a task and never runs an agent --
     /// its status mirrors the attestations its subject's run collected.
     Gate,
+    /// A daemon-owned fan-out boundary.  It never spawns an agent itself;
+    /// its children are task nodes materialised from an approved intake
+    /// decomposition in this run's snapshot.
+    Expand,
+}
+
+/// When an expand node's children are joined, tolerate this many failed
+/// independent branches.  Zero is the safe/default `all_succeeded` policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpandJoin {
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub tolerate: u8,
+}
+
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
+}
+
+/// What cancelling a parent workflow does to children already in flight.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpandCancelPolicy {
+    #[default]
+    Terminate,
+    Abandon,
+}
+
+/// Runtime policy carried by an `expand` node.  `children` is explicit in
+/// the immutable run snapshot, making restart recovery deterministic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpandSpec {
+    #[serde(default)]
+    pub join: ExpandJoin,
+    #[serde(default)]
+    pub cancel: ExpandCancelPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<String>,
+    #[serde(default = "default_rework_rounds")]
+    pub max_rework_rounds: u32,
+}
+
+fn default_rework_rounds() -> u32 {
+    3
 }
 
 /// A `Gate` node's check. Injected ones are `locked` -- the control plan put
@@ -295,14 +344,17 @@ impl WorkflowDefinition {
             if let Some(category) = &node.task.category {
                 control_plan::check_category(category).map_err(|e| format!("node {:?}: {e}", node.id))?;
             }
-            match (node.kind, &node.gate) {
-                (WorkflowNodeKind::Task, Some(_)) => {
+            match (node.kind, &node.gate, &node.expand) {
+                (WorkflowNodeKind::Task, Some(_), _) => {
                     return Err(format!("node {:?} is a task node but carries a gate; make it a gate node", node.id));
                 }
-                (WorkflowNodeKind::Gate, None) => {
+                (WorkflowNodeKind::Task, _, Some(_)) => {
+                    return Err(format!("node {:?} is a task node but carries expand policy; make it an expand node", node.id));
+                }
+                (WorkflowNodeKind::Gate, None, _) => {
                     return Err(format!("gate node {:?} needs a gate: a step and a command", node.id));
                 }
-                (WorkflowNodeKind::Gate, Some(gate)) => {
+                (WorkflowNodeKind::Gate, Some(gate), None) => {
                     if !control_plan::is_name(&gate.step) {
                         return Err(format!("gate node {:?} names step {:?}, which is not a step name", node.id, gate.step));
                     }
@@ -316,7 +368,36 @@ impl WorkflowDefinition {
                         return Err(format!("gate node {:?} has a zero timeout; use at least one second", node.id));
                     }
                 }
-                (WorkflowNodeKind::Task, None) => {}
+                (WorkflowNodeKind::Gate, _, Some(_)) => {
+                    return Err(format!(
+                        "gate node {:?} cannot carry expand policy",
+                        node.id
+                    ));
+                }
+                (WorkflowNodeKind::Expand, Some(_), _) => {
+                    return Err(format!("expand node {:?} cannot carry a gate", node.id));
+                }
+                (WorkflowNodeKind::Expand, None, None) => {
+                    return Err(format!("expand node {:?} needs expand policy", node.id));
+                }
+                (WorkflowNodeKind::Expand, None, Some(expand)) => {
+                    if expand.max_rework_rounds == 0 {
+                        return Err(format!(
+                            "expand node {:?} needs at least one rework round",
+                            node.id
+                        ));
+                    }
+                    let mut children = BTreeSet::new();
+                    for child in &expand.children {
+                        if !children.insert(child.as_str()) {
+                            return Err(format!(
+                                "expand node {:?} names child {child:?} twice",
+                                node.id
+                            ));
+                        }
+                    }
+                }
+                (WorkflowNodeKind::Task, None, None) => {}
             }
         }
         if let Some(category) = &self.category {
@@ -353,6 +434,48 @@ impl WorkflowDefinition {
                 .entry(edge.from.as_str())
                 .or_default()
                 .push(edge.to.as_str());
+        }
+        for node in self
+            .nodes
+            .iter()
+            .filter(|node| node.kind == WorkflowNodeKind::Expand)
+        {
+            let expand = node.expand.as_ref().expect("expand shape checked above");
+            if expand.join.tolerate as usize > expand.children.len() {
+                return Err(format!(
+                    "expand node {:?} tolerates {} failures but has only {} children",
+                    node.id,
+                    expand.join.tolerate,
+                    expand.children.len()
+                ));
+            }
+            for child in &expand.children {
+                let Some(target) = self.node(child) else {
+                    return Err(format!(
+                        "expand node {:?} names missing child {child:?}",
+                        node.id
+                    ));
+                };
+                if target.kind != WorkflowNodeKind::Task {
+                    return Err(format!(
+                        "expand node {:?} child {child:?} is not a task node",
+                        node.id
+                    ));
+                }
+                if !self.edges.iter().any(|edge| {
+                    edge.to == *child
+                        && (edge.from == node.id
+                            || expand
+                                .children
+                                .iter()
+                                .any(|candidate| candidate == &edge.from))
+                }) {
+                    return Err(format!(
+                        "expand node {:?} child {child:?} is not joined to the expand graph",
+                        node.id
+                    ));
+                }
+            }
         }
 
         let mut ready: VecDeque<&str> = indegree
@@ -454,8 +577,13 @@ impl WorkflowDefinition {
     fn validate_exits(&self) -> Result<(), String> {
         for node in &self.nodes {
             if !node.exits.is_empty() && node.kind != WorkflowNodeKind::Task {
+                let kind = match node.kind {
+                    WorkflowNodeKind::Gate => "gate",
+                    WorkflowNodeKind::Expand => "expand",
+                    WorkflowNodeKind::Task => unreachable!(),
+                };
                 return Err(format!(
-                    "gate node {:?} cannot declare exits; only a task node can",
+                    "{kind} node {:?} cannot declare exits; only a task node can",
                     node.id
                 ));
             }
@@ -474,7 +602,7 @@ impl WorkflowDefinition {
                         "node {:?} exit {ordinal} has an empty condition",
                         node.id
                     ));
-            }
+                }
                 let target = self.node(&exit.to).ok_or_else(|| {
                     format!(
                         "node {:?} exit {ordinal} targets missing node {:?}",
@@ -484,17 +612,22 @@ impl WorkflowDefinition {
                 let backwards = self.ancestors(&node.id).contains(&exit.to);
                 if backwards {
                     if target.kind != WorkflowNodeKind::Task {
+                        let kind = match target.kind {
+                            WorkflowNodeKind::Gate => "gate",
+                            WorkflowNodeKind::Expand => "expand",
+                            WorkflowNodeKind::Task => unreachable!(),
+                        };
                         return Err(format!(
-                            "node {:?} exit {ordinal} points back to gate node {:?}; name a task node",
+                            "node {:?} exit {ordinal} points back to {kind} node {:?}; name a task node",
                             node.id, exit.to
                         ));
-            }
+                    }
                     if exit.max_rounds.unwrap_or(0) == 0 {
                         return Err(format!(
                             "node {:?} exit {ordinal} points backward and needs max_rounds of at least one",
                             node.id
                         ));
-                }
+                    }
                 } else {
                     if !self
                         .edges
@@ -505,14 +638,14 @@ impl WorkflowDefinition {
                             "node {:?} exit {ordinal} points forward to {:?} without an explicit edge",
                             node.id, exit.to
                         ));
-            }
+                    }
                     if exit.max_rounds.is_some() {
-                return Err(format!(
+                        return Err(format!(
                             "node {:?} exit {ordinal} points forward and must not declare max_rounds",
                             node.id
-                ));
-            }
-        }
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -618,6 +751,7 @@ impl WorkflowDefinition {
                 WorkflowNodeKind::Gate => {
                     subjects.insert(self.gate_subject_inner(&parent.id, seen)?);
                 }
+                WorkflowNodeKind::Expand => return None,
             }
         }
         if subjects.len() == 1 {
@@ -677,6 +811,7 @@ impl WorkflowDefinition {
                 },
                 gate: None,
                 exits: Vec::new(),
+                expand: None,
             }],
             edges: Vec::new(),
             revision: 1,
@@ -779,6 +914,7 @@ impl WorkflowDefinition {
                         locked: true,
                     }),
                     exits: Vec::new(),
+                    expand: None,
                 });
                 chain_edges.push(WorkflowEdge {
                     id: fresh(format!("{previous}->{gate_id}"), &mut edge_ids),
@@ -1025,6 +1161,10 @@ pub struct ReworkRequest {
     /// This round, counted from 1, and how many there may be.
     pub round: u32,
     pub max_rounds: u32,
+    /// Daemon-produced integration or combined-gate feedback.  Ordinary
+    /// agent exits keep this empty and read the sending task's result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -1070,6 +1210,10 @@ pub struct WorkflowRun {
     /// `definition`; kept to say so.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, String>,
+    /// Present only for an intake decomposition that is assembled on one
+    /// integration branch and handed over as one pull request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<WorkflowIntegration>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1104,10 +1248,46 @@ impl WorkflowRun {
             error: None,
             started_by,
             inputs: BTreeMap::new(),
+            integration: None,
             created_at: now,
             updated_at: now,
         }
     }
+}
+
+/// One child slice's contract at the integration boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationPart {
+    pub node_id: String,
+    pub part_id: String,
+    pub acceptance: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
+}
+
+/// Durable state for the single-writer integration phase of a decomposed
+/// intake item.  Paths and merged/check state live on the workflow run so a
+/// daemon restart reconciles instead of starting a second branch or PR.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowIntegration {
+    pub parent_task_id: String,
+    pub base_ref: String,
+    pub branch: String,
+    pub worktree_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<IntegrationPart>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_nodes: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checks_passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_complete: bool,
 }
 
 /// What [`WorkflowRun::send_back`] did.
@@ -1181,6 +1361,7 @@ impl WorkflowRun {
                 from_task: from_task.clone(),
                 round,
                 max_rounds,
+                feedback: None,
             });
         }
         self.updated_at = Utc::now();
@@ -1224,6 +1405,7 @@ mod tests {
             },
             gate: None,
             exits: Vec::new(),
+            expand: None,
         }
     }
 
@@ -1267,6 +1449,55 @@ mod tests {
         let order = def.validate().unwrap();
         assert_eq!(order.first().map(String::as_str), Some("a"));
         assert_eq!(order.last().map(String::as_str), Some("d"));
+    }
+
+    #[test]
+    fn expand_nodes_validate_their_explicit_children_and_join_policy() {
+        let mut expand = node("expand");
+        expand.kind = WorkflowNodeKind::Expand;
+        expand.expand = Some(ExpandSpec {
+            children: vec!["a".into(), "b".into()],
+            join: ExpandJoin { tolerate: 1 },
+            cancel: ExpandCancelPolicy::Abandon,
+            max_rework_rounds: 2,
+        });
+        let valid = definition(
+            vec![expand.clone(), node("a"), node("b")],
+            vec![
+                WorkflowEdge {
+                    id: "expand-a".into(),
+                    from: "expand".into(),
+                    to: "a".into(),
+                },
+                WorkflowEdge {
+                    id: "a-b".into(),
+                    from: "a".into(),
+                    to: "b".into(),
+                },
+            ],
+        );
+        valid.validate().unwrap();
+
+        expand.expand.as_mut().unwrap().join.tolerate = 3;
+        let invalid = definition(
+            vec![expand, node("a"), node("b")],
+            vec![
+                WorkflowEdge {
+                    id: "expand-a".into(),
+                    from: "expand".into(),
+                    to: "a".into(),
+                },
+                WorkflowEdge {
+                    id: "a-b".into(),
+                    from: "a".into(),
+                    to: "b".into(),
+                },
+            ],
+        );
+        assert!(invalid
+            .validate()
+            .unwrap_err()
+            .contains("tolerates 3 failures"));
     }
 
     #[test]
@@ -1420,6 +1651,7 @@ mod tests {
                 ..Default::default()
             }),
             exits: Vec::new(),
+            expand: None,
         }
     }
 
@@ -1721,7 +1953,13 @@ mod tests {
         assert_eq!(implement.superseded_task_ids, vec!["i1"]);
         assert_eq!(
             implement.rework_request,
-            Some(ReworkRequest { from_node: "review".into(), from_task: "r1".into(), round: 1, max_rounds: 2 })
+            Some(ReworkRequest {
+                from_node: "review".into(),
+                from_task: "r1".into(),
+                round: 1,
+                max_rounds: 2,
+                feedback: None,
+            })
         );
         assert_eq!(node(&run, "review").round, 1);
         assert_eq!(node(&run, "review").rework_request, None);

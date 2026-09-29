@@ -1601,19 +1601,40 @@ number and GitHub's stable external id as well as the public URL, so a renamed
 repository does not create a second item; older URL-only rows are upgraded on
 their next poll.
 
+The daemon first probes one fixed labelled-issues REST URL with its ETag.
+`304 Not Modified` ends that repository's poll without the heavier
+comment-rich read; a changed ETag triggers the full synchronization. This is
+deliberately polling rather than a webhook: a local daemon needs no public
+endpoint.
+
 An assessment may include two to eight `split` parts. The original shape is
 still a proposal for the manual `intake decide <id> split` fallback. A plan
-whose parts also provide `owns`, `interface`, and `estimate_seconds` is executable:
-`intake assess --decide` validates standalone instructions and acceptance,
-an acyclic graph, estimates, and disjoint ownership between parallel parts,
-then creates ordinary tasks directly. Each child stores `parent_task_id`,
-`decomposition_part`, and task-id `depends_on` fields; labels are only a
-compatibility mirror. Root tasks start immediately. Successors appear in the
-Scheduled column and are dispatched once all prerequisites are `Done`; their
-prompts receive each prerequisite's result as upstream output. A failed or
-missing prerequisite never silently releases a child. Automatic plans are
-one level deep, leave `routing.workflow` empty, and do not create GitHub
-child issues.
+whose parts also provide `owns`, `interface`, and `estimate_seconds` is
+executable: `intake assess --decide` validates standalone instructions and
+acceptance, an acyclic graph, estimates, and disjoint ownership between
+parallel parts. A valid automatic plan starts one generated workflow run,
+without another approval stop. Its `expand` node materializes ordinary child
+tasks carrying real `parent_task_id`, `decomposition_part`, and task-id
+`depends_on` fields; labels are only a compatibility mirror. Root tasks start
+immediately. Successors appear scheduled and are dispatched only after their
+prerequisites have completed and been merged; their prompts receive each
+prerequisite's result as upstream output. The normal L3 session limit still
+bounds dispatch. A failed or missing prerequisite never silently releases a
+child. Automatic plans are one level deep, leave `routing.workflow` empty,
+and do not create GitHub child issues.
+
+For a GitHub item, Factory fetches `origin/main` once and creates
+`factory/issue-<number>`. Each runnable child branches from that integration
+ref as it then stands. The workflow's single-writer integrator merges clean,
+committed child branches in dependency order; a conflict returns only that
+child with concrete rework feedback. After all merges, every part's acceptance
+command runs again in the combined worktree. A failed combined check likewise
+returns its owning part, up to the expand node's rework limit. On success the
+integrator pushes without force and opens one PR to `main`, whose body lists
+the internal parts and closes the source issue. Factory never merges, approves
+or enables auto-merge on that PR. It records the PR before removing child and
+integration worktrees and merged local branches, so no unpushed result is
+discarded.
 
 **Per-scope definitions of ready (`#169`).** The seven axes are fixed —
 compiled in, never removed — but a scope can add its own checks on top of
@@ -2353,6 +2374,29 @@ a downstream command can do `cat "$FACTORY_UPSTREAM_FILE"` to see what its
 parents said — the acceptance bar is that literal command. Either way, each
 parent's result is tail-truncated to a byte budget first, so one noisy
 upstream step can't blow up every prompt downstream of it.
+
+### Dynamic expansion and integration (#180)
+
+An `expand` node is a daemon-owned fan-out boundary. It does not run an
+agent: its immutable `expand.children` list identifies the task nodes produced
+from an Intake decomposition. The generated graph carries the parts' declared
+dependencies, so independent roots may run together while a dependent child
+waits until its predecessors have reached the integration branch. The web
+canvas labels the node `EXPAND` and shows its child count in Design and Run
+views.
+
+`expand.join.tolerate` is the number of failed independent children the join
+may accept; zero is the default `all_succeeded` behavior used by integrated
+code plans. `expand.cancel` is `terminate` by default, which cancels running
+children with their parent, or `abandon`, which leaves already-dispatched
+children alone. Integration-backed expands also carry a bounded
+`max_rework_rounds`: merge conflicts and acceptance failures return the
+responsible child with the same task identity and a new run. A resumable
+harness continues its session; other runtimes start a fresh run from the
+current integration ref. All of this state—the base ref, merge ledger, checks,
+PR URL and cleanup—is stored on the workflow run, so restart reconciliation
+continues rather than opening a second PR or losing which branches were
+accepted.
 
 ### Inputs and ordered exits (#140, #149)
 
