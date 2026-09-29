@@ -5196,14 +5196,22 @@ fn one_line(t: &Task) -> String {
 }
 
 fn run_line(r: &Run) -> String {
-    format!(
+    let mut line = format!(
         "{}  attempt {:<3} {:<12} {:<9} {}",
         &r.id[..8.min(r.id.len())],
         r.attempt,
         r.status.as_str(),
         r.trigger.as_str(),
         r.started_at.format("%Y-%m-%d %H:%M:%S")
-    )
+    );
+    // `#178`: a workflow's rework round is a run of the same task.
+    if r.round > 0 {
+        line.push_str(&format!("  rework round {}", r.round));
+    }
+    if r.resumed_session.is_some() {
+        line.push_str("  (resumed)");
+    }
+    line
 }
 
 async fn workflow_cmd(json: bool, client: &Client, cmd: WorkflowCmd) -> Result<()> {
