@@ -358,6 +358,7 @@ impl Engine {
             cwd: cwd.clone(),
             factory_bin: self.factory_bin.clone(),
             socket: factory.socket_path(),
+            callback_url: None,
             guides_dir: factory.guides_dir(),
             task: None,
             identity_token: Some(identity),

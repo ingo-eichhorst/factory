@@ -1,0 +1,60 @@
+# OpenShell provider profile for GitHub, for a run that publishes through
+# pull requests (#218): NVIDIA's `github` profile (providers/github.yaml),
+# with its GraphQL endpoint widened from read-only to queries plus exactly the
+# two mutations `gh pr create` and `gh pr merge` send.
+#
+# Why a profile and not the sandbox policy: OpenShell evaluates a GraphQL
+# request against the attached provider's `/graphql` endpoint, and a sandbox
+# policy rule for the same path does not widen it -- verified on 0.1.2, where
+# the policy's own mutation allowance is never consulted. REST and git
+# requests do compose with the policy, which is where the per-repository
+# write rules live.
+#
+# GraphQL cannot be scoped to a repository -- the repository is an id in the
+# request body -- so these two mutations are allowed for whatever the token
+# can reach. Create the provider from a fine-grained token limited to the one
+# repository (contents and pull requests: write), not `gh auth token`'s.
+#
+#   openshell profile lint   -f examples/openshell/github-publish.yaml
+#   openshell profile import -f examples/openshell/github-publish.yaml
+#   GITHUB_TOKEN=<fine-grained token> \
+#     openshell provider create --name factory-github --type github-publish --from-existing
+
+id: github-publish
+display_name: GitHub (pull requests)
+description: GitHub API and Git operations, plus creating and merging pull requests
+category: source_control
+credentials:
+  - name: api_token
+    description: GitHub token
+    env_vars: [GITHUB_TOKEN, GH_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+discovery:
+  credentials: [api_token]
+endpoints:
+  - host: api.github.com
+    port: 443
+    protocol: rest
+    access: read-only
+    enforcement: enforce
+  - host: api.github.com
+    port: 443
+    path: /graphql
+    protocol: graphql
+    enforcement: enforce
+    rules:
+      - allow: { operation_type: query }
+      - allow: { operation_type: mutation, fields: [createPullRequest] }
+      - allow: { operation_type: mutation, fields: [mergePullRequest] }
+  - host: github.com
+    port: 443
+    protocol: rest
+    enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "**" }
+      - allow: { method: HEAD, path: "**" }
+      - allow: { method: OPTIONS, path: "**" }
+      - allow: { method: POST, path: "/**/git-upload-pack" }
+binaries: [/usr/bin/gh, /usr/local/bin/gh, /usr/bin/git, /usr/local/bin/git]

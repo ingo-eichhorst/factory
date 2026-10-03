@@ -288,7 +288,11 @@ fn status_for(response: &Response) -> StatusCode {
 /// The raw envelope, token and all. This is the one route an agent uses when
 /// it is not going through the CLI.
 async fn rpc(State(engine): State<Arc<Engine>>, Json(env): Json<Envelope>) -> AxumResponse {
-    let response = engine.handle(env).await;
+    // Boxed for the same reason `run_as` boxes: unboxed, the whole request
+    // future sits on axum's own frames, and a debug build overflows the
+    // worker's stack on it. This is the route a sandboxed run reports
+    // through (`#218`), so it must hold up as well as the socket does.
+    let response = Box::pin(engine.handle(env)).await;
     let code = status_for(&response);
     (code, Json(response)).into_response()
 }

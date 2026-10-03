@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { state } from "../js/core.js";
-import { visibleSandboxes } from "../js/sandboxes.js";
+import { sandboxTag, visibleSandboxes } from "../js/sandboxes.js";
 import { visibleCredentials } from "../js/secrets.js";
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
@@ -36,6 +36,15 @@ test("no selection shows the whole inventory", () => {
 test("the sandbox rows narrow to the selection the same way", () => {
   const rows = [{ scope: "alpha" }, { scope: "beta" }, { scope: "alpha" }];
   assert.equal(visibleSandboxes(rows, name => name === "alpha").length, 2);
+});
+
+test("openshell is tagged enforced, docker and srt declared only, none untagged", () => {
+  assert.match(sandboxTag({ sandbox: "openshell", enforced: true }), /enforced/);
+  assert.doesNotMatch(sandboxTag({ sandbox: "openshell", enforced: true }), /not enforced/);
+  assert.match(sandboxTag({ sandbox: "docker", enforced: false }), /declared, not enforced/);
+  // An older daemon's row carries no `enforced` at all: nothing was.
+  assert.match(sandboxTag({ sandbox: "srt" }), /declared, not enforced/);
+  assert.equal(sandboxTag({ sandbox: "none", enforced: false }), "");
 });
 
 test("both notes sit above the table they speak about", () => {

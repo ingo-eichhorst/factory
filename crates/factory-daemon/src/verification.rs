@@ -1540,6 +1540,7 @@ mod tests {
                     autostart: None,
                     args: Vec::new(),
                     sandbox: Default::default(),
+                    openshell: None,
                     provider: None,
                     max_sessions: None,
                 }],

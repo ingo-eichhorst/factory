@@ -43,6 +43,7 @@ fn agent_facts_for(scope: &Scope, foreman: &ForemanConfig, roles: &Roles) -> Vec
                 role: agent.role.as_str().to_string(),
                 grants,
                 has_sandbox: !agent.sandbox.is_none(),
+                sandbox_enforced: agent.sandbox.is_enforced(),
             }
         })
         .collect()

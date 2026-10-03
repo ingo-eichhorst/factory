@@ -1,0 +1,80 @@
+# The awesome-herdr scope's config with the curator sandboxed (#218) -- what
+# projects/awesome-herdr/.factory/config.yaml becomes once a build with
+# `sandbox: openshell` is installed and the host setup in the README's
+# Sandboxes section is done. Kept here, not in that repository: its AGENTS.md
+# forbids new files, and a scope owns only its own config file.
+#
+# The weekly audit is `--no-worktree`, so its working directory is the scope
+# itself: the tree and its .git go in by upload, the run publishes by pushing
+# an audit/YYYY-MM-DD branch and merging its pull request on GitHub, and
+# `fast_forward` then leaves the host checkout level with origin/main.
+#
+# Binary paths are the image's (examples/openshell/build-image.sh). A rule
+# lists the executable that opens the connection; git's https helper and
+# anything else a listed binary starts are covered by it.
+version: 1
+scope:
+  id: 16a0309c-34ed-4a7c-b2e5-e66035d25ab5
+  name: awesome-herdr
+  git: https://github.com/not-ingo/awesome-herdr.git
+  agent:
+    name: awesome-herdr-curator
+    harness: claude-code
+    sandbox: openshell
+    openshell:
+      image: /Users/factory/.local/share/factory/openshell/factory-agent-rootfs.tar.gz
+      # factory-claude: claude-code-oauth profile, from `claude setup-token`.
+      # factory-github: github-publish profile -- GitHub reads, git
+      # clone/fetch, and the createPullRequest/mergePullRequest mutations.
+      providers: [factory-claude, factory-github]
+      upload: workdir
+      download: none
+      fast_forward: true
+      policy:
+        filesystem_policy:
+          include_workdir: true
+          read_only: [/usr, /lib, /bin, /sbin, /etc, /opt, /proc, /sys, /var, /dev/urandom, /dev/random]
+          read_write: [/sandbox, /tmp, /dev/null, /dev/zero, /dev/tty, /dev/pts, /dev/shm]
+        network_policies:
+          # Reads: GitHub's REST API, its git transport and raw content.
+          # Inspected and read-only, so a token placeholder can never be
+          # used to write anywhere through these.
+          github_read:
+            endpoints:
+              - { host: api.github.com, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: github.com, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: raw.githubusercontent.com, port: 443 }
+              - { host: objects.githubusercontent.com, port: 443 }
+              - { host: codeload.github.com, port: 443 }
+            binaries: [{ path: /usr/bin/curl }, { path: /usr/bin/gh }, { path: /usr/bin/git }]
+          # Publication (Phase 7): push, and every REST write, on this one
+          # repository only. gh's pull-request mutations come from the
+          # github-publish provider profile; GraphQL cannot be scoped to a
+          # repository here.
+          awesome_herdr_publish:
+            endpoints:
+              - host: github.com
+                port: 443
+                protocol: rest
+                enforcement: enforce
+                rules:
+                  - allow: { method: GET, path: "/not-ingo/awesome-herdr.git/info/refs*" }
+                  - allow: { method: POST, path: "/not-ingo/awesome-herdr.git/git-upload-pack" }
+                  - allow: { method: POST, path: "/not-ingo/awesome-herdr.git/git-receive-pack" }
+              - host: api.github.com
+                port: 443
+                protocol: rest
+                enforcement: enforce
+                rules:
+                  - allow: { method: "*", path: "/repos/not-ingo/awesome-herdr/**" }
+            binaries: [{ path: /usr/bin/git }, { path: /usr/bin/gh }]
+          # Other forges and herdr's own site.
+          sources:
+            endpoints:
+              - { host: gitlab.com, port: 443 }
+              - { host: codeberg.org, port: 443 }
+              - { host: herdr.dev, port: 443 }
+              - { host: www.herdr.dev, port: 443 }
+            binaries: [{ path: /usr/bin/curl }]
+          # factory_callback is added by Factory: /usr/local/bin/factory to
+          # the daemon's http interface. Declare it here only to override it.

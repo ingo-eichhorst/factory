@@ -1558,6 +1558,7 @@ impl Engine {
                     harness: av.adapter.clone(),
                     lifetime: av.lifetime.clone(),
                     sandbox: av.sandbox.clone(),
+                    enforced: av.sandbox == Sandbox::Openshell.as_str(),
                     worktree_capable: sv.worktree_capable,
                 });
             }
@@ -2703,7 +2704,7 @@ impl Engine {
                 _ => {}
             }
         }
-        let run = match self.dispatch(task_id, trigger, due, continue_from).await {
+        let run = match Box::pin(self.dispatch(task_id, trigger, due, continue_from)).await {
             Ok(run) => run,
             // Blocked, not failed: `harness_gate` has already said why on
             // the task, and there is no run to close.
@@ -2856,7 +2857,13 @@ impl Engine {
         // `#178`: decided before the run row exists, since none of it needs
         // one -- `resolve_continue` only ever reads the previous run and this
         // dispatch's freshly resolved agent/runtime.
+        let sandboxed_agent = declaration.as_ref().is_some_and(|d| d.sandbox == Sandbox::Openshell);
         let continue_outcome = match &continue_from {
+            // `#218`: the conversation lived in the previous run's sandbox,
+            // which was deleted when that run ended.
+            Some(_) if sandboxed_agent => Some(ContinueOutcome::Fresh {
+                reason: "the previous run's conversation lived in its OpenShell sandbox, which was deleted when that run ended".into(),
+            }),
             Some(prev) => Some(
                 self.resolve_continue(&task, (&agent_name, &adapter_name), agent.as_ref(), runtime.as_ref(), prev, &scope_path)
                     .await,
@@ -3109,12 +3116,39 @@ impl Engine {
         // and never again for this run -- the same once-at-dispatch rule.
         let quality = self.quality_context(&task.scope).await;
 
+        // `sandbox: openshell` (`#218`): the run's harness starts inside a
+        // sandbox, so everything that names Factory to the agent -- the CLI
+        // in hooks and the contract, how it reaches the daemon -- has to be
+        // what exists in there, not on this host. Resolved before the
+        // context is built, so the adapters need no idea it is happening.
+        let openshell = match declaration.as_ref() {
+            Some(declared) if declared.sandbox == Sandbox::Openshell => {
+                let config = declared.openshell.clone().ok_or_else(|| {
+                    FactoryError::BadRequest(format!(
+                        "{agent_name} declares sandbox: openshell without an openshell: block; the run was not started on the host instead"
+                    ))
+                })?;
+                let callback = config.callback_target(self.http_bind(&factory).as_deref())?;
+                Some((config, callback))
+            }
+            _ => None,
+        };
+
         let ctx = AgentContext {
             scope: task.scope.clone(),
             agent_name: agent_name.clone(),
-            cwd: cwd.clone(),
-            factory_bin: self.factory_bin.clone(),
+            // What the agent is told its working directory is: inside a
+            // sandbox, the host path names nothing.
+            cwd: match &openshell {
+                Some((config, _)) => PathBuf::from(factory_core::openshell::workdir_for(config, &cwd)?),
+                None => cwd.clone(),
+            },
+            factory_bin: match &openshell {
+                Some((config, _)) => PathBuf::from(&config.factory_bin),
+                None => self.factory_bin.clone(),
+            },
             socket: factory.socket_path(),
+            callback_url: openshell.as_ref().map(|(_, callback)| callback.url()),
             guides_dir: factory.guides_dir(),
             task: Some(TaskBinding {
                 task: task.clone(),
@@ -3156,7 +3190,29 @@ impl Engine {
         // live, so two concurrent runs must never resolve to the same herdr
         // agent.
         let run_id_fragment = &run.id[..8.min(run.id.len())];
-        let session = runtime
+
+        // The sandbox, made now -- after the run row exists, so a failure
+        // here fails this run with the reason, and before the session, so
+        // nothing ever starts on the host in its place. Its launch replaces
+        // the harness's own, and the prompt goes in with it: typed into a
+        // TUI through a pty, a multi-line prompt would submit at its first
+        // newline.
+        let sandboxed = match &openshell {
+            // Its own boxed future: everything the sandbox needs lives in
+            // that frame, not in this one, which is already deep.
+            Some((config, callback)) => {
+                let prompt = agent.prompt(&ctx).await?;
+                let (plan, teardown) = Box::pin(self.prepare_sandbox(
+                    &factory, &task, &run.id, &cwd, &launch, &prompt, config, callback,
+                ))
+                .await?;
+                launch = plan.launch.clone();
+                Some((teardown, plan))
+            }
+            None => None,
+        };
+
+        let started = runtime
             .start(&StartRequest {
                 id: run.id.clone(),
                 scope: canonical_scope.clone(),
@@ -3168,7 +3224,19 @@ impl Engine {
                 cwd,
                 launch,
             })
-            .await?;
+            .await;
+        let mut session = match (started, &sandboxed) {
+            (Ok(session), _) => session,
+            // No session will ever carry this sandbox to `close_session`.
+            (Err(e), Some((_, plan))) => {
+                Box::pin(crate::openshell::discard(plan)).await;
+                return Err(e);
+            }
+            (Err(e), None) => return Err(e),
+        };
+        if let Some((teardown, _)) = &sandboxed {
+            session.meta.insert(crate::openshell::META_KEY.to_string(), teardown.to_meta());
+        }
 
         let run = self
             .store
@@ -3188,8 +3256,11 @@ impl Engine {
         // `?`: a runtime with no usage to give must not fail the run.
         Box::pin(self.snapshot_usage(&run, factory_core::usage::SnapshotPoint::Dispatch)).await;
 
-        let prompt = agent.prompt(&ctx).await?;
-        runtime.submit(&session, &prompt).await?;
+        // A sandboxed run was handed its prompt at launch.
+        if sandboxed.is_none() {
+            let prompt = agent.prompt(&ctx).await?;
+            runtime.submit(&session, &prompt).await?;
+        }
 
         self.entry(
             task_id,
@@ -4337,6 +4408,203 @@ impl Engine {
                 .await;
             }
         }
+        // `sandbox: openshell` (`#218`): after the pane is gone, so nothing
+        // is still writing in the sandbox while its tree comes back -- and
+        // off this path, in the background. Every caller of `close_session`
+        // writes the run's terminal status only after it returns; a
+        // download and a delete taking seconds in between would leave a run
+        // that already reported `done` looking active with its pane gone,
+        // which the watchdog fails as `session_gone`. Claimed per sandbox,
+        // so a run closed twice (a report racing a cancel) is torn down once.
+        if let Some(teardown) = crate::openshell::Teardown::from_meta(&session.meta) {
+            let store = self.store.clone();
+            let bus = self.bus.clone();
+            let (task_id, run_id) = (run.task_id.clone(), run.id.clone());
+            tokio::spawn(async move {
+                let Some(_claim) = crate::openshell::Claim::take(&teardown.sandbox) else { return };
+                for note in Box::pin(crate::openshell::finish(&teardown)).await {
+                    let entry = TaskEntry::new("daemon", "sandbox", note).in_run(&run_id);
+                    if let Err(e) = store.append_entry(&task_id, &entry).await {
+                        tracing::warn!(task = %task_id, "could not record journal entry: {e}");
+                    }
+                    bus.publish(Event::TaskEntry { id: task_id.clone(), entry });
+                }
+            });
+        }
+    }
+
+    /// The daemon's own http bind, when it serves the http interface at
+    /// all -- what a sandboxed run reports back to.
+    pub(crate) fn http_bind(&self, factory: &Factory) -> Option<String> {
+        let binds: Vec<String> = factory
+            .config
+            .daemon
+            .interfaces
+            .iter()
+            .filter(|interface| interface.kind == "http")
+            .map(|interface| interface.http_bind())
+            .collect();
+        // A loopback one, when there are several: it does not move when the
+        // host's network address does.
+        binds
+            .iter()
+            .find(|bind| bind.starts_with("127.") || bind.starts_with("localhost:") || bind.starts_with("[::1]:"))
+            .or_else(|| binds.first())
+            .cloned()
+    }
+
+    /// `sandbox: openshell` at dispatch (`#218`): plan the run's sandbox,
+    /// make it, and say so on the run. An `Err` fails the run with the
+    /// reason; nothing here ever falls back to the host.
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_sandbox(
+        &self,
+        factory: &Factory,
+        task: &Task,
+        run_id: &str,
+        cwd: &Path,
+        launch: &LaunchSpec,
+        prompt: &str,
+        config: &factory_core::openshell::OpenshellConfig,
+        callback: &factory_core::openshell::CallbackTarget,
+    ) -> Result<(factory_core::openshell::Plan, crate::openshell::Teardown)> {
+        let cli = crate::openshell::resolve_cli(config.cli.as_deref())?;
+        let plan = factory_core::openshell::plan(&factory_core::openshell::PlanInput {
+            config,
+            cli: &cli,
+            instance_id: &factory.config.instance.id,
+            run_id,
+            task_id: &task.id,
+            cwd,
+            guides_dir: &factory.guides_dir(),
+            state_dir: &factory.factory_dir().join("openshell").join(run_id),
+            launch,
+            prompt,
+            callback,
+        })?;
+        self.entry(
+            &task.id,
+            TaskEntry::new(
+                "daemon",
+                "sandbox",
+                format!("creating OpenShell sandbox {} from {}", plan.sandbox, config.image),
+            )
+            .in_run(run_id),
+        )
+        .await;
+        let teardown = crate::openshell::Teardown::of(&plan, cwd, config.fast_forward);
+        crate::openshell::Pending {
+            instance: factory.config.instance.id.clone(),
+            run: run_id.to_string(),
+            task: task.id.clone(),
+            base: plan.base.clone(),
+            teardown: teardown.clone(),
+        }.save().map_err(|e| FactoryError::BadRequest(format!("could not persist OpenShell cleanup record: {e}")))?;
+        Box::pin(crate::openshell::prepare(&plan, &config.providers)).await?;
+        self.entry(
+            &task.id,
+            TaskEntry::new(
+                "daemon",
+                "sandbox",
+                format!("sandbox {} is ready; the harness runs in {}", plan.sandbox, plan.workdir),
+            )
+            .in_run(run_id)
+            .with_data(serde_json::json!({
+                "sandbox": plan.sandbox,
+                "image": config.image,
+                "providers": config.providers,
+                "workdir": plan.workdir,
+            })),
+        )
+        .await;
+        Ok((plan, teardown))
+    }
+
+    /// On start: delete every OpenShell sandbox this instance made whose run
+    /// is no longer active -- one a crash, a lost session or a failed delete
+    /// left behind (`#218`). A sandbox that outlives its run is a leak. Only
+    /// asked for current declarations and persisted cleanup records, so
+    /// removing or changing a declaration cannot strand an older sandbox.
+    pub async fn reconcile_openshell(&self) {
+        let factory = self.factory_snapshot();
+        let mut configs: Vec<factory_core::openshell::OpenshellConfig> = Vec::new();
+        for name in factory.scope_names() {
+            if let Ok(scope) = factory.scope(&name) {
+                for agent in scope.declared_agents() {
+                    if let Some(config) = agent.openshell.filter(|_| agent.sandbox == Sandbox::Openshell) {
+                        configs.push(config);
+                    }
+                }
+            }
+        }
+        let pending = match crate::openshell::pending(&factory.factory_dir().join("openshell"), &factory.config.instance.id) {
+            Ok(pending) => pending,
+            Err(e) => {
+                tracing::warn!("openshell reconcile: could not read cleanup records: {e}");
+                Vec::new()
+            }
+        };
+        if configs.is_empty() && pending.is_empty() {
+            return;
+        }
+        let active: std::collections::BTreeSet<String> = match self.store.active_runs().await {
+            Ok(runs) => runs.into_iter().map(|r| r.id).collect(),
+            Err(e) => {
+                tracing::warn!("openshell reconcile: could not list active runs: {e}");
+                return;
+            }
+        };
+        let mut bases: std::collections::BTreeSet<Vec<String>> = pending.iter().map(|record| record.base.clone()).collect();
+        for config in configs {
+            let Ok(cli) = crate::openshell::resolve_cli(config.cli.as_deref()) else { continue };
+            let mut base = vec![cli];
+            if let Some(gateway) = &config.gateway {
+                base.push("-g".into());
+                base.push(gateway.clone());
+            }
+            bases.insert(base);
+        }
+        for base in bases {
+            let ours = match crate::openshell::list_ours(&base, &factory.config.instance.id).await {
+                Ok(ours) => ours,
+                Err(e) => {
+                    tracing::warn!("openshell reconcile: {e}");
+                    continue;
+                }
+            };
+            // A successful authoritative list also settles a create that
+            // never reached the gateway, or a delete completed just before
+            // the previous daemon exited. Recovery output is never erased.
+            for record in pending.iter().filter(|record| record.base == base && !active.contains(&record.run)) {
+                if !ours.iter().any(|(name, run)| name == &record.teardown.sandbox && run == &record.run)
+                    && !record.teardown.state_dir.join("recovery").exists() {
+                    let _ = std::fs::remove_dir_all(&record.teardown.state_dir);
+                }
+            }
+            for (name, run_id) in ours {
+                if active.contains(&run_id) {
+                    continue;
+                }
+                let Some(_claim) = crate::openshell::Claim::take(&name) else { continue };
+                if let Some(record) = pending.iter().find(|record| record.base == base && record.run == run_id
+                    && record.teardown.sandbox == name && !record.teardown.state_dir.join("recovery").exists()) {
+                    for note in Box::pin(crate::openshell::finish(&record.teardown)).await {
+                        self.entry(&record.task, TaskEntry::new("daemon", "sandbox", note).in_run(&record.run)).await;
+                    }
+                    continue;
+                }
+                match crate::openshell::delete(&base, &name).await {
+                    Ok(()) => {
+                        tracing::info!(sandbox = %name, run = %run_id, "deleted an OpenShell sandbox its run left behind");
+                        let state = factory.factory_dir().join("openshell").join(&run_id);
+                        if !state.join("recovery").exists() {
+                            let _ = std::fs::remove_dir_all(state);
+                        }
+                    }
+                    Err(e) => tracing::warn!(sandbox = %name, "openshell reconcile: {e}"),
+                }
+            }
+        }
     }
 
     /// Terminal output for a run: live while it is running, the transcript kept
@@ -4989,6 +5257,7 @@ mod tests {
                 autostart: None,
                 args: Vec::new(),
                 sandbox: Sandbox::None,
+                openshell: None,
                 provider: None,
                 max_sessions,
             }
@@ -5757,6 +6026,7 @@ mod tests {
                 autostart: None,
                 args: Vec::new(),
                 sandbox: Sandbox::Docker,
+                openshell: None,
                 provider: None,
                 max_sessions: None,
             });
@@ -5771,6 +6041,7 @@ mod tests {
         assert_eq!(row.scope, "demo");
         assert_eq!(row.harness, "shell");
         assert_eq!(row.sandbox, "docker");
+        assert!(!row.enforced, "docker is declared only (#218)");
         assert!(!row.worktree_capable, "not a git repository");
 
         let env_row = credentials
@@ -6173,6 +6444,7 @@ mod tests {
                 autostart: None,
                 args: vec!["--model".into(), "opus".into(), "--api-key".into(), "s3cret".into()],
                 sandbox: Sandbox::None,
+                openshell: None,
                 provider: None,
                 max_sessions: None,
             });
@@ -7123,6 +7395,7 @@ mod tests {
             cwd: root.join("cwd"),
             factory_bin: PathBuf::from("factory"),
             socket: root.join("factory.sock"),
+            callback_url: None,
             guides_dir: root.join("guides"),
             task: None,
             identity_token: Some("identity".into()),
@@ -8490,6 +8763,315 @@ mod tests {
             assert!(engine.report(&task.id, fresh_report).await.is_ok());
 
             std::fs::remove_dir_all(&scope_dir).ok();
+        }
+    }
+
+    // ==================================================================
+    // #218: `sandbox: openshell` at dispatch and at the end of a run
+    // ==================================================================
+    mod openshell_tests {
+        use super::*;
+        use async_trait::async_trait;
+        use factory_core::adapter::agent::LaunchKind;
+        use factory_core::adapter::runtime::RuntimeEventStream;
+        use factory_core::task::{SessionRef, TaskReport};
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Recorder {
+            starts: Mutex<Vec<StartRequest>>,
+            submits: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl AgentRuntime for Recorder {
+            fn name(&self) -> &str {
+                "stub-os"
+            }
+            async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
+                self.starts.lock().unwrap().push(req.clone());
+                Ok(SessionRef { runtime: "stub-os".into(), handle: format!("stub-{}", req.id), meta: Default::default() })
+            }
+            async fn submit(&self, _session: &SessionRef, text: &str) -> Result<()> {
+                self.submits.lock().unwrap().push(text.to_string());
+                Ok(())
+            }
+            async fn status(&self, _session: &SessionRef) -> Result<RuntimeStatus> {
+                Ok(RuntimeStatus::Working)
+            }
+            async fn send_text(&self, _session: &SessionRef, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn send_keys(&self, _session: &SessionRef, _keys: &[String]) -> Result<()> {
+                Ok(())
+            }
+            async fn read(&self, _session: &SessionRef, _lines: u32) -> Result<String> {
+                Ok(String::new())
+            }
+            async fn stop(&self, _session: &SessionRef) -> Result<()> {
+                Ok(())
+            }
+            async fn watch(&self) -> Result<Option<RuntimeEventStream>> {
+                Ok(None)
+            }
+        }
+
+        /// A stand-in `openshell` that logs every call and succeeds.
+        fn fake_cli(dir: &Path) -> PathBuf {
+            let path = dir.join("openshell");
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$1 $2\" in\n'status -o') echo '{{\"status\":\"connected\"}}' ;;\nesac\n",
+                    dir.join("calls").display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+
+        /// Launches as `claude` and says, in its prompt, the working
+        /// directory it was given -- what a harness tells its agent.
+        struct CwdAgent;
+
+        #[async_trait]
+        impl Agent for CwdAgent {
+            fn name(&self) -> &str {
+                "cwd-probe"
+            }
+            async fn launch_spec(&self, ctx: &AgentContext) -> Result<LaunchSpec> {
+                Ok(LaunchSpec { kind: LaunchKind::Named("claude".into()), args: Vec::new(), env: ctx.env() })
+            }
+            async fn prompt(&self, ctx: &AgentContext) -> Result<String> {
+                Ok(format!("Working directory: {}\n", ctx.cwd.display()))
+            }
+        }
+
+        fn engine_with(scope_dir: PathBuf, cli: &str) -> (Arc<Engine>, Arc<Recorder>) {
+            let engine = test_engine(scope_dir);
+            let runtime = Arc::new(Recorder::default());
+            let mut registry = Registry::with_builtins();
+            registry.add_runtime(runtime.clone(), "test");
+            registry.add_agent(Arc::new(CwdAgent), "test");
+            let mut factory = engine.factory_snapshot();
+            let mut probe: ScopeAgent = serde_yaml_ng::from_str(&format!(
+                "name: boxed-claude\nharness: cwd-probe\nsandbox: openshell\nopenshell:\n  image: img\n  cli: {cli}\n  policy: {{}}\n"
+            ))
+            .unwrap();
+            probe.lifetime = Lifetime::Task;
+            factory.config.scopes[0].agents.push(probe);
+            factory.config.scopes[0].agents.push(ScopeAgent {
+                name: Some("boxed".into()),
+                harness: "shell".into(),
+                lifetime: Lifetime::Task,
+                role: Role::default(),
+                autostart: None,
+                args: Vec::new(),
+                sandbox: Sandbox::Openshell,
+                openshell: Some(
+                    serde_yaml_ng::from_str(&format!(
+                        "image: img\ncli: {cli}\nproviders: [factory-claude]\npolicy:\n  network_policies: {{}}\n"
+                    ))
+                    .unwrap(),
+                ),
+                provider: None,
+                max_sessions: None,
+            });
+            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+            let engine = Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()));
+            (engine, runtime)
+        }
+
+        async fn boxed_task(engine: &Arc<Engine>) -> Task {
+            engine
+                .create(NewTask {
+                    title: "in the box".into(),
+                    instructions: "echo hi".into(),
+                    scope: Some("demo".into()),
+                    agent: Some("boxed".into()),
+                    runtime: Some("stub-os".into()),
+                    worktree: Some(false),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        }
+
+        /// The host path names nothing inside the sandbox; the agent is told
+        /// the directory it actually works in there.
+        #[tokio::test]
+        async fn a_sandboxed_agent_is_told_its_working_directory_inside_the_sandbox() {
+            let scope_dir = temp_dir("openshell-cwd");
+            let tools = temp_dir("openshell-cwd-cli");
+            let cli = fake_cli(&tools);
+            let (engine, _runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = engine
+                .create(NewTask {
+                    title: "where am i".into(),
+                    instructions: "say".into(),
+                    scope: Some("demo".into()),
+                    agent: Some("boxed-claude".into()),
+                    runtime: Some("stub-os".into()),
+                    worktree: Some(false),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            let session = engine.store.get_run(&run.id).await.unwrap().unwrap().session.unwrap();
+            let teardown = crate::openshell::Teardown::from_meta(&session.meta).unwrap();
+            let prompt = std::fs::read_to_string(teardown.state_dir.join(".factory-run/prompt.md")).unwrap();
+            let name = scope_dir.file_name().unwrap().to_string_lossy().to_string();
+            assert_eq!(prompt.trim(), format!("Working directory: /sandbox/work/{name}"));
+            assert!(!prompt.contains(&scope_dir.display().to_string()), "{prompt}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
+        }
+
+        #[tokio::test]
+        async fn restart_restores_and_deletes_an_orphan_even_after_its_declaration_is_removed() {
+            let scope_dir = temp_dir("openshell-restart");
+            let tools = temp_dir("openshell-restart-cli");
+            let cli = fake_cli(&tools);
+            let (engine, _) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_task(&engine).await;
+            let factory = engine.factory_snapshot();
+            let run = uuid::Uuid::new_v4().to_string();
+            let sandbox = format!("factory-{}", &run[..8]);
+            let state = factory.factory_dir().join("openshell").join(&run);
+            let download_dir = state.join("download");
+            let base = vec![cli.display().to_string()];
+            let teardown = crate::openshell::Teardown {
+                sandbox: sandbox.clone(), state_dir: state.clone(), cwd: scope_dir.clone(),
+                download: Some(vec![base[0].clone(), "sandbox".into(), "download".into(), sandbox.clone(), "/sandbox/work/demo".into(), download_dir.display().to_string()]),
+                download_dir, fast_forward: false,
+                delete: vec![base[0].clone(), "sandbox".into(), "delete".into(), sandbox.clone()],
+            };
+            crate::openshell::Pending { instance: factory.config.instance.id.clone(), run: run.clone(), task: task.id.clone(), base, teardown }.save().unwrap();
+            let listed = serde_json::json!({"sandboxes":[{"name":sandbox,"labels":{"factory.instance":factory.config.instance.id,"factory.run":run}}]});
+            std::fs::write(&cli, format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$1 $2\" in\n'sandbox list') echo '{}' ;;\n'sandbox download') mkdir -p \"$5\" && echo restored > \"$5/result.txt\" ;;\nesac\n",
+                tools.join("calls").display(), listed
+            )).unwrap();
+            engine.factory.write().unwrap().config.scopes[0].agents.retain(|agent| agent.openshell.is_none());
+            engine.reconcile_openshell().await;
+            assert_eq!(std::fs::read_to_string(scope_dir.join("result.txt")).unwrap(), "restored\n");
+            assert!(!state.exists());
+            let calls = std::fs::read_to_string(tools.join("calls")).unwrap();
+            assert!(calls.contains(&format!("sandbox delete {sandbox}")), "{calls}");
+            assert!(engine.store.run_entries(&run, 20).await.unwrap().iter().any(|entry| entry.message.contains("deleted sandbox")));
+            std::fs::remove_dir_all(scope_dir).ok();
+            std::fs::remove_dir_all(tools).ok();
+        }
+
+        #[tokio::test]
+        async fn restart_keeps_active_sandboxes_even_when_their_declaration_is_removed() {
+            let scope_dir = temp_dir("openshell-active");
+            let tools = temp_dir("openshell-active-cli");
+            let cli = fake_cli(&tools);
+            let (engine, _) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_task(&engine).await;
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            let factory = engine.factory_snapshot();
+            let state = factory.factory_dir().join("openshell").join(&run.id);
+            assert!(state.join("pending.json").exists(), "saved before create, not just in session metadata");
+            let sandbox = format!("factory-{}", &run.id[..8]);
+            let listed = serde_json::json!({"sandboxes":[{"name":sandbox,"labels":{"factory.instance":factory.config.instance.id,"factory.run":run.id}}]});
+            std::fs::write(&cli, format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$1 $2\" in\n'sandbox list') echo '{}' ;;\nesac\n",
+                tools.join("calls").display(), listed
+            )).unwrap();
+            engine.factory.write().unwrap().config.scopes[0].agents.retain(|agent| agent.openshell.is_none());
+            engine.reconcile_openshell().await;
+            assert!(state.join("pending.json").exists());
+            let calls = std::fs::read_to_string(tools.join("calls")).unwrap();
+            assert!(!calls.contains("sandbox delete"), "{calls}");
+            std::fs::remove_dir_all(scope_dir).ok();
+            std::fs::remove_dir_all(tools).ok();
+        }
+
+        #[tokio::test]
+        async fn a_missing_openshell_cli_fails_the_run_and_never_starts_a_session() {
+            let scope_dir = temp_dir("openshell-missing");
+            let (engine, runtime) = engine_with(scope_dir.clone(), "/nonexistent/openshell");
+            let task = boxed_task(&engine).await;
+            engine.start_run(&task.id, Trigger::Manual).await;
+            assert!(runtime.starts.lock().unwrap().is_empty(), "nothing ran on the host in its place");
+            let runs = engine.store.runs(&task.id, 10).await.unwrap();
+            let run = runs.iter().max_by_key(|r| r.attempt).expect("the run row exists and carries the failure");
+            assert_eq!(run.status, RunStatus::Failed);
+            let error = run.error.clone().unwrap_or_default();
+            assert!(error.contains("openshell") && error.contains("does not exist"), "{error}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_sandboxed_run_launches_through_openshell_with_its_prompt_and_is_deleted_when_it_ends() {
+            let scope_dir = temp_dir("openshell-run");
+            let tools = temp_dir("openshell-cli");
+            let cli = fake_cli(&tools);
+            let (engine, runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_task(&engine).await;
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+
+            let starts = runtime.starts.lock().unwrap().clone();
+            assert_eq!(starts.len(), 1);
+            let LaunchKind::Command(words) = &starts[0].launch.kind else { panic!("{:?}", starts[0].launch.kind) };
+            assert!(words[0].starts_with("sh '") && words[0].ends_with("pane.sh'"), "{words:?}");
+            assert!(starts[0].launch.env.is_empty(), "no token in the pane's environment");
+            assert!(runtime.submits.lock().unwrap().is_empty(), "the prompt went in at launch, never typed");
+            let calls = std::fs::read_to_string(tools.join("calls")).unwrap();
+            assert!(calls.contains("provider get factory-claude"), "{calls}");
+            assert!(calls.contains("sandbox create --name factory-"), "{calls}");
+            assert!(!calls.contains(run.token.as_deref().unwrap()), "the run token is on no command line: {calls}");
+
+            let stored = engine.store.get_run(&run.id).await.unwrap().unwrap();
+            let session = stored.session.expect("the session is recorded");
+            let teardown = crate::openshell::Teardown::from_meta(&session.meta).expect("with its teardown");
+            assert!(teardown.state_dir.starts_with(engine.factory_snapshot().factory_dir()), "state lives under .factory");
+            let pane_script = std::fs::read_to_string(teardown.state_dir.join("pane.sh")).unwrap();
+            assert!(pane_script.contains("'sandbox' 'exec'") && pane_script.contains(&teardown.sandbox), "{pane_script}");
+            let launcher = std::fs::read_to_string(teardown.state_dir.join(".factory-run/launch.sh")).unwrap();
+            let workdir = format!("/sandbox/work/{}", scope_dir.file_name().unwrap().to_string_lossy());
+            assert!(launcher.contains(&format!("cd '{workdir}'")), "{launcher}");
+
+            engine
+                .report(
+                    &task.id,
+                    TaskReport {
+                        artifacts: Vec::new(),
+                        status: Some(RunStatus::Done),
+                        message: None,
+                        result: Some("ok".into()),
+                        send_to: None,
+                        error: None,
+                        token: run.token.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            // The teardown runs in the background, after the run is settled.
+            assert_eq!(engine.store.get_run(&run.id).await.unwrap().unwrap().status, RunStatus::Done);
+            let mut calls = String::new();
+            for _ in 0..100 {
+                calls = std::fs::read_to_string(tools.join("calls")).unwrap();
+                if calls.trim_end().ends_with(&format!("sandbox delete {}", teardown.sandbox)) && !teardown.state_dir.exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(calls.trim_end().ends_with(&format!("sandbox delete {}", teardown.sandbox)), "{calls}");
+            assert!(!teardown.state_dir.exists(), "the run's openshell files are gone");
+            let entries = engine.store.run_entries(&run.id, 100).await.unwrap();
+            assert!(
+                entries.iter().any(|e| e.kind == "sandbox" && e.message.contains("deleted sandbox")),
+                "{:?}",
+                entries.iter().map(|e| (&e.kind, &e.message)).collect::<Vec<_>>()
+            );
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
         }
     }
 }

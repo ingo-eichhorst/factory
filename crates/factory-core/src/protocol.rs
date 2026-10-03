@@ -1359,8 +1359,8 @@ pub struct AgentView {
     /// The role it is working under -- the config's, unless somebody gave it
     /// another.
     pub role: String,
-    /// `none`, `docker`, or `srt` -- what the declaration says, unread by
-    /// anything else today. See `Sandbox`'s doc comment.
+    /// `none`, `docker`, `srt`, or `openshell` -- what the declaration
+    /// says. Only `openshell` is enforced; see `Sandbox`'s doc comment.
     pub sandbox: String,
     /// Set when a person gave it this role, so the roster can say that the
     /// config says something else.
@@ -2045,8 +2045,13 @@ pub struct SandboxRow {
     pub harness: String,
     /// `permanent`, `temporary`, or `task`.
     pub lifetime: String,
-    /// `none`, `docker`, or `srt`.
+    /// `none`, `docker`, `srt`, or `openshell`.
     pub sandbox: String,
+    /// Whether dispatch actually puts this agent's runs inside `sandbox`
+    /// (`Sandbox::is_enforced`) -- `openshell` only, today. Absent from an
+    /// older daemon's answer, which enforced nothing.
+    #[serde(default)]
+    pub enforced: bool,
     pub worktree_capable: bool,
 }
 

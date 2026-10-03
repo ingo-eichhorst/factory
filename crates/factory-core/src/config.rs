@@ -449,6 +449,7 @@ impl Config {
             let roles = self.roles_for_scope(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
+                refuse_bad_openshell(scope, &agent)?;
                 self.infrastructure.refuse_unknown_provider(scope, &agent)?;
                 if !roles.contains(&agent.role) {
                     return Err(FactoryError::BadRequest(format!(
@@ -516,6 +517,7 @@ impl Config {
             refuse_zero_max_sessions(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
+                refuse_bad_openshell(scope, &agent)?;
                 self.infrastructure.refuse_unknown_provider(scope, &agent)?;
                 if !roles.contains(&agent.role) {
                     return Err(FactoryError::BadRequest(format!(
@@ -619,6 +621,39 @@ fn refuse_shell_args(scope: &Scope, agent: &ScopeAgent) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// `sandbox: openshell` and its `openshell:` block come together or not at
+/// all, and the block itself has to be one a sandbox can be made from
+/// (`OpenshellConfig::problems`). Refused at load, naming the scope's path,
+/// like `refuse_zero_max_sessions` -- a run that only found out at dispatch
+/// would fail every week until somebody read the journal.
+pub fn refuse_bad_openshell(scope: &Scope, agent: &ScopeAgent) -> Result<()> {
+    let refuse = |what: String| {
+        Err(FactoryError::BadRequest(format!(
+            "scope {:?} at {} gives {:?} {what}",
+            scope.name,
+            scope.path.display(),
+            agent.name(),
+        )))
+    };
+    match (agent.sandbox, &agent.openshell) {
+        (Sandbox::Openshell, None) => refuse(
+            "sandbox: openshell without an openshell: block; it needs at least an image and a policy".to_string(),
+        ),
+        (other, Some(_)) if other != Sandbox::Openshell => refuse(format!(
+            "an openshell: block but sandbox: {}; set sandbox: openshell or remove the block",
+            other.as_str()
+        )),
+        (_, Some(_)) if agent.lifetime != Lifetime::Task => refuse(
+            "sandbox: openshell for a standing agent; this version supports only lifetime: task and will not start a standing harness on the host instead".to_string(),
+        ),
+        (_, Some(block)) => match block.problems().first() {
+            Some(problem) => refuse(format!("an openshell: block that {problem}")),
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    }
 }
 
 /// A `max_sessions: 0` would never run anything -- which is never what
@@ -1032,14 +1067,18 @@ impl InterfaceConfig {
 
 /// Where a run declared with this agent executes.
 ///
-/// **Nothing in dispatch reads this yet.** It is declared here and shown on
-/// the L2 Environment page's Sandboxes tab, and choosing `docker` or `srt`
-/// still changes nothing about how the agent actually starts -- that stays
-/// true until a later increment teaches the runtime to act on this field.
-/// `none` is the default, today's behaviour, unchanged. `factory_core::
-/// policy`'s `sandbox` check does read it now (`#82`), but only to report
-/// evidence -- "every agent in the scope declares one" -- never to enforce
-/// anything.
+/// `openshell` is enforced (`#218`): a task run of an agent that declares it
+/// starts its harness inside an NVIDIA OpenShell sandbox -- created for the
+/// run, carrying the policy, image and providers its `openshell:` block
+/// names, and deleted when the run ends -- and a run that cannot get one
+/// fails with the reason rather than starting on the host. See
+/// `crate::openshell` and the daemon's `openshell` module.
+///
+/// `docker` and `srt` are still **declared only**: shown on the L2
+/// Environment page's Sandboxes tab and read by `factory_core::policy`'s
+/// `sandbox` check as evidence, but nothing in dispatch acts on them, so an
+/// agent declaring one starts exactly as `none` does. `none` is the default,
+/// today's behaviour, unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sandbox {
@@ -1047,6 +1086,7 @@ pub enum Sandbox {
     None,
     Docker,
     Srt,
+    Openshell,
 }
 
 impl Sandbox {
@@ -1055,7 +1095,16 @@ impl Sandbox {
             Self::None => "none",
             Self::Docker => "docker",
             Self::Srt => "srt",
+            Self::Openshell => "openshell",
         }
+    }
+
+    /// Whether dispatch actually puts a run of this agent inside the
+    /// sandbox, as opposed to only recording that someone said so. The one
+    /// place that answer lives, so the L2 tab, L3's facts and the policy
+    /// check cannot disagree about it.
+    pub fn is_enforced(self) -> bool {
+        matches!(self, Self::Openshell)
     }
 
     /// So a config file nobody asked to change never grows a `sandbox: none`
@@ -1312,9 +1361,12 @@ pub enum AgentRef {
         /// Arguments added after the adapter's own defaults for this agent.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         args: Vec<String>,
-        /// See `Sandbox`'s doc comment: nothing reads this yet.
+        /// See `Sandbox`'s doc comment.
         #[serde(default, skip_serializing_if = "Sandbox::is_none")]
         sandbox: Sandbox,
+        /// See `ScopeAgent::openshell`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        openshell: Option<crate::openshell::OpenshellConfig>,
         /// See `ScopeAgent::provider`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
@@ -1347,6 +1399,8 @@ impl<'de> Deserialize<'de> for AgentRef {
             #[serde(default)]
             sandbox: Sandbox,
             #[serde(default)]
+            openshell: Option<crate::openshell::OpenshellConfig>,
+            #[serde(default)]
             provider: Option<String>,
             // Older Factory configs wrote this in the singular declaration.
             // It used to have no effect; `#179` makes it live.
@@ -1368,6 +1422,7 @@ impl<'de> Deserialize<'de> for AgentRef {
                     role: declaration.role,
                     args: declaration.args,
                     sandbox: declaration.sandbox,
+                    openshell: declaration.openshell,
                     provider: declaration.provider,
                     max_sessions: declaration.max_sessions,
                 })
@@ -1417,9 +1472,16 @@ pub struct ScopeAgent {
     /// Arguments added after the adapter's own defaults for this agent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
-    /// See `Sandbox`'s doc comment: nothing reads this yet.
+    /// See `Sandbox`'s doc comment.
     #[serde(default, skip_serializing_if = "Sandbox::is_none")]
     pub sandbox: Sandbox,
+    /// How an `openshell` sandbox is made for this agent's runs: the image,
+    /// the providers attached by name, the policy, and what crosses in and
+    /// out. Present exactly when `sandbox: openshell` is -- either one alone
+    /// is refused at load (`refuse_bad_openshell`). Holds no secret: a
+    /// provider is named, and its credential stays in OpenShell's store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openshell: Option<crate::openshell::OpenshellConfig>,
     /// The AI account this agent's model calls go to, by the name
     /// `infrastructure.providers` in the root config declares it under.
     /// Absent means the provider that claims this agent's harness, if any
@@ -1615,6 +1677,7 @@ impl Scope {
             // Synthesized, not declared: nothing names a sandbox for a
             // foreman nobody wrote, so it gets today's default forever.
             sandbox: Sandbox::None,
+            openshell: None,
             // Likewise: its harness's default provider, if one claims it.
             provider: None,
             // And no cap of its own -- only the scope's, if it has one.
@@ -1642,6 +1705,7 @@ impl Scope {
             role,
             args,
             sandbox,
+            openshell,
             provider,
             max_sessions,
         }) = &self.agent
@@ -1654,6 +1718,7 @@ impl Scope {
                 autostart: *autostart,
                 args: args.clone(),
                 sandbox: *sandbox,
+                openshell: openshell.clone(),
                 provider: provider.clone(),
                 max_sessions: *max_sessions,
             });
@@ -3108,6 +3173,72 @@ mod tests {
             Sandbox::None,
             "an agent that never mentions it stays at today's default"
         );
+    }
+
+    /// `openshell` is the fourth value in the same three places, and its
+    /// `openshell:` block rides along in each of them (`#218`).
+    #[test]
+    fn an_openshell_sandbox_and_its_block_load_from_both_spellings() {
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: a\npath: .\n\
+             agent:\n  harness: claude-code\n  sandbox: openshell\n  openshell:\n    image: img:1\n    providers: [claude]\n    policy:\n      network_policies: {}\n\
+             agents:\n  - name: watcher\n    harness: shell\n    sandbox: openshell\n    openshell:\n      image: img:1\n      providers: [claude]\n      policy:\n        network_policies: {}\n",
+        )
+        .unwrap();
+        let declared = s.declared_agents();
+        assert_eq!(declared.len(), 2);
+        for agent in &declared {
+            assert_eq!(agent.sandbox, Sandbox::Openshell, "{}", agent.name());
+            let os = agent.openshell.as_ref().expect("the block is kept");
+            assert_eq!(os.image, "img:1");
+            assert_eq!(os.providers, ["claude"]);
+        }
+        assert!(Sandbox::Openshell.is_enforced() && !Sandbox::Docker.is_enforced() && !Sandbox::Srt.is_enforced());
+        let bare = ScopeAgent { openshell: None, sandbox: Sandbox::None, ..declared[0].clone() };
+        assert!(
+            !serde_yaml_ng::to_string(&bare).unwrap().contains("openshell"),
+            "an agent without the block is never written with one"
+        );
+    }
+
+    #[test]
+    fn openshell_without_its_block_or_a_block_without_openshell_or_a_bad_block_is_refused_naming_the_scope() {
+        let cases = [
+            ("        sandbox: openshell\n", "without an openshell: block"),
+            ("        openshell:\n          image: img\n          policy: {}\n", "but sandbox: none"),
+            (
+                "        sandbox: openshell\n        openshell:\n          image: img\n          factory_bin: factory\n          policy: {}\n",
+                "absolute path",
+            ),
+        ];
+        for (agent, expected) in cases {
+            let c = config_with(&format!(
+                "scopes:\n  - name: demo\n    path: projects/demo\n    agents:\n      - name: curator\n        harness: claude-code\n{agent}"
+            ));
+            let e = c.validate().unwrap_err().to_string();
+            assert!(e.contains(expected) && e.contains("curator") && e.contains("projects/demo"), "{e}");
+        }
+        let fine = config_with(
+            "scopes:\n  - name: demo\n    path: projects/demo\n    agents:\n      - name: curator\n        harness: claude-code\n        sandbox: openshell\n        openshell:\n          image: img\n          policy: {}\n",
+        );
+        fine.validate().unwrap();
+        // A misspelt key never parses at all, so it is refused at load with
+        // the file named by whoever read it ("parsing <path>: ...").
+        let typo: std::result::Result<Scope, _> = serde_yaml_ng::from_str(
+            "name: a\nagents:\n  - harness: claude-code\n    sandbox: openshell\n    openshell:\n      image: img\n      polcy: {}\n",
+        );
+        assert!(typo.unwrap_err().to_string().contains("polcy"));
+    }
+
+    #[test]
+    fn openshell_standing_agents_are_refused_rather_than_started_on_the_host() {
+        for lifetime in ["permanent", "temporary"] {
+            let c = config_with(&format!(
+                "scopes:\n  - name: demo\n    path: projects/demo\n    agents:\n      - name: boxed\n        harness: claude-code\n        lifetime: {lifetime}\n        sandbox: openshell\n        openshell:\n          image: img\n          policy: {{}}\n"
+            ));
+            let error = c.validate().unwrap_err().to_string();
+            assert!(error.contains("only lifetime: task") && error.contains("projects/demo"), "{error}");
+        }
     }
 
     #[test]

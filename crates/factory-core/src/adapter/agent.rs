@@ -208,6 +208,13 @@ pub struct AgentContext {
     pub factory_bin: PathBuf,
     /// Absolute path to the daemon's control socket.
     pub socket: PathBuf,
+    /// The daemon's http interface as the agent can reach it, when the
+    /// socket is out of its reach -- a run inside an OpenShell sandbox
+    /// (`#218`), where the agent is on Linux in a VM and `socket` names a
+    /// path on another machine. `Some` makes `env()` export `FACTORY_URL`
+    /// instead of `FACTORY_SOCKET` and the explicit contract say `--url`
+    /// instead of `--socket`; `None` is every other run, unchanged.
+    pub callback_url: Option<String>,
     /// Where a guide written to a file, rather than passed as text, lives --
     /// under the instance root's `.factory/`, never inside a scope.
     pub guides_dir: PathBuf,
@@ -325,10 +332,13 @@ impl AgentContext {
         };
         let bin = if explicit {
             let token = &binding.token;
+            let endpoint = match &self.callback_url {
+                Some(url) => format!("--url {}", shell_word(url)),
+                None => format!("--socket {}", shell_word(&self.socket.display().to_string())),
+            };
             format!(
-                "{} --socket {} --token {token}",
+                "{} {endpoint} --token {token}",
                 shell_word(&self.factory_bin.display().to_string()),
-                shell_word(&self.socket.display().to_string())
             )
         } else {
             self.factory_bin.display().to_string()
@@ -892,9 +902,14 @@ impl AgentContext {
     pub fn env(&self) -> BTreeMap<String, String> {
         let mut env = BTreeMap::from([
             ("FACTORY_SCOPE".to_string(), self.scope.clone()),
-            ("FACTORY_SOCKET".to_string(), self.socket.display().to_string()),
             ("FACTORY_BIN".to_string(), self.factory_bin.display().to_string()),
         ]);
+        // One way to reach the daemon, never both: a sandboxed run that
+        // inherited a host socket path would only have a path to nothing.
+        match &self.callback_url {
+            Some(url) => env.insert("FACTORY_URL".to_string(), url.clone()),
+            None => env.insert("FACTORY_SOCKET".to_string(), self.socket.display().to_string()),
+        };
         // One variable says which agent is calling, whether it is standing
         // there or working a task. The CLI sends it on every request.
         if let Some(token) = self
@@ -1025,6 +1040,7 @@ mod tests {
             cwd: PathBuf::from("/tmp/somewhere"),
             factory_bin: PathBuf::from("/usr/local/bin/factory"),
             socket: PathBuf::from("/tmp/factory.sock"),
+            callback_url: None,
             guides_dir: PathBuf::from("/tmp/factory-guides"),
             task: None,
             identity_token: Some("identity".into()),

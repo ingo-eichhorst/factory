@@ -23,6 +23,7 @@ pub mod intake;
 pub mod knowledge;
 pub mod metrics;
 pub mod occupancy;
+pub mod openshell;
 pub mod operations;
 pub mod policy;
 pub mod policy_export;

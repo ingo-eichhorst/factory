@@ -46,6 +46,14 @@ struct Cli {
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
 
+    /// Reach the daemon over its http interface instead of the socket, as
+    /// http://host:port. For an agent that cannot see the socket -- a run in
+    /// an OpenShell sandbox, which Factory starts with FACTORY_URL set. The
+    /// same request and token go to the same handler, so roles apply as over
+    /// the socket.
+    #[arg(long, global = true, env = "FACTORY_URL")]
+    url: Option<String>,
+
     /// Print the daemon's answer as JSON.
     #[arg(long, global = true)]
     json: bool,
@@ -1435,7 +1443,7 @@ enum HookEvent {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let client = Client::locate(cli.socket.clone(), cli.root.clone(), cli.token.clone())?;
+    let client = Client::locate(cli.socket.clone(), cli.url.clone(), cli.root.clone(), cli.token.clone())?;
 
     match cli.command {
         Command::Status => {
@@ -1453,7 +1461,7 @@ async fn main() -> Result<()> {
                         status.tasks_active,
                         status.interfaces.join(", "),
                         status.subscribers,
-                        client.socket_path().display(),
+                        client.endpoint(),
                     );
                     if !status.capacity.is_empty() {
                         out.push_str("\n  capacity    ");
@@ -1669,7 +1677,7 @@ async fn main() -> Result<()> {
         }
 
         Command::Watch => {
-            eprintln!("watching {} -- ctrl-c to stop", client.socket_path().display());
+            eprintln!("watching {} -- ctrl-c to stop", client.endpoint());
             client
                 .subscribe(|msg| {
                     match msg {
