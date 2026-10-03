@@ -14,6 +14,8 @@ fn assert_producer<F: Fact<Producer = P>, P: Level>(name: &str, producer: &str) 
 #[test]
 fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<DaemonConfigFact, L1>("DaemonConfigFact", "L1");
+    assert_producer::<ScopeCapacityFact, L1>("ScopeCapacityFact", "L1");
+    assert_producer::<EnvironmentMetricFact, L1>("EnvironmentMetricFact", "L1");
     assert_producer::<BackupFact, L1>("BackupFact", "L1");
     assert_producer::<SecretsPresence, L2>("SecretsPresence", "L2");
     assert_producer::<DependenciesFact, L2>("DependenciesFact", "L2");
@@ -24,12 +26,15 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<ConfirmedSecurityReport, L4>("ConfirmedSecurityReport", "L4");
     assert_producer::<AttestedRun, L4>("AttestedRun", "L4");
     assert_producer::<GateFact, L5>("GateFact", "L5");
+    assert_producer::<KnowledgeTags, L5>("KnowledgeTags", "L5");
 }
 
 #[test]
 fn catalogue_is_complete_unique_and_has_readers() {
     let mut expected = vec![
         "DaemonConfigFact",
+        "ScopeCapacityFact",
+        "EnvironmentMetricFact",
         "BackupFact",
         "SecretsPresence",
         "DependenciesFact",
@@ -40,6 +45,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "ConfirmedSecurityReport",
         "AttestedRun",
         "GateFact",
+        "KnowledgeTags",
     ];
     let mut actual: Vec<_> = FACT_CATALOGUE.iter().map(|entry| entry.fact).collect();
     actual.sort_unstable();

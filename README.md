@@ -3806,7 +3806,13 @@ The L0 kernel now owns every live fact schema and its nested vocabulary
 (#193 phase 2), including conformance evidence. Existing core paths re-export
 these types. Providers, wildcard authorization, intake deduplication and
 conformance evaluation remain outside L0. The kernel has no Factory crate
-dependency; fact ports and the strict command ladder follow in later phases.
+dependency. The first phase-3 batch adds typed pull ports: producer-owned
+providers assemble policy evidence, and metrics read backup, conformance
+and environment figures through the same channel. Line reads its capacity
+configuration through a port. Queries preserve selective names and windows;
+responses can contain only the selected fact or a collection of it. No
+status table or fact log is introduced. The remaining signpost reader move,
+Below bounds, crate splitting and strict command ladder are still ahead.
 
 ## Layout
 

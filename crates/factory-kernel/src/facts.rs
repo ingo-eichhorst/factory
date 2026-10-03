@@ -1,6 +1,6 @@
-//! Live fact vocabulary for the six-level ladder (#193 phase 2).
+//! Live fact vocabulary for the six-level ladder (#193 phases 2-3).
 //! All schemas are defined in L0; producing levels retain their providers
-//! and behavior. Fact ports and Below bounds are the next phase.
+//! and behavior. Provide defines live ports; Below bounds follow in phase 4.
 
 use crate::fact_vocabulary::*;
 use chrono::{DateTime, Utc};
@@ -55,11 +55,8 @@ impl Level for L6 {}
 // ==================================================================== fact
 
 /// A fact type one level's own state produces, for a level above it to read.
-/// Phase 2 only catalogues the vocabulary and names each fact's producer;
-/// the fact *port* -- a `Below` bound, a `Provide<F>` impl, a `Facts<R>`
-/// handle a reader is given at startup -- is phases 3-4's work, not this
-/// trait's. Until then, `policy::Evidence` still gathers every fact the way
-/// `policies/mod.rs` always has.
+/// The producer owns a `Provide<F>` implementation; readers use a typed
+/// Facts handle. Phase 4 adds Below bounds and level-crate enforcement.
 pub trait Fact: Serialize + DeserializeOwned {
     /// The level that derives this fact fresh, live, on every read (ADR
     /// 0004: "status is computed on every read") -- never the level that
@@ -99,6 +96,44 @@ pub struct DaemonConfigFact {
 
 impl Fact for DaemonConfigFact {
     type Producer = L1;
+}
+
+/// Live scope session ceilings and the scheduler's tick, for L4 Line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeCapacityFact {
+    pub max_sessions: BTreeMap<String, u32>,
+    pub tick_seconds: u64,
+}
+impl Fact for ScopeCapacityFact {
+    type Producer = L1;
+}
+
+/// L1 Operations' existing computed figures, without exposing its report
+/// or deployment internals to metrics. Unknown values remain unknown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentMetricFact {
+    pub name: String,
+    pub availability: Option<f64>,
+    pub has_slo: bool,
+    pub error_budget: Option<f64>,
+    pub incidents: usize,
+    pub mttr: Option<f64>,
+    pub time_to_restore_p50: Option<f64>,
+    pub deploy_frequency: Option<f64>,
+    pub lead_time_p50: Option<f64>,
+    pub change_failure_rate: Option<f64>,
+}
+impl Fact for EnvironmentMetricFact {
+    type Producer = L1;
+}
+
+/// Current tags in the L5 knowledge vault, never a persisted status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeTags {
+    pub tags: BTreeSet<String>,
+}
+impl Fact for KnowledgeTags {
+    type Producer = L5;
 }
 
 /// The `daemon` check's whole fixed vocabulary -- everything else
@@ -404,8 +439,7 @@ impl Fact for AttestedRun {
 // =============================================================== catalogue
 
 /// One row of [`FACT_CATALOGUE`]: a fact's name, the level that produces it,
-/// which levels read it today (through `policy::Evidence`, until phases 3-4
-/// add real fact ports), and where its shared schema lives.
+/// which levels read it today, and where its shared schema lives.
 #[derive(Debug, Clone, Copy)]
 pub struct FactCatalogueEntry {
     pub fact: &'static str,
@@ -418,10 +452,31 @@ pub struct FactCatalogueEntry {
 /// Every fact behind `policy::Evidence`, whatever module its type actually
 /// lives in -- the catalogue the issue's guardrails ask for ("a catalogue
 /// test lists fact, producer and readers"). `readers` is documentation, not
-/// a compiled reference: phases 3-4's `Facts<Reader>::get` is what will make
+/// a compiled reference: phase 4's Below bound is what will make
 /// a wrong reader a compile error instead of a comment. All listed schemas
 /// and their nested vocabulary now live in L0.
 pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
+    FactCatalogueEntry {
+        fact: "KnowledgeTags",
+        producer: "L5",
+        readers: &["L6 policy"],
+        lives_in_kernel: true,
+        note: "live vault index port, phase 3",
+    },
+    FactCatalogueEntry {
+        fact: "ScopeCapacityFact",
+        producer: "L1",
+        readers: &["L4 Line"],
+        lives_in_kernel: true,
+        note: "live configuration port, phase 3",
+    },
+    FactCatalogueEntry {
+        fact: "EnvironmentMetricFact",
+        producer: "L1",
+        readers: &["L6 metrics"],
+        lives_in_kernel: true,
+        note: "existing Operations figures, phase 3",
+    },
     FactCatalogueEntry {
         fact: "AttestedRun",
         producer: "L4",

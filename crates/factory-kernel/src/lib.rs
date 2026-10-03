@@ -19,13 +19,18 @@
 //! - [`Level`], `L1`..`L6` and [`Fact`] (#193, phase 2) -- a marker per
 //!   level and the trait that names a fact's producer. All [`facts`] schemas
 //!   live here with their nested vocabulary. Providers and evaluators
-//!   remain outside L0; [`FACT_CATALOGUE`] lists all eleven live facts.
+//!   remain outside L0; [`FACT_CATALOGUE`] lists every wired live fact.
+//! - [`Provide`] -- a typed pull port, with producer ownership and
+//!   fact-only response shapes. The host supplies queries and errors.
 
 mod duration;
 mod fact_vocabulary;
 pub mod facts;
 pub use fact_vocabulary::*;
+mod ports;
 mod stats;
+pub use facts::{EnvironmentMetricFact, KnowledgeTags, ScopeCapacityFact};
+pub use ports::{FactProvider, FactValue, Provide};
 
 pub use duration::Duration;
 pub use facts::{

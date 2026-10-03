@@ -91,7 +91,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use factory_core::environments::EnvironmentCard;
+use factory_kernel::{EnvironmentMetricFact, BackupFact, AttestedRun, L6};
+use crate::facts::{Facts, AttestedQuery};
 use factory_core::config::Scope;
 use factory_core::error::{FactoryError, Result};
 use factory_core::goals::GoalsCatalogue;
@@ -325,7 +326,8 @@ impl Engine {
         // `#154`: never spawns `git`/`tmutil` -- `Engine::backup_fact` shares
         // `capture` with `backup_report` but not its repository or Time
         // Machine probes.
-        let backup_fact = if needs_backup { Some(self.backup_fact(now).await?) } else { None };
+        let facts = Facts::<L6>::new(self);
+        let backup_fact = if needs_backup { Some(facts.get::<BackupFact>(&now).await?) } else { None };
         // `#158`: one read shared by `conformance_rate.<category>` (any
         // number of distinct categories a request asks for) and
         // `gate_fail_rate` (every category) -- `categories: None`, so the
@@ -337,13 +339,17 @@ impl Engine {
                 .unwrap_or(OPERATIONS_WINDOW_DAYS);
             let attestation_window = factory_core::operations::Window::trailing(now, days);
             let scopes = canonical_scope.map(|_| &target_scope_names);
-            Some(self.attested_runs(scopes, None, attestation_window).await?)
+            Some(facts.get::<AttestedRun>(&AttestedQuery {
+                scopes: scopes.cloned(), categories: None, window: attestation_window,
+            }).await?)
         } else {
             None
         };
         let needs_environments =
             computing.iter().any(|(id, r)| r.is_ok() && environment_metric(id.as_str()).is_some());
-        let environments = if needs_environments { Some(self.environment_cards(canonical_scope).await?) } else { None };
+        let environments = if needs_environments {
+            Some(facts.get::<EnvironmentMetricFact>(&canonical_scope.map(str::to_string)).await?)
+        } else { None };
 
         let sources = ComputeSources {
             production: production.as_ref(),
@@ -1162,7 +1168,7 @@ struct ComputeSources<'a> {
     hours: Option<&'a HoursTotals>,
     intake: Option<&'a IntakeInput>,
     backup: Option<&'a factory_core::backup::BackupFact>,
-    environments: Option<&'a BTreeMap<String, EnvironmentCard>>,
+    environments: Option<&'a BTreeMap<String, EnvironmentMetricFact>>,
     /// `#158`: `Engine::attested_runs`'s finished runs, shared by
     /// `conformance_rate.<category>` and `gate_fail_rate`.
     attested: Option<&'a [factory_core::conformance::AttestedRun]>,
@@ -1206,7 +1212,7 @@ fn intake_value(id: &MetricId, intake: &IntakeInput, now: DateTime<Utc>) -> Metr
 /// `None` with the reason.
 fn environment_value(
     id: &MetricId,
-    cards: &BTreeMap<String, EnvironmentCard>,
+    cards: &BTreeMap<String, EnvironmentMetricFact>,
     name: &str,
     env: &str,
     now: DateTime<Utc>,
@@ -1221,20 +1227,19 @@ fn environment_value(
         return answer(None, &format!("no environment named {env:?} is declared or deployed to"));
     };
     let no_samples = "no health samples in the window yet";
-    let dora = &card.dora;
     match name {
-        "availability" => answer(card.uptime_window, no_samples),
-        "error_budget" if card.slo.is_none() => answer(None, &format!("environment {env:?} declares no SLO")),
+        "availability" => answer(card.availability, no_samples),
+        "error_budget" if !card.has_slo => answer(None, &format!("environment {env:?} declares no SLO")),
         "error_budget" => answer(card.error_budget, no_samples),
-        "incidents" => answer(card.uptime_window.map(|_| card.incidents.len() as f64), no_samples),
-        "mttr" => answer(dora.mttr, "no incident ended in the window"),
-        "time_to_restore_p50" => answer(dora.time_to_restore_p50, "no incident ended in the window"),
-        "deploy_frequency" => answer(dora.deploy_frequency, "no successful deployment in the window"),
+        "incidents" => answer(card.availability.map(|_| card.incidents as f64), no_samples),
+        "mttr" => answer(card.mttr, "no incident ended in the window"),
+        "time_to_restore_p50" => answer(card.time_to_restore_p50, "no incident ended in the window"),
+        "deploy_frequency" => answer(card.deploy_frequency, "no successful deployment in the window"),
         "lead_time_p50" => answer(
-            dora.lead_time_p50,
+            card.lead_time_p50,
             "no successful deployment in the window says when its commit was made",
         ),
-        "change_failure_rate" => answer(dora.change_failure_rate, "no deployment finished in the window"),
+        "change_failure_rate" => answer(card.change_failure_rate, "no deployment finished in the window"),
         _ => answer(None, "no computation wired for this metric yet"),
     }
 }
