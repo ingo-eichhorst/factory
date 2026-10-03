@@ -1810,6 +1810,7 @@ mod tests {
             .report(
                 &task.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     message: None,
                     result: Some("fixed".into()),

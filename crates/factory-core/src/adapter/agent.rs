@@ -402,6 +402,8 @@ impl AgentContext {
              {routing}\
              - Gave up:         {bin} task report {id} --status failed --error \"<why>\"\n\
              \n\
+             Release outputs: add `--artifact <file>` to the done command (repeat for multiple files). Paths are relative to this run's working directory. Factory captures their bytes and publishes provenance only after required verification passes; do not change the source or outputs while it verifies.\n\
+             \n\
              Dependency scans attach CycloneDX documents with `{bin} task attach{attach_to} --kind sbom|vulnerabilities <file>`. \
              Authored VEX is available with `{bin} dependencies vex {scope}`.\n\
              \n\

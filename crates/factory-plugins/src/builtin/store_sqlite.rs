@@ -592,6 +592,7 @@ impl TaskStore for SqliteStore {
                 turn_end_reason: None,
                 turn_ended_session_id: None,
                 required_steps: Vec::new(),
+                artifacts: Vec::new(),
                 usage: None,
             };
             write_run(&tx, &run)?;
@@ -744,6 +745,9 @@ impl TaskStore for SqliteStore {
             }
             if let Some(v) = patch.required_steps {
                 run.required_steps = v;
+            }
+            if let Some(v) = patch.artifacts {
+                run.artifacts = v;
             }
             if let Some(v) = patch.usage {
                 run.usage = Some(v);

@@ -27,6 +27,7 @@ pub mod operations;
 pub mod policy;
 pub mod policy_export;
 pub mod protocol;
+pub mod provenance;
 pub mod quality;
 pub mod ready;
 pub mod reporting_clock;

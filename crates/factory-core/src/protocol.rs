@@ -294,6 +294,9 @@ pub enum Request {
     /// Every attestation a run's required steps left behind (`#118`).
     #[serde(rename = "run.attestations")]
     RunAttestations { id: String },
+    /// Append-only artifact provenance for this completed run (#158).
+    #[serde(rename = "run.provenance")]
+    RunProvenance { id: String },
     /// Person/functionary decisions for enforced approval and rework.
     #[serde(rename = "run.approve")]
     RunApprove { id: String, reason: String },
@@ -990,6 +993,7 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Payload {
+    RunProvenance { records: Vec<factory_kernel::ArtifactProvenance> },
     Ok,
     Status { status: StatusInfo },
     Adapters { adapters: Vec<AdapterEntry> },

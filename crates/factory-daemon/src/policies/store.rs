@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS run_attestations (
     data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS run_attestations_run ON run_attestations(run_id, at);
+
+CREATE TABLE IF NOT EXISTS artifact_provenance (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS artifact_provenance_run ON artifact_provenance(run_id);
 "#;
 
 fn error(error: impl std::fmt::Display) -> FactoryError {
@@ -85,6 +92,59 @@ pub struct PolicyStore {
 }
 
 impl PolicyStore {
+    pub(crate) async fn append_provenance(
+        &self,
+        record: &factory_kernel::ArtifactProvenance,
+    ) -> Result<()> {
+        let record = record.clone();
+        self.with_conn(move |conn| {
+            let data = serde_json::to_string(&record).map_err(error)?;
+            // An id identifies one captured immutable artifact. Never overwrite it.
+            let existing: Option<String> = conn
+                .query_row(
+                    "SELECT data FROM artifact_provenance WHERE id = ?1",
+                    params![record.id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(error)?;
+            if let Some(existing) = existing {
+                if existing == data {
+                    return Ok(());
+                }
+                return Err(FactoryError::BadRequest(
+                    "artifact provenance is append-only; this id already has different evidence"
+                        .into(),
+                ));
+            }
+            conn.execute(
+                "INSERT INTO artifact_provenance(id, run_id, data) VALUES (?1, ?2, ?3)",
+                params![record.id, record.run_id, data],
+            )
+            .map_err(error)?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn provenance(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<factory_kernel::ArtifactProvenance>> {
+        let run_id = run_id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, data FROM artifact_provenance WHERE run_id = ?1 ORDER BY id")
+                .map_err(error)?;
+            let rows = stmt
+                .query_map(params![run_id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(error)?
+                .collect::<std::result::Result<Vec<(String, String)>, _>>()
+                .map_err(error)?;
+            Ok(decode_all(rows, "artifact_provenance"))
+        })
+        .await
+    }
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path).map_err(error)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")

@@ -256,6 +256,16 @@ impl Provide<AttestedRun> for Provider<'_> {
             .await
     }
 }
+
+#[async_trait]
+impl Provide<factory_kernel::ArtifactProvenance> for Provider<'_> {
+    type Query = String;
+    type Value = Vec<factory_kernel::ArtifactProvenance>;
+    type Error = FactoryError;
+    async fn get(&self, id: &String) -> Result<Self::Value> {
+        self.engine.run_provenance(id).await
+    }
+}
 #[async_trait]
 impl Provide<ConfirmedSecurityReport> for Provider<'_> {
     type Query = Option<String>;

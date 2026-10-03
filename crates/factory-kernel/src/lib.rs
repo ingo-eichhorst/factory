@@ -28,6 +28,8 @@ mod fact_vocabulary;
 pub mod facts;
 pub use fact_vocabulary::*;
 mod ports;
+mod provenance;
+pub use provenance::*;
 mod stats;
 pub use facts::{EnvironmentMetricFact, KnowledgeTags, ScopeCapacityFact};
 pub use ports::{FactProvider, FactValue, Provide};

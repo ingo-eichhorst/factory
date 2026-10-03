@@ -82,6 +82,7 @@ port!(AgentFact, l3, String, Vec<AgentFact>);
 port!(TaskFact, l4, NamedQuery, BTreeMap<String, Vec<TaskFact>>);
 port!(WorkflowFact, l4, NamedQuery, BTreeMap<String, Vec<WorkflowFact>>);
 port!(AttestedRun, l4, AttestedQuery, Vec<AttestedRun>);
+port!(ArtifactProvenance, l4, String, Vec<ArtifactProvenance>);
 port!(
     ConfirmedSecurityReport,
     l4,
@@ -108,6 +109,7 @@ mod tests {
         registered::<TaskFact>();
         registered::<WorkflowFact>();
         registered::<AttestedRun>();
+        registered::<ArtifactProvenance>();
         registered::<ConfirmedSecurityReport>();
         registered::<GateFact>();
         registered::<KnowledgeTags>();

@@ -1770,6 +1770,7 @@ mod tests {
     /// queued the moment it started.
     fn run(id: &str, task: &str, attempt: u32, status: RunStatus, started: i64, ended: Option<i64>) -> Run {
         Run {
+            artifacts: Vec::new(),
             id: id.into(),
             task_id: task.into(),
             attempt,

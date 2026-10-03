@@ -344,6 +344,7 @@ mod tests {
         ended: Option<DateTime<Utc>>,
     ) -> Run {
         Run {
+            artifacts: Vec::new(),
             id: id.into(),
             task_id: task_id.into(),
             attempt,
