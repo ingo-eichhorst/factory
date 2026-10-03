@@ -9,51 +9,20 @@ use crate::task::SessionRef;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Where a run is. Unlike a task, a run is never `pending`: it exists because
-/// something started it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunStatus {
-    /// The session is opening and the agent is being handed the task.
-    Dispatching,
-    /// The agent said it is working.
-    Running,
-    /// The agent needs a human.
-    Blocked,
-    /// The agent reported `done`, and the steps its control plan requires
-    /// (`Run::required_steps`) are being run and attested before that
-    /// counts (`#118`). Not terminal: it ends `Done` when every required
-    /// attestation exists and passed, or goes to `Blocked` with the reason.
-    Verifying,
-    Done,
-    Failed,
-    Cancelled,
+pub use factory_kernel::RunStatus;
+
+/// L4 maps the shared run status to its own task model.
+pub trait RunTaskStatus {
+    fn as_task_status(self) -> crate::task::TaskStatus;
 }
-
-impl RunStatus {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Done | Self::Failed | Self::Cancelled)
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Dispatching => "dispatching",
-            Self::Running => "running",
-            Self::Blocked => "blocked",
-            Self::Verifying => "verifying",
-            Self::Done => "done",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
+impl RunTaskStatus for RunStatus {
     /// The task's own status while this is its most recent run. A failed
     /// run leaves its task `Blocked`, never failed: the run really did fail
     /// and stays that way, but the task is an open item until a person
     /// disposes of it (`#122`) -- `Task::failure` says it is that kind of
     /// block. A scheduled task's engine may still hold it `Pending` while a
     /// retry is queued (`Engine::mirror_to_task`).
-    pub fn as_task_status(self) -> crate::task::TaskStatus {
+    fn as_task_status(self) -> crate::task::TaskStatus {
         use crate::task::TaskStatus as T;
         match self {
             Self::Dispatching => T::Dispatching,
@@ -64,22 +33,6 @@ impl RunStatus {
             Self::Failed => T::Blocked,
             Self::Cancelled => T::Cancelled,
         }
-    }
-}
-
-impl std::str::FromStr for RunStatus {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "dispatching" => Self::Dispatching,
-            "running" => Self::Running,
-            "blocked" => Self::Blocked,
-            "verifying" => Self::Verifying,
-            "done" => Self::Done,
-            "failed" => Self::Failed,
-            "cancelled" => Self::Cancelled,
-            other => return Err(format!("unknown run status: {other}")),
-        })
     }
 }
 
@@ -151,78 +104,7 @@ impl BlockSource {
     }
 }
 
-/// Why a run ended `Failed` or `Cancelled`, as a fact recorded where it
-/// happened rather than read back out of `error`'s prose -- counting
-/// timeouts by matching strings is exactly what this exists to avoid. The
-/// free-text `error` stays alongside it for a person to read.
-///
-/// `None` on a run that ended any other way, and on every run that ended
-/// before this field existed: those are *unclassified*, never quietly
-/// counted as one of the kinds below.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FailKind {
-    /// Still `Dispatching` past its ack timeout: the agent never said a word.
-    AckTimeout,
-    /// Ran past its total-duration cap (`timeout_seconds`).
-    RunTimeout,
-    /// Sat `Blocked` past `blocked_timeout_seconds` with nobody answering.
-    BlockedTimeout,
-    /// The session went away and the agent never reported back.
-    SessionGone,
-    /// Never reached an agent at all: the scope, the worktree, the runtime
-    /// or the agent refused before the task was handed over.
-    DispatchFailed,
-    /// The agent itself reported `failed`.
-    AgentFailed,
-    /// The harness said the agent's turn ended with no report before it --
-    /// a `Stop` hook that stood, or `pi`'s own `idle` lifecycle hook.
-    TurnEnded,
-    /// The harness's `StopFailure` hook: the turn was cut short by an API
-    /// error.
-    StopFailure,
-    /// Cancelled on a request that came in as the owner -- the UI, the CLI,
-    /// or anything else that presented no token. That last clause is the
-    /// honest limit of the name: an agent that omits its token *is* the
-    /// owner (`AGENTS.md`), and nothing here can tell the two apart.
-    CancelledByPerson,
-    /// Cancelled by an agent that identified itself, or reported as
-    /// `cancelled` by the run's own agent.
-    CancelledByAgent,
-    /// Cancelled because the workflow or bench run it belongs to was.
-    CancelledWithParent,
-}
-
-impl FailKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::AckTimeout => "ack_timeout",
-            Self::RunTimeout => "run_timeout",
-            Self::BlockedTimeout => "blocked_timeout",
-            Self::SessionGone => "session_gone",
-            Self::DispatchFailed => "dispatch_failed",
-            Self::AgentFailed => "agent_failed",
-            Self::TurnEnded => "turn_ended",
-            Self::StopFailure => "stop_failure",
-            Self::CancelledByPerson => "cancelled_by_person",
-            Self::CancelledByAgent => "cancelled_by_agent",
-            Self::CancelledWithParent => "cancelled_with_parent",
-        }
-    }
-
-    /// Whether a run that ended this way is a candidate for `task run
-    /// --continue` (#178 first slice): the daemon's own infrastructure gave
-    /// up on it -- an ack that never came, a runtime that ran out the clock,
-    /// or a session that vanished -- never a failure the agent itself chose
-    /// (`AgentFailed`, a cancel) or one the harness itself reported
-    /// (`TurnEnded`, `StopFailure`). `DispatchFailed` is a candidate too, but
-    /// only when a session had already come up -- callers check that
-    /// separately (`Run::last_session`), since a dispatch that never reached
-    /// an agent has no conversation to resume.
-    pub fn is_infrastructure(self) -> bool {
-        matches!(self, Self::AckTimeout | Self::RunTimeout | Self::SessionGone | Self::DispatchFailed)
-    }
-}
+pub use factory_kernel::FailKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {

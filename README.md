@@ -3657,9 +3657,15 @@ unchanged.
   workspace stays for the rest of the scope. A task that never reaches a
   terminal state leaves its session open on purpose, so it can be looked at.
 
+The L0 kernel now owns every live fact schema and its nested vocabulary
+(#193 phase 2), including conformance evidence. Existing core paths re-export
+these types. Providers, wildcard authorization, intake deduplication and
+conformance evaluation remain outside L0. The kernel has no Factory crate
+dependency; fact ports and the strict command ladder follow in later phases.
+
 ## Layout
 
-    crates/factory-kernel    L0: pure vocabulary shared by every level (Duration, nearest_rank/percentile) -- depends on no other factory-* crate
+    crates/factory-kernel    L0: pure shared vocabulary and every live fact schema (Level/Fact, nested statuses, grants and evidence); no other factory-* dependency
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary

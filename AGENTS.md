@@ -4,7 +4,7 @@ A daemon that gives tasks to coding agents and watches what happens.
 
 ## Layout
 
-    crates/factory-kernel    L0: pure vocabulary shared by every level (Duration, nearest_rank/percentile) -- depends on no other factory-* crate
+    crates/factory-kernel    L0: pure shared vocabulary and every live fact schema (Level/Fact, nested statuses, grants and evidence); no other factory-* dependency
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
@@ -177,9 +177,15 @@ something impossible.
 - Roles bound what an agent does by accident, not what it could do. Every agent
   runs as the owner and can reach the socket; one that omits its token is the
   owner. Never write anything that implies otherwise.
-- A role is data, not a match arm: grants and reach live in `factory-core/src/role.rs`
+- A role is data, not a match arm: role definitions, grant expansion and reach live in `factory-core/src/role.rs`
   and are checked in one place. A new request has to say which grant it needs --
   the match in `access.rs` has no wildcard arm, so the compiler asks.
+- Live facts and their nested schema live in L0, with a `Fact::Producer` and
+  a complete typed catalogue test. The shared `Grant` vocabulary lives there
+  too and is re-exported by `role.rs`; wildcard authorization, receipt
+  deduplication, task-status mapping and conformance evaluation stay in core.
+  L0 never depends on a producing level or gathers evidence itself. Fact
+  ports and the strict command ladder are subsequent phases of #193.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's
   `scope.roles` down to that scope -- from the live snapshot, and `authorize`,

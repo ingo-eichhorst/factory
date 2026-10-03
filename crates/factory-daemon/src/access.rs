@@ -21,6 +21,8 @@ use factory_core::agent::AgentSession;
 use factory_core::error::{FactoryError, Result};
 use factory_core::protocol::Request;
 use factory_core::role::{Grant, Reach, Role, RoleDef};
+#[cfg(test)]
+use factory_core::role::GrantExpansion;
 use factory_core::task::{NewTask, Task};
 use factory_core::workflow::WorkflowActor;
 

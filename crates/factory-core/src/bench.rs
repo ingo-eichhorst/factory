@@ -17,31 +17,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// A case's outcome for one attempt. `Unverified` is the agent's own word,
-/// never counted in a resolve rate; only `Pass`/`Fail` come from a gate.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Verdict {
-    Pass,
-    Fail,
-    Unverified,
-    Skipped,
-    Cancelled,
-    Error,
-}
-
-impl Verdict {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pass => "pass",
-            Self::Fail => "fail",
-            Self::Unverified => "unverified",
-            Self::Skipped => "skipped",
-            Self::Cancelled => "cancelled",
-            Self::Error => "error",
-        }
-    }
-}
+pub use factory_kernel::BenchVerdict as Verdict;
 
 /// What ties a task to the bench attempt that spawned it, following
 /// `WorkflowOrigin`'s own shape. `#[serde(default)]` on `Task::bench_origin`

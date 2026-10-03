@@ -16,9 +16,24 @@
 //!   layer that forecasts or reports agrees on, formerly
 //!   `factory_core::scenario::nearest_rank` and `operations::percentile`'s
 //!   own inlined sort-and-index.
+//! - [`Level`], `L1`..`L6` and [`Fact`] (#193, phase 2) -- a marker per
+//!   level and the trait that names a fact's producer. All [`facts`] schemas
+//!   live here with their nested vocabulary. Providers and evaluators
+//!   remain outside L0; [`FACT_CATALOGUE`] lists all eleven live facts.
 
 mod duration;
+mod fact_vocabulary;
+pub mod facts;
+pub use fact_vocabulary::*;
 mod stats;
 
 pub use duration::Duration;
+pub use facts::{
+    AgentFact, AttestedRun, ConfirmedSecurityReport, DependenciesFact, ExploitedFinding, GateCase,
+    GateFact, RunFact, TaskFact, WorkflowFact, WorkflowRunFact,
+};
+pub use facts::{
+    BackupFact, DaemonConfigFact, Fact, FactCatalogueEntry, Level, SecretsPresence, VerifySummary,
+    FACT_CATALOGUE, KNOWN_DAEMON_FACTS, KNOWN_SECRETS_LOCATIONS, L1, L2, L3, L4, L5, L6,
+};
 pub use stats::{nearest_rank, percentile};
