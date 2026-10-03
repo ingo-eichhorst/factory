@@ -27,9 +27,36 @@ test("itemKey mirrors ClockItemRef's Display, the CLI's own text form", () => {
   assert.equal(itemKey(REPORT), "report:task-1");
 });
 
+test("final-report state is shown verbatim in Intake shaping and due-soon/overdue Inbox rows", () => {
+  const now = "2026-10-06T12:00:00Z";
+  const item = { item: REPORT, scope: "demo", awareness_at: "2026-09-01T12:00:00Z",
+    corrective_measure: { available_at: "2026-09-22T12:00:00Z", evidence: "fix" },
+    deadlines: [{ deadline: "final_report", due_at: now, state: "due", submission: null }] };
+  const clock = { now, items: [item] };
+  const row = reportDeadlines(clockIndex(clock), { id: "task-1" }, now);
+  assert.equal(row.deadlines[0].label, "14-day final report");
+  assert.equal(row.awaitingMeasure, false);
+  assert.equal(row.correctiveMeasure.evidence, "fix");
+  const title = () => "Confirmed vulnerability";
+  const href = () => "#demo/dependencies";
+  let inbox = inboxClockRows(clock, 0, title, href);
+  assert.equal(inbox.length, 1);
+  assert.equal(inbox[0].label, "14-day final report, due soon");
+  assert.equal(inbox[0].task_id, "task-1");
+  item.deadlines[0].state = "overdue";
+  inbox = inboxClockRows(clock, 60, title, href);
+  assert.equal(inbox[0].tone, "fault");
+  assert.equal(inbox[0].label, "14-day final report, overdue");
+  for (const state of ["met", "late"]) {
+    item.deadlines[0].state = state;
+    assert.equal(inboxClockRows(clock, 60, title, href).length, 0);
+  }
+});
+
 test("deadlineLabel/stateLabel translate the wire's snake_case, falling back to the raw id", () => {
   assert.equal(deadlineLabel("early_warning"), "24h early warning");
   assert.equal(deadlineLabel("notification"), "72h notification");
+  assert.equal(deadlineLabel("final_report"), "14-day final report");
   assert.equal(deadlineLabel("bogus"), "bogus");
   assert.equal(stateLabel("due"), "due");
   assert.equal(stateLabel("overdue"), "overdue");
@@ -128,7 +155,11 @@ test("reportDeadlines finds a confirmed report directly, or one hop up through a
   assert.equal(child.key, "report:root-id", "a split part resolves one hop up to its parent");
 
   assert.equal(reportDeadlines(idx, { id: "grandchild-id", parent: "child-id" }, "2026-09-24T13:00:00Z"), null,
-    "two hops from the root is out of scope -- resolved server-side only, never walked again here");
+    "old responses without membership cannot resolve a deeper chain");
+  rootItem.report_items = ["root-id", "child-id", "grandchild-id"];
+  const aliased = clockIndex({ items: [rootItem] });
+  assert.equal(reportDeadlines(aliased, { id: "grandchild-id", parent: "child-id" }, "2026-09-24T13:00:00Z").key, "report:root-id");
+  assert.equal(clockRows({ items: [rootItem] }, "2026-09-24T13:00:00Z").length, 1, "aliases do not duplicate clock rows");
   assert.equal(reportDeadlines(idx, { id: "unrelated-id" }, "2026-09-24T13:00:00Z"), null);
   assert.equal(reportDeadlines(null, { id: "root-id" }, "2026-09-24T13:00:00Z"), null);
   assert.equal(reportDeadlines(idx, null, "2026-09-24T13:00:00Z"), null);

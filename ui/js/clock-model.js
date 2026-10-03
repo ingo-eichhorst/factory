@@ -2,9 +2,8 @@
 //! `#170` phase 2): turns a `ReportingClock` (`factory_core::reporting_clock`,
 //! `Payload::PolicyClock` in `protocol.rs`, read from `GET /api/policy/clock`)
 //! into rows Intake, the Inbox and the L6 Policy tab each draw in their own
-//! idiom. Only the 24h early warning and 72h notification exist here -- the
-//! 14-day final report is `#157` phases 2-3, whose anchor (the
-//! corrective-measure time) has no source yet; it is not invented here.
+//! idiom. The 14-day final report appears once evidenced corrective-measure
+//! availability is recorded; before then there is no invented deadline.
 //!
 //! Nothing here decides a deadline's `due`/`overdue`/`met`/`late` state --
 //! that is the daemon's, computed once by `reporting_clock::compute` and
@@ -36,13 +35,16 @@ export function itemKey(item) {
 /// failed): an empty map, same as no clock item ever matching.
 export function clockIndex(clock) {
   const map = new Map();
-  for (const item of clock?.items || []) map.set(itemKey(item.item), item);
+  for (const item of clock?.items || []) {
+    map.set(itemKey(item.item), item);
+    for (const id of item.report_items || []) map.set(`report:${id}`, item);
+  }
   return map;
 }
 
 // -------------------------------------------------------------- vocabulary
 
-export const DEADLINE_LABELS = { early_warning: "24h early warning", notification: "72h notification" };
+export const DEADLINE_LABELS = { early_warning: "24h early warning", notification: "72h notification", final_report: "14-day final report" };
 export function deadlineLabel(kind) {
   return DEADLINE_LABELS[kind] || kind;
 }
@@ -130,6 +132,8 @@ export function itemRow(item, nowIso) {
     awarenessAt: item.awareness_at,
     excluded: item.excluded || null,
     reportedNow: item.reported_now,
+    correctiveMeasure: item.corrective_measure || null,
+    awaitingMeasure: !item.excluded && !item.corrective_measure,
     deadlines: (item.deadlines || []).map((d) => deadlineRow(d, nowIso)),
   };
 }
@@ -146,14 +150,9 @@ export function clockRows(clock, nowIso) {
 // --------------------------------------------------------------- intake
 
 /// A confirmed security report's own deadlines, for the Intake card and item
-/// modal: `report:<card.id>` if the clock carries it directly, else
-/// `report:<card.parent>` -- a split chain's root, one hop up, as far as a
-/// board's own cards resolve on their own. `#211`'s clock already folds a
-/// deeper chain to its true root inside `compute`; a card more than one
-/// split away from that root shows nothing here rather than walking the
-/// chain again client-side (`clockIdx` only ever holds root items). `null`
-/// when neither matches -- an unconfirmed flag, a report split more than
-/// once from its root, or the clock not read (`clockIdx` empty).
+/// modal: server-derived `report_items` aliases every split descendant to
+/// the root. The one-hop parent fallback supports older daemon responses.
+/// `null` for unrelated/unconfirmed cards or an unavailable clock.
 export function reportDeadlines(clockIdx, card, nowIso) {
   if (!clockIdx || !card) return null;
   const item = clockIdx.get(`report:${card.id}`) || (card.parent ? clockIdx.get(`report:${card.parent}`) : null);

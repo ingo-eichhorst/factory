@@ -978,15 +978,15 @@ attachment; filename="policy-<scope|instance>-<date>.<format>"`, so a browser
 click downloads it directly. The L6 tab's header carries an "Export" link
 that does exactly that click, for the scope currently selected on the rail.
 
-**The CRA Article 14 reporting clock** (`#157`, phase 1) is L6 Policy's own
+**The CRA Article 14 vulnerability reporting clock** (`#157`) is L6 Policy's own
 projection over evidence two other levels already keep: L2's exploited
 findings (`Engine::exploited_findings`, see "Dependencies" above) and L4's
 confirmed security reports (`Engine::confirmed_security_reports`, `#170`).
-Phase 1 covers only the 24-hour early warning and 72-hour notification
+It covers the 24-hour early warning and 72-hour notification
 deadlines Art. 14(2)(a)/(b) sets from awareness — a finding's first
-qualifying sighting, or a report's `received_at` — never the 14-day final
-report, which has no source yet for the corrective-measure time it would run
-from. A confirmed report that was split (`#170`'s intake split,
+qualifying sighting, or a report's `received_at`. The 14-day final report
+runs from evidenced corrective/mitigating measure availability, not awareness
+or confirmation. A confirmed report that was split (`#170`'s intake split,
 `ConfirmedSecurityReport.parent`) counts once, at its split chain's root
 awareness, however many parts of it are also confirmed.
 
@@ -999,7 +999,7 @@ is the one place `ClockItemRef` (`finding:<scope>:<vulnerability>` or
 subtree exactly like `factory policy`/`GET /api/policy` themselves are;
 `policy.clock` needs no grant, the same as `policy`.
 
-A submission — an early warning or a notification actually sent — is
+A submission — an early warning, notification or final report actually sent — is
 recorded as an ordinary attestation carrying a `clock: {item, deadline}`
 mark, through the same `policy.attest` door and the same root-scope rule
 every other attestation goes through:
@@ -1034,9 +1034,9 @@ surfaces —
 - **Intake** reads `/api/policy/clock` only once a card on the loaded board
   carries a *confirmed* security report (the only state the clock ever has
   a `report:` item for), and shows that report's own deadlines as badges on
-  its card and in the item modal, resolving a split part one hop up to its
-  parent (the clock itself already folds a deeper chain to its true root;
-  a card more than one split away from that root shows nothing).
+  its card and in the item modal. The clock's computed `report_items`
+  membership resolves every split descendant to the root, including nested
+  splits, without duplicating Policy or Inbox deadlines.
 - **The Inbox** reads the whole instance's clock alongside `/api/operations`
   and adds its own overdue and due-soon deadlines (a `finding:` item too,
   linked to Dependencies) to the daemon's attention queue — a second,
@@ -1050,8 +1050,30 @@ A clock read failure degrades gracefully everywhere: the rest of each page
 still renders, and the clock's own section or badges simply have nothing to
 show.
 
-Left for a later phase: the 14-day final report, and whether reachability
-(C(2026) 5252) gates reportability or is display-only.
+Record the corrective/mitigating measure's availability explicitly, with
+an evidence pointer and RFC3339 timestamp:
+
+```sh
+factory policy attest cra/art-14 --scope demo \
+  --evidence https://example.com/mitigation-available \
+  --corrective-item report:TASK_ID --available-at 2026-10-01T09:00:00Z
+factory policy attest cra/art-14 --scope demo \
+  --evidence https://example.com/final-report-sent \
+  --clock-item report:TASK_ID --deadline final-report
+```
+
+These are append-only policy observations, not countdown state or an upward
+call from Intake. `corrective: {item, available_at}` carries the anchor;
+`--expires` defaults to `520w` for this record too. Future availability,
+duplicate live anchors and final submissions without an anchor are refused.
+Withdraw an incorrect record before replacing it; expiry does not erase
+its historical anchor. Neither a corrective record nor a submission alone
+satisfies the whole policy control. Before an anchor exists, Intake and
+Policy say the final report awaits measure evidence; there is no invented
+date to put in the Inbox. Afterward all three surfaces show its deadline.
+This is the vulnerability rule of Art. 14(2)(c), not the different severe-
+incident final-report rule of Art. 14(4)(c). Reachability evidence remains
+later work under #157.
 
 ## Goals
 
@@ -1854,11 +1876,10 @@ it away.
 
 Left out on purpose: any countdown state of intake's own (the reporting
 clock -- see "Policies" below -- computes deadlines fresh on every read, and
-`#170` phase 2 shows a confirmed report's own 24-hour/72-hour deadlines as
+`#170` phase 2 shows a confirmed report's own 24-hour/72-hour/14-day deadlines as
 badges on its card and in the item modal, and on the Inbox), notifications,
 a text or LLM classifier, and GitHub security advisories. The 14-day final
-report is still `#157` phases 2-3, without a source yet for the
-corrective-measure time it would run from.
+report appears only after evidenced corrective-measure availability is recorded.
 
 **Outbound: approved GitHub triage comments and labels (`#171`).** Intake's
 first outward effect: one maintained triage comment plus labels on the

@@ -310,8 +310,9 @@
     <section style="margin-top:14px">
       <h3>Reporting clock</h3>
       <p class="env-note">The CRA Art. 14 24-hour early warning and 72-hour notification, for every exploited
-        dependency finding and confirmed security report. Only these two deadlines exist yet -- the 14-day final
-        report is a later phase, still without a source for the corrective-measure time it would run from.</p>
+        dependency finding and confirmed security report. The 14-day vulnerability final report runs from evidenced
+        corrective-measure availability, recorded with <code>factory policy attest --corrective-item</code>.
+        Until then its timestamp is unknown, never inferred from a task or commit.</p>
       <table>
         <thead><tr><th>Item</th><th>Scope</th><th>Deadline</th><th>Due</th><th>State</th><th>Detail</th></tr></thead>
         <tbody id="policy-clock"></tbody>

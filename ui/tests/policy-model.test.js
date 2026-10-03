@@ -460,6 +460,14 @@ test("policyClockRows flattens a report to a task link and a finding to Dependen
   assert.equal(excluded.itemText, "CVE-2026-1234");
   assert.equal(excluded.excluded, "not_affected");
   assert.equal(excluded.label, null, "no deadline of its own to show");
+  assert.match(met.text, /awaiting corrective-measure evidence/);
+  clock.items[0].corrective_measure = { available_at: "2026-09-22T12:00:00Z", evidence: "fix" };
+  clock.items[0].deadlines.push({ deadline: "final_report", due_at: "2026-10-06T12:00:00Z", state: "due", submission: null });
+  const updated = policyClockRows(clock, clock.now);
+  assert.equal(updated.length, 4);
+  assert.equal(updated[2].label, "14-day final report");
+  assert.equal(updated[2].state, "due");
+  assert.doesNotMatch(updated[0].text, /awaiting corrective-measure evidence/);
 });
 
 test("policyClockRows degrades to [] with no clock, same as clockRows itself", () => {

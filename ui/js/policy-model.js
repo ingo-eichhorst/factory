@@ -518,7 +518,7 @@ export function policyClockRows(clock, nowIso) {
         dueAt: d.dueAt,
         state: d.state,
         stateLabel: d.stateLabel,
-        text: d.text,
+        text: d.text + (d.deadline === "early_warning" && item.awaitingMeasure ? "; final report awaiting corrective-measure evidence" : ""),
         submission: d.submission,
       });
     }

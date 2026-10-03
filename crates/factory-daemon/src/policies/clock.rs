@@ -20,7 +20,7 @@ use super::subtree_scopes;
 impl Engine {
     /// `Request::PolicyClock`: every exploited finding and confirmed
     /// security report over `scope`'s subtree (the whole instance when
-    /// `scope` is `None`), with phase 1's 24h/72h deadlines computed fresh.
+    /// `scope` is `None`), with 24h/72h and evidenced 14-day deadlines computed fresh.
     /// The same subtree resolution `Request::Policy` and
     /// `confirmed_security_reports` themselves use -- `exploited_findings`
     /// itself reads one scope at a time, so this asks it once per scope in

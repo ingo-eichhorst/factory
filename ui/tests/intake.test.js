@@ -186,6 +186,13 @@ test("a confirmed security report reads the reporting clock and shows its deadli
   assert.match(html, /class="badge s-met"[^>]*>24h early warning: met</);
   assert.match(html, /class="badge s-overdue"[^>]*>72h notification: overdue</);
 
+  assert.match(html, /final report: awaiting measure evidence/);
+  clock.items[0].corrective_measure = { available_at: "2026-09-22T12:00:00Z", evidence: "https://example.com/fix", by: "owner" };
+  clock.items[0].deadlines.push({ deadline: "final_report", due_at: "2026-10-06T12:00:00Z", state: "due", submission: null });
+  await loadIntake();
+  assert.match(el.intake.innerHTML, /class="badge s-due"[^>]*>14-day final report: due</);
+  assert.doesNotMatch(el.intake.innerHTML, /awaiting measure evidence/);
+
   state.scope = null;
 });
 
