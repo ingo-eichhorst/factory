@@ -2245,6 +2245,26 @@ mod tests {
         ))
         .unwrap();
         let definition = WorkflowDefinition::from_draft(draft);
-        assert_eq!(definition.validate().unwrap(), vec!["built", "running"]);
+        assert_eq!(
+            definition.validate().unwrap(),
+            vec!["built", "running", "source-reachability"]
+        );
+        let source = definition
+            .nodes
+            .iter()
+            .find(|node| node.id == "source-reachability")
+            .unwrap();
+        assert_eq!(
+            source.task.instructions,
+            "examples/dependency-scan.sh --reachability"
+        );
+        assert_eq!(
+            source.task.labels.get("lifecycle").map(String::as_str),
+            Some("declared")
+        );
+        assert!(
+            definition.edges.is_empty(),
+            "source analysis cannot describe the separate release/installed scans"
+        );
     }
 }

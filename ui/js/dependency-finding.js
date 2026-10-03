@@ -48,6 +48,9 @@ export function findingCard(finding) {
       <dt>Scan</dt><dd>${esc(scanLabel(finding.scan))}<br>run <code>${esc(finding.scan.attachment.run_id)}</code></dd>
       <dt>Fixed version</dt><dd>${esc(finding.fixed_version || "—")}</dd>
       <dt>VEX</dt><dd>${vex}</dd>
+      <dt>Reported reachability</dt><dd>${esc(finding.reachability || "unknown")} <span class="sub">scanner evidence, not a VEX judgment</span></dd>
+      <dt>Analysis detail</dt><dd>${esc(finding.analysis_detail || "—")}</dd>
+      ${finding.analysis_scan ? `<dt>Analysis evidence scan</dt><dd>${esc(scanLabel(finding.analysis_scan))}<br>document <code>${esc(finding.analysis_scan.attachment.id)}</code><br>run <code>${esc(finding.analysis_scan.attachment.run_id)}</code></dd>` : ""}
       <dt>Exploit signals</dt><dd>${signals.length ? signals.map((signal) => `<span class="tag warn">${esc(signal)}</span>`).join(" ") : "none"}</dd>
     </dl>
   </details>`;

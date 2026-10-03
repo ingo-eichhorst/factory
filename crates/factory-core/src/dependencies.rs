@@ -212,6 +212,18 @@ pub struct DependencyFinding {
     pub vex_justification: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vex_response: Vec<String>,
+    /// Scanner-reported `factory:reachability`, kept opaque and display-only.
+    /// It never changes VEX, finding status or reporting obligations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachability: Option<String>,
+    /// CycloneDX `analysis.detail` and per-component workflow detail:
+    /// evidence/prose, not an inferred verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_detail: Option<String>,
+    /// The immutable document that actually supplied the evidence above.
+    /// A later absence scan may resolve the finding without rewriting it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_scan: Option<DocumentSummary>,
     #[serde(default)]
     pub kev: bool,
     #[serde(default)]
@@ -320,5 +332,22 @@ mod tests {
 
         let declared: Value = serde_json::from_slice(SBOM).unwrap();
         assert_eq!(product_identity(&declared), None);
+    }
+
+    #[test]
+    fn legacy_dependency_findings_keep_analysis_evidence_unknown() {
+        let finding: DependencyFinding = serde_json::from_value(serde_json::json!({
+            "id":"CVE-OLD", "state":"built", "status":"open", "severity":"high",
+            "affected":{"bom_ref":"pkg:cargo/demo@1", "name":"demo", "path":[]},
+            "scan":{"attachment":{"id":"a", "kind":"vulnerabilities", "scope":"demo", "run_id":"r", "task_id":"t", "attempt":1,
+                "attached_at":"2026-10-01T00:00:00Z", "filename":"v.cdx.json", "spec_version":"1.6", "states":[]}}
+        })).unwrap();
+        assert_eq!(finding.reachability, None);
+        assert_eq!(finding.analysis_detail, None);
+        assert_eq!(finding.analysis_scan, None);
+        let row = serde_json::to_value(&finding).unwrap();
+        assert!(row.get("reachability").is_none());
+        assert!(row.get("analysis_detail").is_none());
+        assert!(row.get("analysis_scan").is_none());
     }
 }

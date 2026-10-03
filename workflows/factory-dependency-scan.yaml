@@ -22,4 +22,12 @@ nodes:
       timeout_seconds: 1800
       labels: { workflow: factory-dependency-scan, lifecycle: running }
       instructions: examples/factory-dependency-scan.sh running
+  - id: source-reachability
+    position: { x: 0, y: 360 }
+    task:
+      title: Scan source dependency reachability
+      agent: shell
+      timeout_seconds: 3600
+      labels: { workflow: factory-dependency-scan, lifecycle: declared }
+      instructions: examples/dependency-scan.sh --reachability
 edges: []

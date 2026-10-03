@@ -191,6 +191,9 @@ mod tests {
         let running = document(LifecycleState::Running, RUNNING, "running");
         let scan = running.sbom.clone();
         let finding = |state| DependencyFinding {
+            reachability: None,
+            analysis_detail: None,
+            analysis_scan: None,
             id: format!("CVE-{state}"),
             state,
             status: FindingStatus::Open,
