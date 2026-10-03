@@ -17,28 +17,18 @@ pub use store::PolicyStore;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
-use factory_core::config::{Factory, ForemanConfig, Scope};
+use factory_core::config::{Factory, Scope};
 use factory_core::error::{FactoryError, Result};
 use factory_core::policy::{self, Attestation, ControlRef, Withdrawal};
 use factory_core::policy_export;
-use factory_core::protocol::{CatalogueSummary, CredentialRow, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy, WorkflowEnforcement, WorkflowEnforcementFinding};
+use factory_core::protocol::{CatalogueSummary, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy, WorkflowEnforcement, WorkflowEnforcementFinding};
 use factory_core::reporting_clock::{self, ClockDeadlineState, ClockMark};
-use factory_core::role::Roles;
 use factory_core::task::{NewTask, Task, TaskFilter};
-use factory_core::workflow::WorkflowDefinition;
+use factory_kernel::{DaemonConfigFact, BackupFact, SecretsPresence, AgentFact, TaskFact, WorkflowFact, GateFact, DependenciesFact, AttestedRun, L6};
+use crate::facts::{Facts, NamedQuery, AttestedQuery};
 
 use crate::access::Caller;
 use crate::engine::Engine;
-
-/// How many of a task's or workflow's most recent runs `task_fact`/
-/// `workflow_fact` fetch, newest first, so `evaluate` can skip past any
-/// still in progress to the newest one that actually finished (`policy::
-/// TaskFact`/`WorkflowFact`'s own doc comments). A task or workflow
-/// ordinarily has at most one run in flight at a time, so this only has to
-/// cover that plus headroom for the unusual case -- not the whole history,
-/// which `TaskStore::runs`/`WorkflowStore::runs` would otherwise have to
-/// load in full.
-const RUN_LOOKBACK: u32 = 20;
 
 /// Every distinct dataset name a `gate` check among `applied`'s controls
 /// names -- what a caller resolving `gate` facts (`Engine::gate_facts_for`)
@@ -146,61 +136,6 @@ fn attested_categories(
     (categories, widest)
 }
 
-/// Every agent Factory would actually dispatch in `scope` --
-/// `Scope::agents_with`, which folds in a synthesised foreman when
-/// `daemon.foreman` covers this scope. That is a deliberate choice, not an
-/// oversight of the issue's literal `Scope::declared_agents`: a synthesised
-/// foreman is a real agent Factory starts and hands work to, and it is
-/// hard-coded `Sandbox::None` (`ScopeAgent`'s own doc comment on
-/// `Scope::agents_with`), so a scope that turns the foreman on without
-/// giving it a sandbox of its own now shows up in a `sandbox` check instead
-/// of being silently exempt because it was never "declared". See the
-/// README's "Policies" section.
-///
-/// Unlike `resolve_task_and_workflow_facts`, nothing here touches a store --
-/// `roles` is `Engine::roles_for`'s live, in-memory read of the config
-/// snapshot -- so this is a plain sync function, not spawned or awaited.
-fn agent_facts_for(scope: &Scope, foreman: &ForemanConfig, roles: &Roles) -> Vec<policy::AgentFact> {
-    scope
-        .agents_with(foreman)
-        .into_iter()
-        .map(|agent| {
-            let grants = roles.get(&agent.role).map(|def| def.grants.clone());
-            policy::AgentFact {
-                name: agent.name(),
-                role: agent.role.as_str().to_string(),
-                grants,
-                has_sandbox: !agent.sandbox.is_none(),
-            }
-        })
-        .collect()
-}
-
-/// The `secrets` fact for one scope, out of the L2 Secrets tab's own
-/// inventory (`Engine::credential_inventory`): the five machine-wide
-/// locations (an agent runs as the daemon's owner, so these are identical
-/// for every scope) plus `scope`'s own `.env`, mapped to the location ids
-/// [`policy::KNOWN_SECRETS_LOCATIONS`] names. `rows` is fetched once per
-/// report (`policy_report`/`policy_control` each call `credential_inventory`
-/// at most once), not once per scope -- it already walks every scope's
-/// `.env` in one pass.
-fn secrets_fact_map(rows: &[CredentialRow], scope: &str) -> BTreeMap<String, bool> {
-    let mut map = BTreeMap::new();
-    for row in rows {
-        let id = match (row.integration.as_str(), row.scope.as_deref()) {
-            ("anthropic", None) => "anthropic",
-            ("github", None) => "github",
-            ("aws", None) => "aws",
-            ("netrc", None) => "netrc",
-            ("ssh", None) => "ssh",
-            ("scope env", Some(s)) if s == scope => "scope_env",
-            _ => continue,
-        };
-        map.insert(id.to_string(), row.present);
-    }
-    map
-}
-
 /// Every scope in `snapshot.config.scopes` that is `scope` itself or a
 /// descendant of it (`Config::ancestors_of`), or every configured scope when
 /// `scope` is `None` -- the "roll up the subtree" resolution `policy_report`
@@ -233,23 +168,21 @@ pub(crate) fn subtree_scopes(snapshot: &Factory, scope: Option<&str>) -> Result<
 }
 
 impl Engine {
-    /// Every catalogue on disk, and the knowledge vault's tags -- the two
-    /// blocking filesystem walks every policy request needs, done together
-    /// in one `spawn_blocking` rather than one each.
+    /// Own catalogue read plus the L5 knowledge-tag port. Both filesystem
+    /// walks stay off the async executor; providers own their fact reads.
     pub(crate) async fn load_catalogues_and_tags(
         &self,
     ) -> Result<(Vec<policy::Catalogue>, Vec<policy::Finding>, BTreeSet<String>)> {
         let snapshot = self.factory_snapshot();
         let policies_dir = snapshot.policies_dir();
-        let root = snapshot.root.clone();
-        tokio::task::spawn_blocking(move || {
+        let (catalogues, findings) = tokio::task::spawn_blocking(move || {
             let (catalogues, findings) = policy::load_all(&policies_dir);
-            let index = factory_core::knowledge::index(&root);
-            let tags: BTreeSet<String> = index.tags.into_iter().map(|t| t.name).collect();
-            (catalogues, findings, tags)
+            (catalogues, findings)
         })
         .await
-        .map_err(|e| FactoryError::Other(anyhow::anyhow!("policy catalogue/knowledge walk: {e}")))
+        .map_err(|e| FactoryError::Other(anyhow::anyhow!("policy catalogue walk: {e}")))?;
+        let tags = Facts::<L6>::new(self).get::<factory_kernel::KnowledgeTags>(&()).await?.tags;
+        Ok((catalogues, findings, tags))
     }
 
     /// Resolve every `task` and `workflow` check name `applied` actually
@@ -282,28 +215,13 @@ impl Engine {
             }
         }
 
-        let mut tasks = BTreeMap::new();
-        if !task_names.is_empty() {
-            let scoped = self
-                .store
-                .list(&TaskFilter {
-                    scope: Some(scope.to_string()),
-                    ..Default::default()
-                })
-                .await?;
-            for name in task_names {
-                tasks.insert(name.to_string(), self.task_facts_for(&scoped, name).await?);
-            }
-        }
-
-        let mut workflows = BTreeMap::new();
-        if !workflow_names.is_empty() {
-            let defs = self.workflows.definitions(Some(scope)).await?;
-            for name in workflow_names {
-                workflows.insert(name.to_string(), self.workflow_facts_for(&defs, scope, name).await?);
-            }
-        }
-
+        let facts = Facts::<L6>::new(self);
+        let tasks = facts.get::<TaskFact>(&NamedQuery {
+            scope: scope.to_string(), names: task_names.into_iter().map(str::to_string).collect(),
+        }).await?;
+        let workflows = facts.get::<WorkflowFact>(&NamedQuery {
+            scope: scope.to_string(), names: workflow_names.into_iter().map(str::to_string).collect(),
+        }).await?;
         Ok((tasks, workflows))
     }
 
@@ -313,178 +231,7 @@ impl Engine {
     /// evaluating several scopes in one report calls this once, over the
     /// union of every scope's `gate` checks, rather than once per scope.
     async fn gate_facts_for(&self, names: &BTreeSet<String>) -> Result<BTreeMap<String, policy::GateFact>> {
-        let mut gates = BTreeMap::new();
-        for name in names {
-            if let Some(fact) = self.gate_fact_for(name).await? {
-                gates.insert(name.clone(), fact);
-            }
-        }
-        Ok(gates)
-    }
-
-    /// [`policy::KNOWN_DAEMON_FACTS`]'s whole vocabulary, read off the live
-    /// config snapshot -- the same for every scope a report evaluates
-    /// (`Evidence::gates`' own reasoning), so this is resolved once, not per
-    /// scope, and it is a plain sync read: no store, no filesystem walk,
-    /// no call through `Engine::infrastructure` (which does both, for the
-    /// host and store facts `DaemonFacts` also carries). It shares
-    /// `crate::interfaces::interface_facts` with `infrastructure` instead --
-    /// the one derivation of what each configured interface actually binds
-    /// to (#193, phase 1, F8) -- so the two never drift apart.
-    fn daemon_facts(&self) -> policy::DaemonFact {
-        let snapshot = self.factory_snapshot();
-        let daemon_config = &snapshot.config.daemon;
-
-        let http_binds: Vec<String> = crate::interfaces::interface_facts(&daemon_config.interfaces)
-            .into_iter()
-            .filter(|i| i.kind == "http")
-            .filter_map(|i| i.bind)
-            .collect();
-        // No `http` interface at all is vacuously loopback-only -- nothing
-        // is exposed beyond loopback either way. A `bind` that does not
-        // parse as a socket address (a bare hostname, say) is left `None`:
-        // this module makes no DNS lookup and no guess about what a name
-        // resolves to.
-        let http_loopback_only = if http_binds.is_empty() {
-            Some(true)
-        } else {
-            http_binds
-                .iter()
-                .map(|bind| bind.parse::<std::net::SocketAddr>().map(|addr| addr.ip().is_loopback()))
-                .collect::<std::result::Result<Vec<bool>, _>>()
-                .ok()
-                .map(|loopback| loopback.iter().all(|l| *l))
-        };
-
-        policy::DaemonFact {
-            foreman_enabled: daemon_config.foreman.enabled,
-            http_loopback_only,
-            power_assertion: daemon_config.power_assertion,
-        }
-    }
-
-    /// Every task in `scoped` (the evaluated scope's own tasks) that `name`
-    /// -- a `task` check's own string -- could mean: by id first (unique, so
-    /// at most one match), and otherwise by exact title, which may match
-    /// more than one. `evaluate` treats more than one match as an ambiguous
-    /// name (`TaskFact`'s own doc comment), so only the sole unambiguous
-    /// match's runs are worth fetching -- a lookup for every candidate of an
-    /// ambiguous name would cost something nothing ever reads.
-    async fn task_facts_for(&self, scoped: &[Task], name: &str) -> Result<Vec<policy::TaskFact>> {
-        if let Some(task) = scoped.iter().find(|t| t.id == name) {
-            return Ok(vec![self.task_fact(task).await?]);
-        }
-        let matches: Vec<&Task> = scoped.iter().filter(|t| t.title == name).collect();
-        if let [only] = matches.as_slice() {
-            return Ok(vec![self.task_fact(only).await?]);
-        }
-        Ok(matches
-            .into_iter()
-            .map(|t| policy::TaskFact {
-                id: t.id.clone(),
-                title: t.title.clone(),
-                runs: Vec::new(),
-            })
-            .collect())
-    }
-
-    async fn task_fact(&self, task: &Task) -> Result<policy::TaskFact> {
-        // Newest first (`TaskStore::runs`'s own contract), bounded to
-        // `RUN_LOOKBACK` rather than the task's whole history: `evaluate`
-        // only ever needs to walk past however many runs are still in
-        // progress to find the newest *finished* one, and a task normally
-        // has at most one of those at a time.
-        let runs = self
-            .store
-            .runs(&task.id, RUN_LOOKBACK)
-            .await?
-            .into_iter()
-            .map(|r| policy::RunFact {
-                id: r.id,
-                status: r.status,
-                started_at: r.started_at,
-                ended_at: r.ended_at,
-            })
-            .collect();
-        Ok(policy::TaskFact {
-            id: task.id.clone(),
-            title: task.title.clone(),
-            runs,
-        })
-    }
-
-    /// The workflow-side twin of `task_facts_for`.
-    async fn workflow_facts_for(&self, defs: &[WorkflowDefinition], scope: &str, name: &str) -> Result<Vec<policy::WorkflowFact>> {
-        if let Some(def) = defs.iter().find(|d| d.id == name) {
-            return Ok(vec![self.workflow_fact(def, scope).await?]);
-        }
-        let matches: Vec<&WorkflowDefinition> = defs.iter().filter(|d| d.name == name).collect();
-        if let [only] = matches.as_slice() {
-            return Ok(vec![self.workflow_fact(only, scope).await?]);
-        }
-        Ok(matches
-            .into_iter()
-            .map(|d| policy::WorkflowFact {
-                id: d.id.clone(),
-                name: d.name.clone(),
-                runs: Vec::new(),
-            })
-            .collect())
-    }
-
-    /// The workflow-side twin of `task_fact` -- see `RUN_LOOKBACK`.
-    async fn workflow_fact(&self, def: &WorkflowDefinition, scope: &str) -> Result<policy::WorkflowFact> {
-        let runs = self
-            .workflows
-            .runs(Some(&def.id), Some(scope), RUN_LOOKBACK)
-            .await?
-            .into_iter()
-            .map(|r| policy::WorkflowRunFact {
-                id: r.id,
-                status: r.status,
-                updated_at: r.updated_at,
-            })
-            .collect();
-        Ok(policy::WorkflowFact {
-            id: def.id.clone(),
-            name: def.name.clone(),
-            runs,
-        })
-    }
-
-    /// The newest *settled* bench run of `dataset` (`BenchRun::settled`),
-    /// `None` when it has never had one -- `evaluate`'s `gate` check treats
-    /// an entry missing from `Evidence::gates` the same way.
-    async fn gate_fact_for(&self, dataset: &str) -> Result<Option<policy::GateFact>> {
-        // `BenchStore::runs` loads every returned run's attempts eagerly, so
-        // this is bounded rather than "every run this dataset ever had" --
-        // the same 200 `Request::BenchRuns` already asks for, which a
-        // dataset gated often enough to bury its newest settled run past
-        // could still, in principle, outrun; the same edge case that bound
-        // already accepts.
-        let runs = self.bench.runs(Some(dataset), 200).await?;
-        let Some(run) = runs.into_iter().find(|r| r.settled()) else {
-            return Ok(None);
-        };
-        let cases = run
-            .cases
-            .iter()
-            .map(|case| policy::GateCase {
-                id: case.id.clone(),
-                gated: case.gate.is_some(),
-                verdicts: run
-                    .attempts
-                    .iter()
-                    .filter(|a| a.case_id == case.id)
-                    .filter_map(|a| a.verdict)
-                    .collect(),
-            })
-            .collect();
-        Ok(Some(policy::GateFact {
-            run_id: run.id,
-            ended_at: run.ended_at,
-            cases,
-        }))
+        Facts::<L6>::new(self).get::<GateFact>(names).await
     }
 
     /// The facts every scope in a report's subtree shares, resolved once
@@ -510,7 +257,7 @@ impl Engine {
     ) -> Result<(
         BTreeMap<String, policy::GateFact>,
         Option<policy::DaemonFact>,
-        Vec<CredentialRow>,
+        BTreeMap<String, SecretsPresence>,
         Option<factory_core::backup::BackupFact>,
     )> {
         let mut dataset_names: BTreeSet<String> = BTreeSet::new();
@@ -518,17 +265,19 @@ impl Engine {
             dataset_names.extend(gate_dataset_names(applied));
         }
         let gates = self.gate_facts_for(&dataset_names).await?;
-        let daemon_fact = per_scope_applied
-            .iter()
-            .any(|(_, applied)| needs_daemon_facts(applied))
-            .then(|| self.daemon_facts());
+        let facts = Facts::<L6>::new(self);
+        let daemon_fact = if per_scope_applied.iter().any(|(_, applied)| needs_daemon_facts(applied)) {
+            Some(facts.get::<DaemonConfigFact>(&()).await?)
+        } else { None };
         let credential_rows = if per_scope_applied.iter().any(|(_, applied)| needs_secrets_facts(applied)) {
-            self.credential_inventory().await
+            let scopes = per_scope_applied.iter().filter(|(_, a)| needs_secrets_facts(a))
+                .map(|(s, _)| s.name.clone()).collect();
+            facts.get::<SecretsPresence>(&scopes).await?
         } else {
-            Vec::new()
+            BTreeMap::new()
         };
         let backup_fact = if per_scope_applied.iter().any(|(_, applied)| needs_backup_facts(applied)) {
-            Some(self.backup_fact(Utc::now()).await?)
+            Some(facts.get::<BackupFact>(&Utc::now()).await?)
         } else {
             None
         };
@@ -562,7 +311,9 @@ impl Engine {
         };
         let scopes: BTreeSet<String> = std::iter::once(scope.to_string()).collect();
         Ok(Some(
-            self.attested_runs(Some(&scopes), Some(&categories), window)
+            Facts::<L6>::new(self).get::<AttestedRun>(&AttestedQuery {
+                scopes: Some(scopes), categories: Some(categories), window,
+            })
                 .await?,
         ))
     }
@@ -585,7 +336,7 @@ impl Engine {
         all_attestations: &[Attestation],
         gates: &BTreeMap<String, policy::GateFact>,
         daemon_fact: Option<policy::DaemonFact>,
-        credential_rows: &[CredentialRow],
+        credential_rows: &BTreeMap<String, SecretsPresence>,
         backup_fact: Option<factory_core::backup::BackupFact>,
     ) -> Result<policy::Evidence> {
         let ancestor_names: BTreeSet<&str> = snapshot
@@ -595,17 +346,17 @@ impl Engine {
             .map(|ancestor| ancestor.name.as_str())
             .collect();
         let (tasks, workflows) = self.resolve_task_and_workflow_facts(&t.name, applied).await?;
-        let agents = needs_agent_facts(applied).then(|| {
-            let roles = self.roles_for(&t.name);
-            agent_facts_for(t, &snapshot.config.daemon.foreman, &roles)
-        });
+        let facts = Facts::<L6>::new(self);
+        let agents = if needs_agent_facts(applied) {
+            Some(facts.get::<AgentFact>(&t.name).await?)
+        } else { None };
         let secrets = if needs_secrets_facts(applied) {
-            secrets_fact_map(credential_rows, &t.name)
+            credential_rows.get(&t.name).cloned().unwrap_or_default()
         } else {
-            BTreeMap::new()
+            SecretsPresence::default()
         };
         let dependencies = if needs_dependencies_facts(applied) {
-            Some(crate::dependencies::fact(&self.dependencies_report(&t.name).await?))
+            Some(facts.get::<DependenciesFact>(&t.name).await?)
         } else {
             None
         };
@@ -621,7 +372,7 @@ impl Engine {
             workflows,
             gates: gates.clone(),
             agents,
-            secrets: secrets.into(),
+            secrets,
             daemon: daemon_fact,
             dependencies,
             backup: backup_fact,
@@ -857,23 +608,26 @@ impl Engine {
         // too, or propagation would see it as wrongly `open`.
         let (tasks, workflows) = self.resolve_task_and_workflow_facts(&scope_obj.name, &applied).await?;
         let gates = self.gate_facts_for(&gate_dataset_names(&applied)).await?;
-        let agents = needs_agent_facts(&applied).then(|| {
-            let roles = self.roles_for(&scope_obj.name);
-            agent_facts_for(&scope_obj, &snapshot.config.daemon.foreman, &roles)
-        });
+        let facts = Facts::<L6>::new(self);
+        let agents = if needs_agent_facts(&applied) {
+            Some(facts.get::<AgentFact>(&scope_obj.name).await?)
+        } else { None };
         let secrets = if needs_secrets_facts(&applied) {
-            secrets_fact_map(&self.credential_inventory().await, &scope_obj.name)
+            facts.get::<SecretsPresence>(&std::iter::once(scope_obj.name.clone()).collect()).await?
+                .remove(&scope_obj.name).unwrap_or_default()
         } else {
-            BTreeMap::new()
+            SecretsPresence::default()
         };
-        let daemon = needs_daemon_facts(&applied).then(|| self.daemon_facts());
+        let daemon = if needs_daemon_facts(&applied) {
+            Some(facts.get::<DaemonConfigFact>(&()).await?)
+        } else { None };
         let backup = if needs_backup_facts(&applied) {
-            Some(self.backup_fact(Utc::now()).await?)
+            Some(facts.get::<BackupFact>(&Utc::now()).await?)
         } else {
             None
         };
         let dependencies = if needs_dependencies_facts(&applied) {
-            Some(crate::dependencies::fact(&self.dependencies_report(&scope_obj.name).await?))
+            Some(facts.get::<DependenciesFact>(&scope_obj.name).await?)
         } else {
             None
         };
@@ -885,7 +639,7 @@ impl Engine {
             workflows,
             gates,
             agents,
-            secrets: secrets.into(),
+            secrets,
             daemon,
             dependencies,
             backup,
@@ -1231,6 +985,7 @@ mod tests {
     //! on disk, a real scope tree, and the store behind `Engine`.
 
     use super::*;
+    use factory_core::config::ForemanConfig;
     use chrono::DateTime;
     use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::TaskStore;
@@ -1768,6 +1523,57 @@ mod tests {
         Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()))
     }
 
+    #[tokio::test]
+    async fn fact_ports_read_secret_presence_live_and_keep_scopes_separate() {
+        let engine = l123_test_engine();
+        let facts = Facts::<L6>::new(&engine);
+        let scopes = ["root".to_string(), "team".to_string()].into_iter().collect();
+        let before = facts.get::<SecretsPresence>(&scopes).await.unwrap();
+        assert_eq!(before["root"].get("scope_env"), Some(&true));
+        assert_eq!(before["team"].get("scope_env"), Some(&false));
+        // Only this test's throwaway .env, never the real instance.
+        std::fs::remove_file(engine.factory_snapshot().root.join(".env")).unwrap();
+        let after = facts.get::<SecretsPresence>(&scopes).await.unwrap();
+        assert_eq!(after["root"].get("scope_env"), Some(&false), "not cached");
+        assert!(facts.get::<SecretsPresence>(&BTreeSet::new()).await.unwrap().is_empty());
+        assert!(facts.get::<SecretsPresence>(&["missing".into()].into_iter().collect()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn knowledge_tag_port_observes_file_changes_without_an_event_or_cache() {
+        let engine = test_engine();
+        let facts = Facts::<L6>::new(&engine);
+        assert!(facts.get::<factory_kernel::KnowledgeTags>(&()).await.unwrap().tags.contains("control/cra/a"));
+        std::fs::write(engine.factory_snapshot().root.join(".factory/knowledge/page.md"),
+            "---\ntags: [control/cra/changed]\n---\n# Updated\n").unwrap();
+        let tags = facts.get::<factory_kernel::KnowledgeTags>(&()).await.unwrap().tags;
+        assert!(tags.contains("control/cra/changed"));
+        assert!(!tags.contains("control/cra/a"));
+    }
+
+    #[tokio::test]
+    async fn task_fact_port_preserves_id_priority_ambiguity_and_exact_scope() {
+        let engine = test_engine();
+        let mut ids = Vec::new();
+        for scope in ["engineering", "engineering", "sibling"] {
+            let task = task_from_new(NewTask { title: "shared".into(), ..Default::default() },
+                scope.into(), "shell".into(), "quiet".into());
+            ids.push(engine.store.create(&task).await.unwrap().id);
+        }
+        let facts = Facts::<L6>::new(&engine).get::<TaskFact>(&NamedQuery {
+            scope: "engineering".into(),
+            names: ["shared".into(), ids[0].clone(), "absent".into()].into_iter().collect(),
+        }).await.unwrap();
+        assert_eq!(facts["shared"].len(), 2);
+        assert!(facts["shared"].iter().all(|t| t.runs.is_empty() && t.id != ids[2]));
+        assert_eq!(facts[&ids[0]].len(), 1);
+        assert_eq!(facts[&ids[0]][0].id, ids[0]);
+        assert!(facts["absent"].is_empty());
+        assert!(Facts::<L6>::new(&engine).get::<TaskFact>(&NamedQuery {
+            scope: "missing".into(), names: ["shared".into()].into_iter().collect(),
+        }).await.is_err());
+    }
+
     /// A bare-bones engine for the F8 mutation test below (`#193`, phase 1):
     /// no policy catalogue at all -- `infrastructure()` and `daemon_facts()`
     /// need none -- just an interfaces list the caller sets directly.
@@ -1865,10 +1671,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn daemon_facts_reads_the_default_http_bind_as_loopback_only() {
+    #[tokio::test]
+    async fn daemon_facts_reads_the_default_http_bind_as_loopback_only() {
         let engine = l123_test_engine();
-        let facts = engine.daemon_facts();
+        let facts = Facts::<L6>::new(&engine).get::<DaemonConfigFact>(&()).await.unwrap();
         assert!(facts.foreman_enabled);
         assert_eq!(facts.http_loopback_only, Some(true), "the default bind, 127.0.0.1:8787, is loopback");
         assert!(facts.power_assertion);
@@ -1908,7 +1714,7 @@ mod tests {
             };
             assert_eq!(oracle, want, "the oracle itself must match the fixed expectation for this config");
             assert_eq!(
-                engine.daemon_facts().http_loopback_only,
+                Facts::<L6>::new(&engine).get::<DaemonConfigFact>(&()).await.unwrap().http_loopback_only,
                 oracle,
                 "policy's http_loopback_only must equal infrastructure()'s own interfaces"
             );

@@ -13,6 +13,7 @@ mod environments;
 mod doctor;
 mod discovery;
 mod engine;
+mod facts;
 mod goals;
 mod github_intake;
 mod github_outbound;

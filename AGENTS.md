@@ -185,8 +185,11 @@ something impossible.
   a complete typed catalogue test. The shared `Grant` vocabulary lives there
   too and is re-exported by `role.rs`; wildcard authorization, receipt
   deduplication, task-status mapping and conformance evaluation stay in core.
-  L0 never depends on a producing level or gathers evidence itself. Fact
-  ports and the strict command ladder are subsequent phases of #193.
+  L0 never depends on a producing level or gathers evidence itself. Typed
+  providers in daemon `facts/l1.rs` through `l5.rs` own the live reads;
+  policy and fact-backed metrics ask `Facts<Reader>::get`. A port returns
+  only its fact or a collection of it, never another level's report. Below
+  bounds, crate splitting and the strict command ladder follow in #193.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's
   `scope.roles` down to that scope -- from the live snapshot, and `authorize`,
