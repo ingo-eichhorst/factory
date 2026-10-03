@@ -1,83 +1,113 @@
-//! Guards phase 2 of #193: every fact behind `policy::Evidence` is
-//! catalogued with a producer and its readers, and the four fact types that
-//! moved into the kernel outright actually implement `Fact` with the
-//! producer the catalogue claims for them. The other seven still live in
-//! `factory-core` -- this crate cannot name their types (the kernel depends
-//! on no `factory-*` crate, guarded by `no_factory_dependency.rs`), so the
-//! catalogue is the one place that documents them all in one list; their
-//! own `impl Fact` sits beside each type where it is defined.
+//! The entire fact catalogue must be usable without any producing-level crate.
+use factory_kernel::*;
 
-use factory_kernel::{BackupFact, DaemonConfigFact, Fact, Level, SecretsPresence, FACT_CATALOGUE, L1, L2};
-
-/// A fact whose `Producer` is exactly `P` -- fails to compile if a moved
-/// type's `impl Fact` ever drifts from what [`FACT_CATALOGUE`] claims for
-/// it.
-fn assert_producer<F: Fact<Producer = P>, P: Level>() {}
-
-#[test]
-fn moved_facts_implement_fact_with_the_producer_the_catalogue_claims() {
-    assert_producer::<DaemonConfigFact, L1>();
-    assert_producer::<BackupFact, L1>();
-    assert_producer::<SecretsPresence, L2>();
+fn assert_producer<F: Fact<Producer = P>, P: Level>(name: &str, producer: &str) {
+    let entry = FACT_CATALOGUE
+        .iter()
+        .find(|entry| entry.fact == name)
+        .unwrap();
+    assert_eq!(entry.producer, producer);
+    assert!(entry.lives_in_kernel);
+    assert!(!entry.readers.is_empty());
 }
 
 #[test]
-fn every_catalogued_fact_names_a_real_level_and_at_least_one_reader() {
-    let known_levels = ["L1", "L2", "L3", "L4", "L5", "L6"];
-    for entry in FACT_CATALOGUE {
-        assert!(
-            known_levels.contains(&entry.producer),
-            "{}'s producer {:?} is not one of {known_levels:?}",
-            entry.fact,
-            entry.producer,
-        );
-        assert!(!entry.readers.is_empty(), "{} names no reader", entry.fact);
-        assert!(
-            !entry.note.trim().is_empty(),
-            "{} carries no note explaining where it lives",
-            entry.fact
-        );
-    }
+fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
+    assert_producer::<DaemonConfigFact, L1>("DaemonConfigFact", "L1");
+    assert_producer::<BackupFact, L1>("BackupFact", "L1");
+    assert_producer::<SecretsPresence, L2>("SecretsPresence", "L2");
+    assert_producer::<DependenciesFact, L2>("DependenciesFact", "L2");
+    assert_producer::<ExploitedFinding, L2>("ExploitedFinding", "L2");
+    assert_producer::<AgentFact, L3>("AgentFact", "L3");
+    assert_producer::<TaskFact, L4>("TaskFact", "L4");
+    assert_producer::<WorkflowFact, L4>("WorkflowFact", "L4");
+    assert_producer::<ConfirmedSecurityReport, L4>("ConfirmedSecurityReport", "L4");
+    assert_producer::<AttestedRun, L4>("AttestedRun", "L4");
+    assert_producer::<GateFact, L5>("GateFact", "L5");
 }
 
 #[test]
-fn every_catalogued_fact_name_is_unique() {
-    let mut names: Vec<&str> = FACT_CATALOGUE.iter().map(|entry| entry.fact).collect();
-    let before = names.len();
-    names.sort_unstable();
-    names.dedup();
-    assert_eq!(names.len(), before, "FACT_CATALOGUE repeats a fact name");
-}
-
-/// The catalogue's own `lives_in_kernel` flag must agree with what actually
-/// implements `Fact` here -- exactly the three this crate can name plus
-/// `VerifySummary`, `BackupFact`'s own nested fact, which the catalogue
-/// does not list separately (it travels with `BackupFact`).
-#[test]
-fn exactly_the_facts_this_crate_can_name_are_marked_as_living_here() {
-    let in_kernel: Vec<&str> = FACT_CATALOGUE.iter().filter(|e| e.lives_in_kernel).map(|e| e.fact).collect();
-    let mut expected = vec!["DaemonConfigFact", "BackupFact", "SecretsPresence"];
-    let mut in_kernel_sorted = in_kernel.clone();
-    in_kernel_sorted.sort_unstable();
-    expected.sort_unstable();
-    assert_eq!(in_kernel_sorted, expected, "FACT_CATALOGUE's lives_in_kernel flags do not match this module's own facts");
-}
-
-#[test]
-fn the_catalogue_lists_every_fact_behind_policy_evidence() {
-    let names: Vec<&str> = FACT_CATALOGUE.iter().map(|e| e.fact).collect();
-    for expected in [
+fn catalogue_is_complete_unique_and_has_readers() {
+    let mut expected = vec![
         "DaemonConfigFact",
         "BackupFact",
         "SecretsPresence",
         "DependenciesFact",
         "ExploitedFinding",
+        "AgentFact",
         "TaskFact",
         "WorkflowFact",
         "ConfirmedSecurityReport",
+        "AttestedRun",
         "GateFact",
-        "AgentFact",
-    ] {
-        assert!(names.contains(&expected), "FACT_CATALOGUE is missing {expected:?}");
+    ];
+    let mut actual: Vec<_> = FACT_CATALOGUE.iter().map(|entry| entry.fact).collect();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
+    for entry in FACT_CATALOGUE {
+        assert!(entry.lives_in_kernel);
+        assert!(!entry.note.is_empty());
+        for reader in entry.readers {
+            let level = reader.split_whitespace().next().unwrap();
+            assert!(["L1", "L2", "L3", "L4", "L5", "L6"].contains(&level));
+        }
     }
+}
+
+#[test]
+fn nested_fact_vocabulary_preserves_serialized_values_and_defaults() {
+    use serde_json::{from_value, json, to_value};
+    let run: TaskFact = from_value(json!({"id":"t", "title":"test", "runs":[{
+        "id":"r", "status":"verifying", "started_at":"2026-09-29T00:00:00Z"
+    }]}))
+    .unwrap();
+    assert_eq!(run.runs[0].status, RunStatus::Verifying);
+    assert_eq!(to_value(&run).unwrap()["runs"][0]["status"], "verifying");
+    assert!(to_value(&run).unwrap()["runs"][0].get("ended_at").is_none());
+    let workflow: WorkflowFact = from_value(json!({"id":"w", "name":"scan"})).unwrap();
+    assert_eq!(
+        to_value(workflow).unwrap(),
+        json!({"id":"w", "name":"scan"})
+    );
+    let gate: GateFact = from_value(json!({"run_id":"scan", "cases":[{
+        "id":"one", "gated":true, "verdicts":["pass","unverified"]
+    }]}))
+    .unwrap();
+    assert_eq!(
+        gate.cases[0].verdicts,
+        vec![BenchVerdict::Pass, BenchVerdict::Unverified]
+    );
+    assert_eq!(to_value(Grant::RunApprove).unwrap(), "run.approve");
+    assert_eq!(to_value(LifecycleState::Running).unwrap(), "running");
+    assert_eq!(to_value(Severity::High).unwrap(), "high");
+    let report: ConfirmedSecurityReport = from_value(json!({"item":"i", "scope":"demo",
+        "awareness_at":"2026-09-29T00:00:00Z", "source":{"kind":"github", "external_id":"id"},
+        "confirmed_by":"owner", "confirmed_at":"2026-09-29T01:00:00Z"}))
+    .unwrap();
+    assert_eq!(report.source.kind, SourceKind::Github);
+    assert_eq!(report.source.external_id.as_deref(), Some("id"));
+    assert_eq!(report.parent, None);
+    let step: StepAttestation = from_value(json!({"id":"a", "run_id":"r", "task_id":"t",
+        "scope":"demo", "category":"feature", "step":"tests", "kind":"gate", "actor":"factory-daemon",
+        "verdict":"pass", "dir":"/tmp/work", "at":"2026-09-29T01:00:00Z"})).unwrap();
+    assert_eq!(step.round, 0);
+    assert_eq!(step.verdict, AttestationVerdict::Pass);
+    assert!(to_value(step).unwrap().get("round").is_none());
+}
+
+#[test]
+fn a_new_fact_impl_cannot_be_left_out_of_the_catalogue() {
+    let source = include_str!("../src/facts.rs");
+    let mut declared: Vec<_> = source
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("impl Fact for ")?;
+            Some(rest.split_whitespace().next().unwrap())
+        })
+        .collect();
+    let mut catalogued: Vec<_> = FACT_CATALOGUE.iter().map(|entry| entry.fact).collect();
+    declared.sort_unstable();
+    catalogued.sort_unstable();
+    assert_eq!(declared, catalogued);
 }

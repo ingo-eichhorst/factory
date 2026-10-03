@@ -1,53 +1,12 @@
-//! The fact vocabulary behind `policy::Evidence` (#193, phase 2): a `Level`
-//! marker for each of Factory's six levels, the `Fact` trait that names a
-//! fact's producer, and the handful of fact types plain enough to move here
-//! unchanged. No behaviour changes: `policy::Evidence` still has the same
-//! fields, `evaluate` still reads them the same way, and every moved type
-//! is re-exported from where it used to live (`policy::DaemonFact`,
-//! `backup::BackupFact`, `backup::VerifySummary`), the same way phase 1 kept
-//! `policy::Duration` working.
-//!
-//! ## What moved, and what did not
-//!
-//! A fact moves here when it is plain data all the way down -- no field
-//! whose type is itself owned by a level's own module. Several of
-//! `Evidence`'s facts are not that: `TaskFact` carries a `RunFact` typed by
-//! `crate::run::RunStatus` (L4's own status enum, with its `Verifying`
-//! variant tied to `#118`'s control-plan semantics); `WorkflowFact` carries
-//! `crate::workflow::WorkflowRunStatus` (L4); `GateFact` carries
-//! `crate::bench::Verdict` (L5); `AgentFact` carries `crate::role::Grant`
-//! (the whole cross-level authorization vocabulary `access.rs` matches
-//! exhaustively -- the biggest of the four, and the least like a single
-//! level's own fact); `dependencies::DependenciesFact` carries
-//! `dependencies::Severity` (L2); `dependencies::ExploitedFinding` carries
-//! `dependencies::{Attachment, AffectedComponent, LifecycleState}` (L2); and
-//! `intake::ConfirmedSecurityReport` carries `intake::IntakeSource` (L4,
-//! with its own `identity()` method). Moving any of those here now would
-//! mean moving a producing level's status/identity vocabulary into L0 ahead
-//! of the crate split that is supposed to draw that boundary (phase 4) --
-//! exactly the "L0 becomes the next hub" the issue's guardrails warn against
-//! (policy.rs is 4,082 lines and counting; L0 must not grow the same way).
-//! Applying one rule to all seven kept this phase from quietly moving the
-//! four that happened to look small (`DaemonFact`, `BackupFact`) while
-//! leaving the rest for an inconsistent reason.
-//!
-//! Each of those seven still implements [`Fact`] and still names its
-//! producer -- Rust's orphan rule allows a foreign trait (`Fact`, defined
-//! here) on a local type (`TaskFact`, defined in `factory-core`), so the
-//! `impl` sits right beside each type instead of waiting for a future move.
-//! [`FACT_CATALOGUE`] lists all eleven either way, moved or not, with the
-//! producer, the readers, and -- for the seven still elsewhere -- why.
-//!
-//! What is genuinely new here rather than moved: [`SecretsPresence`], a name
-//! for the shape `Evidence::secrets` already was (`BTreeMap<String, bool>`,
-//! keyed by a `KNOWN_SECRETS_LOCATIONS` entry) so it too can implement
-//! [`Fact`] -- a type alias, not a wrapper, so nothing that builds or reads
-//! an `Evidence` changes at all.
+//! Live fact vocabulary for the six-level ladder (#193 phase 2).
+//! All schemas are defined in L0; producing levels retain their providers
+//! and behavior. Fact ports and Below bounds are the next phase.
 
+use crate::fact_vocabulary::*;
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ================================================================== levels
 
@@ -160,8 +119,14 @@ impl Fact for DaemonConfigFact {
 /// - `backup_verified` -- `#154`: the newest verification of a snapshot
 ///   still in the destination passed, within 30 days --
 ///   [`BackupFact::verified`].
-pub const KNOWN_DAEMON_FACTS: &[&str] =
-    &["foreman_enabled", "http_loopback_only", "power_assertion", "backup_recent", "backup_offsite", "backup_verified"];
+pub const KNOWN_DAEMON_FACTS: &[&str] = &[
+    "foreman_enabled",
+    "http_loopback_only",
+    "power_assertion",
+    "backup_recent",
+    "backup_offsite",
+    "backup_verified",
+];
 
 // ============================================================ backup (L1)
 
@@ -223,14 +188,45 @@ impl Fact for BackupFact {
 /// tab's own inventory (`Engine::credential_inventory`). A location absent
 /// from this map was never asked about, not confirmed absent.
 ///
-/// A type alias, not a wrapper: `Evidence::secrets` was already exactly this
-/// shape (`BTreeMap<String, bool>`), so naming it here to give it a [`Fact`]
-/// impl changes nothing about how it is built or read -- no `.0`, no
-/// `From`/`Into`, no construction-site churn. The richer shape the design
-/// sketch's `CredentialInventory` imagines (one entry per location, still no
-/// value) is phase 3's to build, once something actually reads it through a
-/// fact port.
-pub type SecretsPresence = BTreeMap<String, bool>;
+/// A nominal fact with transparent map serialization. Other maps do not
+/// accidentally become L2 facts.
+///
+/// ```compile_fail
+/// use factory_kernel::Fact;
+/// use std::collections::BTreeMap;
+/// fn is_fact<F: Fact>() {}
+/// is_fact::<BTreeMap<String, bool>>();
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecretsPresence(pub BTreeMap<String, bool>);
+
+impl SecretsPresence {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+impl std::ops::Deref for SecretsPresence {
+    type Target = BTreeMap<String, bool>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for SecretsPresence {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl From<BTreeMap<String, bool>> for SecretsPresence {
+    fn from(present: BTreeMap<String, bool>) -> Self {
+        Self(present)
+    }
+}
+impl FromIterator<(String, bool)> for SecretsPresence {
+    fn from_iter<T: IntoIterator<Item = (String, bool)>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
 
 impl Fact for SecretsPresence {
     type Producer = L2;
@@ -241,14 +237,175 @@ impl Fact for SecretsPresence {
 /// five machine-wide locations every scope shares (an agent runs as the
 /// daemon's owner, so these are the same regardless of scope) plus a
 /// scope's own `.env`.
-pub const KNOWN_SECRETS_LOCATIONS: &[&str] = &["anthropic", "github", "aws", "netrc", "ssh", "scope_env"];
+pub const KNOWN_SECRETS_LOCATIONS: &[&str] =
+    &["anthropic", "github", "aws", "netrc", "ssh", "scope_env"];
 
+/// Shared RunFact evidence schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunFact {
+    pub id: String,
+    pub status: RunStatus,
+    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Missing for an in-flight run; readers must not call it finished.
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+/// Shared TaskFact evidence schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskFact {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Bounded lookback, newest first. A check ignores non-terminal runs.
+    pub runs: Vec<RunFact>,
+}
+
+/// Shared WorkflowRunFact evidence schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowRunFact {
+    pub id: String,
+    pub status: WorkflowRunStatus,
+    /// Completion time only when the workflow status is terminal.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Shared WorkflowFact evidence schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowFact {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<WorkflowRunFact>,
+}
+
+/// Shared GateCase evidence schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateCase {
+    pub id: String,
+    pub gated: bool,
+    pub verdicts: Vec<BenchVerdict>,
+}
+
+/// Shared GateFact evidence schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateFact {
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+    pub cases: Vec<GateCase>,
+}
+
+/// Shared AgentFact evidence schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentFact {
+    pub name: String,
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Missing means an unresolved role, not a role with no grants.
+    pub grants: Option<BTreeSet<Grant>>,
+    pub has_sandbox: bool,
+}
+
+impl Fact for TaskFact {
+    type Producer = L4;
+}
+impl Fact for WorkflowFact {
+    type Producer = L4;
+}
+impl Fact for GateFact {
+    type Producer = L5;
+}
+impl Fact for AgentFact {
+    type Producer = L3;
+}
+
+/// Live evidence produced by L2.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependenciesFact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_sbom_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built_sbom_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub open: BTreeMap<Severity, u32>,
+    #[serde(default)]
+    pub exploited_open: u32,
+}
+
+impl Fact for DependenciesFact {
+    type Producer = L2;
+}
+
+/// Live evidence produced by L2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExploitedFinding {
+    pub scope: String,
+    pub vulnerability: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<AffectedComponent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub states: Vec<LifecycleState>,
+    /// First qualifying vulnerability document's attachment time, not the
+    /// scanner's own clock or a later remediation/confirmation time.
+    pub first_seen_at: DateTime<Utc>,
+    pub first_document: Attachment,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Only a later not_affected/false_positive judgment excludes a clock.
+    pub latest_vex: Option<String>,
+    #[serde(default)]
+    /// Absence from the newest document does not erase awareness.
+    pub reported_now: bool,
+}
+
+impl Fact for ExploitedFinding {
+    type Producer = L2;
+}
+
+/// Live evidence produced by L4.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfirmedSecurityReport {
+    pub item: String,
+    pub scope: String,
+    /// Original receipt time, never the confirmation time.
+    pub awareness_at: DateTime<Utc>,
+    pub source: IntakeSource,
+    pub confirmed_by: String,
+    pub confirmed_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Split ancestry; the clock follows confirmed parents to the root.
+    pub parent: Option<String>,
+}
+
+impl Fact for ConfirmedSecurityReport {
+    type Producer = L4;
+}
+
+/// Live evidence produced by L4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttestedRun {
+    pub run_id: String,
+    pub task_id: String,
+    /// Canonical exact scope, not rolled up to an ancestor.
+    pub scope: String,
+    pub category: String,
+    pub agent: String,
+    pub status: RunStatus,
+    pub ended_at: DateTime<Utc>,
+    pub fail_kind: Option<FailKind>,
+    /// Immutable dispatch-time plan, including the frozen functionary.
+    pub required_steps: Vec<RequiredStep>,
+    pub attestations: Vec<StepAttestation>,
+}
+
+impl Fact for AttestedRun {
+    type Producer = L4;
+}
 // =============================================================== catalogue
 
 /// One row of [`FACT_CATALOGUE`]: a fact's name, the level that produces it,
 /// which levels read it today (through `policy::Evidence`, until phases 3-4
-/// add real fact ports), whether the type itself lives here yet, and -- for
-/// the ones that do not -- why.
+/// add real fact ports), and where its shared schema lives.
 #[derive(Debug, Clone, Copy)]
 pub struct FactCatalogueEntry {
     pub fact: &'static str,
@@ -262,82 +419,92 @@ pub struct FactCatalogueEntry {
 /// lives in -- the catalogue the issue's guardrails ask for ("a catalogue
 /// test lists fact, producer and readers"). `readers` is documentation, not
 /// a compiled reference: phases 3-4's `Facts<Reader>::get` is what will make
-/// a wrong reader a compile error instead of a comment. See this module's
-/// own doc comment for why the four still in `policy.rs`, the two in
-/// `dependencies.rs` and the one in `intake.rs` did not move.
+/// a wrong reader a compile error instead of a comment. All listed schemas
+/// and their nested vocabulary now live in L0.
 pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
+    FactCatalogueEntry {
+        fact: "AttestedRun",
+        producer: "L4",
+        readers: &["L5 quality", "L6 policy and metrics"],
+        lives_in_kernel: true,
+        note: "finished run and immutable verification evidence",
+    },
     FactCatalogueEntry {
         fact: "DaemonConfigFact",
         producer: "L1",
-        readers: &["L6 policy (the `daemon` check)"],
+        readers: &["L5 quality", "L6 policy (the `daemon` check)"],
         lives_in_kernel: true,
         note: "moved whole in phase 2: no field's type is owned by another level's module",
     },
     FactCatalogueEntry {
         fact: "BackupFact",
         producer: "L1",
-        readers: &["L6 policy (the `daemon` check's backup_* names)", "L6 metrics (goals/scenario drivers)"],
+        readers: &[
+            "L5 quality",
+            "L6 policy (the `daemon` check's backup_* names)",
+            "L6 metrics (goals/scenario drivers)",
+        ],
         lives_in_kernel: true,
         note: "moved whole in phase 2, with VerifySummary",
     },
     FactCatalogueEntry {
         fact: "SecretsPresence",
         producer: "L2",
-        readers: &["L6 policy (the `secrets` check)"],
+        readers: &["L5 quality", "L6 policy (the `secrets` check)"],
         lives_in_kernel: true,
-        note: "newly named in phase 2 as a type alias over the map `Evidence::secrets` already was",
+        note: "nominal transparent map: its original JSON representation is unchanged",
     },
     FactCatalogueEntry {
         fact: "DependenciesFact",
         producer: "L2",
-        readers: &["L6 policy (the `dependencies` check)"],
-        lives_in_kernel: false,
-        note: "stays in factory_core::dependencies: carries Severity, L2's own status enum (from_cyclonedx); \
-               moving it means moving L2's status vocabulary into L0 ahead of phase 4's crate split",
+        readers: &["L5 quality", "L6 policy (the `dependencies` check)"],
+        lives_in_kernel: true,
+        note: "moved with its nested shared vocabulary in phase 2",
     },
     FactCatalogueEntry {
         fact: "ExploitedFinding",
         producer: "L2",
         readers: &["L6 policy (the CRA Article 14 reporting clock, `#157`)"],
-        lives_in_kernel: false,
-        note: "stays in factory_core::dependencies: carries Attachment/AffectedComponent/LifecycleState, \
-               L2's own SBOM-lifecycle vocabulary",
+        lives_in_kernel: true,
+        note: "moved with its nested shared vocabulary in phase 2",
     },
     FactCatalogueEntry {
         fact: "TaskFact",
         producer: "L4",
-        readers: &["L6 policy (the `task` check)"],
-        lives_in_kernel: false,
-        note: "stays in factory_core::policy: RunFact carries crate::run::RunStatus, L4's own status enum",
+        readers: &["L5 quality", "L6 policy (the `task` check)"],
+        lives_in_kernel: true,
+        note: "moved with its nested shared vocabulary in phase 2",
     },
     FactCatalogueEntry {
         fact: "WorkflowFact",
         producer: "L4",
-        readers: &["L6 policy (the `workflow` check)"],
-        lives_in_kernel: false,
-        note: "stays in factory_core::policy: WorkflowRunFact carries crate::workflow::WorkflowRunStatus, L4's own status enum",
+        readers: &["L5 quality", "L6 policy (the `workflow` check)"],
+        lives_in_kernel: true,
+        note: "moved with its nested shared vocabulary in phase 2",
     },
     FactCatalogueEntry {
         fact: "ConfirmedSecurityReport",
         producer: "L4",
         readers: &["L6 policy (the CRA Article 14 reporting clock, `#157`)"],
-        lives_in_kernel: false,
-        note: "stays in factory_core::intake: carries IntakeSource, which has its own identity() method",
+        lives_in_kernel: true,
+        note: "moved with its nested shared vocabulary in phase 2",
     },
     FactCatalogueEntry {
         fact: "GateFact",
         producer: "L5",
-        readers: &["L6 policy (the `gate` check)"],
-        lives_in_kernel: false,
-        note: "stays in factory_core::policy: GateCase carries crate::bench::Verdict, L5's own status enum",
+        readers: &[
+            "L5 quality (same-level evaluation)",
+            "L6 policy (the `gate` check)",
+        ],
+        lives_in_kernel: true,
+        note: "moved with its nested shared vocabulary in phase 2",
     },
     FactCatalogueEntry {
         fact: "AgentFact",
         producer: "L3",
-        readers: &["L6 policy (the `roles`/`sandbox` checks)"],
-        lives_in_kernel: false,
-        note: "stays in factory_core::policy: carries crate::role::Grant, the whole cross-level authorization \
-               vocabulary access.rs matches exhaustively -- the least single-level of the seven",
+        readers: &["L5 quality", "L6 policy (the `roles`/`sandbox` checks)"],
+        lives_in_kernel: true,
+        note: "moved with its nested shared vocabulary in phase 2",
     },
 ];
 
@@ -351,13 +518,21 @@ mod tests {
     /// `DaemonConfigFact`.
     #[test]
     fn daemon_config_fact_serializes_exactly_as_daemon_fact_used_to() {
-        let with_bind = DaemonConfigFact { foreman_enabled: true, http_loopback_only: Some(false), power_assertion: true };
+        let with_bind = DaemonConfigFact {
+            foreman_enabled: true,
+            http_loopback_only: Some(false),
+            power_assertion: true,
+        };
         assert_eq!(
             serde_json::to_string(&with_bind).unwrap(),
             r#"{"foreman_enabled":true,"http_loopback_only":false,"power_assertion":true}"#
         );
 
-        let never_gathered_bind = DaemonConfigFact { foreman_enabled: false, http_loopback_only: None, power_assertion: false };
+        let never_gathered_bind = DaemonConfigFact {
+            foreman_enabled: false,
+            http_loopback_only: None,
+            power_assertion: false,
+        };
         assert_eq!(
             serde_json::to_string(&never_gathered_bind).unwrap(),
             r#"{"foreman_enabled":false,"power_assertion":false}"#
@@ -373,7 +548,11 @@ mod tests {
             recent: Some(true),
             offsite: Some(false),
             verified: Some(true),
-            last_verified: Some(VerifySummary { snapshot: "snap-1".into(), at: "2026-09-28T01:00:00Z".parse().unwrap(), ok: true }),
+            last_verified: Some(VerifySummary {
+                snapshot: "snap-1".into(),
+                at: "2026-09-28T01:00:00Z".parse().unwrap(),
+                ok: true,
+            }),
         };
         let json = serde_json::to_string(&fact).unwrap();
         let back: BackupFact = serde_json::from_str(&json).unwrap();
@@ -385,15 +564,28 @@ mod tests {
         let mut presence: SecretsPresence = SecretsPresence::new();
         presence.insert("github".to_string(), true);
         presence.insert("scope_env".to_string(), false);
-        assert_eq!(serde_json::to_string(&presence).unwrap(), r#"{"github":true,"scope_env":false}"#);
+        assert_eq!(
+            serde_json::to_string(&presence).unwrap(),
+            r#"{"github":true,"scope_env":false}"#
+        );
     }
 
     #[test]
     fn known_daemon_facts_and_secrets_locations_are_unchanged() {
         assert_eq!(
             KNOWN_DAEMON_FACTS,
-            &["foreman_enabled", "http_loopback_only", "power_assertion", "backup_recent", "backup_offsite", "backup_verified"]
+            &[
+                "foreman_enabled",
+                "http_loopback_only",
+                "power_assertion",
+                "backup_recent",
+                "backup_offsite",
+                "backup_verified"
+            ]
         );
-        assert_eq!(KNOWN_SECRETS_LOCATIONS, &["anthropic", "github", "aws", "netrc", "ssh", "scope_env"]);
+        assert_eq!(
+            KNOWN_SECRETS_LOCATIONS,
+            &["anthropic", "github", "aws", "netrc", "ssh", "scope_env"]
+        );
     }
 }

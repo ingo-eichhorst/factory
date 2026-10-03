@@ -97,14 +97,13 @@
 //! [`KNOWN_SECRETS_LOCATIONS`].
 
 use crate::bench::Verdict;
-use crate::conformance::{AttestedRun, StepEvidence};
+use crate::conformance::{AttestedRun, ConformanceEvidence, StepEvidence};
 use crate::dataset::is_slug;
 use crate::dependencies::{DependenciesFact, Severity};
 use crate::role::Grant;
 use crate::run::RunStatus;
 use crate::workflow::WorkflowRunStatus;
 use chrono::{DateTime, Utc};
-use factory_kernel::{Fact, L3, L4, L5};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1022,159 +1021,19 @@ pub fn parse_expiry(s: &str, now: DateTime<Utc>) -> std::result::Result<DateTime
     Err(bad())
 }
 
-/// Enough about one of a task's runs for `evaluate`'s `task` check to judge
-/// it without reading a `Run` itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunFact {
-    pub id: String,
-    pub status: RunStatus,
-    pub started_at: DateTime<Utc>,
-    /// `None` for a run that has not ended -- a terminal run that somehow
-    /// has none is handled the same way, defensively, by `evaluate`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<DateTime<Utc>>,
-}
+pub use factory_kernel::RunFact;
 
-/// One task a `task` check's name could mean, resolved by the engine
-/// (`Engine::policy_report`/`policy_control`) against the tasks in the
-/// evaluated scope alone. `Evidence::tasks` keys a `Vec` of these by the
-/// check's own `task` string, exactly as the catalogue wrote it -- the
-/// length says how resolution went: empty means no task matched, by id or by
-/// exact title; one means it resolved; more than one means the name is an
-/// ambiguous title (ids are unique, so that can only happen for a name that
-/// is not one), which [`evidence_findings`] reports as a
-/// [`FindingKind::AmbiguousCheckTarget`] and `evaluate` treats as `open`.
-///
-/// `runs` is only ever resolved for the single unambiguous match --
-/// fetching it for every candidate of an ambiguous name would cost a lookup
-/// `evaluate` can never use -- and is a bounded lookback (the engine's own
-/// `RUN_LOOKBACK`), newest first, not the task's whole history: `evaluate`
-/// finds the newest run with a terminal status (`RunStatus::is_terminal`) in
-/// it and ignores every run still in progress, however many of those sit
-/// ahead of it. An in-flight run must never flip a control `open` for as
-/// long as it runs -- a nightly scan's control would otherwise read `open`
-/// for the whole scan, every night -- so `evaluate` only ever asks "is there
-/// a *finished* run, and how did it end", never "is the newest run done".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskFact {
-    pub id: String,
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub runs: Vec<RunFact>,
-}
+pub use factory_kernel::TaskFact;
 
-/// `TaskFact`'s producer, for the L0 fact catalogue (#193, phase 2). Stays
-/// here rather than moving into `factory-kernel`: `RunFact::status` is
-/// `crate::run::RunStatus`, L4's own status enum, and L0 must not become the
-/// next hub by absorbing a producing level's vocabulary ahead of the crate
-/// split that is supposed to draw that boundary (phase 4). See
-/// `factory_kernel::facts`'s own doc comment and `FACT_CATALOGUE` for the
-/// full accounting; Rust's orphan rule allows this `impl` of a foreign
-/// trait on a local type regardless of where `TaskFact` itself lives.
-impl Fact for TaskFact {
-    type Producer = L4;
-}
+pub use factory_kernel::WorkflowRunFact;
 
-/// Enough about one of a workflow's runs for `evaluate`'s `workflow` check
-/// to judge it without reading a `WorkflowRun` itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowRunFact {
-    pub id: String,
-    pub status: WorkflowRunStatus,
-    /// A `WorkflowRun` has no `ended_at` of its own -- this is its
-    /// `updated_at`, which is exactly its last change and so, once `status`
-    /// is terminal, its completion time.
-    pub updated_at: DateTime<Utc>,
-}
+pub use factory_kernel::WorkflowFact;
 
-/// The workflow-side twin of [`TaskFact`] -- see it for how
-/// `Evidence::workflows`' `Vec` encodes resolution (empty, one, or an
-/// ambiguous name) and how `runs` (bounded, newest first) is read: the
-/// newest run with a terminal status (`WorkflowRunStatus::is_terminal`),
-/// ignoring every one still `Running` ahead of it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowFact {
-    pub id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub runs: Vec<WorkflowRunFact>,
-}
+pub use factory_kernel::GateCase;
 
-/// `WorkflowFact`'s producer -- see [`TaskFact`]'s own `impl Fact` for why
-/// this stays here rather than moving into `factory-kernel`
-/// (`WorkflowRunFact::status` is `crate::workflow::WorkflowRunStatus`, L4's
-/// own status enum).
-impl Fact for WorkflowFact {
-    type Producer = L4;
-}
+pub use factory_kernel::GateFact;
 
-/// One case as it stood in a dataset's newest *settled* bench run
-/// (`BenchRun::settled`) -- `gated` is `Case::gate.is_some()` at the moment
-/// that run started, and `verdicts` is every attempt's verdict for this case
-/// in that run, in no particular order. An ungated case's `verdicts` is
-/// still recorded (an attempt's own `Verdict::Unverified` never becomes a
-/// `pass`), but `gated: false` is what actually keeps it out of a `gate`
-/// check with no `case` named.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GateCase {
-    pub id: String,
-    pub gated: bool,
-    pub verdicts: Vec<Verdict>,
-}
-
-/// A dataset's newest settled bench run, resolved by the engine for
-/// `evaluate`'s `gate` check. `Evidence::gates` keys these by the check's own
-/// `dataset` name; a dataset absent from the map has never had one settle.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GateFact {
-    pub run_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<DateTime<Utc>>,
-    pub cases: Vec<GateCase>,
-}
-
-/// `GateFact`'s producer -- see [`TaskFact`]'s own `impl Fact` for why this
-/// stays here rather than moving into `factory-kernel` (`GateCase::verdicts`
-/// is `Vec<crate::bench::Verdict>`, L5's own status enum).
-impl Fact for GateFact {
-    type Producer = L5;
-}
-
-/// One agent Factory would actually dispatch in the evaluated scope --
-/// `Scope::agents_with(&daemon.foreman)`, which folds in a synthesised
-/// foreman when the instance turns one on for this scope. It counts: a
-/// synthesised foreman is a real agent Factory starts and hands work to,
-/// not a hypothetical one, and it happens to be hard-coded `Sandbox::None`
-/// (nothing names a sandbox for a foreman nobody wrote), so a scope that
-/// enables `daemon.foreman` without giving it one shows up in a `sandbox`
-/// check instead of being quietly exempt. See the README's "Policies"
-/// section for this written out as the documented choice it is.
-///
-/// Resolved by the engine (`Engine::agent_facts_for`), never here: `grants`
-/// comes from `Engine::roles_for`, a live, in-memory read with no store of
-/// its own, but still a lookup only the engine can make.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentFact {
-    pub name: String,
-    pub role: String,
-    /// `None` when `role` names nothing `roles_for` resolves at this scope
-    /// -- a role deleted out from under a declared agent, say. Never read
-    /// as "holds nothing" (which would silently satisfy `roles`);
-    /// `direct_status` reports it `open`, by name, instead.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grants: Option<BTreeSet<Grant>>,
-    /// `false` for `Sandbox::None` -- see the `sandbox` check's own doc.
-    pub has_sandbox: bool,
-}
-
-/// `AgentFact`'s producer -- see [`TaskFact`]'s own `impl Fact` for the
-/// general reasoning; `AgentFact` is the widest of the four still here,
-/// since `grants` is `BTreeSet<crate::role::Grant>`, the whole cross-level
-/// authorization vocabulary `access.rs` matches exhaustively, not just one
-/// level's own status enum.
-impl Fact for AgentFact {
-    type Producer = L3;
-}
+pub use factory_kernel::AgentFact;
 
 /// The `daemon` check's own configuration facts, resolved once per report by
 /// the engine (`Engine::daemon_facts`) rather than per scope -- the daemon's
@@ -1254,10 +1113,7 @@ pub struct Evidence {
     /// scoped slice of the L2 Secrets tab's own inventory
     /// (`Engine::credential_inventory`). A location absent from this map was
     /// never asked about, not confirmed absent -- see `direct_status`'s
-    /// `secrets` arm. Typed as [`factory_kernel::SecretsPresence`] (#193,
-    /// phase 2), a kernel type alias for exactly the `BTreeMap<String,
-    /// bool>` this field always was -- nothing about building or reading it
-    /// changes.
+    /// `secrets` arm. The L0 nominal fact preserves the map's wire shape.
     #[serde(default)]
     pub secrets: factory_kernel::SecretsPresence,
     /// The daemon-config facts `Check::Daemon` can name -- see
@@ -1265,10 +1121,7 @@ pub struct Evidence {
     #[serde(default)]
     pub daemon: Option<DaemonFact>,
     /// Dependency evidence derived from the L2 report. `None` means it was
-    /// never gathered, not an empty inventory. `DependenciesFact` stays in
-    /// `factory_core::dependencies` rather than the L0 kernel (#193, phase
-    /// 2): it carries `Severity`, L2's own status enum -- see
-    /// `factory_kernel::facts::FACT_CATALOGUE` for the full accounting.
+    /// never gathered, not an empty inventory. Its shared schema is in L0.
     #[serde(default)]
     pub dependencies: Option<DependenciesFact>,
     /// `#154`: the `backup_recent`/`backup_offsite`/`backup_verified` names
@@ -3040,7 +2893,7 @@ mod tests {
     fn secrets_satisfied_when_the_default_location_is_absent() {
         let applied = vec![applied_control("a", vec![Check::Secrets { absent: Vec::new() }], Vec::new())];
         let evidence = Evidence {
-            secrets: BTreeMap::from([("scope_env".to_string(), false)]),
+            secrets: BTreeMap::from([("scope_env".to_string(), false)]).into(),
             ..Default::default()
         };
         let statuses = evaluate(&applied, &evidence, Utc::now());
@@ -3055,7 +2908,7 @@ mod tests {
             Vec::new(),
         )];
         let evidence = Evidence {
-            secrets: BTreeMap::from([("anthropic".to_string(), true), ("ssh".to_string(), false)]),
+            secrets: BTreeMap::from([("anthropic".to_string(), true), ("ssh".to_string(), false)]).into(),
             ..Default::default()
         };
         let statuses = evaluate(&applied, &evidence, Utc::now());

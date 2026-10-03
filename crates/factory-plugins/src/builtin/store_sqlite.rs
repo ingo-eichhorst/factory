@@ -12,7 +12,7 @@ use factory_core::adapter::{RuntimeStatus, TaskStore};
 use factory_core::error::{FactoryError, Result};
 use factory_core::agent::AgentSession;
 use factory_core::occupancy::StatusChange;
-use factory_core::run::{NewRun, Run, RunPatch, RunStatus};
+use factory_core::run::{NewRun, Run, RunPatch, RunStatus, RunTaskStatus};
 use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch};
 use factory_core::usage::UsageSnapshot;
 use rusqlite::{params, Connection, OptionalExtension};
