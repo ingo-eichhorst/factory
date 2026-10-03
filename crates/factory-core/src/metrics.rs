@@ -378,11 +378,9 @@ fn rework_rate_def() -> MetricDef {
     )
 }
 
-/// `#158`, phase 1: `Engine::attested_runs`'s batch read of finished runs
-/// and their `StepAttestation`s, shared by `conformance_rate.<category>` and
-/// `gate_fail_rate` -- one read behind both, like `OPERATIONS_SOURCE` above.
+/// `#158`: one batch read shared by conformance, gate and review metrics.
 const ATTESTATION_SOURCE: &str =
-    "Engine::attested_runs's finished runs and StepAttestations (factory_core::conformance), trailing 28 days";
+    "Engine::attested_runs's finished runs and StepAttestations (factory_core::conformance), trailing 28 days; evidence: GET /api/runs/{id}/attestations";
 
 fn conformance_rate_def(category: &str) -> MetricDef {
     fixed(
@@ -412,6 +410,21 @@ fn gate_fail_rate_def() -> MetricDef {
         "Failed gate attestations over every gate attestation, across every category and \
          every re-verification round, over the trailing 28 days. A round the andon stopped \
          at its first failure still counts every attestation that round actually left.",
+        Unit::Ratio,
+        Better::Lower,
+        ATTESTATION_SOURCE,
+    )
+}
+
+fn review_reject_rate_def() -> MetricDef {
+    fixed(
+        "review_reject_rate",
+        "Review reject rate",
+        "Failed independent review decisions over all review decisions on finished runs, \
+         across every category, trailing 28 days. Each step and review round counts once \
+         (newest duplicate wins); self-review and actors other than the frozen reviewer \
+         are excluded. Missing reviews are unknown, not rejected. Approval and gate \
+         decisions do not count.",
         Unit::Ratio,
         Better::Lower,
         ATTESTATION_SOURCE,
@@ -780,6 +793,7 @@ pub fn registry() -> Vec<MetricDef> {
         fail_rate_def(),
         rework_rate_def(),
         gate_fail_rate_def(),
+        review_reject_rate_def(),
         conformance_rate_def("<category>"),
         time_to_recover_p50_def(),
         unit_cost_def(),
@@ -834,6 +848,7 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
         ["fail_rate"] => fail_rate_def(),
         ["rework_rate"] => rework_rate_def(),
         ["gate_fail_rate"] => gate_fail_rate_def(),
+        ["review_reject_rate"] => review_reject_rate_def(),
         ["conformance_rate", category] => conformance_rate_def(category),
         ["time_to_recover_p50"] => time_to_recover_p50_def(),
         ["unit_cost"] => unit_cost_def(),
@@ -1033,6 +1048,7 @@ mod tests {
             "fail_rate",
             "rework_rate",
             "gate_fail_rate",
+            "review_reject_rate",
             "conformance_rate.<category>",
             "time_to_recover_p50",
             "unit_cost",
@@ -1236,6 +1252,10 @@ mod tests {
             (def.unit, def.better, def.coverage),
             (Unit::Ratio, Better::Lower, MetricCoverage::ScopeAware)
         );
+        let def = resolve(&MetricId::new("review_reject_rate").unwrap()).unwrap();
+        assert_eq!((def.unit, def.better, def.coverage), (Unit::Ratio, Better::Lower, MetricCoverage::ScopeAware));
+        assert!(def.source.contains("Attestation"));
+        assert!(resolve(&MetricId::new("review_reject_rate.extra").unwrap()).is_err());
     }
 
     #[test]
