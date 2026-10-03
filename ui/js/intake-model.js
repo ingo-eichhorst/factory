@@ -22,6 +22,28 @@ export const WONTFIX_REASONS = [
   { key: "out_of_scope", label: "Out of scope" },
 ];
 
+/// A card's `source.kind`, as a person reads it -- `cli`/`ui`/`agent`/
+/// `github` unchanged, plus the two relayed kinds `#167` adds.
+export const SOURCE_LABELS = {
+  cli: "CLI",
+  ui: "UI",
+  agent: "agent",
+  github: "GitHub",
+  email: "email",
+  chat: "chat",
+};
+
+/// Where a card came from, for the board and the item modal (`#167`): the
+/// kind, its provider when there is one (`email`/`chat`, always given),
+/// and who relayed it when that was not the source itself.
+export function sourceText(source) {
+  if (!source) return "";
+  let text = SOURCE_LABELS[source.kind] || source.kind;
+  if (source.provider) text += `/${source.provider}`;
+  if (source.relayed_by) text += ` (relayed by ${source.relayed_by})`;
+  return text;
+}
+
 /// Impact x urgency, the daemon's matrix (`factory_core::intake::priority`)
 /// -- only for the form's live preview.
 export function priorityOf(impact, urgency) {
@@ -53,6 +75,27 @@ function shortDuration(seconds) {
 export function estimateText(estimate) {
   if (!estimate) return "no estimate";
   return `${shortDuration(estimate.min_seconds)}-${shortDuration(estimate.max_seconds)}`;
+}
+
+/// What an estimate rests on (`#168`, `EstimateBasis::describe` mirrored
+/// exactly): "p10-p90 of 12 completed bugfix tasks in factory, last 90
+/// days" for a reference class, "complexity table: 2 of 5 samples" for the
+/// fallback, "the assessor's own estimate" for one an assessor gave outright,
+/// null only for a `Triage` from before this existed (no `estimate_basis` at
+/// all) -- the one case with truly nothing to say.
+export function basisText(basis) {
+  if (!basis) return null;
+  if (basis.source === "reference_class") {
+    const n = basis.time_samples;
+    return `p10–p90 of ${n} completed ${basis.category} task${n === 1 ? "" : "s"} in ${basis.scope}, last 90 days`;
+  }
+  if (basis.source === "complexity_table") {
+    return `complexity table: ${basis.time_samples} of 5 samples`;
+  }
+  if (basis.source === "assessor") {
+    return "the assessor's own estimate";
+  }
+  return null;
 }
 
 /// How long an item has waited, at a glance.
@@ -96,8 +139,40 @@ export function verdictChips(card) {
     priority: t.priority,
     category: t.assessment.category,
     estimate: estimateText(t.estimate),
+    basis: basisText(t.estimate_basis),
     verdict: t.verdict.verdict,
   };
+}
+
+// ------------------------------------------------------------ duplicates
+
+/// `card.candidates` (the daemon's search overlaid with the triager's own
+/// answer, `factory_core::intake::candidates_with_verdicts`), normalised
+/// for the item modal: `kind`, `reference`, `title`, `evidence`, `verdict`
+/// and `matchText` -- "source" or "text 82%".
+export function duplicateRows(card) {
+  return ((card && card.candidates) || []).map(c => ({
+    kind: c.kind,
+    reference: c.reference,
+    title: c.title,
+    evidence: c.evidence,
+    verdict: c.verdict,
+    matchText: c.match === "text" ? `text ${c.score != null ? c.score : "?"}%` : "source",
+  }));
+}
+
+/// The first candidate the assessment itself confirmed -- what a wontfix
+/// dialog prefills `duplicate_of` from. Null when there is none.
+export function confirmedDuplicate(card) {
+  const duplicates = (card && card.triage && card.triage.assessment && card.triage.assessment.duplicates) || [];
+  return duplicates.find(d => d.verdict === "confirmed") || null;
+}
+
+/// The wontfix dialog's starting values: a confirmed duplicate's own
+/// reference and evidence when there is one, otherwise blank.
+export function wontfixDraft(card) {
+  const d = confirmedDuplicate(card);
+  return d ? { reason: "duplicate", duplicate_of: d.reference, evidence: d.evidence || "" } : { reason: "", duplicate_of: "", evidence: "" };
 }
 
 /// The card's triage task has ended and nothing is running it. The daemon
@@ -137,21 +212,58 @@ export function cardNote(card) {
   return null;
 }
 
+/// A possible or confirmed security report (`#170`) -- the fast lane
+/// `board()` already sorted; here it is what gates release, split and
+/// wontfix. `dismissed` is an ordinary item again.
+export function securityFlag(card) {
+  return (card && card.security) || null;
+}
+
+/// A decided GitHub item with something to publish (`#171`): the daemon
+/// only ever records `outbound` for a GitHub-sourced item once it carries
+/// both a decision and the assessment behind it, and never for a possible
+/// or confirmed security report -- so its mere presence is the whole
+/// eligibility check; a dismissed report's item is ordinary again the same
+/// way `securityFlag` treats it everywhere else.
+export function canPublish(card) {
+  return !!(card && card.source && card.source.kind === "github" && card.outbound);
+}
+
 /// Which actions an item allows, in the order the buttons are drawn. A
-/// released or split item has none: it is a task now, and the task modal
-/// is where it is worked. Any open item can be split -- a person may cut
-/// one nobody could assess as a whole.
+/// released item is a task now, and the task modal is where it is worked --
+/// except approving a GitHub publish, which stays available there too,
+/// since that is the one thing left to do with it here. Any open item can
+/// be split -- a person may cut one nobody could assess as a whole --
+/// except a possible security report, which nothing may release, split or
+/// close until a person looks (`#170`).
 export function cardActions(card) {
-  if (!card || !["received", "triaging", "needs_info"].includes(card.stage)) return [];
+  if (!card) return [];
+  if (card.stage === "ready") return canPublish(card) ? ["publish"] : [];
+  if (!["received", "triaging", "needs_info"].includes(card.stage)) return [];
   const triageRunning = card.triage_task && !card.triage && !triageEnded(card);
+  const flag = securityFlag(card);
+  const possible = !!flag && flag.state === "possible";
+  const confirmed = !!flag && flag.state === "confirmed";
   const out = [];
   if (card.stage === "needs_info") out.push("info");
   if (!triageRunning) out.push("triage");
   out.push("assess");
-  if (card.triage && card.triage.verdict.verdict === "ready") out.push("release");
-  out.push("split");
+  if (!possible && card.triage && card.triage.verdict.verdict === "ready") out.push("release");
+  if (!possible) out.push("split");
   if (card.stage !== "needs_info") out.push("needs_info");
-  out.push("wontfix");
+  // Wontfix is for a dismissal, never for a report nobody has looked at yet
+  // or one already confirmed real.
+  if (!possible && !confirmed) out.push("wontfix");
+  // Flagging only adds scrutiny, so it stays open to anyone who could assess
+  // the item -- but only once: an item already carrying a flag of any kind
+  // (possible, confirmed or dismissed) is never flagged a second time.
+  if (!flag) out.push("flag_security");
+  // Confirm or dismiss: the owner's alone (the daemon refuses anyone else),
+  // and only while the report is still `possible`.
+  if (possible) out.push("security_confirm", "security_dismiss");
+  // Approve and post to GitHub: a needs-info item can carry an outbound
+  // record too (a decision sent it back, and it came from GitHub).
+  if (canPublish(card)) out.push("publish");
   return out;
 }
 
@@ -163,11 +275,18 @@ export const ACTION_LABELS = {
   split: "Split into items",
   needs_info: "Needs info",
   wontfix: "Won't fix",
+  flag_security: "Flag as security report",
+  security_confirm: "Confirm security report",
+  security_dismiss: "Dismiss security report",
+  publish: "Approve and post to GitHub",
 };
 
 /// The daemon's next actions (`factory_core::intake::next_actions`), each
-/// with the dialog that carries it out.
+/// with the dialog that carries it out. A confirmed duplicate opens the
+/// same wontfix dialog the board's own button does -- `wontfixDraft` is
+/// what prefills it.
 const NEXT_ACTION = {
+  close_duplicate: { label: "Close as duplicate", act: "wontfix" },
   split: { label: "Split into items", act: "split" },
   add_info: { label: "Add information", act: "info" },
 };
@@ -266,7 +385,32 @@ export function addRequest(values) {
   if (values.scope) body.scope = values.scope;
   if ((values.reference || "").trim()) body.reference = values.reference.trim();
   if ((values.requester || "").trim()) body.requester = values.requester.trim();
+  if (values.security) body.security = true;
   return { path: "/api/intake", method: "POST", body };
+}
+
+/// `#170`: flag an item still in the gate as a possible security report.
+export function flagSecurityRequest(id, reason) {
+  return { path: `/api/intake/${encodeURIComponent(id)}/flag-security`, method: "POST", body: { reason: reason || "" } };
+}
+
+/// `#170`: a person confirms or dismisses. `verdict` is `"confirm"` or
+/// `"dismiss"`; evidence is required for a dismissal, optional to confirm.
+export function securityDecisionRequest(id, verdict, evidence) {
+  return {
+    path: `/api/intake/${encodeURIComponent(id)}/security`,
+    method: "POST",
+    body: { verdict, evidence: (evidence || "").trim() },
+  };
+}
+
+/// What stops a security decision being sent -- the daemon's own rule said
+/// before the round trip.
+export function securityDecisionProblem(verdict, evidence) {
+  if (verdict === "dismiss" && !(evidence || "").trim()) {
+    return "dismissing needs the evidence that clears it";
+  }
+  return null;
 }
 
 export function triageRequest(id, agent) {
@@ -310,6 +454,25 @@ export function decideProblem(action, values = {}) {
   return null;
 }
 
+/// One duplicate row -- a stored candidate answered, or a knowledge one
+/// added by hand -- as the wire's `DuplicateCandidate`. Dropped by
+/// `buildAssessment` when it names neither a kind nor a reference: an
+/// "add a knowledge candidate" row nobody filled in.
+export function buildDuplicateAnswer(row) {
+  const out = {
+    kind: row.kind,
+    reference: (row.reference || "").trim(),
+    title: (row.title || "").trim(),
+    match: row.match || "text",
+    verdict: row.verdict || "unverified",
+    evidence: (row.evidence || "").trim(),
+  };
+  if (out.match === "text" && row.score !== "" && row.score != null && !Number.isNaN(Number(row.score))) {
+    out.score = Number(row.score);
+  }
+  return out;
+}
+
 /// The assessment form's values as the wire's `Assessment`.
 export function buildAssessment(values) {
   const axes = (values.axes || []).map(a => {
@@ -329,9 +492,18 @@ export function buildAssessment(values) {
     routing.agent = values.agent.trim();
   }
   const split = buildParts(values.split);
+  const duplicates = (values.duplicates || []).map(buildDuplicateAnswer).filter(d => d.kind && d.reference);
+  const category = (values.category || "").trim();
+  // A scope's own extra checks (`#169`): each row carries the categories it
+  // applies to (from the routed scope's effective definition), so a check
+  // that does not apply to the category just chosen is left out here rather
+  // than submitted and refused by the daemon's own `validate`.
+  const checks = (values.checks || [])
+    .filter(c => !(c.categories || []).length || c.categories.includes(category))
+    .map(c => ({ id: c.id, pass: !!c.pass, evidence: (c.evidence || "").trim() }));
   return {
     axes,
-    category: (values.category || "").trim(),
+    category,
     impact: values.impact,
     urgency: values.urgency,
     complexity: Number(values.complexity),
@@ -339,6 +511,8 @@ export function buildAssessment(values) {
     summary: (values.summary || "").trim(),
     questions: lines(values.questions),
     ...(split.length ? { split } : {}),
+    ...(duplicates.length ? { duplicates } : {}),
+    ...(checks.length ? { checks } : {}),
   };
 }
 
@@ -351,9 +525,23 @@ function clean(map) {
   return out;
 }
 
-/// Mirror of `factory_core::intake::validate`, for the form: the first
-/// thing that would be refused, or null.
-export function assessmentProblem(a) {
+/// The checks of `definition` (`ReadyDefinition`, `#169`) that apply to
+/// `category`: none declared for it (the default, "every category"), or
+/// `category` named explicitly -- `ReadyDefinition::applicable` in JS.
+function applicableChecks(definition, category) {
+  return ((definition && definition.checks) || []).filter(
+    c => !(c.categories || []).length || c.categories.includes(category)
+  );
+}
+
+/// Mirror of `factory_core::intake::validate` and `validate_duplicates`,
+/// for the form: the first thing that would be refused, or null. `stored`
+/// is the item's own found candidates (`card.candidates`) -- omitted where
+/// there are none to leave unanswered. `definition` is the routed scope's
+/// effective definition of ready (`#169`, `route.definition`) -- omitted
+/// for a scope whose chain adds nothing, where every existing check still
+/// passes unchanged.
+export function assessmentProblem(a, stored = [], definition = null) {
   for (const check of a.axes) {
     if (!check.evidence) return `${check.axis}: one sentence of evidence`;
     if (check.axis === "observability" && !check.pass && !check.cost) return "a failed observability axis needs its cost";
@@ -366,6 +554,17 @@ export function assessmentProblem(a) {
   if (a.split && a.split.length) {
     const why = splitProblem(a.split);
     if (why) return `the proposed split: ${why}`;
+  }
+  for (const d of a.duplicates || []) {
+    if (!(d.evidence || "").trim()) return `duplicate ${d.reference || "candidate"}: evidence for its verdict`;
+  }
+  for (const s of stored) {
+    const answer = (a.duplicates || []).find(d => d.kind === s.kind && d.reference === s.reference);
+    if (!answer || answer.verdict === "unverified") return `possible duplicate ${s.reference}: confirm or reject it`;
+  }
+  for (const c of applicableChecks(definition, a.category)) {
+    const answer = (a.checks || []).find(x => x.id === c.id);
+    if (!answer || !(answer.evidence || "").trim()) return `check ${c.id}: one sentence of evidence`;
   }
   return null;
 }
@@ -385,18 +584,69 @@ export function routeProblem(a, board) {
   return null;
 }
 
+/// Whether a failed observability axis at `cost` passes through `tolerance`
+/// -- `factory_core::ready::Tolerance::allows`, mirrored: at `medium` (the
+/// default, and today's only rule) low or medium cost passes, at `low` only
+/// low does, and `none` tolerates nothing.
+function toleranceAllows(tolerance, cost) {
+  if (tolerance === "low") return cost === "low";
+  if (tolerance === "none") return false;
+  return cost === "low" || cost === "medium";
+}
+
 /// What the rules will make of the form as it stands: `ready`, or
-/// `needs_info` with the reasons.
-export function previewVerdict(a) {
+/// `needs_info` with the reasons. Mirrors `evaluate`'s order -- a confirmed
+/// duplicate first, then the axes, then the scope's own extra checks
+/// (`#169`), then complexity. `definition` is the routed scope's effective
+/// definition of ready, as in `assessmentProblem`; omitted, this previews
+/// exactly what it always has.
+export function previewVerdict(a, definition = null) {
   const blockers = [];
+  for (const d of a.duplicates || []) {
+    if (d.verdict === "confirmed") blockers.push(`duplicate ${d.reference}`);
+  }
+  const tolerance = (definition && definition.observability_tolerance) || "medium";
   for (const check of a.axes) {
     if (check.pass) continue;
-    if (check.axis === "observability" && (check.cost === "low" || check.cost === "medium")) continue;
+    if (check.axis === "observability" && toleranceAllows(tolerance, check.cost)) continue;
     blockers.push(check.axis);
   }
+  for (const c of applicableChecks(definition, a.category)) {
+    const answer = (a.checks || []).find(x => x.id === c.id);
+    if (answer && !answer.pass) blockers.push(c.id);
+  }
   if (a.complexity >= 9) blockers.push(`complexity ${a.complexity}`);
+  else if (definition && a.complexity > (definition.max_complexity || 8)) blockers.push(`complexity ${a.complexity}`);
   return blockers.length ? { verdict: "needs_info", blockers } : { verdict: "ready", blockers };
 }
+
+/// `#171`: approve and post a decided GitHub item's triage comment and
+/// labels to the issue it came from. Factory never does this on its own.
+export function publishRequest(id) {
+  return { path: `/api/intake/${encodeURIComponent(id)}/publish`, method: "POST", body: {} };
+}
+
+/// A card's `outbound` record (`#171`), shaped for the modal: its state, the
+/// comment link once posted, and any labels the repository does not have or
+/// the error from the last attempt. Null for a card with nothing outbound
+/// yet.
+export function outboundInfo(card) {
+  const o = card && card.outbound;
+  if (!o) return null;
+  return {
+    state: o.state,
+    commentUrl: o.comment_url || null,
+    labelsApplied: o.labels_applied || [],
+    labelsSkipped: o.labels_skipped || [],
+    error: o.last_error || null,
+  };
+}
+
+export const OUTBOUND_STATE_LABELS = {
+  awaiting_approval: "awaiting approval",
+  published: "published to GitHub",
+  failed: "GitHub publish failed",
+};
 
 export function assessRequest(id, assessment, decide) {
   return {

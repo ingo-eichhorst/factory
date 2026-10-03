@@ -97,7 +97,7 @@ pub fn parse_span(text: &str) -> std::result::Result<u64, String> {
     if n == 0 {
         return Err(bad());
     }
-    Ok(n * mult)
+    n.checked_mul(mult).ok_or_else(bad)
 }
 
 /// An availability target, written `99.5%` (or the bare number `99.5`).
@@ -1148,6 +1148,7 @@ mod tests {
         assert!(parse_span("0s").is_err());
         assert!(parse_span("10").is_err());
         assert!(parse_span("1w").is_err());
+        assert!(parse_span("18446744073709551615d").is_err());
         let slo: Slo = serde_yaml_ng::from_str("{ availability: 99.5%, window: 7d }").unwrap();
         assert!((slo.availability.ratio() - 0.995).abs() < 1e-9);
         assert_eq!(slo.window_days(), 7);

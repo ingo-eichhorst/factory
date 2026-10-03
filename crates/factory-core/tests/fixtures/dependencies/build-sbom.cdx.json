@@ -1,0 +1,25 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:33333333-3333-4333-8333-333333333333",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-09-25T12:00:00Z",
+    "lifecycles": [{ "phase": "build" }],
+    "tools": { "components": [{ "name": "syft", "version": "1.30.0" }] },
+    "component": {
+      "type": "application",
+      "name": "factory",
+      "version": "0.1.0",
+      "bom-ref": "pkg:generic/factory@0.1.0",
+      "properties": [{ "name": "factory:git-sha", "value": "0123456789abcdef0123456789abcdef01234567" }]
+    }
+  },
+  "components": [
+    { "type": "library", "name": "serde", "version": "1.0.0", "bom-ref": "pkg:cargo/serde@1.0.0" }
+  ],
+  "dependencies": [
+    { "ref": "pkg:generic/factory@0.1.0", "dependsOn": ["pkg:cargo/serde@1.0.0"] },
+    { "ref": "pkg:cargo/serde@1.0.0", "dependsOn": [] }
+  ]
+}

@@ -7,7 +7,7 @@ use crate::benchmark::Configuration;
 use crate::building::{Activity, Cues, RepoMetrics, Shape};
 use crate::agent::AgentSession;
 use crate::config::ScopeAgent;
-use crate::dependencies::{Attachment, AttachmentKind, DependenciesReport};
+use crate::dependencies::{Attachment, AttachmentKind, DependenciesReport, DoctorReport};
 use crate::event::Event;
 use crate::knowledge::{Document, Finding, Gap, Page, Refusal, Tag};
 use crate::occupancy::Occupancy;
@@ -144,11 +144,20 @@ pub enum Request {
     #[serde(rename = "task.delete")]
     TaskDelete { id: String },
     /// Journaled with who asked, and `reason` when there is one (`#106`).
+    /// `continue_run` (`continue` on the wire -- a Rust keyword) is
+    /// `factory task run --continue` (`#178`): resume the task's newest
+    /// run's harness session rather than start a fresh one. Refused outright
+    /// unless that newest run is terminal and ended on an infrastructure
+    /// failure; from there, `Engine::dispatch` falls back to a fresh session
+    /// -- journaled with the exact reason -- for anything that stops the
+    /// resume itself from going through.
     #[serde(rename = "task.run")]
     TaskRun {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        #[serde(default, rename = "continue", skip_serializing_if = "std::ops::Not::not")]
+        continue_run: bool,
     },
     /// Journaled with who asked, and `reason` when there is one (`#106`).
     #[serde(rename = "task.cancel")]
@@ -285,6 +294,13 @@ pub enum Request {
     /// Every attestation a run's required steps left behind (`#118`).
     #[serde(rename = "run.attestations")]
     RunAttestations { id: String },
+    /// Person/functionary decisions for enforced approval and rework.
+    #[serde(rename = "run.approve")]
+    RunApprove { id: String, reason: String },
+    #[serde(rename = "run.reject")]
+    RunReject { id: String, reason: String },
+    #[serde(rename = "run.rework")]
+    RunRework { id: String },
     #[serde(rename = "run.list")]
     RunList {
         task_id: String,
@@ -358,6 +374,10 @@ pub enum Request {
     Dependencies { scope: String },
     #[serde(rename = "dependencies.vex")]
     DependenciesVex { scope: String },
+    /// The L1 Doctor dependency view: newest Factory build versus the
+    /// installed binaries, derived from immutable scan evidence.
+    #[serde(rename = "doctor")]
+    Doctor,
     /// The L1 Infrastructure page: what everything runs on -- the host and
     /// the daemon on it, read live on every request, and the AI accounts the
     /// root config declares with the agents each one pays for. Read-only,
@@ -404,15 +424,27 @@ pub enum Request {
     /// Unpack a snapshot into a temporary directory and prove it would
     /// restore: every checksum in its manifest, `integrity_check` on the
     /// database copy, and every authored-content loader. `snapshot: None`
-    /// is the newest. The same grant as `BackupRun`. Nothing in the
-    /// destination or the instance is changed; the result is recorded.
+    /// is the newest. The same grant as `BackupRun` -- unless `identity` is
+    /// `Some`, which decrypts an encrypted snapshot and is the owner's alone
+    /// (`#152`): a role grant must never become "read this key file".
+    /// Nothing in the destination or the instance is changed; the result is
+    /// recorded (an encrypted snapshot given no identity is refused before
+    /// anything is recorded -- see the daemon's `backup` module).
     #[serde(rename = "backup.verify")]
     BackupVerify {
         #[serde(default)]
         snapshot: Option<String>,
+        /// A path to a file holding one native `AGE-SECRET-KEY-1…` identity
+        /// (`#152`), read once by the daemon and never stored, logged or
+        /// echoed back. Required to verify an encrypted snapshot; refused
+        /// for a path inside the instance's own `.factory/`. The HTTP verify
+        /// endpoint never accepts one.
+        #[serde(default)]
+        identity: Option<PathBuf>,
     },
-    /// Verify and materialize a plaintext snapshot as a new instance root.
-    /// The destination must not exist or must be empty; the daemon stages it
+    /// Verify and materialize a snapshot as a new instance root -- plaintext
+    /// as v1 did, or encrypted with `identity` supplied (`#152`). The
+    /// destination must not exist or must be empty; the daemon stages it
     /// beside that destination and renames only after every required check
     /// passes. CLI-only and owner-only: there is intentionally no grant or
     /// HTTP endpoint for restore.
@@ -420,6 +452,9 @@ pub enum Request {
     BackupRestore {
         snapshot: String,
         into: PathBuf,
+        /// See `BackupVerify::identity`.
+        #[serde(default)]
+        identity: Option<PathBuf>,
     },
     /// The L5 Knowledge tab: an index of `<root>/.factory/knowledge/`,
     /// rebuilt from the files on every request. Read-only, like
@@ -568,6 +603,17 @@ pub enum Request {
         #[serde(default)]
         scope: Option<String>,
     },
+    /// The CRA Art. 14 reporting clock (`#157`, phase 1): the 24-hour early
+    /// warning and 72-hour notification deadlines for every exploited L2
+    /// finding and confirmed L4 security report over `scope`'s subtree (the
+    /// whole instance when `scope` is `None`) -- the same rollup
+    /// `Request::Policy` itself uses. Computed fresh on every read, like
+    /// `Policy` (ADR 0004: no status table). Read-only.
+    #[serde(rename = "policy.clock")]
+    PolicyClock {
+        #[serde(default)]
+        scope: Option<String>,
+    },
     /// One control's full detail at `scope`: its catalogue data, its status
     /// there, and its whole attestation history for that scope and its
     /// ancestors. Read-only.
@@ -591,6 +637,15 @@ pub enum Request {
         #[serde(default)]
         note: Option<String>,
         expires_at: chrono::DateTime<chrono::Utc>,
+        /// A submission against the CRA Art. 14 reporting clock (`#157`,
+        /// phase 1) -- absent for an ordinary attestation. `policy_attest`
+        /// refuses it against any control but `cra/art-14`, an item that
+        /// does not exist or belongs to a scope other than the canonical
+        /// `scope` above, an excluded item, or a deadline that already has
+        /// a live (unwithdrawn) submission. Uses the same grant and
+        /// root-scope reach as an ordinary attestation -- not a new door.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clock: Option<crate::reporting_clock::ClockMark>,
     },
     /// Withdraw a previously recorded attestation. Append-only like the rest
     /// of the store: this writes a new row that references `id`, and never
@@ -640,6 +695,13 @@ pub enum Request {
     Metrics {
         #[serde(default)]
         ids: Vec<crate::metrics::MetricId>,
+        /// Only this scope and its descendants. Absent means the whole
+        /// instance; definitions marked `instance_wide` ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// Override the run-backed metrics' established default intervals.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<crate::metrics::MetricsWindow>,
     },
     /// The dashboard's resolved layout for `scope` (`#159`, phase 4 of
     /// `#150`): the nearest `dashboard:` block down `Scope.path`, the
@@ -656,6 +718,29 @@ pub enum Request {
         #[serde(default)]
         scope: Option<String>,
     },
+    /// Save `scope`'s own dashboard layout whole (`#160`, phase 5 of `#150`):
+    /// the instance root's own configured scope writes its top-level
+    /// `dashboard:`, any other scope writes `scope.dashboard` in its own
+    /// config -- the same split `Request::RoleDefine` makes for a role
+    /// layer, and `scope` is required for the same reason: naming which
+    /// scope's own block this is, not a fallback to the caller's. Refused
+    /// (`FactoryError::BadRequest`) when `tiles` is empty, names an unknown
+    /// metric, or is otherwise invalid -- `Config::validate` checked whole,
+    /// the same gate every other write here passes through before a byte is
+    /// written. Answered with the resolved `Payload::Dashboard { tiles,
+    /// source }` for `scope`, same as `Request::Dashboard` would answer
+    /// right after. Needs `dashboard.edit` in `scope`.
+    #[serde(rename = "dashboard.set")]
+    DashboardSet {
+        scope: String,
+        tiles: Vec<crate::dashboard::Tile>,
+    },
+    /// Remove `scope`'s own `dashboard:` block and reveal whatever it was
+    /// overriding -- the nearest ancestor's layout, or the built-in default.
+    /// Refused when `scope` writes no block of its own to remove. Answered
+    /// like `Request::DashboardSet`. Needs `dashboard.edit` in `scope`.
+    #[serde(rename = "dashboard.reset")]
+    DashboardReset { scope: String },
     /// The L6 Goals tab: vision, mission, the north star and its inputs,
     /// every cycle's own summary, the asked-for (or current) cycle's full
     /// graded report, and the roadmap -- narrowed to `scope` (and its
@@ -781,8 +866,8 @@ pub enum Request {
     /// `#119`: hand work in through the intake gate instead of straight
     /// onto the line. Creates a task in `TaskStatus::Intake` with its
     /// `Intake` record -- no run, and none until it is released. Needs
-    /// `task.create` in the target scope, like `TaskCreate`. An agent's
-    /// request is recorded as source `agent`, whatever it says.
+    /// `intake.add` in the target scope (`#172`; `task.create` before it).
+    /// An agent's request is recorded as source `agent`, whatever it says.
     #[serde(rename = "intake.add")]
     IntakeAdd(crate::intake::NewIntake),
     /// The Intake view and `factory intake list`: every intake item in the
@@ -795,8 +880,11 @@ pub enum Request {
     },
     /// Start the triage node on an item: a task in the item's scope whose
     /// instructions are the generalised `ir:triage`, dispatched at once, that
-    /// answers with `IntakeAssess`. Needs `task.create` and reach over the
-    /// item.
+    /// answers with `IntakeAssess`. Needs `intake.triage` and reach over the
+    /// item (`#172`; `task.create` before it). Refused if the named `agent`
+    /// -- or the scope's default, when none is named -- holds a role that
+    /// may not `task.report`: a triage run that could never report its own
+    /// result would start and stay stuck.
     #[serde(rename = "intake.triage")]
     IntakeTriage {
         id: String,
@@ -804,9 +892,9 @@ pub enum Request {
         agent: Option<String>,
     },
     /// Record an assessment on an item. With `decide`, also apply what the
-    /// rules give -- ready or needs-info, never wontfix. Needs `task.edit`
+    /// rules give -- ready or needs-info, never wontfix. Needs `intake.assess`
     /// and reach over the item -- or to be the run of the item's own triage
-    /// task.
+    /// task (`#172`; `task.edit` before it).
     #[serde(rename = "intake.assess")]
     IntakeAssess {
         id: String,
@@ -814,18 +902,58 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         decide: bool,
     },
-    /// Decide an item: release it, send it back, or close it. The same grant
-    /// and reach as `IntakeAssess`.
+    /// Decide an item: release it, send it back, or close it. Needs
+    /// `intake.decide` and the same reach as `IntakeAssess` (`#172`;
+    /// `task.edit` before it). Releasing ready with `run: true` also needs
+    /// `task.run`, exactly as a workflow-routed release already does.
     #[serde(rename = "intake.decide")]
     IntakeDecide {
         id: String,
         decision: crate::intake::Decision,
     },
     /// Add information to an item that is still in intake -- the answer to a
-    /// needs-info, which puts it back in `received`. Needs `task.create`
-    /// with reach over the item, or to be the one who handed it in.
+    /// needs-info, which puts it back in `received`. Needs `intake.info` with
+    /// reach over the item, or to be the one who handed it in (`#172`;
+    /// `task.create` before it).
     #[serde(rename = "intake.info")]
     IntakeInfo { id: String, text: String },
+    /// Flag an item still in intake as a possible security report
+    /// (`#170`) -- from anyone who could assess it: flagging only adds
+    /// scrutiny. Needs `intake.assess` with the same reach `IntakeAssess`
+    /// checks. Refused once the item already carries a flag of any kind.
+    #[serde(rename = "intake.flag_security")]
+    IntakeFlagSecurity { id: String, reason: String },
+    /// A person confirms or dismisses a possible security report -- the one
+    /// decision an agent never makes, whatever role it holds (`Needs::Owner`).
+    /// Confirming needs no evidence; dismissing does, or it is refused.
+    /// Journaled as `intake_security_confirmed`/`intake_security_dismissed`.
+    #[serde(rename = "intake.security")]
+    IntakeSecurity {
+        id: String,
+        verdict: crate::intake::SecurityVerdict,
+        #[serde(default)]
+        evidence: String,
+    },
+    /// Every confirmed security report over `scope`'s subtree (every scope,
+    /// absent) -- `Engine::confirmed_security_reports`, read live off the
+    /// store, including an item that has since left intake. The L4 fact the
+    /// CRA reporting clock (`#157`, phase 2) will read; a plain read, needing
+    /// nothing, like `IntakeBoard`.
+    #[serde(rename = "intake.security_reports")]
+    IntakeSecurityReports {
+        #[serde(default)]
+        scope: Option<String>,
+    },
+    /// Approve and post a decided GitHub item's triage comment and labels to
+    /// the issue it came from (`#171`). The daemon never does this on its
+    /// own -- a decision only records `awaiting_approval`; this request is
+    /// the approval. Needs `intake.publish`, named exactly: never a
+    /// wildcard, never in `foreman` or `triager`. Refused for anything not
+    /// sourced from GitHub, for an item with no decision or no assessment to
+    /// publish, and for one carrying a possible or confirmed security
+    /// report -- posting triage details publicly would disclose it.
+    #[serde(rename = "intake.publish")]
+    IntakePublish { id: String },
     /// One task's usage and cost: every run's, and their sum (#117).
     /// Read-only, derived from what the runs already carry.
     #[serde(rename = "task.usage")]
@@ -916,6 +1044,7 @@ pub enum Payload {
     },
     Attachment { attachment: Attachment },
     Dependencies { report: DependenciesReport },
+    Doctor { report: DoctorReport },
     /// The L1 Infrastructure page, read from the bottom up: the host, the
     /// daemon on it, the declared AI accounts above that with the agents
     /// each one serves, and the model agents no account claims yet. A host
@@ -1009,6 +1138,8 @@ pub enum Payload {
     BenchRuns { runs: Vec<crate::bench::BenchRun> },
     /// The L6 Policy tab -- see `PolicyReport`.
     Policy { report: PolicyReport },
+    /// The answer to `Request::PolicyClock`.
+    PolicyClock { clock: crate::reporting_clock::ReportingClock },
     /// The answer to `Request::PolicyControl`.
     PolicyControl { detail: PolicyControlDetail },
     /// The answer to `Request::PolicyAttest`/`Request::PolicyWithdraw`: the
@@ -1068,6 +1199,8 @@ pub enum Payload {
     Operations { report: Box<crate::operations::OperationsReport> },
     /// The Intake view -- see `factory_core::intake::IntakeBoard`.
     IntakeBoard { board: crate::intake::IntakeBoard },
+    /// `Request::IntakeSecurityReports`' answer.
+    IntakeSecurityReports { reports: Vec<crate::intake::ConfirmedSecurityReport> },
     /// `Request::TaskUsage`'s answer.
     TaskUsage { usage: crate::usage::TaskUsage },
     /// `Request::RunUsage`'s answer.
@@ -1120,6 +1253,18 @@ impl Response {
     }
 }
 
+/// One declared agent's `max_sessions` picture, for `factory status`
+/// (`#179`). Only an agent that declares its own cap gets a row -- a
+/// scope-wide cap alone already shows in `factory stats`' Flow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapacityRow {
+    pub scope: String,
+    pub agent: String,
+    pub in_use: u32,
+    pub max: u32,
+    pub waiting: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusInfo {
     pub instance: String,
@@ -1131,6 +1276,11 @@ pub struct StatusInfo {
     pub tasks_active: usize,
     pub subscribers: usize,
     pub interfaces: Vec<String>,
+    /// Every agent that declares its own `max_sessions`, across every scope.
+    /// Absent on a build old enough to predate this, which reads as no
+    /// declared agent caps -- the same as today.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capacity: Vec<CapacityRow>,
     pub scopes: Vec<String>,
 }
 
@@ -1379,7 +1529,36 @@ pub struct PolicyReport {
     /// same finding reached by walking two different scopes' chains is
     /// reported once.
     pub findings: Vec<crate::policy::Finding>,
+    /// Required workflow controls as they would be injected now. This is
+    /// advisory preview data; immutable run snapshots remain authoritative.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_enforcement: Vec<WorkflowEnforcement>,
+    /// Ordering and functionary gaps from the same workflow lint pass.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_findings: Vec<WorkflowEnforcementFinding>,
     pub catalogues: Vec<CatalogueSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowEnforcement {
+    pub workflow: String,
+    pub name: String,
+    pub scope: String,
+    pub node: String,
+    pub step: String,
+    pub kind: crate::control_plan::StepKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowEnforcementFinding {
+    pub workflow: String,
+    pub name: String,
+    pub scope: String,
+    pub detail: String,
 }
 
 /// One control's full detail: its catalogue data as it applies at the scope
@@ -1438,6 +1617,7 @@ pub struct MetricDefView {
     pub description: String,
     pub unit: crate::metrics::Unit,
     pub better: crate::metrics::Better,
+    pub coverage: crate::metrics::MetricCoverage,
     pub source: String,
     pub available: bool,
     pub unavailable_reason: Option<String>,
@@ -1451,6 +1631,7 @@ impl From<crate::metrics::MetricDef> for MetricDefView {
             description: d.description,
             unit: d.unit,
             better: d.better,
+            coverage: d.coverage,
             source: d.source.to_string(),
             available: d.available,
             unavailable_reason: d.unavailable_reason.map(str::to_string),
@@ -1965,6 +2146,54 @@ pub struct ProviderRow {
     pub plan: Option<String>,
     pub env: Option<String>,
     pub agents: Vec<ProviderAgent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<ProviderWindow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_runs: Vec<ProviderRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_unknown: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderWindow {
+    pub window_minutes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_percent: Option<f64>,
+    pub resets_at: String,
+    /// When the runtime sampled the reading (`SessionUsage::sampled_at`).
+    pub sampled_at: chrono::DateTime<chrono::Utc>,
+    /// The runtime did not say when it sampled, so `sampled_at` is when
+    /// Factory asked -- and the reading is never called fresh.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sample_time_estimated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution_quality: Option<String>,
+    /// How the change that ended at this reading was charged: to one run
+    /// (`direct`) or split across several (`apportioned`). Fixed by the
+    /// interval the reading closed, not by who is running now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<crate::usage::PlanShareAttribution>,
+    /// Why that change could not be attributed, when it could not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution_unknown: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trend_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderRun {
+    pub run_id: String,
+    pub task_id: String,
+    pub scope: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2169,12 +2398,35 @@ mod tests {
         let env: Envelope = serde_json::from_str(json).expect("request parses");
         assert!(matches!(
             &env.request,
-            Request::BackupRestore { snapshot, into }
+            Request::BackupRestore { snapshot, into, identity: None }
                 if snapshot.ends_with(".tar.zst") && into == &PathBuf::from("/tmp/restored")
         ));
         let back = serde_json::to_string(&env).unwrap();
         let again: Envelope = serde_json::from_str(&back).unwrap();
         assert!(matches!(again.request, Request::BackupRestore { .. }));
+    }
+
+    /// `#152`: an identity is opt in on the wire, and old clients that never
+    /// send one still parse.
+    #[test]
+    fn backup_verify_and_restore_carry_an_optional_identity_path() {
+        let json = r#"{"op":"backup.verify","params":{"snapshot":"s.tar.zst.age","identity":"/home/me/key.txt"}}"#;
+        let env: Envelope = serde_json::from_str(json).expect("request parses");
+        assert!(matches!(
+            &env.request,
+            Request::BackupVerify { snapshot: Some(s), identity: Some(path) }
+                if s == "s.tar.zst.age" && path == &PathBuf::from("/home/me/key.txt")
+        ));
+
+        let no_identity: Envelope = serde_json::from_str(r#"{"op":"backup.verify","params":{}}"#).unwrap();
+        assert!(matches!(no_identity.request, Request::BackupVerify { snapshot: None, identity: None }));
+
+        let restore_json = r#"{"op":"backup.restore","params":{"snapshot":"s.tar.zst.age","into":"/tmp/r","identity":"/home/me/key.txt"}}"#;
+        let restore: Envelope = serde_json::from_str(restore_json).unwrap();
+        assert!(matches!(
+            &restore.request,
+            Request::BackupRestore { identity: Some(path), .. } if path == &PathBuf::from("/home/me/key.txt")
+        ));
     }
 
     #[test]
@@ -2206,6 +2458,38 @@ mod tests {
         let env: Envelope =
             serde_json::from_str(r#"{"op":"dashboard","params":{"scope":"demo"}}"#).expect("request parses");
         assert!(matches!(env.request, Request::Dashboard { scope: Some(s) } if s == "demo"));
+    }
+
+    #[test]
+    fn dashboard_set_and_reset_require_a_scope_named_exactly() {
+        let env: Envelope = serde_json::from_str(
+            r#"{"op":"dashboard.set","params":{"scope":"demo","tiles":[{"view":"kpis","size":"s"}]}}"#,
+        )
+        .expect("request parses");
+        match &env.request {
+            Request::DashboardSet { scope, tiles } => {
+                assert_eq!(scope, "demo");
+                assert_eq!(tiles.len(), 1);
+                assert_eq!(tiles[0].view, Some(crate::dashboard::ViewId::Kpis));
+            }
+            other => panic!("wrong request: {other:?}"),
+        }
+        let back = serde_json::to_string(&env).unwrap();
+        let again: Envelope = serde_json::from_str(&back).unwrap();
+        assert!(matches!(again.request, Request::DashboardSet { .. }));
+
+        // No default: unlike the read, a write must name which scope's own
+        // block this is.
+        let missing_scope = serde_json::from_str::<Envelope>(
+            r#"{"op":"dashboard.set","params":{"tiles":[{"view":"kpis","size":"s"}]}}"#,
+        );
+        assert!(missing_scope.is_err());
+
+        let env: Envelope =
+            serde_json::from_str(r#"{"op":"dashboard.reset","params":{"scope":"demo"}}"#).expect("request parses");
+        assert!(matches!(env.request, Request::DashboardReset { scope } if scope == "demo"));
+        let missing_scope = serde_json::from_str::<Envelope>(r#"{"op":"dashboard.reset","params":{}}"#);
+        assert!(missing_scope.is_err());
     }
 
     #[test]
@@ -2672,6 +2956,9 @@ mod tests {
                     harness: "claude-code".into(),
                     via: ProviderVia::Harness,
                 }],
+                windows: Vec::new(),
+                active_runs: Vec::new(),
+                usage_unknown: None,
             }],
             unassigned: vec![UnassignedAgent {
                 scope: "model-lab".into(),
@@ -2716,6 +3003,9 @@ mod tests {
                 plan: None,
                 env: Some("OPENROUTER_API_KEY".into()),
                 agents: vec![],
+                windows: Vec::new(),
+                active_runs: Vec::new(),
+                usage_unknown: None,
             }],
             unassigned: vec![],
             harnesses: vec![],
@@ -2749,5 +3039,10 @@ mod tests {
         assert_eq!(wire["op"], "infrastructure");
         let env: Envelope = serde_json::from_str(r#"{"op":"infrastructure"}"#).unwrap();
         assert!(matches!(env.request, Request::Infrastructure));
+
+        let wire = serde_json::to_value(Envelope { request: Request::Doctor, token: None }).unwrap();
+        assert_eq!(wire["op"], "doctor");
+        let env: Envelope = serde_json::from_str(r#"{"op":"doctor"}"#).unwrap();
+        assert!(matches!(env.request, Request::Doctor));
     }
 }

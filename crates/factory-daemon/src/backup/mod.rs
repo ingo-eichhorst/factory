@@ -16,16 +16,18 @@
 //! backup.
 
 pub mod archive;
+mod repos;
 pub mod store;
 
 pub use store::BackupStore;
 
 use chrono::{DateTime, Duration, Utc};
 use factory_core::backup::{
-    age_level, parse_archive_name, refuse_bad_snapshot_name, retain, warnings, AgeLevel, BackupConfig,
-    BackupFailure, BackupReport, BackupTrigger, CheckStatus, DestinationFacts, ExcludeRow, Group, IncludeRow,
-    KeptBy, ManifestInstance, Restoration, Snapshot, SnapshotRow, Verification, VerifySummary, WarningFacts, AUTHORED,
-    EXCLUDED, GRACE_HOURS, OPTIONAL, UNSCHEDULED_OVERDUE_HOURS, UNSCHEDULED_STALE_HOURS,
+    age_level, looks_encrypted, parse_archive_name, refuse_bad_snapshot_name, resolve_backup_fact, retain, warnings,
+    AgeLevel, BackupConfig, BackupFact, BackupFailure, BackupReport, BackupTrigger, CheckStatus,
+    DestinationFacts, ExcludeRow, Group, IncludeRow, KeptBy, ManifestInstance, RepositoryFact, Restoration, Snapshot,
+    SnapshotRow, TimeMachineFact, Verification, VerifyCheck, VerifySummary, WarningFacts, AUTHORED,
+    ENCRYPTED_ARCHIVE_SUFFIX, EXCLUDED, GRACE_HOURS, OPTIONAL, UNSCHEDULED_OVERDUE_HOURS, UNSCHEDULED_STALE_HOURS,
 };
 use factory_core::config::{Factory, CONFIG_FILE, FACTORY_DIR};
 use factory_core::error::{FactoryError, Result};
@@ -46,6 +48,9 @@ struct Found {
     name: String,
     at: DateTime<Utc>,
     size_bytes: u64,
+    /// Read from the file's own bytes, never its name or the config -- see
+    /// [`peek_encrypted`].
+    encrypted: bool,
 }
 
 /// Every archive of this instance in `destination`, newest first -- only
@@ -59,11 +64,27 @@ fn list_archives(destination: &Path, instance: &str) -> Vec<Found> {
             let name = entry.file_name().to_string_lossy().into_owned();
             let at = parse_archive_name(instance, &name)?;
             let meta = entry.metadata().ok().filter(|m| m.is_file())?;
-            Some(Found { name, at, size_bytes: meta.len() })
+            let encrypted = peek_encrypted(&entry.path(), &name);
+            Some(Found { name, at, size_bytes: meta.len(), encrypted })
         })
         .collect();
     found.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| b.name.cmp(&a.name)));
     found
+}
+
+/// Whether `path` is age-encrypted (`#152`): read from its own first bytes,
+/// never trusted from `name`'s suffix or the live config, so a renamed file
+/// or a config changed since it was written can never be misreported --
+/// falling back to the name only when the file itself could not even be
+/// opened, so a listing never wrongly calls an encrypted archive plain and
+/// so never asks nobody for the identity it actually needs.
+fn peek_encrypted(path: &Path, name: &str) -> bool {
+    use std::io::Read;
+    let mut header = [0u8; factory_core::backup::AGE_MAGIC.len()];
+    match std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut header)) {
+        Ok(()) => looks_encrypted(&header),
+        Err(_) => name.ends_with(ENCRYPTED_ARCHIVE_SUFFIX),
+    }
 }
 
 /// What retention says about each archive, in the same order. Days, weeks
@@ -131,16 +152,39 @@ fn deadlines(config: &BackupConfig, newest: DateTime<Utc>) -> (Option<DateTime<U
     }
 }
 
-/// Refuse at start a schedule the job could never fire, the same way an
-/// unregistered knowledge provider is refused there -- in front of whoever
-/// started the daemon, not as a `backup_failed` every minute afterwards.
-pub fn validate_schedule(factory: &Factory) -> Result<()> {
-    if let Some(schedule) = factory.config.infrastructure.backup.as_ref().and_then(|b| b.schedule.as_ref()) {
-        crate::schedule::next_after(&schedule.as_task_schedule(), Utc::now()).map_err(|e| {
-            FactoryError::BadRequest(format!("infrastructure.backup.schedule: {e}"))
-        })?;
+/// Refuse at start a schedule the job could never fire and an `encrypt_to`
+/// that is not a usable recipient, the same way an unregistered knowledge
+/// provider is refused there -- in front of whoever started the daemon, not
+/// as a `backup_failed` every minute (or every backup, `#152`) afterwards.
+/// `archive.rs`'s own verification calls this too, on a restored config.
+pub fn validate_config(factory: &Factory) -> Result<()> {
+    let Some(backup) = factory.config.infrastructure.backup.as_ref() else { return Ok(()) };
+    if let Some(schedule) = &backup.schedule {
+        crate::schedule::next_after(&schedule.as_task_schedule(), Utc::now())
+            .map_err(|e| FactoryError::BadRequest(format!("infrastructure.backup.schedule: {e}")))?;
+    }
+    if let Some(schedule) = &backup.verify_schedule {
+        crate::schedule::next_after(&schedule.as_task_schedule(), Utc::now())
+            .map_err(|e| FactoryError::BadRequest(format!("infrastructure.backup.verify_schedule: {e}")))?;
+    }
+    if let Some(encrypt_to) = &backup.encrypt_to {
+        parse_recipient(encrypt_to)?;
     }
     Ok(())
+}
+
+/// The one place `age::x25519::Recipient` is parsed from config (`#152`): a
+/// single native X25519 recipient only. An SSH public key or a plugin
+/// recipient (`age1yubikey1…`) fails the very same bech32 HRP check the
+/// `age` crate applies to a native one, so refusing them needs no
+/// special-casing here -- only a clearer message than the crate's own.
+pub fn parse_recipient(encrypt_to: &str) -> Result<age::x25519::Recipient> {
+    encrypt_to.parse::<age::x25519::Recipient>().map_err(|e| {
+        FactoryError::BadRequest(format!(
+            "infrastructure.backup.encrypt_to {encrypt_to:?} is not usable: {e} -- only a single native X25519 \
+             recipient (age1…) is supported; SSH and plugin recipients (age1yubikey1…, ssh-ed25519 …) are refused"
+        ))
+    })
 }
 
 impl Engine {
@@ -174,28 +218,69 @@ impl Engine {
         attempted.max(newest)
     }
 
+    /// `#156`: the newest verification recorded of any trigger -- a manual
+    /// verify satisfies a drill's own slot exactly as a manual backup
+    /// satisfies `last_attempt`'s. `None` before anything has ever been
+    /// verified, so the caller falls back to `booted_at`.
+    async fn last_verified_at(&self) -> Option<DateTime<Utc>> {
+        let recorded = self.backups.all().await.unwrap_or_default();
+        recorded
+            .iter()
+            .filter_map(|r| match r {
+                Recorded::Verified { verification } => Some(verification.at),
+                _ => None,
+            })
+            .max()
+    }
+
     /// `GET /api/backup`. Never fails for a destination that is missing or
     /// unreadable: that is a fact the report carries, and a warning.
     pub(crate) async fn backup_report(&self) -> Result<BackupReport> {
         let now = Utc::now();
         let factory = self.factory_snapshot();
+        // `#155`: gathered whether or not a backup is even configured --
+        // source code is backed up by pushing it, not by this snapshot --
+        // so both branches `report` handles carry them. Deliberately not
+        // part of `capture`: `backup_fact` (`#154`) must never spawn `git`
+        // or `tmutil`.
+        let (code, time_machine) = tokio::join!(
+            repos::repository_facts(&factory.root, &factory.config.scopes),
+            repos::time_machine_fact(),
+        );
+        let state = self.capture(now).await?;
+        Ok(report(&state, code, time_machine))
+    }
+
+    /// `#154`'s `BackupFact`, `at` bound to `now` -- the one L1 fact a
+    /// policy `daemon` check or a registry metric reads. Shares `capture`
+    /// with `backup_report`, but never the repository or Time Machine
+    /// probes above: this is the whole reason the two were split apart.
+    pub(crate) async fn backup_fact(&self, now: DateTime<Utc>) -> Result<BackupFact> {
+        let state = self.capture(now).await?;
+        Ok(fact(&state))
+    }
+
+    /// The one gather behind both `backup_report` and `backup_fact`: the
+    /// live config, whether an operation is already running, every
+    /// recorded `backup_events` row, and -- only when a backup is
+    /// configured -- the destination's own facts and its archive listing,
+    /// off-thread as today. `now` is a parameter so a metric's `as_of` and
+    /// a report's own clock are always the same instant this state was
+    /// gathered at.
+    async fn capture(&self, now: DateTime<Utc>) -> Result<Captured> {
+        let factory = self.factory_snapshot();
         let running = self.backup_busy.try_lock().is_err();
         let recorded = self.backups.all().await?;
         let Some(config) = factory.config.infrastructure.backup.clone() else {
-            return Ok(BackupReport {
+            return Ok(Captured {
                 now,
+                running,
+                recorded,
                 config: None,
                 destination: None,
-                age: AgeLevel::None,
-                due_by: None,
+                found: Vec::new(),
                 next_run: None,
-                running,
-                last_verified: None,
-                last_failure: None,
-                warnings: warnings(&WarningFacts::default()),
-                snapshots: Vec::new(),
-                include: include_rows(false, None),
-                exclude: exclude_rows(false),
+                next_verify: None,
             });
         };
 
@@ -207,92 +292,52 @@ impl Engine {
         .await
         .map_err(|e| FactoryError::Other(anyhow::anyhow!("listing the destination: {e}")))?;
 
-        let completed: Vec<&Snapshot> = recorded
-            .iter()
-            .filter_map(|r| match r {
-                Recorded::Completed { snapshot } => Some(snapshot),
-                _ => None,
-            })
-            .collect();
-        let verifications: Vec<&Verification> = recorded
-            .iter()
-            .filter_map(|r| match r {
-                Recorded::Verified { verification } => Some(verification),
-                _ => None,
-            })
-            .collect();
-        let kept = kept_by(&found, &config);
-        let snapshots: Vec<SnapshotRow> = found
-            .iter()
-            .zip(kept)
-            .map(|(f, kept_by)| SnapshotRow {
-                name: f.name.clone(),
-                at: f.at,
-                size_bytes: f.size_bytes,
-                files: completed.iter().find(|s| s.name == f.name).map(|s| s.files),
-                // Newest first, so the first one found is the latest word.
-                verified: verifications.iter().find(|v| v.snapshot == f.name).map(|v| v.summary()),
-                kept_by,
-                encrypted: false,
-            })
-            .collect();
-
-        let newest = snapshots.first().map(|s| s.at);
-        let (due_by, overdue_by) = match newest {
-            Some(at) => deadlines(&config, at),
-            None => (None, None),
-        };
-        let age = age_level(now, newest, due_by, overdue_by);
-        // Only verifications of archives still in the destination count: a
-        // pass on a snapshot since deleted proves nothing about what is left.
-        let last_verified: Option<VerifySummary> = verifications
-            .iter()
-            .find(|v| found.iter().any(|f| f.name == v.snapshot))
-            .map(|v| v.summary());
-        let last_failure: Option<BackupFailure> = recorded.iter().find_map(|r| match r {
-            Recorded::Failed { failure } => Some(failure.clone()),
-            _ => None,
-        });
         let next_run = match &config.schedule {
             Some(schedule) => {
-                let base = self.last_attempt(&factory, &config).await.unwrap_or(self.booted_at);
+                // The same "later of the newest attempt and the newest
+                // archive" `last_attempt` computes -- inlined against
+                // `recorded`/`found` already in hand, rather than a second
+                // `backups.all()` and a second `list_archives` over the
+                // same destination for the one gather this method promises.
+                let attempted = recorded
+                    .iter()
+                    .filter(|r| matches!(r, Recorded::Completed { .. } | Recorded::Failed { .. }))
+                    .map(|r| r.at())
+                    .max();
+                let base = attempted.max(found.first().map(|f| f.at)).unwrap_or(self.booted_at);
                 crate::schedule::next_after(&schedule.as_task_schedule(), base)
                     .ok()
                     .map(|next| next.max(now))
             }
             None => None,
         };
-        let warning_facts = WarningFacts {
-            configured: true,
-            destination: Some(facts.path.clone()),
-            destination_exists: facts.exists,
-            same_device: facts.same_device,
-            scheduled: config.schedule.is_some(),
-            newest,
-            age: Some(age),
-            last_verified: last_verified.as_ref().map(|v| (v.at, v.ok)),
-            failure_since_newest: last_failure
-                .as_ref()
-                .filter(|f| newest.is_none_or(|n| f.at > n))
-                .map(|f| (f.at, f.reason.clone())),
+
+        // `#156`: the drill's own next slot -- the same "inline against
+        // `recorded` already in hand" `next_run` follows above, so this
+        // gather still costs one `backups.all()`, not two.
+        let next_verify = match &config.verify_schedule {
+            Some(schedule) => {
+                let last_verified = recorded
+                    .iter()
+                    .filter_map(|r| match r {
+                        Recorded::Verified { verification } => Some(verification.at),
+                        _ => None,
+                    })
+                    .max();
+                let base = last_verified.unwrap_or(self.booted_at);
+                crate::schedule::next_after(&schedule.as_task_schedule(), base).ok().map(|next| next.max(now))
+            }
+            None => None,
         };
-        // The include table's numbers are the newest snapshot this daemon
-        // took itself: the one it has a manifest summary for.
-        let newest_taken = snapshots.first().and_then(|row| completed.iter().find(|s| s.name == row.name).copied());
-        Ok(BackupReport {
+        Ok(Captured {
             now,
-            include: include_rows(config.include_logs, newest_taken),
-            exclude: exclude_rows(config.include_logs),
+            running,
+            recorded,
             config: Some(config),
             destination: Some(facts),
-            age,
-            due_by,
+            found,
             next_run,
-            running,
-            last_verified,
-            last_failure,
-            warnings: warnings(&warning_facts),
-            snapshots,
+            next_verify,
         })
     }
 
@@ -362,11 +407,13 @@ impl Engine {
                 })
                 .collect(),
             include_logs: config.include_logs,
+            encrypt_to: config.encrypt_to.clone(),
         };
-        let name = factory_core::backup::archive_name(&factory.config.instance.name, at);
+        let name = factory_core::backup::archive_name(&factory.config.instance.name, at, config.encrypt_to.is_some());
         let destination = config.destination.clone();
         let config_destination = config.destination.clone();
         let instance = factory.config.instance.name.clone();
+        let encrypted_to = config.encrypt_to.clone();
         let config = config.clone();
         let started = std::time::Instant::now();
         let (taken, pruned) = tokio::task::spawn_blocking(move || -> Result<(archive::Taken, Vec<String>)> {
@@ -402,13 +449,38 @@ impl Engine {
             duration_ms: started.elapsed().as_millis() as u64,
             pruned,
             groups: taken.groups,
+            encrypted_to,
         })
     }
 
     /// Verify `snapshot`, or the newest. The result is recorded and
     /// published whether it passed or not; only a snapshot that cannot be
-    /// found, or a lock already held, is refused without a record.
-    pub(crate) async fn backup_verify(self: &Arc<Self>, snapshot: Option<String>, by: String) -> Result<Verification> {
+    /// found, a lock already held, or -- for an encrypted snapshot -- a
+    /// missing or unusable `identity` (`#152`), is refused without a record.
+    /// A `BadRequest` here is never a verdict about the archive: it is
+    /// refused before `archive::verify` runs at all.
+    pub(crate) async fn backup_verify(
+        self: &Arc<Self>,
+        snapshot: Option<String>,
+        identity: Option<PathBuf>,
+        by: String,
+    ) -> Result<Verification> {
+        self.backup_verify_at(snapshot, identity, by, Utc::now()).await
+    }
+
+    /// `backup_verify`, with the verification's own `at` supplied rather
+    /// than read off the clock. `#156`'s job loop passes its own tick's
+    /// `now` here, so a scheduled drill's `Recorded::Verified.at` -- and so
+    /// the next slot `next_after` computes from -- is exactly the clock a
+    /// test drives, never a race against real time. Every other caller goes
+    /// through `backup_verify` above, which is just this with `Utc::now()`.
+    async fn backup_verify_at(
+        self: &Arc<Self>,
+        snapshot: Option<String>,
+        identity: Option<PathBuf>,
+        by: String,
+        at: DateTime<Utc>,
+    ) -> Result<Verification> {
         let (factory, config) = self.backup_config()?;
         if let Some(name) = &snapshot {
             refuse_bad_snapshot_name(name)?;
@@ -426,34 +498,41 @@ impl Engine {
         })
         .await
         .unwrap_or_default();
-        let name = match snapshot {
-            Some(name) => found.iter().find(|f| f.name == name).map(|f| f.name.clone()).ok_or_else(|| {
+        let target = match snapshot {
+            Some(name) => found.iter().find(|f| f.name == name).cloned().ok_or_else(|| {
                 FactoryError::BadRequest(format!(
                     "no snapshot {name:?} in {}; `factory backup list` shows them",
                     destination.display()
                 ))
             })?,
-            None => found.first().map(|f| f.name.clone()).ok_or_else(|| {
+            None => found.first().cloned().ok_or_else(|| {
                 FactoryError::BadRequest(format!("there is no snapshot in {} to verify", destination.display()))
             })?,
         };
 
-        let at = Utc::now();
         let started = std::time::Instant::now();
-        let path: PathBuf = destination.join(&name);
+        let path: PathBuf = destination.join(&target.name);
         let instance_id = factory.config.instance.id.clone();
-        let checks = tokio::task::spawn_blocking(move || archive::verify(&path, &instance_id))
-            .await
-            .unwrap_or_else(|e| {
-                vec![factory_core::backup::VerifyCheck {
-                    name: "archive".into(),
-                    status: CheckStatus::Fail,
-                    detail: format!("the verification task stopped: {e}"),
-                }]
-            });
+        let root = factory.root.clone();
+        let encrypted = target.encrypted;
+        let name = target.name.clone();
+        let checks: Vec<VerifyCheck> = tokio::task::spawn_blocking(move || -> Result<Vec<VerifyCheck>> {
+            let owner_identity = match (encrypted, identity) {
+                (true, None) => {
+                    return Err(FactoryError::BadRequest(format!(
+                        "snapshot {name:?} is encrypted; run `factory backup verify {name} --identity <file>`"
+                    )))
+                }
+                (true, Some(path)) => Some(archive::OwnerIdentity::read(&path, &root)?),
+                (false, _) => None,
+            };
+            Ok(archive::verify(&path, &instance_id, owner_identity.as_ref()))
+        })
+        .await
+        .map_err(|e| FactoryError::adapter("backup", format!("the verification task stopped: {e}")))??;
         let verification = Verification {
             ok: !checks.iter().any(|c| c.status == CheckStatus::Fail),
-            snapshot: name,
+            snapshot: target.name,
             at,
             by,
             checks,
@@ -465,11 +544,82 @@ impl Engine {
         Ok(verification)
     }
 
+    /// `#156`: run a verification drill if `verify_schedule`'s own next slot
+    /// is due at `now`. Shares `backup_verify`'s `backup_busy` exclusion,
+    /// `backup_verified` event and row -- busy or no snapshot leave nothing
+    /// recorded, so the slot stays due and the next tick tries again. An
+    /// encrypted newest snapshot is checked here, directly off the listing,
+    /// rather than by matching `backup_verify_at`'s own refusal text: the
+    /// drill never holds an identity, so it never even attempts one, and
+    /// logs the skip once per slot rather than every tick. Never panics:
+    /// any other error `backup_verify_at` returns (busy, or anything else)
+    /// is logged and swallowed -- the job's whole promise.
+    async fn maybe_verify(self: &Arc<Self>, factory: &Factory, config: &BackupConfig, now: DateTime<Utc>) {
+        let Some(schedule) = &config.verify_schedule else {
+            self.clear_verify_skip();
+            return;
+        };
+        let base = self.last_verified_at().await.unwrap_or(self.booted_at);
+        let due = match crate::schedule::next_after(&schedule.as_task_schedule(), base) {
+            Ok(due) => due,
+            Err(e) => {
+                tracing::warn!("infrastructure.backup.verify_schedule: {e}");
+                return;
+            }
+        };
+        if due > now {
+            self.clear_verify_skip();
+            return;
+        }
+
+        let destination = config.destination.clone();
+        let instance = factory.config.instance.name.clone();
+        let found = tokio::task::spawn_blocking(move || list_archives(&destination, &instance)).await.unwrap_or_default();
+        let Some(newest) = found.first() else {
+            // No snapshot: nothing to verify, nothing recorded. The slot
+            // stays due, so the very next tick with a snapshot drills it.
+            self.clear_verify_skip();
+            return;
+        };
+        if newest.encrypted {
+            self.log_verify_skip_once(due, "newest snapshot is encrypted; verify it with --identity");
+            return;
+        }
+        self.clear_verify_skip();
+        if let Err(e) = self.backup_verify_at(None, None, "schedule".into(), now).await {
+            tracing::warn!("verification drill: {e}");
+        }
+    }
+
+    /// Log `reason` at most once for a given due `slot` -- otherwise an
+    /// encrypted newest snapshot with no identity would log the same line
+    /// on every tick for as long as it stays that way.
+    fn log_verify_skip_once(&self, slot: DateTime<Utc>, reason: &str) {
+        let mut state = self.verify_drill_skip.lock().unwrap_or_else(|p| p.into_inner());
+        let unchanged = state.as_ref().is_some_and(|(s, r)| *s == slot && r == reason);
+        if !unchanged {
+            tracing::info!("verification drill skipped: {reason}");
+        }
+        *state = Some((slot, reason.to_string()));
+    }
+
+    fn clear_verify_skip(&self) {
+        *self.verify_drill_skip.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
     /// Restore one named snapshot into a new root. Authorization makes this
     /// owner-only before it reaches here; the daemon supplies its active root
     /// so the archive layer can refuse aliases of the live instance. Unlike a
     /// backup or verify, restore never changes this instance's history.
-    pub(crate) async fn backup_restore(self: &Arc<Self>, snapshot: String, into: PathBuf) -> Result<Restoration> {
+    /// `identity` decrypts an encrypted snapshot (`#152`) -- missing or
+    /// unusable, restore is refused the same way verify is, before anything
+    /// is staged.
+    pub(crate) async fn backup_restore(
+        self: &Arc<Self>,
+        snapshot: String,
+        into: PathBuf,
+        identity: Option<PathBuf>,
+    ) -> Result<Restoration> {
         let (factory, config) = self.backup_config()?;
         refuse_bad_snapshot_name(&snapshot)?;
         let Ok(_busy) = self.backup_busy.try_lock() else {
@@ -485,30 +635,233 @@ impl Engine {
         })
         .await
         .unwrap_or_default();
-        if !found.iter().any(|f| f.name == snapshot) {
-            return Err(FactoryError::BadRequest(format!(
+        let target = found.iter().find(|f| f.name == snapshot).cloned().ok_or_else(|| {
+            FactoryError::BadRequest(format!(
                 "no snapshot {snapshot:?} in {}; `factory backup list` shows them",
                 destination.display()
-            )));
-        }
+            ))
+        })?;
 
         let started = std::time::Instant::now();
-        let archive_path = destination.join(&snapshot);
+        let archive_path = destination.join(&target.name);
         let instance_id = factory.config.instance.id.clone();
         let active_root = factory.root.clone();
-        let restored = tokio::task::spawn_blocking(move || {
-            archive::restore(&archive_path, &instance_id, &active_root, &into)
+        let root = factory.root.clone();
+        let encrypted = target.encrypted;
+        let name = target.name.clone();
+        let restored = tokio::task::spawn_blocking(move || -> Result<archive::Restored> {
+            let owner_identity = match (encrypted, identity) {
+                (true, None) => {
+                    return Err(FactoryError::BadRequest(format!(
+                        "snapshot {name:?} is encrypted; run `factory backup restore {name} --into <new-root> \
+                         --identity <file>`"
+                    )))
+                }
+                (true, Some(path)) => Some(archive::OwnerIdentity::read(&path, &root)?),
+                (false, _) => None,
+            };
+            archive::restore(&archive_path, &instance_id, &active_root, &into, owner_identity.as_ref())
         })
         .await
         .map_err(|e| FactoryError::adapter("backup", format!("the restore task stopped: {e}")))??;
         Ok(Restoration {
-            snapshot,
+            snapshot: target.name,
             into: restored.into.display().to_string(),
             files: restored.files,
             checks: restored.checks,
             duration_ms: started.elapsed().as_millis() as u64,
         })
     }
+}
+
+/// `Engine::capture`'s whole gather, shared by the `report` and `fact`
+/// projections below -- neither ever reads a file, the store or the clock
+/// again once this exists. `#155`'s repository and Time Machine probes are
+/// deliberately not here: `report` takes them as separate arguments, and
+/// `fact` never sees them at all.
+struct Captured {
+    now: DateTime<Utc>,
+    running: bool,
+    /// Every `backup_events` row: completed, failed and verified attempts.
+    recorded: Vec<Recorded>,
+    /// `None` when `infrastructure.backup` is not set.
+    config: Option<BackupConfig>,
+    /// `Some` exactly when `config` is -- the destination's own facts,
+    /// whether or not it turned out to exist.
+    destination: Option<DestinationFacts>,
+    /// Every archive of this instance found in the destination, newest
+    /// first. Empty when unconfigured or when the destination could not be
+    /// listed.
+    found: Vec<Found>,
+    next_run: Option<DateTime<Utc>>,
+    /// `#156`: the verification drill's own next slot -- `None` when
+    /// `verify_schedule` is not configured.
+    next_verify: Option<DateTime<Utc>>,
+}
+
+fn completed_of(recorded: &[Recorded]) -> Vec<&Snapshot> {
+    recorded
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Completed { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .collect()
+}
+
+fn verifications_of(recorded: &[Recorded]) -> Vec<&Verification> {
+    recorded
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Verified { verification } => Some(verification),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The newest verification of a snapshot still in the destination --
+/// `warnings`' and now `resolve_backup_fact`'s own rule: a pass on a
+/// snapshot retention has since deleted proves nothing about what is left.
+fn last_verified_of_present(verifications: &[&Verification], found: &[Found]) -> Option<VerifySummary> {
+    verifications.iter().find(|v| found.iter().any(|f| f.name == v.snapshot)).map(|v| v.summary())
+}
+
+/// `GET /api/backup`'s whole page, from a `Captured` state plus `#155`'s
+/// code and Time Machine facts (gathered separately, never part of
+/// `capture`). Byte-identical to the pre-`#154` `backup_report` for every
+/// existing case -- the split changed nothing about what the page shows.
+fn report(state: &Captured, code: Vec<RepositoryFact>, time_machine: TimeMachineFact) -> BackupReport {
+    let Some(config) = &state.config else {
+        return BackupReport {
+            now: state.now,
+            config: None,
+            destination: None,
+            age: AgeLevel::None,
+            due_by: None,
+            next_run: None,
+            next_verify: None,
+            verify_skipped: None,
+            running: state.running,
+            last_verified: None,
+            last_failure: None,
+            warnings: warnings(&WarningFacts {
+                code: code.clone(),
+                time_machine: Some(time_machine.clone()),
+                ..Default::default()
+            }),
+            snapshots: Vec::new(),
+            include: include_rows(false, None),
+            exclude: exclude_rows(false),
+            code,
+            time_machine: Some(time_machine),
+        };
+    };
+    let destination = state
+        .destination
+        .clone()
+        .expect("capture gathers destination facts whenever a backup is configured");
+
+    let completed = completed_of(&state.recorded);
+    let verifications = verifications_of(&state.recorded);
+    let kept = kept_by(&state.found, config);
+    let snapshots: Vec<SnapshotRow> = state
+        .found
+        .iter()
+        .zip(kept)
+        .map(|(f, kept_by)| SnapshotRow {
+            name: f.name.clone(),
+            at: f.at,
+            size_bytes: f.size_bytes,
+            files: completed.iter().find(|s| s.name == f.name).map(|s| s.files),
+            // Newest first, so the first one found is the latest word.
+            verified: verifications.iter().find(|v| v.snapshot == f.name).map(|v| v.summary()),
+            kept_by,
+            encrypted: f.encrypted,
+        })
+        .collect();
+
+    let newest = snapshots.first().map(|s| s.at);
+    let newest_encrypted = snapshots.first().is_some_and(|s| s.encrypted);
+    let (due_by, overdue_by) = match newest {
+        Some(at) => deadlines(config, at),
+        None => (None, None),
+    };
+    let age = age_level(state.now, newest, due_by, overdue_by);
+    let last_verified = last_verified_of_present(&verifications, &state.found);
+    let last_failure: Option<BackupFailure> = state.recorded.iter().find_map(|r| match r {
+        Recorded::Failed { failure } => Some(failure.clone()),
+        _ => None,
+    });
+    let warning_facts = WarningFacts {
+        configured: true,
+        destination: Some(destination.path.clone()),
+        destination_exists: destination.exists,
+        same_device: destination.same_device,
+        scheduled: config.schedule.is_some(),
+        newest,
+        age: Some(age),
+        last_verified: last_verified.as_ref().map(|v| (v.at, v.ok)),
+        failure_since_newest: last_failure
+            .as_ref()
+            .filter(|f| newest.is_none_or(|n| f.at > n))
+            .map(|f| (f.at, f.reason.clone())),
+        newest_encrypted,
+        code: code.clone(),
+        time_machine: Some(time_machine.clone()),
+    };
+    // The include table's numbers are the newest snapshot this daemon took
+    // itself: the one it has a manifest summary for.
+    let newest_taken = snapshots.first().and_then(|row| completed.iter().find(|s| s.name == row.name).copied());
+    // `#156`: a plain projection of the same `newest_encrypted` fact the
+    // warnings strip already reads -- never the job loop's own
+    // `verify_drill_skip` state, which only throttles how often it logs and
+    // would otherwise make this field stale for up to a tick after the
+    // config or the destination changes.
+    let verify_skipped = (config.verify_schedule.is_some() && newest_encrypted)
+        .then(|| "newest snapshot is encrypted; verify it with --identity".to_string());
+    BackupReport {
+        now: state.now,
+        include: include_rows(config.include_logs, newest_taken),
+        exclude: exclude_rows(config.include_logs),
+        config: Some(config.clone()),
+        destination: Some(destination),
+        age,
+        due_by,
+        next_run: state.next_run,
+        next_verify: state.next_verify,
+        verify_skipped,
+        running: state.running,
+        last_verified,
+        last_failure,
+        warnings: warnings(&warning_facts),
+        snapshots,
+        code,
+        time_machine: Some(time_machine),
+    }
+}
+
+/// `#154`'s `BackupFact`, from the same `Captured` state -- never the
+/// repository or Time Machine probes `report` takes as extra arguments:
+/// this is the whole reason a policy report or a metric call, which only
+/// ever wants this projection, never spawns `git` or `tmutil`.
+fn fact(state: &Captured) -> BackupFact {
+    let configured = state.config.is_some();
+    let destination_exists = state.destination.as_ref().is_some_and(|d| d.exists);
+    let same_device = state.destination.as_ref().and_then(|d| d.same_device);
+    let (newest, age, last_verified) = if let (Some(config), true) = (&state.config, destination_exists) {
+        let newest = state.found.first().map(|f| f.at);
+        let (due_by, overdue_by) = match newest {
+            Some(at) => deadlines(config, at),
+            None => (None, None),
+        };
+        let age = age_level(state.now, newest, due_by, overdue_by);
+        let verifications = verifications_of(&state.recorded);
+        let last_verified = last_verified_of_present(&verifications, &state.found);
+        (newest, age, last_verified)
+    } else {
+        (None, AgeLevel::None, None)
+    };
+    resolve_backup_fact(state.now, configured, destination_exists, same_device, newest, age, last_verified)
 }
 
 /// The include table: the database, the configs, every authored directory,
@@ -560,10 +913,16 @@ fn exclude_rows(include_logs: bool) -> Vec<ExcludeRow> {
 }
 
 /// The daemon job: once a minute, take a backup if the schedule says one is
-/// due. Due is counted from the later of the newest attempt and the newest
-/// archive, so a daemon that was down at 03:00 takes the night's backup as
-/// soon as it is back, exactly once -- the same "survives a missed night"
-/// a scheduled task gets. With no schedule configured this does nothing.
+/// due, then -- `#156` -- run a verification drill if `verify_schedule`'s
+/// own schedule says one is. Each is counted from its own base: a backup
+/// from the later of the newest attempt and the newest archive, a drill
+/// from the newest verification recorded of any trigger; either falls back
+/// to when the daemon booted if there is nothing yet. So a daemon that was
+/// down across several slots catches up exactly once for each, the same
+/// "survives a missed night" a scheduled task gets. When a backup is also
+/// due, it runs first and the drill waits for a later tick, so it never
+/// verifies a snapshot mid-write. With neither configured this does
+/// nothing.
 pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     let mut ticker = tokio::time::interval(JOB_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -574,29 +933,41 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 if *shutdown.borrow() { return; }
             }
         }
-        let factory = engine.factory_snapshot();
-        let Some(config) = factory.config.infrastructure.backup.clone() else { continue };
-        let Some(schedule) = config.schedule.clone() else { continue };
-        let base = engine.last_attempt(&factory, &config).await.unwrap_or(engine.booted_at);
-        let due = match crate::schedule::next_after(&schedule.as_task_schedule(), base) {
-            Ok(due) => due,
-            Err(e) => {
-                tracing::warn!("infrastructure.backup.schedule: {e}");
-                continue;
-            }
-        };
-        if due > Utc::now() {
-            continue;
-        }
-        // Busy (a person's backup operation) is not a failure: the
-        // next tick looks again.
-        if engine.backup_busy.try_lock().is_err() {
-            continue;
-        }
-        // Its failures are recorded, published and logged inside; nothing
-        // here can take the daemon down.
-        let _ = engine.backup_run(BackupTrigger::Schedule, "schedule".into()).await;
+        tick(&engine, Utc::now()).await;
     }
+}
+
+/// One tick of [`run`]'s loop, `now` passed in rather than read off the
+/// clock so a test can drive it directly instead of waiting on real time.
+/// Never takes the daemon down: every failure below is logged and
+/// swallowed, the same promise `backup_run`'s and `backup_verify`'s own
+/// callers already keep.
+async fn tick(engine: &Arc<Engine>, now: DateTime<Utc>) {
+    let factory = engine.factory_snapshot();
+    let Some(config) = factory.config.infrastructure.backup.clone() else { return };
+
+    if let Some(schedule) = &config.schedule {
+        let base = engine.last_attempt(&factory, &config).await.unwrap_or(engine.booted_at);
+        match crate::schedule::next_after(&schedule.as_task_schedule(), base) {
+            Ok(due) if due <= now => {
+                // Busy (a person's backup operation) is not a failure: the
+                // next tick looks again, and the drill waits for it too.
+                if engine.backup_busy.try_lock().is_err() {
+                    return;
+                }
+                // Its failures are recorded, published and logged inside;
+                // nothing here can take the daemon down.
+                let _ = engine.backup_run(BackupTrigger::Schedule, "schedule".into()).await;
+                // The drill runs on a later tick, against the fresh
+                // snapshot this one just took.
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("infrastructure.backup.schedule: {e}"),
+        }
+    }
+
+    engine.maybe_verify(&factory, &config, now).await;
 }
 
 #[cfg(test)]
@@ -606,6 +977,50 @@ mod tests {
 
     fn config(yaml: &str) -> BackupConfig {
         serde_yaml_ng::from_str(yaml).unwrap()
+    }
+
+    /// `#152`: `parse_recipient` is the one place the `age` crate actually
+    /// parses `encrypt_to` -- `factory_core::backup::BackupConfig::validate`
+    /// stays dependency-free and accepts any non-empty string, so this is
+    /// the only test proving an SSH or plugin recipient is truly refused,
+    /// not just deferred to nowhere.
+    #[test]
+    fn parse_recipient_accepts_only_a_native_x25519_recipient() {
+        let recipient = age::x25519::Identity::generate().to_public().to_string();
+        parse_recipient(&recipient).unwrap();
+
+        let ssh = parse_recipient("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogusnotarealkeyatall").unwrap_err();
+        assert!(ssh.to_string().contains("encrypt_to"), "{ssh}");
+
+        // A plugin recipient's HRP is "age1<plugin-name>", never bare "age" --
+        // the same bech32 check that accepts a native recipient refuses this
+        // without any special-casing.
+        let plugin = parse_recipient("age1yubikey1qtn67d3z5jnzq2crf0zgz2u9r5c9z9x8g3p3f9x7hqjxdq0h4z0").unwrap_err();
+        assert!(plugin.to_string().contains("encrypt_to"), "{plugin}");
+
+        let garbage = parse_recipient("age1not-a-real-recipient").unwrap_err();
+        assert!(garbage.to_string().contains("encrypt_to"), "{garbage}");
+    }
+
+    /// The daemon-start refusal in practice: `main.rs` calls `validate_config`
+    /// on the live config before the daemon does anything else, and it must
+    /// reject a config asking to encrypt to something that is not a native
+    /// recipient just as reliably as it already rejects an unfireable cron
+    /// expression.
+    #[tokio::test]
+    async fn validate_config_refuses_a_bad_recipient_the_same_way_it_refuses_a_bad_schedule() {
+        let (engine, base) = engine_backing_up("{ daily: 7 }", "destination");
+        let mut factory = engine.factory_snapshot();
+        factory.config.infrastructure.backup.as_mut().unwrap().encrypt_to =
+            Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBogusnotarealkeyatall".into());
+        let e = validate_config(&factory).unwrap_err();
+        assert!(e.to_string().contains("encrypt_to"), "{e}");
+
+        let (_, recipient) = generated_identity();
+        factory.config.infrastructure.backup.as_mut().unwrap().encrypt_to = Some(recipient);
+        validate_config(&factory).unwrap();
+
+        std::fs::remove_dir_all(base).ok();
     }
 
     /// A throwaway instance with a real database file, its root scope's own
@@ -647,6 +1062,477 @@ mod tests {
         (Arc::new(engine), base)
     }
 
+    /// `engine_backing_up`, with `infrastructure.backup.encrypt_to` set to
+    /// `recipient` (`#152`) -- for the engine-level round trip through
+    /// `backup_run`/`backup_verify`/`backup_restore`, not just `archive.rs`'s
+    /// own unit tests.
+    fn engine_backing_up_encrypted(keep: &str, destination: &str, recipient: &str) -> (Arc<Engine>, PathBuf) {
+        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_plugins::{Registry, SqliteStore};
+        let base = std::env::temp_dir().join(format!("factory-backup-encrypted-engine-{}", uuid::Uuid::new_v4()));
+        let root = base.join("instance");
+        std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
+        std::fs::write(root.join(".factory/config.yaml"), "version: 1\ninstance:\n  id: test\n  name: test\n").unwrap();
+        std::fs::write(root.join(".factory/knowledge/page.md"), "# A page\n").unwrap();
+        std::fs::write(root.join(".factory/secrets.yaml"), "api: hunter2-secret-marker").unwrap();
+        let database = root.join(".factory/factory.sqlite");
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
+        let mut company: factory_core::config::Scope =
+            serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let destination = base.join(destination);
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: serde_yaml_ng::from_str(&format!(
+                "backup:\n  destination: {}\n  keep: {keep}\n  encrypt_to: {recipient}\n",
+                destination.display()
+            ))
+            .unwrap(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
+            .with_backup_store(BackupStore::open(&database).unwrap());
+        (Arc::new(engine), base)
+    }
+
+    /// A generated age identity, written to its own file directly under the
+    /// OS temp directory (never inside an instance's own `.factory/`, and
+    /// independent of any one engine's own temp `base`, since the recipient
+    /// has to exist before a config naming it can be built), plus its public
+    /// recipient. The caller removes the file when it is done with it.
+    fn generated_identity() -> (PathBuf, String) {
+        use age::secrecy::ExposeSecret;
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+        let path = std::env::temp_dir().join(format!("factory-backup-identity-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&path, identity.to_string().expose_secret()).unwrap();
+        (path, recipient)
+    }
+
+    /// A fixed instant, so a job-loop test's own math never depends on when
+    /// the test happened to run.
+    fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
+    }
+
+    /// `engine_backing_up`, plus `verify_schedule` (and, optionally,
+    /// `encrypt_to`) and a `booted_at` fixed at construction rather than at
+    /// whatever instant the test happened to run -- `#156`'s own fixture for
+    /// the drill's job-loop tests, so `tick`'s due/catch-up math is exact
+    /// date arithmetic, never a race against real time.
+    fn engine_with_drill(
+        keep: &str,
+        destination: &str,
+        verify_cron: &str,
+        encrypt_to: Option<&str>,
+        booted_at: DateTime<Utc>,
+    ) -> (Arc<Engine>, PathBuf) {
+        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_plugins::{Registry, SqliteStore};
+        let base = std::env::temp_dir().join(format!("factory-backup-drill-engine-{}", uuid::Uuid::new_v4()));
+        let root = base.join("instance");
+        std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
+        std::fs::write(root.join(".factory/config.yaml"), "version: 1\ninstance:\n  id: test\n  name: test\n").unwrap();
+        std::fs::write(root.join(".factory/knowledge/page.md"), "# A page\n").unwrap();
+        let database = root.join(".factory/factory.sqlite");
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
+        let mut company: factory_core::config::Scope =
+            serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let destination = base.join(destination);
+        let encrypt_line = encrypt_to.map(|r| format!("\n  encrypt_to: {r}")).unwrap_or_default();
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: serde_yaml_ng::from_str(&format!(
+                "backup:\n  destination: {}\n  keep: {keep}\n  verify_schedule: {{ cron: \"{verify_cron}\" }}{encrypt_line}\n",
+                destination.display()
+            ))
+            .unwrap(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let mut engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
+            .with_backup_store(BackupStore::open(&database).unwrap());
+        engine.booted_at = booted_at;
+        (Arc::new(engine), base)
+    }
+
+    /// `#156`: a due slot with a snapshot already in the destination records
+    /// exactly one `Verified { by: "schedule" }` row and a `backup_verified`
+    /// event, and never rewrites the archive.
+    #[tokio::test]
+    async fn a_due_drill_records_exactly_one_verified_by_schedule_and_leaves_the_archive_untouched() {
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
+        let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        let mut events = engine.bus.subscribe();
+        let path = PathBuf::from(&snapshot.path);
+        let before_bytes = std::fs::read(&path).unwrap();
+        let before_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let now = booted_at + Duration::minutes(2);
+        tick(&engine, now).await;
+
+        assert!(matches!(events.recv().await.unwrap(), Event::BackupVerified { .. }));
+        let verified: Vec<Verification> = engine
+            .backups
+            .all()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r {
+                Recorded::Verified { verification } => Some(verification),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verified.len(), 1, "{verified:?}");
+        assert_eq!(verified[0].by, "schedule");
+        assert_eq!(verified[0].at, now, "the drill's own clock, never the wall clock");
+        assert_eq!(verified[0].snapshot, snapshot.name);
+
+        assert_eq!(std::fs::read(&path).unwrap(), before_bytes, "a drill never rewrites the archive");
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before_mtime);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A second tick in the same due slot drills nothing more: the first
+    /// tick's own `Verified` already moved the base past it.
+    #[tokio::test]
+    async fn a_second_tick_in_the_same_slot_drills_nothing_more() {
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
+        engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        let now = booted_at + Duration::minutes(2);
+        tick(&engine, now).await;
+        let after_first = engine.backups.all().await.unwrap().len();
+        tick(&engine, now).await;
+        assert_eq!(engine.backups.all().await.unwrap().len(), after_first, "the same due slot drills only once");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A manual verify satisfies the drill's own slot, and catch-up drills
+    /// exactly once regardless of how many slots were missed -- never one
+    /// per missed slot.
+    #[tokio::test]
+    async fn a_manual_verify_satisfies_the_slot_and_catch_up_drills_exactly_once() {
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
+        let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        let now = booted_at + Duration::minutes(5);
+        engine
+            .backups
+            .append(Recorded::Verified {
+                verification: Verification {
+                    snapshot: snapshot.name.clone(),
+                    at: now - Duration::minutes(3),
+                    by: "owner".into(),
+                    ok: true,
+                    checks: vec![],
+                    duration_ms: 0,
+                },
+            })
+            .await
+            .unwrap();
+
+        tick(&engine, now).await;
+        let verified_count =
+            engine.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
+        assert_eq!(verified_count, 2, "the seeded manual verify, plus exactly one catch-up drill");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// Busy (a person's own backup operation) is not a failure: the drill
+    /// records nothing and the next tick runs it.
+    #[tokio::test]
+    async fn a_busy_drill_is_skipped_and_the_next_tick_runs_it() {
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
+        engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        let now = booted_at + Duration::minutes(2);
+
+        let guard = engine.backup_busy.lock().await;
+        tick(&engine, now).await;
+        assert!(
+            !engine.backups.all().await.unwrap().iter().any(|r| matches!(r, Recorded::Verified { .. })),
+            "busy: nothing recorded"
+        );
+        drop(guard);
+
+        tick(&engine, now).await;
+        let verified_count =
+            engine.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
+        assert_eq!(verified_count, 1);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// An empty destination records nothing -- the slot stays due -- and a
+    /// backup taken afterward makes the next tick drill exactly once.
+    #[tokio::test]
+    async fn no_snapshot_yet_leaves_the_slot_due_until_a_backup_exists() {
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
+        let now = booted_at + Duration::minutes(2);
+
+        tick(&engine, now).await;
+        assert!(engine.backups.all().await.unwrap().is_empty(), "no snapshot: nothing recorded");
+
+        engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        tick(&engine, now).await;
+        let verified_count =
+            engine.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
+        assert_eq!(verified_count, 1);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A corrupted archive is recorded `ok: false`, exactly like a manual
+    /// verify's own failure, and the loop keeps drilling on later slots.
+    #[tokio::test]
+    async fn a_corrupted_archive_drill_records_ok_false_and_the_next_slot_still_drills() {
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
+        let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        let mut bytes = std::fs::read(&snapshot.path).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xff;
+        std::fs::write(&snapshot.path, &bytes).unwrap();
+
+        let now = booted_at + Duration::minutes(2);
+        tick(&engine, now).await;
+        let recorded = engine.backups.all().await.unwrap();
+        let first = recorded
+            .iter()
+            .find_map(|r| match r { Recorded::Verified { verification } => Some(verification), _ => None })
+            .unwrap();
+        assert!(!first.ok, "{:?}", first.checks);
+        assert_eq!(first.by, "schedule");
+
+        // The loop keeps going: the next slot still drills.
+        tick(&engine, now + Duration::minutes(1)).await;
+        let verified_count =
+            engine.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
+        assert_eq!(verified_count, 2);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// An encrypted newest snapshot is a skip, never a record: the drill
+    /// never holds an identity. The report names the reason regardless of
+    /// ticking (a plain projection of the live facts), and the job's own
+    /// skip tracker moves only when the due slot changes, so the log is not
+    /// spammed every tick.
+    #[tokio::test]
+    async fn an_encrypted_newest_snapshot_is_skipped_and_the_report_names_the_reason() {
+        let (_, recipient) = generated_identity();
+        let booted_at = dt(2026, 1, 1, 0, 0);
+        let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", Some(&recipient), booted_at);
+        engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+
+        let report = engine.backup_report().await.unwrap();
+        assert_eq!(
+            report.verify_skipped.as_deref(),
+            Some("newest snapshot is encrypted; verify it with --identity")
+        );
+        assert!(report.next_verify.is_some());
+
+        let now = booted_at + Duration::minutes(2);
+        assert_eq!(*engine.verify_drill_skip.lock().unwrap(), None);
+        tick(&engine, now).await;
+        assert!(
+            !engine.backups.all().await.unwrap().iter().any(|r| matches!(r, Recorded::Verified { .. })),
+            "an encrypted snapshot with no identity is refused, never recorded"
+        );
+        let logged = engine.verify_drill_skip.lock().unwrap().clone();
+        assert!(logged.is_some(), "the skip is tracked so the job logs it only once per slot");
+
+        // Ticking again in the same slot must not move the tracked slot.
+        tick(&engine, now).await;
+        assert_eq!(engine.verify_drill_skip.lock().unwrap().clone(), logged);
+
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A config with no `verify_schedule` round-trips with no drill
+    /// scheduled -- `next_verify`/`verify_skipped` are both `None`, and
+    /// every existing backup-only behaviour is unchanged.
+    #[tokio::test]
+    async fn a_config_without_verify_schedule_round_trips_with_no_drill_scheduled() {
+        let (engine, base) = engine_backing_up("{ daily: 7 }", "destination");
+        let report = engine.backup_report().await.unwrap();
+        assert_eq!(report.next_verify, None);
+        assert_eq!(report.verify_skipped, None);
+        assert_eq!(report.config.as_ref().unwrap().verify_schedule, None);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// The daemon-start refusal covers `verify_schedule` exactly like
+    /// `schedule`: an unfireable cron is refused before the daemon does
+    /// anything else, never discovered a minute later as a warning log.
+    #[tokio::test]
+    async fn validate_config_refuses_an_unfireable_verify_schedule_the_same_way_it_refuses_a_bad_backup_schedule() {
+        let (engine, base) = engine_backing_up("{ daily: 7 }", "destination");
+        let mut factory = engine.factory_snapshot();
+        factory.config.infrastructure.backup.as_mut().unwrap().verify_schedule =
+            Some(factory_core::backup::BackupSchedule { cron: "not a cron".into(), timezone: None });
+        let e = validate_config(&factory).unwrap_err();
+        assert!(e.to_string().contains("verify_schedule"), "{e}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// `engine_backing_up`, plus a `dsgvo` catalogue naming `backup_verified`
+    /// and `backup_offsite` -- `#154`'s engine test needs a real policy
+    /// report to prove the lazy evidence wiring end to end, not just
+    /// `resolve_backup_fact` on its own.
+    fn engine_backing_up_with_backup_policy(keep: &str, destination: &str) -> (Arc<Engine>, PathBuf) {
+        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_plugins::{Registry, SqliteStore};
+        let base = std::env::temp_dir().join(format!("factory-backup-policy-engine-{}", uuid::Uuid::new_v4()));
+        let root = base.join("instance");
+        std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(root.join(".factory/config.yaml"), "version: 1\ninstance:\n  id: test\n  name: test\n").unwrap();
+        std::fs::write(root.join(".factory/knowledge/page.md"), "# A page\n").unwrap();
+        std::fs::write(
+            root.join(".factory/policies/dsgvo.yaml"),
+            "framework: dsgvo\n\
+             title: DSGVO\n\
+             kind: regulation\n\
+             controls:\n\
+             \x20\x20- id: art-32-restore\n\x20\x20\x20\x20title: Availability can be restored\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: daemon\n\x20\x20\x20\x20\x20\x20\x20\x20fact: backup_verified\n\
+             \x20\x20- id: art-32-offsite\n\x20\x20\x20\x20title: Offsite copy\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: daemon\n\x20\x20\x20\x20\x20\x20\x20\x20fact: backup_offsite\n",
+        )
+        .unwrap();
+        let database = root.join(".factory/factory.sqlite");
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
+        let mut company: factory_core::config::Scope =
+            serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let destination = base.join(destination);
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration { frameworks: vec!["dsgvo".to_string()], ..Default::default() },
+            quality: Default::default(),
+            infrastructure: serde_yaml_ng::from_str(&format!(
+                "backup:\n  destination: {}\n  keep: {keep}\n",
+                destination.display()
+            ))
+            .unwrap(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
+            .with_backup_store(BackupStore::open(&database).unwrap());
+        (Arc::new(engine), base)
+    }
+
+    /// `#154`, end to end: back up and verify, then a policy report's
+    /// `daemon: backup_verified` control reads `Satisfied` and its
+    /// `backup_offsite` control stays `Open` -- the temp destination sits
+    /// beside the instance, so it is not offsite.
+    #[tokio::test]
+    async fn backup_and_verify_satisfy_a_backup_verified_control_and_leave_backup_offsite_open() {
+        let (engine, base) = engine_backing_up_with_backup_policy("{ daily: 7 }", "destination");
+        engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        engine.backup_verify(None, None, "owner".into()).await.unwrap();
+
+        let report = engine.policy_report(None).await.unwrap();
+        let company = &report.rows.iter().find(|r| r.scope == "company").unwrap().statuses;
+
+        let verified = company.iter().find(|s| s.control.id == "art-32-restore").unwrap();
+        assert_eq!(
+            verified.status.kind(),
+            factory_core::policy::StatusKind::Satisfied,
+            "{:?}",
+            verified.status
+        );
+
+        let offsite = company.iter().find(|s| s.control.id == "art-32-offsite").unwrap();
+        assert_eq!(
+            offsite.status.kind(),
+            factory_core::policy::StatusKind::Open,
+            "the temp destination is on the same device as the instance: {:?}",
+            offsite.status
+        );
+
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// `#155`, end to end through the engine: a scope's remote can carry a
+    /// token, and it must never survive onto the wire `GET /api/backup`
+    /// answers with -- only the redacted URL, and only for the tracked row.
+    #[tokio::test]
+    async fn a_secret_in_a_scopes_remote_never_reaches_the_serialized_report() {
+        async fn run(dir: &Path, args: &[&str]) {
+            assert!(
+                tokio::process::Command::new("git").args(args).current_dir(dir).status().await.unwrap().success(),
+                "git {args:?} in {}",
+                dir.display()
+            );
+        }
+        async fn output(dir: &Path, args: &[&str]) -> String {
+            let out = tokio::process::Command::new("git").args(args).current_dir(dir).output().await.unwrap();
+            assert!(out.status.success(), "git {args:?} in {}", dir.display());
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        let (engine, base) = engine_backing_up("{ daily: 7 }", "destination");
+        let root = engine.factory_snapshot().root;
+        run(&root, &["init", "-q"]).await;
+        run(&root, &["config", "user.email", "factory@example.com"]).await;
+        run(&root, &["config", "user.name", "factory"]).await;
+        run(&root, &["add", "-A"]).await;
+        run(&root, &["commit", "-q", "-m", "base"]).await;
+        run(&root, &["remote", "add", "origin", "https://x-access-token:SECRET-TOKEN@github.com/o/r.git"]).await;
+        // Plant the remote-tracking ref at the current commit and set the
+        // upstream directly -- never fetching -- then commit once more so
+        // `ahead == 1` without this probe ever contacting the remote.
+        let head_sha = output(&root, &["rev-parse", "HEAD"]).await;
+        let branch = output(&root, &["symbolic-ref", "--short", "HEAD"]).await;
+        let tracking_ref = format!("refs/remotes/origin/{branch}");
+        run(&root, &["update-ref", tracking_ref.as_str(), head_sha.as_str()]).await;
+        let upstream = format!("origin/{branch}");
+        run(&root, &["branch", "--set-upstream-to", upstream.as_str()]).await;
+        run(&root, &["commit", "-q", "--allow-empty", "-m", "second"]).await;
+
+        let report = engine.backup_report().await.unwrap();
+        let repo = report
+            .code
+            .iter()
+            .find(|f| f.scopes.iter().any(|s| s == "company"))
+            .expect("the company scope's repository fact");
+        match &repo.state {
+            factory_core::backup::RepositoryState::Tracked { ahead, .. } => assert_eq!(*ahead, 1, "{repo:?}"),
+            other => panic!("expected Tracked, got {other:?}"),
+        }
+        assert_eq!(repo.remote_url.as_deref(), Some("https://github.com/o/r.git"));
+
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("SECRET-TOKEN"), "a secret in a remote reached the wire: {json}");
+        assert!(json.contains("https://github.com/o/r.git"), "the redacted url should still be on the wire: {json}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
     /// The whole v1 path through the engine: run, list, verify, and the
     /// events a watcher sees -- then retention after a second backup.
     #[tokio::test]
@@ -674,7 +1560,7 @@ mod tests {
         let knowledge = report.include.iter().find(|r| r.path == ".factory/knowledge/").unwrap();
         assert_eq!(knowledge.files, Some(1));
 
-        let verification = engine.backup_verify(None, "owner".into()).await.unwrap();
+        let verification = engine.backup_verify(None, None, "owner".into()).await.unwrap();
         assert!(verification.ok, "{:?}", verification.checks);
         assert_eq!(verification.snapshot, first.name);
         assert!(matches!(events.recv().await.unwrap(), Event::BackupVerified { .. }));
@@ -691,7 +1577,7 @@ mod tests {
         assert_eq!(report.snapshots.len(), 1);
         assert_eq!(report.last_verified, None, "the verified snapshot is gone, so nothing verified is left");
 
-        let e = engine.backup_verify(Some("../etc.tar.zst".into()), "owner".into()).await.unwrap_err();
+        let e = engine.backup_verify(Some("../etc.tar.zst".into()), None, "owner".into()).await.unwrap_err();
         assert!(e.to_string().contains("not a snapshot name"), "{e}");
         std::fs::remove_dir_all(base).ok();
     }
@@ -708,6 +1594,143 @@ mod tests {
         let report = engine.backup_report().await.unwrap();
         assert_eq!(report.last_failure.as_ref().map(|f| f.trigger), Some(BackupTrigger::Schedule));
         assert!(report.warnings.iter().any(|w| w.kind == "last_failed"));
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// The failure-cleanup path is shared code regardless of encryption, but
+    /// `#152` adds a new writer in front of it -- prove an encrypted backup
+    /// against an unmounted destination is still a clean, recorded failure,
+    /// never a partial `.age` file or a plaintext one left anywhere.
+    #[tokio::test]
+    async fn a_failed_encrypted_backup_is_recorded_and_leaves_the_destination_empty() {
+        let (_, recipient) = generated_identity();
+        let (engine, base) = engine_backing_up_encrypted("{ daily: 7 }", "unmounted/volume", &recipient);
+        let mut events = engine.bus.subscribe();
+        let e = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap_err();
+        assert!(e.to_string().contains("mounted"), "{e}");
+        assert!(matches!(events.recv().await.unwrap(), Event::BackupFailed { .. }));
+        let report = engine.backup_report().await.unwrap();
+        assert!(report.warnings.iter().any(|w| w.kind == "last_failed"));
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// `#152`, end to end through the engine: an encrypted backup names only
+    /// `.age` archives, verifying it needs the matching identity or is
+    /// refused before anything is recorded, a wrong identity still records a
+    /// failed `decrypt` check, and restore follows the same rule -- and
+    /// nowhere in any of it, including the serialized wire shapes and the
+    /// published events, does the identity's own secret ever appear.
+    #[tokio::test]
+    async fn an_encrypted_backup_round_trips_through_the_engine_and_never_leaks_its_identity() {
+        let (identity_path, recipient) = generated_identity();
+        let (engine, base) = engine_backing_up_encrypted("{ daily: 7 }", "destination", &recipient);
+        let mut events = engine.bus.subscribe();
+
+        let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        assert!(snapshot.name.ends_with(".tar.zst.age"), "{}", snapshot.name);
+        assert_eq!(snapshot.encrypted_to.as_deref(), Some(recipient.as_str()));
+        assert!(matches!(events.recv().await.unwrap(), Event::BackupCompleted { .. }));
+
+        // No plaintext byte anywhere in the destination.
+        let archive_path = std::path::PathBuf::from(&snapshot.path);
+        let bytes = std::fs::read(&archive_path).unwrap();
+        assert!(factory_core::backup::looks_encrypted(&bytes));
+        let haystack = String::from_utf8_lossy(&bytes);
+        assert!(!haystack.contains("hunter2-secret-marker"), "the secret reached the destination");
+        assert!(!haystack.contains(factory_core::backup::MANIFEST_FILE));
+
+        let report = engine.backup_report().await.unwrap();
+        assert_eq!(report.snapshots.len(), 1);
+        assert!(report.snapshots[0].encrypted, "encrypted is read from the archive's own bytes");
+        assert!(
+            report.warnings.iter().any(|w| w.kind == "never_verified" && w.message.contains("--identity")),
+            "{:?}",
+            report.warnings
+        );
+
+        // No identity: refused, and nothing recorded -- neither a store row
+        // nor a published event.
+        let before = engine.backups.all().await.unwrap().len();
+        let refused = engine.backup_verify(None, None, "owner".into()).await.unwrap_err();
+        assert!(refused.to_string().contains("--identity"), "{refused}");
+        assert_eq!(engine.backups.all().await.unwrap().len(), before, "a refusal records nothing");
+
+        // The right identity: verifies clean, decrypt named in the checks.
+        let verification =
+            engine.backup_verify(None, Some(identity_path.clone()), "owner".into()).await.unwrap();
+        assert!(verification.ok, "{:?}", verification.checks);
+        assert!(verification.checks.iter().any(|c| c.name == "decrypt" && c.status == CheckStatus::Ok));
+        assert!(matches!(events.recv().await.unwrap(), Event::BackupVerified { .. }));
+
+        // The wrong identity: still recorded, but only the decrypt check
+        // fails.
+        let (wrong_path, _) = generated_identity();
+        let wrong = engine.backup_verify(None, Some(wrong_path.clone()), "owner".into()).await.unwrap();
+        assert!(!wrong.ok);
+        assert!(wrong.checks.iter().any(|c| c.name == "decrypt" && c.status == CheckStatus::Fail));
+
+        // Restore: refused without an identity, works with the right one.
+        let restore_into = base.join("restored-no-identity");
+        let restore_refused =
+            engine.backup_restore(snapshot.name.clone(), restore_into.clone(), None).await.unwrap_err();
+        assert!(restore_refused.to_string().contains("--identity"), "{restore_refused}");
+        assert!(!restore_into.exists());
+
+        let restore_into = base.join("restored");
+        let restoration = engine
+            .backup_restore(snapshot.name.clone(), restore_into.clone(), Some(identity_path.clone()))
+            .await
+            .unwrap();
+        assert!(factory_core::config::Factory::load(&restore_into).is_ok());
+        assert!(!restore_into.join(".factory/secrets.yaml").exists());
+        assert_eq!(restoration.snapshot, snapshot.name);
+
+        // Never once does the identity's own secret text reach anything
+        // that got serialized or published.
+        let secret = std::fs::read_to_string(&identity_path).unwrap();
+        for haystack in [
+            serde_json::to_string(&verification).unwrap(),
+            serde_json::to_string(&wrong).unwrap(),
+            serde_json::to_string(&report).unwrap(),
+            refused.to_string(),
+            restore_refused.to_string(),
+        ] {
+            assert!(!haystack.contains(secret.trim()), "the identity's secret leaked: {haystack}");
+        }
+
+        std::fs::remove_file(&identity_path).ok();
+        std::fs::remove_file(&wrong_path).ok();
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// `#152`: retention treats a destination holding both formats as one
+    /// history -- a plaintext archive planted as if a pre-`#152` daemon had
+    /// taken it is pruned by the very same `daily: 1` rule an encrypted
+    /// backup taken afterwards is.
+    #[tokio::test]
+    async fn retention_prunes_across_a_mixed_plaintext_and_encrypted_history() {
+        let (identity_path, recipient) = generated_identity();
+        let (engine, base) =
+            engine_backing_up_encrypted("{ daily: 1, weekly: 0, monthly: 0 }", "destination", &recipient);
+        let destination = base.join("destination");
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(
+            destination.join("factory-backup-test-20200101T030000Z.tar.zst"),
+            b"not a real archive; retention only ever looks at a listed name and date",
+        )
+        .unwrap();
+
+        let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        assert_eq!(
+            snapshot.pruned,
+            ["factory-backup-test-20200101T030000Z.tar.zst"],
+            "the older plaintext archive is pruned by the same daily: 1 rule as the new encrypted one"
+        );
+        let report = engine.backup_report().await.unwrap();
+        assert_eq!(report.snapshots.len(), 1);
+        assert!(report.snapshots[0].encrypted);
+
+        std::fs::remove_file(&identity_path).ok();
         std::fs::remove_dir_all(base).ok();
     }
 
@@ -748,6 +1771,34 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// `#152`: a mixed destination of plaintext and encrypted archives is
+    /// one history, newest first, each correctly marked from its own bytes
+    /// -- and a half-written `.age` archive, or another instance's, stays
+    /// exactly as invisible as the plaintext equivalents already are.
+    #[test]
+    fn a_mixed_plaintext_and_encrypted_destination_is_one_history() {
+        let dir = std::env::temp_dir().join(format!("factory-backup-list-mixed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("factory-backup-demo-20260924T030000Z.tar.zst"), b"not really zstd").unwrap();
+        std::fs::write(
+            dir.join("factory-backup-demo-20260925T030000Z.tar.zst.age"),
+            [factory_core::backup::AGE_MAGIC, b"\n-> X25519 ..."].concat(),
+        )
+        .unwrap();
+        std::fs::write(dir.join(".factory-backup-demo-20260926T030000Z.tar.zst.age.partial"), b"partial").unwrap();
+        std::fs::write(dir.join("factory-backup-other-20260925T030000Z.tar.zst.age"), b"not ours").unwrap();
+        let found = list_archives(&dir, "demo");
+        let rows: Vec<(&str, bool)> = found.iter().map(|f| (f.name.as_str(), f.encrypted)).collect();
+        assert_eq!(
+            rows,
+            [
+                ("factory-backup-demo-20260925T030000Z.tar.zst.age", true),
+                ("factory-backup-demo-20260924T030000Z.tar.zst", false),
+            ]
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn the_include_table_reads_zero_for_an_empty_directory_and_unknown_before_any_backup() {
         let before = include_rows(false, None);
@@ -765,6 +1816,7 @@ mod tests {
             duration_ms: 1,
             pruned: vec![],
             groups: vec![factory_core::backup::GroupTotal { group: Group::Knowledge, files: 3, bytes: 30 }],
+            encrypted_to: None,
         };
         let after = include_rows(false, Some(&snapshot));
         let knowledge = after.iter().find(|r| r.path == ".factory/knowledge/").unwrap();

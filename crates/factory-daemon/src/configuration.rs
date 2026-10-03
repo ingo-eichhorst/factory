@@ -9,6 +9,7 @@ use factory_core::config::{
     refuse_misplaced_scope_policies, refuse_misplaced_scope_roles, AgentRef, Config, Scope, ScopeAgent,
     CONFIG_FILE, FACTORY_DIR,
 };
+use factory_core::dashboard::{DashboardConfig, Tile};
 use factory_core::error::{FactoryError, Result};
 use factory_core::role::{Role, RoleOrigin, RoleSpec};
 use serde::Deserialize;
@@ -981,6 +982,185 @@ fn splice_role(
     )
 }
 
+// -------------------------------------------------------- dashboard (`#160`)
+
+/// Where a scope's `dashboard:` block belongs -- `splice_role`'s `RoleFile`,
+/// for the one-value block a dashboard layout is rather than the per-name
+/// mapping a `roles:` block is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardFile {
+    /// The instance root's own config: top-level `dashboard:`.
+    Root,
+    /// A nested scope's own config: `scope.dashboard`.
+    Scope,
+}
+
+/// The `dashboard:` block's own rendering, indented to sit at `indent` --
+/// `rendered_role`'s trick (wrap in a one-entry map so `serde_yaml_ng` names
+/// the key), then pad every line of the body two further.
+fn rendered_dashboard(config: &DashboardConfig, indent: usize) -> Result<String> {
+    let yaml = serde_yaml_ng::to_string(&BTreeMap::from([("dashboard", config)]))
+        .map_err(|error| FactoryError::Other(anyhow::anyhow!("encoding dashboard: {error}")))?;
+    let pad = " ".repeat(indent);
+    Ok(yaml.lines().map(|line| format!("{pad}{line}\n")).collect())
+}
+
+/// Set (`Some`) or remove (`None`) the whole `dashboard:` block that sits at
+/// `indent` among `lines[from..to]`. Unlike `splice_roles_block`, there is no
+/// per-entry key to search for inside it: `dashboard:` names one value,
+/// replaced or removed whole, the same way `Config::dashboard_for_scope`
+/// reads it -- so once the key's own line is found, its whole span
+/// (`block_end`) is either replaced with the new rendering or dropped
+/// entirely, never edited line by line.
+fn splice_dashboard_block(
+    text: &str,
+    lines: &[(usize, usize, &str)],
+    from: usize,
+    to: usize,
+    indent: usize,
+    spec: Option<&DashboardConfig>,
+) -> Result<String> {
+    let Some(at) = (from..to).find(|index| {
+        let line = lines[*index].2;
+        indentation(line) == Some(indent) && key_rest(line, "dashboard").is_some()
+    }) else {
+        let Some(spec) = spec else {
+            return Err(bad("there is no dashboard block here to remove"));
+        };
+        // No block yet: open one after the last thing this level says, so it
+        // lands inside the scope rather than after a comment meant for
+        // whatever follows it -- `splice_roles_block`'s same insert rule.
+        let at = last_content(lines, from, to)
+            .map(|index| offset_of(lines, text, index + 1))
+            .unwrap_or_else(|| offset_of(lines, text, from));
+        return Ok(insert_at(text, at, &rendered_dashboard(spec, indent)?));
+    };
+
+    let rest = key_rest(lines[at].2, "dashboard").unwrap_or_default();
+    if !rest.trim().is_empty() && !rest.trim_start().starts_with('#') {
+        // A flow-style or inline `dashboard: ...` -- one line to replace or
+        // drop, the same as `splice_roles_block`'s flow-style `roles:` case.
+        let replacement = match spec {
+            Some(spec) => rendered_dashboard(spec, indent)?,
+            None => String::new(),
+        };
+        let (start, end, _) = lines[at];
+        return Ok(format!("{}{}{}", &text[..start], replacement, &text[end..]));
+    }
+
+    let end = block_end(lines, at, to, indent);
+    // Trim back to the last real content line, the same way
+    // `splice_roles_block`'s own replace/remove branches do: `block_end`
+    // stops at the next line that says something, which sweeps up a
+    // trailing comment meant for whatever follows (`# the lead runs the
+    // board` sitting right before `lead:`, in that file's own test) unless
+    // it is handed back here first.
+    let last = last_content(lines, at, end).unwrap_or(at);
+    let start = offset_of(lines, text, at);
+    let stop = offset_of(lines, text, last + 1);
+    match spec {
+        Some(spec) => Ok(format!("{}{}{}", &text[..start], rendered_dashboard(spec, indent)?, &text[stop..])),
+        None => Ok(format!("{}{}", &text[..start], &text[stop..])),
+    }
+}
+
+/// The file's text with the scope's own `dashboard:` set or removed, in
+/// whichever of the two places `file` says the layer is written --
+/// `splice_role`'s own structure, minus the per-entry search a mapping needs.
+fn splice_dashboard(
+    text: &str,
+    document: &Value,
+    file: DashboardFile,
+    spec: Option<&DashboardConfig>,
+    path: &Path,
+) -> Result<String> {
+    let lines = line_table(text);
+    if file == DashboardFile::Root {
+        return splice_dashboard_block(text, &lines, 0, lines.len(), 0, spec);
+    }
+
+    let scope_index = lines
+        .iter()
+        .position(|(_, _, line)| indentation(line) == Some(0) && key_rest(line, "scope").is_some())
+        .ok_or_else(|| bad(format!("scope config {} has no top-level scope block", path.display())))?;
+    let scope_rest = key_rest(lines[scope_index].2, "scope").unwrap_or_default();
+    let block_scope = scope_rest.trim().is_empty() || scope_rest.trim_start().starts_with('#');
+    if !block_scope {
+        // A flow-style scope has no line of its own for `dashboard:`. Expand
+        // just that one `scope:` line to a block, as `splice_role` does.
+        let mut scope = document
+            .as_mapping()
+            .and_then(|root| root.get(Value::String("scope".into())))
+            .cloned()
+            .ok_or_else(|| bad(format!("scope config {} has no scope block", path.display())))?;
+        let scope_map = mapping(&mut scope, "scope", path)?;
+        let key = Value::String("dashboard".into());
+        match spec {
+            None => {
+                scope_map.remove(&key);
+            }
+            Some(spec) => {
+                let encoded = serde_yaml_ng::to_value(spec)
+                    .map_err(|error| FactoryError::Other(anyhow::anyhow!("encoding dashboard: {error}")))?;
+                scope_map.insert(key, encoded);
+            }
+        }
+        let comment = scope_rest
+            .find('#')
+            .map(|at| format!(" {}", scope_rest[at..].trim()))
+            .unwrap_or_default();
+        let replacement = rendered_scope(&scope, &comment, path)?;
+        let (start, end, _) = lines[scope_index];
+        return Ok(format!("{}{}{}", &text[..start], replacement, &text[end..]));
+    }
+
+    let scope_end = lines
+        .iter()
+        .enumerate()
+        .skip(scope_index + 1)
+        .find(|(_, (_, _, line))| is_content(line) && indentation(line) == Some(0))
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+    let child_indent = lines[scope_index + 1..scope_end]
+        .iter()
+        .filter(|(_, _, line)| is_content(line))
+        .filter_map(|(_, _, line)| indentation(line))
+        .min()
+        .unwrap_or(2);
+    splice_dashboard_block(text, &lines, scope_index + 1, scope_end, child_indent, spec)
+}
+
+/// `document` with `dashboard`/`scope.dashboard` set to `spec` (or removed),
+/// as a `Value` rather than text -- what the freshly spliced and reparsed
+/// file is compared against below, so the parse-back check catches *any*
+/// stray change the splice made, not only ones that happen to show up in the
+/// one field `Config`/`ScopeFile` decode back out of it.
+fn expected_document(document: &Value, file: DashboardFile, spec: Option<&DashboardConfig>, path: &Path) -> Result<Value> {
+    let mut expected = document.clone();
+    let target = match file {
+        DashboardFile::Root => mapping(&mut expected, "the document", path)?,
+        DashboardFile::Scope => {
+            let root = mapping(&mut expected, "the document", path)?;
+            let scope = root
+                .get_mut(Value::String("scope".into()))
+                .ok_or_else(|| bad(format!("scope config {} has no scope block", path.display())))?;
+            mapping(scope, "scope", path)?
+        }
+    };
+    let key = Value::String("dashboard".into());
+    match spec {
+        Some(spec) => {
+            let encoded = serde_yaml_ng::to_value(spec)
+                .map_err(|error| FactoryError::Other(anyhow::anyhow!("encoding dashboard: {error}")))?;
+            target.insert(key, encoded);
+        }
+        None => {
+            target.remove(&key);
+        }
+    }
+    Ok(expected)
+}
+
 impl Engine {
     /// Write one role into a scope's own config and make it hold from the
     /// next request. `replace` must say whether the file already defines it:
@@ -1000,7 +1180,7 @@ impl Engine {
                 "a role name is letters, digits, `-`, `_` and `.`, and cannot be empty",
             ));
         }
-        if name == Role::WORKER || name == Role::FOREMAN {
+        if name == Role::WORKER || name == Role::FOREMAN || name == Role::TRIAGER {
             return Err(bad(format!(
                 "{name:?} is a built-in role and cannot be redefined at any level"
             )));
@@ -1038,7 +1218,7 @@ impl Engine {
     /// name to this definition, and the refusal names every one of them.
     pub(crate) async fn delete_role(&self, scope_name: &str, name: &str) -> Result<(String, String)> {
         let name = name.trim().to_string();
-        if name == Role::WORKER || name == Role::FOREMAN {
+        if name == Role::WORKER || name == Role::FOREMAN || name == Role::TRIAGER {
             return Err(bad(format!("{name:?} is a built-in role and cannot be deleted")));
         }
         let given = self.given_roles().await?;
@@ -1210,6 +1390,134 @@ impl Engine {
     }
 }
 
+impl Engine {
+    /// Save `scope_name`'s own dashboard layout whole and make it hold from
+    /// the next request -- `edit_role_layer`, for the one-value `dashboard:`
+    /// block instead of a `roles:` mapping (`#160`).
+    pub(crate) fn set_dashboard(&self, scope_name: &str, tiles: Vec<Tile>) -> Result<String> {
+        self.edit_dashboard_layer(scope_name, Some(DashboardConfig { tiles }))
+    }
+
+    /// Remove `scope_name`'s own `dashboard:` block, revealing whatever it
+    /// was overriding. Refused when the scope writes no block of its own.
+    pub(crate) fn reset_dashboard(&self, scope_name: &str) -> Result<String> {
+        self.edit_dashboard_layer(scope_name, None)
+    }
+
+    /// Set (`Some`) or remove (`None`) `scope_name`'s own dashboard layer,
+    /// after the same sequence `edit_role_layer` follows: take the edit
+    /// lock, read the one file this layer writes, build the instance as it
+    /// would be with the change applied, validate it whole, splice only the
+    /// `dashboard:` block, parse the result back and refuse if anything but
+    /// that block moved, then write atomically and update the live
+    /// snapshot. No `given`/dependents check -- a layout cannot orphan an
+    /// agent's role the way removing a role definition could, so there is
+    /// nothing else here to guard.
+    fn edit_dashboard_layer(&self, scope_name: &str, spec: Option<DashboardConfig>) -> Result<String> {
+        let _edit = self
+            .configuration_edit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let factory = self.factory_snapshot();
+        let current = factory.scope(scope_name)?.clone();
+        // The instance root writes its dashboard at the top of its own file;
+        // every other scope writes it under its `scope:` block -- the same
+        // split `edit_role_layer` makes for a role layer.
+        let origin = crate::roles::layer_written_by(&factory, &current);
+        let file = match origin {
+            RoleOrigin::Instance => DashboardFile::Root,
+            _ => DashboardFile::Scope,
+        };
+        let path = match file {
+            DashboardFile::Root => factory.factory_dir().join(CONFIG_FILE),
+            DashboardFile::Scope => factory
+                .scope_path(&current.name)?
+                .join(FACTORY_DIR)
+                .join(CONFIG_FILE),
+        };
+
+        let text = fs::read_to_string(&path).map_err(|error| {
+            FactoryError::Other(anyhow::anyhow!("reading {}: {error}", path.display()))
+        })?;
+        let document: Value = serde_yaml_ng::from_str(&text)
+            .map_err(|error| bad(format!("parsing {}: {error}", path.display())))?;
+
+        let mut from_file = None;
+        let before = match file {
+            DashboardFile::Root => {
+                let config: Config = serde_yaml_ng::from_str(&text)
+                    .map_err(|error| bad(format!("parsing {}: {error}", path.display())))?;
+                config.dashboard
+            }
+            DashboardFile::Scope => {
+                let (_, _, mut scope) = read_document(&path)?;
+                if scope.id != current.id || scope.name != current.name {
+                    return Err(bad(format!(
+                        "scope config {} changed identity since startup; restart Factory before editing it",
+                        path.display()
+                    )));
+                }
+                scope.path = current.path.clone();
+                let dashboard = scope.dashboard.clone();
+                from_file = Some(scope);
+                dashboard
+            }
+        };
+
+        if spec.is_none() && before.is_none() {
+            let hint = match factory.dashboard_for(Some(&current.name))? {
+                (_, Some(source)) => format!(" It currently shows {source:?}'s layout."),
+                (_, None) => " It currently shows the built-in default.".to_string(),
+            };
+            return Err(bad(format!(
+                "{} defines no dashboard of its own to reset. An inherited layout is removed where \
+                 it is defined.{hint}",
+                current.name
+            )));
+        }
+
+        // The instance as it would be, checked whole -- unknown metrics,
+        // empty tiles and bad sizes are refused here, naming the block and
+        // the tile (`DashboardConfig::validate`), before a byte is written.
+        let mut candidate = factory.clone();
+        match (&file, &mut from_file) {
+            (DashboardFile::Root, _) => candidate.config.dashboard = spec.clone(),
+            (DashboardFile::Scope, Some(scope)) => {
+                scope.dashboard = spec.clone();
+                if let Some(slot) = candidate.config.scopes.iter_mut().find(|s| s.id == current.id) {
+                    *slot = scope.clone();
+                }
+            }
+            (DashboardFile::Scope, None) => unreachable!("a scope layer was read from its file"),
+        }
+        candidate.config.validate()?;
+
+        let serialized = splice_dashboard(&text, &document, file, spec.as_ref(), &path)?;
+        let written: Value = serde_yaml_ng::from_str(&serialized).map_err(|error| {
+            FactoryError::Other(anyhow::anyhow!(
+                "could not edit the dashboard in {} without breaking it ({error}); nothing was written",
+                path.display()
+            ))
+        })?;
+        let expected = expected_document(&document, file, spec.as_ref(), &path)?;
+        if written != expected {
+            return Err(FactoryError::Other(anyhow::anyhow!(
+                "could not edit the dashboard in {} without changing more than its own dashboard block; \
+                 nothing was written",
+                path.display()
+            )));
+        }
+        atomic_write(&path, &serialized)?;
+
+        match (file, from_file) {
+            (DashboardFile::Root, _) => self.replace_instance_dashboard(spec),
+            (DashboardFile::Scope, Some(scope)) => self.replace_scope(&current.id, scope),
+            (DashboardFile::Scope, None) => unreachable!("a scope layer was read from its file"),
+        }
+        Ok(current.name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1251,6 +1559,7 @@ mod tests {
             args: vec!["--model".into(), "local model".into()],
             sandbox: Sandbox::None,
             provider: None,
+            max_sessions: None,
         }
     }
 
@@ -1879,10 +2188,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_two_that_ship_are_refused_at_every_level() {
+    async fn the_three_that_ship_are_refused_at_every_level() {
         let instance = Instance::new("presets", ROOT, &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")]);
         let engine = instance.engine();
-        for name in ["worker", "foreman"] {
+        for name in ["worker", "foreman", "triager"] {
             let defined = engine
                 .define_role("projects", name, spec("wider", &["task.create"], "scope"), false)
                 .await
@@ -1983,5 +2292,256 @@ mod tests {
             .handle_request(Request::RoleDelete { scope: "projects".into(), name: "reviewer".into() })
             .await;
         assert!(matches!(response, Response::Ok { data: Payload::Deleted { deleted: true } }), "{response:?}");
+    }
+
+    // -- dashboard (`#160`) ----------------------------------------------------
+
+    #[test]
+    fn setting_the_dashboard_writes_scope_dashboard_and_leaves_every_other_line_alone() {
+        let instance = Instance::new(
+            "set",
+            ROOT,
+            &[(
+                "projects",
+                "# owner note\nversion: 1\nscope:\n  id: p\n  name: projects\n  # the runtime stays put\n  runtime: herdr\n# runtime belongs to another manager\nruntime:\n  provider: local\n",
+            )],
+        );
+        let engine = instance.engine();
+
+        engine
+            .set_dashboard("projects", vec![tile_yaml("throughput_week", "s")])
+            .unwrap();
+
+        let text = instance.text("projects");
+        for kept in ["# owner note", "# the runtime stays put", "runtime: herdr", "# runtime belongs to another manager"] {
+            assert!(text.contains(kept), "{kept:?} is gone from:\n{text}");
+        }
+        assert!(
+            text.find("dashboard:").unwrap() < text.find("# runtime belongs to another manager").unwrap(),
+            "the block lands inside the scope, not after a comment meant for what follows:\n{text}"
+        );
+        let yaml = instance.yaml("projects");
+        assert_eq!(yaml["scope"]["dashboard"]["tiles"][0]["metric"].as_str(), Some("throughput_week"));
+        assert_eq!(yaml["runtime"]["provider"].as_str(), Some("local"));
+        let (resolved, source) = engine.dashboard_for(Some("projects")).unwrap();
+        assert_eq!(source, Some("projects".to_string()), "the running daemon has it from the next request");
+        assert_eq!(resolved.unwrap().tiles[0].metric.as_ref().unwrap().as_str(), "throughput_week");
+    }
+
+    /// A tile shaped like the metric-tile fixtures in `dashboard.rs`'s own
+    /// tests, spelled once here so every write test can just name a metric.
+    fn tile_yaml(metric: &str, size: &str) -> factory_core::dashboard::Tile {
+        serde_yaml_ng::from_str(&format!("metric: {metric}\nsize: {size}\n")).unwrap()
+    }
+
+    fn view_tile(view: &str, size: &str) -> factory_core::dashboard::Tile {
+        serde_yaml_ng::from_str(&format!("view: {view}\nsize: {size}\n")).unwrap()
+    }
+
+    #[test]
+    fn setting_replaces_the_whole_block_and_leaves_its_neighbours() {
+        let instance = Instance::new(
+            "replace",
+            ROOT,
+            &[(
+                "projects",
+                "version: 1\nscope:\n  id: p\n  name: projects\n  dashboard:\n    tiles:\n      - { metric: throughput_week, size: s }\n  # the store stays below the layout\n  task_store: sqlite\n",
+            )],
+        );
+        let engine = instance.engine();
+
+        engine.set_dashboard("projects", vec![view_tile("kpis", "m")]).unwrap();
+
+        let text = instance.text("projects");
+        assert!(text.contains("# the store stays below the layout"), "{text}");
+        assert!(text.contains("task_store: sqlite"), "{text}");
+        let yaml = instance.yaml("projects");
+        assert!(yaml["scope"]["dashboard"]["tiles"][0].get("metric").is_none(), "replaced, never merged");
+        assert_eq!(yaml["scope"]["dashboard"]["tiles"][0]["view"].as_str(), Some("kpis"));
+        assert_eq!(yaml["scope"]["dashboard"]["tiles"].as_sequence().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resetting_removes_the_whole_block_and_leaves_its_neighbours() {
+        let instance = Instance::new(
+            "reset",
+            ROOT,
+            &[(
+                "projects",
+                "version: 1\nscope:\n  id: p\n  name: projects\n  dashboard:\n    tiles:\n      - { metric: throughput_week, size: s }\n  runtime: herdr\n",
+            )],
+        );
+        let engine = instance.engine();
+
+        engine.reset_dashboard("projects").unwrap();
+
+        let text = instance.text("projects");
+        assert!(!text.contains("dashboard"), "no empty block is left behind:\n{text}");
+        assert!(text.contains("runtime: herdr"), "{text}");
+        let (resolved, source) = engine.dashboard_for(Some("projects")).unwrap();
+        assert!(resolved.is_none(), "nothing anywhere in the chain names one any more");
+        assert_eq!(source, None);
+    }
+
+    #[test]
+    fn resetting_with_no_block_of_its_own_is_refused_and_names_where_it_currently_resolves_from() {
+        let instance = Instance::new(
+            "reset-refused",
+            "version: 1\ninstance: { id: i, name: test }\nscope:\n  id: root\n  name: company\ndashboard:\n  tiles:\n    - { metric: throughput_week, size: s }\n",
+            &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")],
+        );
+        let engine = instance.engine();
+        let path = instance.file("projects");
+        let before = fs::read(&path).unwrap();
+
+        let error = engine.reset_dashboard("projects").unwrap_err().to_string();
+        assert!(error.contains("defines no dashboard of its own"), "{error}");
+        assert!(error.contains("company"), "names where it currently resolves from: {error}");
+        assert_eq!(fs::read(path).unwrap(), before, "nothing was written");
+    }
+
+    #[test]
+    fn an_invalid_tile_is_refused_with_the_file_untouched() {
+        let instance = Instance::new("bad", ROOT, &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")]);
+        let engine = instance.engine();
+
+        let error = engine
+            .set_dashboard("projects", vec![tile_yaml("not_a_metric", "s")])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not_a_metric"), "{error}");
+        assert!(error.contains("dashboard.tiles[0].metric"), "names the block and the tile: {error}");
+
+        let error = engine.set_dashboard("projects", vec![]).unwrap_err().to_string();
+        assert!(error.contains("at least one tile"), "{error}");
+
+        assert_eq!(
+            instance.text("projects"),
+            "version: 1\nscope:\n  id: p\n  name: projects\n",
+            "nothing was written"
+        );
+    }
+
+    #[test]
+    fn the_instance_root_writes_its_top_level_dashboard() {
+        let root = "version: 1\ninstance: { id: i, name: test }\nscope:\n  id: root\n  name: company\n# daemon settings follow\ndaemon:\n  tick_seconds: 5\n";
+        let instance = Instance::new("root", root, &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")]);
+        let engine = instance.engine();
+
+        engine.set_dashboard("company", vec![tile_yaml("throughput_week", "s")]).unwrap();
+
+        let text = instance.text("");
+        assert!(text.contains("# daemon settings follow"), "{text}");
+        let yaml = instance.yaml("");
+        assert!(yaml["dashboard"]["tiles"][0].is_mapping(), "{text}");
+        assert!(yaml["scope"].get("dashboard").is_none(), "never scope.dashboard on the root:\n{text}");
+        assert_eq!(yaml["daemon"]["tick_seconds"].as_u64(), Some(5));
+        let (resolved, source) = engine.dashboard_for(Some("projects")).unwrap();
+        assert_eq!(source, Some("company".to_string()), "the root's own block is the top of every chain");
+        assert_eq!(resolved.unwrap().tiles[0].metric.as_ref().unwrap().as_str(), "throughput_week");
+    }
+
+    #[test]
+    fn a_flow_style_scope_is_expanded_to_hold_its_dashboard() {
+        let instance = Instance::new(
+            "flow",
+            ROOT,
+            &[("projects", "version: 1\n# identity\nscope: { id: p, name: projects }\nruntime: { provider: local }\n")],
+        );
+        let engine = instance.engine();
+
+        engine.set_dashboard("projects", vec![tile_yaml("throughput_week", "s")]).unwrap();
+
+        let text = instance.text("projects");
+        assert!(text.contains("# identity"), "{text}");
+        assert!(text.contains("runtime: { provider: local }"), "{text}");
+        assert_eq!(
+            instance.yaml("projects")["scope"]["dashboard"]["tiles"][0]["metric"].as_str(),
+            Some("throughput_week")
+        );
+    }
+
+    #[test]
+    fn saving_at_a_nested_scope_updates_only_its_own_subtree_live() {
+        let instance = Instance::new(
+            "tree",
+            "version: 1\ninstance: { id: i, name: test }\nscope:\n  id: root\n  name: company\ndashboard:\n  tiles:\n    - { metric: throughput_week, size: s }\n",
+            &[
+                ("demo", "version: 1\nscope:\n  id: d\n  name: demo\n"),
+                ("demo/child", "version: 1\nscope:\n  id: c\n  name: child\n"),
+                ("sibling", "version: 1\nscope:\n  id: s\n  name: sibling\n"),
+            ],
+        );
+        let engine = instance.engine();
+
+        engine.set_dashboard("demo", vec![view_tile("kpis", "m")]).unwrap();
+
+        // The child, below demo on disk, resolves demo's freshly saved
+        // layout without a restart.
+        let (resolved, source) = engine.dashboard_for(Some("child")).unwrap();
+        assert_eq!(source, Some("demo".to_string()));
+        assert_eq!(resolved.unwrap().tiles[0].view, Some(factory_core::dashboard::ViewId::Kpis));
+
+        // The sibling, not below demo, still resolves the root's own,
+        // untouched by the write.
+        let (resolved, source) = engine.dashboard_for(Some("sibling")).unwrap();
+        assert_eq!(source, Some("company".to_string()));
+        assert_eq!(resolved.unwrap().tiles[0].metric.as_ref().unwrap().as_str(), "throughput_week");
+
+        // The root itself is untouched too.
+        let (resolved, source) = engine.dashboard_for(Some("company")).unwrap();
+        assert_eq!(source, Some("company".to_string()));
+        assert_eq!(resolved.unwrap().tiles[0].metric.as_ref().unwrap().as_str(), "throughput_week");
+    }
+
+    #[tokio::test]
+    async fn the_dashboard_requests_answer_and_announce_the_change() {
+        use factory_core::event::Event;
+        use factory_core::protocol::{Payload, Request, Response};
+
+        let instance = Instance::new("request", ROOT, &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")]);
+        let engine = instance.engine();
+        let mut events = engine.bus.subscribe();
+
+        let response = engine
+            .handle_request(Request::DashboardSet {
+                scope: "projects".into(),
+                tiles: vec![tile_yaml("throughput_week", "s")],
+            })
+            .await;
+        match response {
+            Response::Ok { data: Payload::Dashboard { tiles, source } } => {
+                assert_eq!(source, Some("projects".into()));
+                assert_eq!(tiles.unwrap()[0].metric.as_ref().unwrap().as_str(), "throughput_week");
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+        assert!(matches!(
+            events.recv().await.unwrap(),
+            Event::DashboardChanged { scope } if scope == "projects"
+        ));
+
+        let response = engine
+            .handle_request(Request::DashboardReset { scope: "projects".into() })
+            .await;
+        match response {
+            Response::Ok { data: Payload::Dashboard { tiles, source } } => {
+                assert!(tiles.is_none(), "nothing overrides it any more");
+                assert_eq!(source, None);
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+        assert!(matches!(
+            events.recv().await.unwrap(),
+            Event::DashboardChanged { scope } if scope == "projects"
+        ));
+    }
+
+    #[test]
+    fn an_unknown_scope_is_refused() {
+        let instance = Instance::new("unknown", ROOT, &[]);
+        let engine = instance.engine();
+        assert!(engine.set_dashboard("nope", vec![tile_yaml("throughput_week", "s")]).is_err());
+        assert!(engine.reset_dashboard("nope").is_err());
     }
 }

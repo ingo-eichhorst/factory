@@ -1,7 +1,8 @@
 //! What a run used, and what a task's runs used together (#117) -- pure
-//! shaping for the task modal's usage block. A count the runtime could not
-//! observe is `?`, and a run it could not measure says why; nothing here
-//! ever turns an unknown into a zero.
+//! shaping for the task modal's usage block, and (`costFigure`, #162) the
+//! dashboard's `cost` tile, one bar row per `/api/costs` group. A count the
+//! runtime could not observe is `?`, and a run it could not measure says
+//! why; nothing here ever turns an unknown into a zero.
 
 /// Dollars to the cent; a non-zero amount under a cent says so rather than
 /// reading as free.
@@ -16,6 +17,66 @@ export function fmtTokens(n) {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
+}
+
+/// What of a run the open task's usage answer is derived from (#117): its
+/// usage, and the status, end, original estimate and re-estimate that
+/// decide whether a comparison is final and what it is compared with.
+export function usageProjectionKey(run) {
+  if (!run) return "null";
+  return JSON.stringify([
+    run.usage ?? null,
+    run.status ?? null,
+    run.ended_at ?? null,
+    run.original_estimate ?? null,
+    run.re_estimate ?? null,
+  ]);
+}
+
+/// Whether a run event changed anything the open task's usage answer is
+/// read from -- a run turning terminal with its usage unchanged included,
+/// since that is what makes its comparison final.
+export function taskUsageMoved(before, after) {
+  return usageProjectionKey(before) !== usageProjectionKey(after);
+}
+
+/// Numbered reads where only the newest call's answer may be kept: two
+/// run events close together start two reads, and the earlier one landing
+/// last would otherwise put the older answer back. `next()` hands out a
+/// check that stays true only while no later read has been started.
+export function newestRead() {
+  let latest = 0;
+  return {
+    next() {
+      const mine = ++latest;
+      return () => mine === latest;
+    },
+  };
+}
+
+export function fmtDuration(seconds) {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return "?";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds / 360) / 10}h`;
+}
+
+export function estimateComparisonView(comparison, unit = "time") {
+  if (!comparison) return null;
+  const value = unit === "cost" ? fmtUsd : fmtDuration;
+  const actual = comparison.actual === null || comparison.actual === undefined ? "actual unknown" : value(comparison.actual);
+  const ratio = comparison.actual_over_expected === null || comparison.actual_over_expected === undefined
+    ? "ratio unknown"
+    : `${comparison.actual_over_expected.toFixed(2)}× expected`;
+  return {
+    tone: comparison.within_range === null || comparison.within_range === undefined
+      ? "unknown"
+      : (comparison.within_range ? "within" : "outside"),
+    label: `${value(comparison.low)}–${value(comparison.high)} · expected ${value(comparison.expected)} · actual ${actual} · ${ratio}`,
+    percent: comparison.actual === null || comparison.actual === undefined || comparison.high <= 0
+      ? null
+      : Math.min(100, Math.max(0, comparison.actual / comparison.high * 100)),
+  };
 }
 
 /// Every token type summed, or `null` if any one is unknown -- the same
@@ -49,6 +110,14 @@ export function runUsageView(usage) {
     `${fmtTokens(t.input)} in · ${fmtTokens(t.output)} out · ${fmtTokens(t.cache_read)} cache read · ${fmtTokens(t.cache_write)} cache write`,
   ];
   if (usage.pricing_sources && usage.pricing_sources.length) lines.push(`priced by ${usage.pricing_sources.join(", ")}`);
+  if (usage.elapsed_seconds !== null && usage.elapsed_seconds !== undefined) {
+    lines.push(`${fmtDuration(usage.elapsed_seconds)} runtime elapsed · ${fmtDuration(usage.active_seconds)} active`);
+  }
+  for (const share of usage.plan_share || []) {
+    const window = share.window_minutes === 300 ? "5-hour" : (share.window_minutes === 10080 ? "weekly" : `${share.window_minutes}-minute`);
+    lines.push(`${share.used_percent.toFixed(2)}% of ${share.provider_account} ${window} · ${share.attribution}`);
+  }
+  if (usage.plan_share_unknown) lines.push(`plan share unknown — ${usage.plan_share_unknown}`);
   if (usage.models && usage.models.length) {
     lines.push(`${usage.models.join(", ")} · ${usage.sessions} harness session${usage.sessions === 1 ? "" : "s"}`);
   }
@@ -76,4 +145,26 @@ export function taskUsageLine(total) {
   // A sum over no costed run is not $0.00.
   const costed = total.runs - (total.runs_unknown || 0) - (total.runs_cost_unknown || 0);
   return `All ${runs}: ${fmtTokens(sum)} tokens · ${costed ? fmtUsd(total.cost_usd) : "?"}${missing.length ? ` (not in the sum: ${missing.join(", ")})` : ""}`;
+}
+
+/// A row's (or a report's own `total`'s) cost figure alone -- the same
+/// distinction `taskUsageLine`'s sentence draws, honest about how much of
+/// it is actually measured, but just the number: for a compact display
+/// (the dashboard's `cost` tile, one bar row per `/api/costs` group) where
+/// the missing-runs breakdown `taskUsageLine` lists would not fit.
+/// `hasCost` is `false` whenever `text` is not a real measured figure --
+/// `cost_usd` in that case is `0` only because nothing costed contributed
+/// to the sum, never because the group truly cost nothing, and a caller
+/// must not draw a bar proportional to it (`dashboard.js`'s `costTile`).
+/// A row where every run's usage is unknown reads `"unknown"`, never a
+/// manufactured `$0.00`; one where some runs are unmeasured, uncosted, or
+/// still partial reads the same figure `taskUsageLine` would sum, prefixed
+/// `≥` -- a lower bound, not the whole story.
+export function costFigure(row) {
+  if (!row?.runs) return { text: "—", hasCost: false };
+  if (row.runs_unknown === row.runs) return { text: "unknown", hasCost: false };
+  const costed = row.runs - (row.runs_unknown || 0) - (row.runs_cost_unknown || 0);
+  if (costed === 0) return { text: "?", hasCost: false };
+  const bounded = (row.runs_unknown || 0) > 0 || (row.runs_cost_unknown || 0) > 0 || (row.runs_partial || 0) > 0;
+  return { text: `${bounded ? "≥ " : ""}${fmtUsd(row.cost_usd)}`, hasCost: true };
 }

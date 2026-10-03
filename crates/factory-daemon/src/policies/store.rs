@@ -288,6 +288,50 @@ impl PolicyStore {
         })
         .await
     }
+
+    /// `#158`: every attestation for each of `run_ids`, grouped by run,
+    /// oldest first within a run -- `Engine::attested_runs`'s own batch
+    /// read, so judging a whole window of runs costs one round trip (well,
+    /// one per 500 ids -- sqlite's own limit on bound parameters) rather
+    /// than one `step_attestations` call per run. A run id absent from the
+    /// result never had one; the caller reads that as an empty `Vec`, the
+    /// same as `step_attestations` would for it alone.
+    pub async fn step_attestations_for(
+        &self,
+        run_ids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, Vec<StepAttestation>>> {
+        let run_ids = run_ids.to_vec();
+        self.with_conn(move |conn| {
+            let mut out: std::collections::BTreeMap<String, Vec<StepAttestation>> = std::collections::BTreeMap::new();
+            for chunk in run_ids.chunks(500) {
+                if chunk.is_empty() {
+                    continue;
+                }
+                let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let sql = format!(
+                    "SELECT id, run_id, data FROM run_attestations WHERE run_id IN ({placeholders}) \
+                     ORDER BY at ASC, rowid ASC"
+                );
+                let mut stmt = conn.prepare(&sql).map_err(error)?;
+                let params: Vec<&dyn rusqlite::ToSql> = chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                let rows = stmt
+                    .query_map(params.as_slice(), |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                    })
+                    .map_err(error)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(error)?;
+                for (id, run_id, json) in rows {
+                    match decode::<StepAttestation>(json) {
+                        Ok(attestation) => out.entry(run_id).or_default().push(attestation),
+                        Err(err) => tracing::warn!(id, table = "run_attestations", "skipping malformed row: {err}"),
+                    }
+                }
+            }
+            Ok(out)
+        })
+        .await
+    }
 }
 
 /// The one withdrawal row referencing `attestation_id`, if there is one --
@@ -321,6 +365,7 @@ mod tests {
             attested_at: now,
             expires_at: now + chrono::Duration::days(30),
             withdrawn: None,
+            clock: None,
         }
     }
 
@@ -339,6 +384,8 @@ mod tests {
             kind: StepKind::Gate,
             actor: "factory-daemon".into(),
             verdict,
+            findings: None,
+            round: 0,
             required_by: vec![],
             command: Some("true".into()),
             exit_code: Some(0),
@@ -346,6 +393,7 @@ mod tests {
             dir: "/tmp".into(),
             commit: None,
             dirty: None,
+            worktree_digest: None,
             node_id: None,
             at: at + chrono::Duration::seconds(secs),
         };
@@ -355,6 +403,75 @@ mod tests {
         let got = store.step_attestations("r1").await.unwrap();
         assert_eq!(got.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
         assert!(store.append_step_attestation(&make("a", "r1", AttestationVerdict::Pass, 3)).await.is_err(), "an id is written once");
+    }
+
+    #[tokio::test]
+    async fn step_attestations_for_groups_by_run_oldest_first_and_leaves_out_runs_with_none() {
+        use factory_core::control_plan::{AttestationVerdict, StepKind};
+        let store = PolicyStore::in_memory().unwrap();
+        let at = Utc::now();
+        let make = |id: &str, run: &str, secs| StepAttestation {
+            id: id.into(),
+            run_id: run.into(),
+            task_id: "t".into(),
+            scope: "demo".into(),
+            category: "feature".into(),
+            step: "tests".into(),
+            kind: StepKind::Gate,
+            actor: "factory-daemon".into(),
+            verdict: AttestationVerdict::Pass,
+            required_by: vec![],
+            findings: None,
+            round: 0,
+            worktree_digest: None,
+            command: Some("true".into()),
+            exit_code: Some(0),
+            output: None,
+            dir: "/tmp".into(),
+            commit: None,
+            dirty: None,
+            node_id: None,
+            at: at + chrono::Duration::seconds(secs),
+        };
+        store
+            .append_step_attestation(&make("b", "r1", 2))
+            .await
+            .unwrap();
+        store
+            .append_step_attestation(&make("a", "r1", 1))
+            .await
+            .unwrap();
+        store
+            .append_step_attestation(&make("c", "r2", 1))
+            .await
+            .unwrap();
+
+        let got = store
+            .step_attestations_for(&["r1".to_string(), "r2".to_string(), "r3".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            got.get("r1")
+                .unwrap()
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            got.get("r2")
+                .unwrap()
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
+        assert!(
+            !got.contains_key("r3"),
+            "a run with no attestations is simply absent"
+        );
+
+        assert!(store.step_attestations_for(&[]).await.unwrap().is_empty());
     }
 
     #[tokio::test]

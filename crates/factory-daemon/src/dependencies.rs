@@ -5,9 +5,10 @@
 
 use chrono::{DateTime, Utc};
 use factory_core::dependencies::{
-    validate_document, AffectedComponent, Attachment, AttachmentKind, DependenciesFact,
-    DependenciesReport, DependencyFinding, DependencyServiceView, DocumentSummary, FindingStatus,
-    LifecycleDocuments, LifecycleState, Rating, Severity,
+    product_identity, validate_document, AffectedComponent, Attachment, AttachmentKind,
+    DependenciesFact, DependenciesReport, DependencyFinding, DependencyServiceView,
+    DocumentSummary, ExploitedFinding, FindingStatus, LifecycleDocuments, LifecycleState, Rating,
+    Severity,
 };
 use factory_core::error::{FactoryError, Result};
 use factory_core::protocol::CredentialRow;
@@ -172,6 +173,7 @@ fn summary(document: &StoredDocument) -> DocumentSummary {
         tool,
         tool_version,
         scan_time,
+        identity: product_identity(&document.json),
     }
 }
 
@@ -618,8 +620,14 @@ pub(crate) fn fact(report: &DependenciesReport) -> DependenciesFact {
         .iter()
         .find(|d| d.state == LifecycleState::Declared)
         .map(|d| d.sbom.attachment.attached_at);
+    let built_sbom_at = report
+        .documents
+        .iter()
+        .find(|d| d.state == LifecycleState::Built)
+        .map(|d| d.sbom.attachment.attached_at);
     let mut fact = DependenciesFact {
         declared_sbom_at,
+        built_sbom_at,
         ..Default::default()
     };
     for finding in report
@@ -633,6 +641,151 @@ pub(crate) fn fact(report: &DependenciesReport) -> DependenciesFact {
         }
     }
     fact
+}
+
+/// One vulnerability's per-mention bookkeeping while `exploited` walks the
+/// scope's scans oldest first -- folded into an [`ExploitedFinding`] once
+/// every relevant scan has been seen.
+struct ExploitedTrack {
+    components: BTreeMap<String, AffectedComponent>,
+    states: BTreeSet<LifecycleState>,
+    first_seen_at: DateTime<Utc>,
+    first_document: Attachment,
+    latest_vex: Option<String>,
+    last_mentioned_document_id: String,
+}
+
+/// `analysis.state` values that never establish -- or continue to count as
+/// -- a sighting: CRA Art. 14's reporting clock (`#157`, phase 1) is built
+/// on KEV/EUVD-listed vulnerabilities a scan still treats as live.
+fn never_a_sighting(state: Option<&str>) -> bool {
+    matches!(state, Some("not_affected") | Some("false_positive") | Some("resolved") | Some("resolved_with_pedigree"))
+}
+
+/// The two `analysis.state` values that exclude an already-sighted item --
+/// a strict subset of [`never_a_sighting`]: `resolved`/`resolved_with_pedigree`
+/// stop a *new* sighting but never retroactively excuse one already made
+/// (CRA counts from awareness).
+fn excludes(state: Option<&str>) -> bool {
+    matches!(state, Some("not_affected") | Some("false_positive"))
+}
+
+fn affected_component(
+    reference: &str,
+    components: &BTreeMap<String, AffectedComponent>,
+    paths: &BTreeMap<String, Vec<String>>,
+) -> AffectedComponent {
+    let mut affected = components.get(reference).cloned().unwrap_or_else(|| AffectedComponent {
+        bom_ref: reference.to_string(),
+        name: reference.to_string(),
+        version: None,
+        path: Vec::new(),
+    });
+    affected.path = paths
+        .get(reference)
+        .cloned()
+        .unwrap_or_else(|| vec![component_label_from_affected(&affected)]);
+    affected
+}
+
+/// `Engine::exploited_findings`'s pure core, kept free of `Engine` so the
+/// unit tests below can build `StoredDocument`s directly with `stored()`,
+/// exactly as `build_report`'s own tests do.
+///
+/// One item per (scope, vulnerability id) sighted against a `built` or
+/// `running` SBOM -- see `ExploitedFinding`'s own doc comment for exactly
+/// what counts as a sighting, an exclusion, and `reported_now`. Scans are
+/// walked in the *vulnerability document's* own `attached_at` order (never
+/// the SBOM's): that is the CRA awareness time, and it is also what decides
+/// which built/running document is "newest" for exclusion and
+/// `reported_now`.
+fn exploited(scope: &str, stored: &[StoredDocument]) -> Vec<ExploitedFinding> {
+    let all_scans = scans(stored);
+    let mut relevant: Vec<&Scan> = all_scans
+        .iter()
+        .filter(|scan| {
+            matches!(scan.state, LifecycleState::Built | LifecycleState::Running) && scan.vulnerabilities.is_some()
+        })
+        .collect();
+    relevant.sort_by(|a, b| {
+        let a = &a.vulnerabilities.as_ref().expect("filtered above").attachment;
+        let b = &b.vulnerabilities.as_ref().expect("filtered above").attachment;
+        a.attached_at.cmp(&b.attached_at).then_with(|| a.id.cmp(&b.id))
+    });
+    let Some(newest) = relevant.last() else {
+        return Vec::new();
+    };
+    let newest_document_id = newest.vulnerabilities.as_ref().expect("filtered above").attachment.id.clone();
+
+    let mut tracks: BTreeMap<String, ExploitedTrack> = BTreeMap::new();
+    for scan in relevant {
+        let document = scan.vulnerabilities.as_ref().expect("filtered above");
+        let (components, paths) = components_and_paths(&scan.sbom.json);
+        for vulnerability in document
+            .json
+            .get("vulnerabilities")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = vulnerability.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let state = vulnerability.get("analysis").and_then(|a| a.get("state")).and_then(Value::as_str);
+            let refs: Vec<String> = vulnerability
+                .get("affects")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.get("ref").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect();
+
+            if !tracks.contains_key(id) {
+                let kev = property_bool(vulnerability, "factory:kev");
+                let euvd = property_bool(vulnerability, "factory:euvd");
+                if !(kev || euvd) || never_a_sighting(state) {
+                    continue;
+                }
+                tracks.insert(
+                    id.to_string(),
+                    ExploitedTrack {
+                        components: BTreeMap::new(),
+                        states: BTreeSet::new(),
+                        first_seen_at: document.attachment.attached_at,
+                        first_document: document.attachment.clone(),
+                        latest_vex: None,
+                        last_mentioned_document_id: String::new(),
+                    },
+                );
+            }
+            let track = tracks.get_mut(id).expect("just inserted or already present");
+            track.states.insert(scan.state);
+            track.latest_vex = excludes(state).then(|| state.expect("excludes() only true for Some").to_string());
+            track.last_mentioned_document_id = document.attachment.id.clone();
+            for reference in &refs {
+                track
+                    .components
+                    .insert(reference.clone(), affected_component(reference, &components, &paths));
+            }
+        }
+    }
+
+    let mut out: Vec<ExploitedFinding> = tracks
+        .into_iter()
+        .map(|(vulnerability, track)| ExploitedFinding {
+            scope: scope.to_string(),
+            vulnerability,
+            components: track.components.into_values().collect(),
+            states: track.states.into_iter().collect(),
+            first_seen_at: track.first_seen_at,
+            first_document: track.first_document,
+            latest_vex: track.latest_vex,
+            reported_now: track.last_mentioned_document_id == newest_document_id,
+        })
+        .collect();
+    out.sort_by(|a, b| a.vulnerability.cmp(&b.vulnerability));
+    out
 }
 
 impl Engine {
@@ -705,6 +858,23 @@ impl Engine {
             })??;
         let credentials = self.credential_inventory().await;
         Ok(build_report(&scope, &documents, &credentials, Utc::now()))
+    }
+
+    /// The CRA Art. 14 reporting clock's L2 read (`#157`, phase 1): every
+    /// exploited finding in `scope` alone -- never its subtree, unlike
+    /// `Request::Policy`'s own rollup -- so a caller that needs a subtree's
+    /// worth (`policies::clock`) asks once per scope and so that
+    /// `policy_attest`'s own equality check (an item's own scope must equal
+    /// the canonical `--scope`) has something exact to check against.
+    pub(crate) async fn exploited_findings(&self, scope: &str) -> Result<Vec<ExploitedFinding>> {
+        let snapshot = self.factory_snapshot();
+        let canonical = snapshot.scope(scope)?.name.clone();
+        let root = snapshot.root;
+        let name = canonical.clone();
+        let documents = tokio::task::spawn_blocking(move || load_documents(&root, &name))
+            .await
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("dependency inventory walk: {e}")))??;
+        Ok(exploited(&canonical, &documents))
     }
 
     pub(crate) async fn dependencies_vex(&self, scope: &str) -> Result<String> {
@@ -785,7 +955,7 @@ mod tests {
         }
     }
 
-    fn scope(max_age: Option<factory_core::policy::Duration>) -> Scope {
+    fn scope(max_age: Option<factory_kernel::Duration>) -> Scope {
         serde_yaml_ng::from_str::<Scope>("name: demo")
             .map(|mut scope| {
                 scope.dependencies = DependenciesConfig {
@@ -908,6 +1078,38 @@ mod tests {
     }
 
     #[test]
+    fn policy_fact_projects_the_newest_build_sbom() {
+        let built = include_bytes!(
+            "../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json"
+        );
+        let docs = vec![stored(
+            AttachmentKind::Sbom,
+            built,
+            "2026-09-25T10:00:00Z",
+            "built",
+            "r1",
+        )];
+        let report = build_report(
+            &scope(None),
+            &docs,
+            &[],
+            DateTime::parse_from_rfc3339("2026-09-25T11:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+
+        assert_eq!(
+            fact(&report).built_sbom_at,
+            Some(
+                DateTime::parse_from_rfc3339("2026-09-25T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            )
+        );
+        assert_eq!(fact(&build_report(&scope(None), &[], &[], Utc::now())).built_sbom_at, None);
+    }
+
+    #[test]
     fn stored_documents_are_create_only() {
         let root = std::env::temp_dir().join(format!("factory-dependencies-{}", uuid::Uuid::new_v4()));
         let document = stored(
@@ -921,5 +1123,113 @@ mod tests {
         let path = root.join(".factory/dependencies/demo/run").join(&document.attachment.filename);
         assert_eq!(std::fs::read(path).unwrap(), first);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // ---------------------------------------------------- exploited findings
+
+    /// A minimal vulnerabilities document naming one vulnerability, with
+    /// `kev`/`euvd` and an optional `analysis.state` -- everything
+    /// `exploited`'s tests below vary.
+    fn vuln_doc(id_suffix: &str, kev: bool, euvd: bool, state: Option<&str>) -> String {
+        let analysis = state.map(|s| format!(r#","analysis":{{"state":"{s}"}}"#)).unwrap_or_default();
+        format!(
+            r#"{{"bomFormat":"CycloneDX","specVersion":"1.6","vulnerabilities":[{{"id":"CVE-2026-{id_suffix}","affects":[{{"ref":"pkg:cargo/serde@1.0.0"}}],"properties":[{{"name":"factory:kev","value":"{kev}"}},{{"name":"factory:euvd","value":"{euvd}"}}]{analysis}}}]}}"#
+        )
+    }
+
+    fn t(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn one_qualifying_sighting_gives_one_item_at_the_vulnerability_documents_own_time() {
+        let sbom = include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
+        let vulns = include_bytes!("../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json");
+        let docs = vec![
+            stored(AttachmentKind::Sbom, sbom, "2026-09-24T10:00:00Z", "s1", "r1"),
+            stored(AttachmentKind::Vulnerabilities, vulns, "2026-09-24T10:01:00Z", "v1", "r1"),
+        ];
+        let items = exploited("demo", &docs);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].scope, "demo");
+        assert_eq!(items[0].vulnerability, "CVE-2026-1234");
+        // The vulnerability document's own `attached_at` -- a minute after
+        // the SBOM's, in this fixture pair -- never the SBOM's.
+        assert_eq!(items[0].first_seen_at, t("2026-09-24T10:01:00Z"));
+        assert_eq!(items[0].first_document.id, "v1");
+        assert_eq!(items[0].states, vec![LifecycleState::Built]);
+        assert!(items[0].reported_now);
+        assert_eq!(items[0].latest_vex, None);
+    }
+
+    #[test]
+    fn a_declared_only_sbom_gives_no_exploited_findings() {
+        let sbom = include_bytes!("../../factory-core/tests/fixtures/dependencies/declared-sbom.cdx.json");
+        let vulns = include_bytes!("../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json");
+        let docs = vec![
+            stored(AttachmentKind::Sbom, sbom, "2026-09-24T10:00:00Z", "s1", "r1"),
+            stored(AttachmentKind::Vulnerabilities, vulns, "2026-09-24T10:01:00Z", "v1", "r1"),
+        ];
+        assert!(exploited("demo", &docs).is_empty(), "declared never counts");
+    }
+
+    #[test]
+    fn analysis_state_exploitable_still_counts_as_a_sighting() {
+        let sbom = include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
+        let vulns = vuln_doc("0001", true, false, Some("exploitable"));
+        let docs = vec![
+            stored(AttachmentKind::Sbom, sbom, "2026-09-24T10:00:00Z", "s1", "r1"),
+            stored(AttachmentKind::Vulnerabilities, vulns.as_bytes(), "2026-09-24T10:01:00Z", "v1", "r1"),
+        ];
+        let items = exploited("demo", &docs);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].latest_vex, None, "exploitable is not an exclusion");
+        assert!(items[0].reported_now);
+    }
+
+    #[test]
+    fn a_later_not_affected_mention_excludes_the_item_but_never_its_awareness() {
+        let sbom = include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
+        let first = vuln_doc("0002", true, false, None);
+        let second = vuln_doc("0002", true, false, Some("not_affected"));
+        let docs = vec![
+            stored(AttachmentKind::Sbom, sbom, "2026-09-24T10:00:00Z", "s1", "r1"),
+            stored(AttachmentKind::Vulnerabilities, first.as_bytes(), "2026-09-24T10:01:00Z", "v1", "r1"),
+            stored(AttachmentKind::Sbom, sbom, "2026-09-25T10:00:00Z", "s2", "r2"),
+            stored(AttachmentKind::Vulnerabilities, second.as_bytes(), "2026-09-25T10:01:00Z", "v2", "r2"),
+        ];
+        let items = exploited("demo", &docs);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].latest_vex.as_deref(), Some("not_affected"));
+        assert_eq!(items[0].first_seen_at, t("2026-09-24T10:01:00Z"), "awareness never moves");
+    }
+
+    #[test]
+    fn a_later_scan_without_the_vulnerability_keeps_the_item_with_reported_now_false() {
+        let sbom = include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
+        let first = vuln_doc("0003", true, false, None);
+        let empty = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","vulnerabilities":[]}"#;
+        let docs = vec![
+            stored(AttachmentKind::Sbom, sbom, "2026-09-24T10:00:00Z", "s1", "r1"),
+            stored(AttachmentKind::Vulnerabilities, first.as_bytes(), "2026-09-24T10:01:00Z", "v1", "r1"),
+            stored(AttachmentKind::Sbom, sbom, "2026-09-25T10:00:00Z", "s2", "r2"),
+            stored(AttachmentKind::Vulnerabilities, empty, "2026-09-25T10:01:00Z", "v2", "r2"),
+        ];
+        let items = exploited("demo", &docs);
+        assert_eq!(items.len(), 1, "CRA counts from awareness, not the newest scan");
+        assert!(!items[0].reported_now);
+        assert_eq!(items[0].latest_vex, None, "dropped, not excluded");
+        assert_eq!(items[0].first_seen_at, t("2026-09-24T10:01:00Z"));
+    }
+
+    #[test]
+    fn kev_and_euvd_both_false_gives_no_exploited_findings() {
+        let sbom = include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
+        let vulns = vuln_doc("0004", false, false, None);
+        let docs = vec![
+            stored(AttachmentKind::Sbom, sbom, "2026-09-24T10:00:00Z", "s1", "r1"),
+            stored(AttachmentKind::Vulnerabilities, vulns.as_bytes(), "2026-09-24T10:01:00Z", "v1", "r1"),
+        ];
+        assert!(exploited("demo", &docs).is_empty());
     }
 }

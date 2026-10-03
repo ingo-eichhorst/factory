@@ -18,6 +18,8 @@ import {
   packRows,
   resolveDashboard,
   isTileRenderable,
+  rowTemplate,
+  rowIsAllSmall,
 } from "../js/dashboard-model.js";
 
 // --------------------------------------------------------- the vocabulary
@@ -57,8 +59,8 @@ test("the epic's view vocabulary is #150's ten ids; `kpis` is a phase-2 stopgap,
   for (const id of EPIC_VIEW_IDS) assert.ok(VIEW_IDS.includes(id), `${id} is a valid tile id`);
 });
 
-test("phase 2 renders exactly kpis, throughput, on_the_line, production_year, by_scope -- nothing new", () => {
-  assert.deepEqual(RENDERABLE_VIEW_IDS, ["kpis", "throughput", "on_the_line", "production_year", "by_scope"]);
+test("#162 (phase 3) renders every view id the epic names, plus the phase-2 kpis stopgap -- nothing left unbuilt", () => {
+  assert.deepEqual(RENDERABLE_VIEW_IDS, VIEW_IDS);
   for (const id of RENDERABLE_VIEW_IDS) assert.ok(VIEW_IDS.includes(id));
 });
 
@@ -134,11 +136,9 @@ test("packRows greedily fills a 12-column row and starts a new one when a tile w
   assert.deepEqual(packRows([s, s, s, s, s, s, s]), [[s, s, s, s, s, s], [s]], "a 7th overflows into a new row");
   assert.deepEqual(packRows([l, m]), [[l, m]], "l + m fills a row exactly, together");
   // packRows itself doesn't care which order fills a row -- only the
-  // running total -- but dashboard.js's `.drow` is a fixed 2fr/1fr grid,
-  // not a general span -> grid-column mapping, so it only ever renders an
-  // `[l, m]` row correctly. DEFAULT_DASHBOARD never produces `[m, l]`; this
-  // case documents the packer's own indifference, not a claim that
-  // dashboard.js would render it the same way.
+  // running total. #162's `.drow` is span-aware now (`rowTemplate`), so an
+  // `[m, l]` row renders correctly too (`4fr 8fr`, the tiles in the order
+  // given) -- see the grid tests below for that.
   assert.deepEqual(packRows([m, l]), [[m, l]], "the packer doesn't care about order, only the running total");
   assert.deepEqual(packRows([xl, xl]), [[xl], [xl]], "an xl tile is always alone");
   assert.deepEqual(packRows([]), []);
@@ -150,6 +150,38 @@ test("packRows on DEFAULT_DASHBOARD reproduces today's four rows: kpis alone, th
     rows.map((row) => row.map((t) => t.view)),
     [["kpis"], ["throughput", "on_the_line"], ["production_year"], ["by_scope"]]
   );
+});
+
+// -------------------------------------------------------------- grid (#162)
+
+test("rowTemplate returns null for a one-tile row and for DEFAULT_DASHBOARD's own [l, m] pair -- nothing to override", () => {
+  const l = { view: "throughput", size: "l" };
+  const m = { view: "on_the_line", size: "m" };
+  assert.equal(rowTemplate([l]), null, "a one-tile row is never wrapped in .drow to begin with");
+  assert.equal(rowTemplate([l, m]), null, "8:4 already matches .drow's own 2fr/1fr CSS fallback exactly");
+  assert.equal(rowTemplate(null), null);
+  assert.equal(rowTemplate([]), null);
+});
+
+test("rowTemplate fr-weights every other row by each tile's own span, with a trailing filler when a row does not fill all 12 columns", () => {
+  const m = { view: "a", size: "m" }; // 4
+  const s = { view: "b", size: "s" }; // 2
+  const xl = { view: "c", size: "xl" }; // 12 -- never actually reaches rowTemplate (packRows keeps it alone), exercised for completeness
+  assert.equal(rowTemplate([m, s]), "minmax(0,4fr) minmax(0,2fr) minmax(0,6fr)", "4 + 2 = 6 of 12 -- 6 columns left blank, not stretched");
+  assert.equal(rowTemplate([s, s, s, s, s, s]), "minmax(0,2fr) minmax(0,2fr) minmax(0,2fr) minmax(0,2fr) minmax(0,2fr) minmax(0,2fr)", "6 x 2 already fills 12, no filler");
+  assert.equal(rowTemplate([m, xl]), "minmax(0,4fr) minmax(0,12fr)", "an unknown/overflowing combination is not this function's job to refuse -- validateDashboard's");
+});
+
+test("rowIsAllSmall is true only for a multi-tile row of nothing but s tiles", () => {
+  const s = { view: "a", size: "s" };
+  const m = { view: "b", size: "m" };
+  assert.equal(rowIsAllSmall([s, s, s]), true);
+  assert.equal(rowIsAllSmall([s, m]), false, "one non-s tile disqualifies the row");
+  assert.equal(rowIsAllSmall([s]), false, "a one-tile row is never wrapped in .drow, so this never applies to it");
+  assert.equal(rowIsAllSmall([]), false);
+  assert.equal(rowIsAllSmall(null), false);
+  // DEFAULT_DASHBOARD's own multi-tile row is [l, m], not s -- unaffected.
+  assert.deepEqual(packRows(DEFAULT_DASHBOARD).filter((row) => rowIsAllSmall(row)), []);
 });
 
 // ------------------------------------------------------------ DEFAULT_DASHBOARD
@@ -183,13 +215,19 @@ test("resolveDashboard uses the fetched tiles when they are a non-empty array, e
   assert.equal(resolveDashboard("nope"), DEFAULT_DASHBOARD, "anything that is not an array reads as no override");
 });
 
-test("isTileRenderable is true only for a view id this page already draws a card for", () => {
+test("isTileRenderable is true for every view id in the vocabulary and any well-shaped metric tile (#162)", () => {
   for (const id of RENDERABLE_VIEW_IDS) {
     assert.equal(isTileRenderable({ view: id, size: "s" }), true, id);
   }
-  assert.equal(isTileRenderable({ view: "agent_hours_by_scope", size: "m" }), false, "phase 3's own view, not built yet");
+  // #162: every registry metric renders, including a bound family --
+  // dashboard.js draws its own "not available" reason off whatever
+  // `/api/metrics` answers, so there is no client-side registry to check
+  // the id against before deciding a `metric` tile is drawable.
+  assert.equal(isTileRenderable({ metric: "throughput_week", size: "s" }), true);
+  assert.equal(isTileRenderable({ metric: "compliance.cra", size: "s" }), true);
+  assert.equal(isTileRenderable({ metric: "", size: "s" }), false, "an empty metric id is not a tile");
+  assert.equal(isTileRenderable({ metric: "   ", size: "s" }), false, "a blank metric id is not a tile");
   assert.equal(isTileRenderable({ view: "nonsense", size: "s" }), false, "not even in the vocabulary");
-  assert.equal(isTileRenderable({ metric: "throughput_week", size: "s" }), false, "no metric tile renders yet");
   assert.equal(isTileRenderable(null), false);
   assert.equal(isTileRenderable({ view: "kpis", metric: "throughput_week", size: "s" }), false, "both is not a tile");
 });
@@ -252,6 +290,11 @@ function fakeDashEls() {
   return { dash: { innerHTML: "", querySelector: () => null, querySelectorAll: () => [] }, "dash-source": { textContent: "" } };
 }
 
+const OCCUPANCY_ANSWER = {
+  status: "ok",
+  data: { kind: "occupancy", occupancy: { now: "2026-09-26T00:00:00Z", from: "2026-09-12T00:00:00Z", to: "2026-09-26T00:00:00Z", scopes: [] } },
+};
+
 test("loadDashboard fetches /api/dashboard for the selected scope, draws its tiles, and shows the source", async () => {
   const elements = fakeDashEls();
   document.getElementById = (id) => (id in elements ? elements[id] : null);
@@ -261,6 +304,9 @@ test("loadDashboard fetches /api/dashboard for the selected scope, draws its til
     requested.push(path);
     if (path.startsWith("/api/production")) {
       return { status: 200, statusText: "OK", json: async () => PRODUCTION_ANSWER };
+    }
+    if (path.startsWith("/api/occupancy")) {
+      return { status: 200, statusText: "OK", json: async () => OCCUPANCY_ANSWER };
     }
     return {
       status: 200,
@@ -282,13 +328,43 @@ test("loadDashboard fetches /api/dashboard for the selected scope, draws its til
   await loadDashboard();
 
   assert.ok(requested.includes("/api/dashboard?scope=demo"), requested.join(", "));
+  // #162: a `view` tile this page has not built a renderer for used to be
+  // the only way `isTileRenderable` read false -- phase 3 built every one
+  // of #150's view ids, so `agent_hours_by_scope` now draws its own card,
+  // reading the one `/api/occupancy` read `neededEndpoints` asked for
+  // because this layout names it.
+  assert.ok(requested.some((p) => p.startsWith("/api/occupancy")), requested.join(", "));
   assert.equal(elements["dash-source"].textContent, "layout from demo");
   assert.match(elements.dash.innerHTML, /class="kpis"/, "the renderable tile draws its own card");
-  assert.match(
-    elements.dash.innerHTML,
-    /agent_hours_by_scope — not drawn yet/,
-    "a view id phase 3 has not built yet gets a placeholder, not nothing"
-  );
+  assert.match(elements.dash.innerHTML, /<h3>Agent hours by scope/, "no placeholder -- #162 built this card");
+  assert.doesNotMatch(elements.dash.innerHTML, /not drawn yet/);
+
+  delete globalThis.fetch;
+});
+
+test("the default layout (no metric or new view tile) never fetches /api/metrics, /api/occupancy, /api/operations, /api/policy or /api/costs", async () => {
+  const elements = fakeDashEls();
+  document.getElementById = (id) => (id in elements ? elements[id] : null);
+
+  const requested = [];
+  globalThis.fetch = async (path) => {
+    requested.push(path);
+    if (path.startsWith("/api/production")) {
+      return { status: 200, statusText: "OK", json: async () => PRODUCTION_ANSWER };
+    }
+    return { status: 200, statusText: "OK", json: async () => ({ status: "ok", data: { kind: "dashboard", tiles: null, source: null } }) };
+  };
+  state.scope = null;
+  state.scopes = [{ name: "root", path: "root", agents: [] }];
+  state.tasks = new Map();
+
+  await loadDashboard();
+
+  for (const forbidden of ["/api/metrics", "/api/occupancy", "/api/operations", "/api/policy", "/api/costs"]) {
+    assert.ok(!requested.some((p) => p.startsWith(forbidden)), `${forbidden} should not be fetched for the default layout; requested ${requested.join(", ")}`);
+  }
+  assert.ok(requested.some((p) => p.startsWith("/api/production")));
+  assert.ok(requested.some((p) => p.startsWith("/api/dashboard")));
 
   delete globalThis.fetch;
 });

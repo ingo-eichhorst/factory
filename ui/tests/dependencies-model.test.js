@@ -9,6 +9,8 @@ import {
   pathLabel,
   serviceTarget,
   shapeFindings,
+  visibleDocuments,
+  visibleFindings,
 } from "../js/dependencies-model.js";
 
 test("findings keep daemon statuses and sort urgent severities first", () => {
@@ -36,4 +38,12 @@ test("unknown credential presence never becomes absent", () => {
   assert.equal(credentialState({ credential: "github", credential_present: false }), "absent");
   assert.equal(credentialState({ credential: "github", credential_present: true }), "present");
   assert.equal(credentialState({}), "none");
+});
+
+test("Factory running evidence is shown only by L1 Doctor", () => {
+  const rows = [{ state: "declared" }, { state: "built" }, { state: "running" }];
+  assert.deepEqual(visibleDocuments(rows, "factory").map((row) => row.state), ["declared", "built"]);
+  assert.deepEqual(visibleFindings(rows, "factory").map((row) => row.state), ["declared", "built"]);
+  assert.deepEqual(visibleDocuments(rows, "demo"), rows);
+  assert.deepEqual(visibleFindings(rows, "demo"), rows);
 });

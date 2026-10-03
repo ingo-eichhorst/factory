@@ -92,7 +92,20 @@ impl Engine {
         bin: Option<ProductionBin>,
         scope: Option<String>,
     ) -> Result<Production> {
-        let now = Utc::now();
+        self.production_at(minutes, bin, scope, Utc::now()).await
+    }
+
+    /// The production read at one caller-owned clock instant. Metrics use
+    /// this form so every family in one response shares exactly the same
+    /// `(from, now]` interval, including every exact-scope read merged for a
+    /// subtree. The public production endpoint samples its clock once above.
+    pub(crate) async fn production_at(
+        self: &Arc<Self>,
+        minutes: Option<u32>,
+        bin: Option<ProductionBin>,
+        scope: Option<String>,
+        now: DateTime<Utc>,
+    ) -> Result<Production> {
         let minutes = minutes.unwrap_or(DEFAULT_MINUTES).clamp(5, MAX_MINUTES);
         let bin = bin.unwrap_or(ProductionBin::Day);
         let from = now - Duration::minutes(minutes as i64);
@@ -260,10 +273,10 @@ fn is_rework(run: &Run, predecessor_status: &BTreeMap<(&str, u32), RunStatus>) -
 }
 
 /// Counts finished runs into calendar-aligned buckets from `from` to `now`.
-/// Every internal boundary is shared between two buckets, so only the very
-/// last one -- the one that ends at `now` rather than a full step later --
-/// counts a run landing exactly on its own end; every other bucket is
-/// half-open, or a run on a shared boundary would be counted twice.
+/// The whole requested interval is `(from, now]`: the first bucket excludes
+/// its lower edge and the last includes its upper edge. Every internal
+/// boundary belongs to the bucket starting there, so adjacent buckets never
+/// count the same run twice.
 ///
 /// `rework` is precomputed per run (`Engine::production`, once, before this
 /// runs twice) rather than decided here, so `is_rework` never runs twice for
@@ -276,10 +289,12 @@ fn bucket(finished: &[(&Run, DateTime<Utc>, bool)], bin: ProductionBin, from: Da
         .into_iter()
         .enumerate()
         .map(|(i, (b_from, b_to))| {
+            let inclusive_start = i > 0;
             let inclusive_end = i == last;
             let (mut count, mut scrapped, mut reworked, mut first_pass) = (0u32, 0u32, 0u32, 0u32);
             for (run, end, rework) in finished {
-                let in_bucket = *end >= b_from && if inclusive_end { *end <= b_to } else { *end < b_to };
+                let after_start = if inclusive_start { *end >= b_from } else { *end > b_from };
+                let in_bucket = after_start && if inclusive_end { *end <= b_to } else { *end < b_to };
                 if !in_bucket {
                     continue;
                 }
@@ -338,7 +353,15 @@ mod tests {
             adapter: "shell".into(),
             runtime: "herdr".into(),
             session: None,
+            last_session: None,
             token: None,
+            spent_token_sha256: None,
+            superseded_token_sha256s: Vec::new(),
+            continued_from: None,
+            resumed_session: None,
+            original_estimate: None,
+            provider_account: None,
+            re_estimate: None,
             result: None,
             routed_to: None,
             error: None,
@@ -349,6 +372,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            turn_ended_session_id: None,
             required_steps: Vec::new(),
             usage: None,
             worktree_path: None,
@@ -426,7 +450,7 @@ mod tests {
         let from = floor_to(ProductionBin::Day, at(0));
         let now = from + Duration::hours(1);
         let runs: Vec<Run> = (0..5)
-            .map(|i| run(&format!("r{i}"), &format!("t{i}"), 1, RunStatus::Failed, Trigger::Manual, from, Some(from + Duration::seconds(i))))
+            .map(|i| run(&format!("r{i}"), &format!("t{i}"), 1, RunStatus::Failed, Trigger::Manual, from, Some(from + Duration::seconds(i + 1))))
             .collect();
         let finished = classify_all(&runs);
         let buckets = bucket(&finished, ProductionBin::Day, from, now);
@@ -574,6 +598,17 @@ mod tests {
         let total: u32 = buckets.iter().map(|b| b.finished).sum();
         assert_eq!(total, 1);
         assert_eq!(buckets[1].finished, 1, "a run ending exactly at midnight belongs to the day starting there");
+    }
+
+    #[test]
+    fn a_run_on_the_requested_start_is_excluded() {
+        let from = floor_to(ProductionBin::Day, at(0));
+        let r = run("r1", "t1", 1, RunStatus::Done, Trigger::Manual, from, Some(from));
+        let runs = [r];
+        let finished = classify_all(&runs);
+        let buckets = bucket(&finished, ProductionBin::Day, from, from + Duration::hours(1));
+
+        assert_eq!(buckets.iter().map(|b| b.finished).sum::<u32>(), 0);
     }
 
     // ------------------------------------------------------------- scope join

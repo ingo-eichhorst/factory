@@ -9,8 +9,8 @@ import { openEdit, scheduleText } from "./task-form.js";
 import { scheduleLabel } from "./schedule.js";
 import { describeWorkflowOrigin } from "./workflows.js";
 import { entryKindLabel, entryTone } from "./operations-model.js";
-import { runUsageView, taskUsageLine } from "./usage-model.js";
-import { columnFor, standing, taskActions, isSettled, CLOSE_REASONS, closeBody } from "./task-model.js";
+import { estimateComparisonView, newestRead, runUsageView, taskUsageLine } from "./usage-model.js";
+import { columnFor, standing, taskActions, isSettled, relationLabel, CLOSE_REASONS, closeBody } from "./task-model.js";
 import { notStartedNote } from "./pending-model.js";
 
 export { scheduleLabel };
@@ -91,16 +91,18 @@ function standingDetail(detail, full) {
 /// Only what `/api/tasks` already serves: title, short id, status, scope,
 /// agent, the schedule rule or the run count, its estimate when it has one,
 /// and how long the newest run has been going.
-function taskCard(t) {
+function taskCard(t, tasks) {
   const bits = [];
   bits.push(t.schedule ? scheduleLabel(t.schedule) : (t.runs ? `${t.runs} run${t.runs === 1 ? "" : "s"}` : "no runs yet"));
   if (t.estimate_seconds) bits.push(`est. ${shortSpan(t.estimate_seconds)}`);
   if (!isSettled(t) && t.status !== "pending" && t.last_run_at) bits.push(since(t.last_run_at));
   const wt = t.worktree ? ` <span class="tag" title="runs in a git worktree of its own">worktree</span>` : "";
+  const relation = relationLabel(t, tasks);
   return `
     <div class="kbc" data-id="${esc(t.id)}">
       <div class="kbc-top">${statusBadge(t.status)}<code class="id">${esc(t.id.slice(0, 8))}</code></div>
       <div class="title">${esc(t.title)}</div>
+      ${relation ? `<div class="sub">${esc(relation)}</div>` : ""}
       <div class="sub">${esc(t.scope)} · ${esc(t.agent)}${wt}</div>
       <div class="sub">${esc(bits.join(" · "))}${pausedTag(t)}</div>
       ${standingHtml(t)}
@@ -118,7 +120,7 @@ function renderBoard(rows) {
     return `
       <div class="kbcol" data-col="${c.key}">
         <div class="kbcol-head"><span>${esc(c.label)}</span><span class="kbcol-count">${items.length}</span></div>
-        <div class="kbcol-body">${items.length ? items.map(taskCard).join("") : `<div class="kbcol-empty">—</div>`}</div>
+        <div class="kbcol-body">${items.length ? items.map(task => taskCard(task, state.tasks)).join("") : `<div class="kbcol-empty">—</div>`}</div>
       </div>`;
   }).join("");
   for (const el of $("kanban").querySelectorAll(".kbc")) {
@@ -139,6 +141,7 @@ export function renderTasks() {
   $("tasks").innerHTML = rows.map(t => `
     <tr class="row" data-id="${esc(t.id)}">
       <td><div class="title">${esc(t.title)}</div>
+          ${relationLabel(t, state.tasks) ? `<div class="sub">${esc(relationLabel(t, state.tasks))}</div>` : ""}
           <div class="sub">${esc(scheduleLabel(t.schedule))}${pausedTag(t)}</div></td>
       <td>${statusBadge(t.status)}${standingHtml(t)}</td>
       <td class="sub">${t.runs || 0}</td>
@@ -255,21 +258,42 @@ export async function loadRuns() {
 /// daemon rather than re-added here, so the modal and `factory task show`
 /// can never disagree about what counts. A daemon without the endpoint
 /// leaves it blank.
+const taskUsageReads = newestRead();
+
 export async function loadTaskUsage() {
   const open = state.open;
+  const current = taskUsageReads.next();
   try {
     const usage = (await api(`/api/tasks/${open}/usage`)).usage;
-    if (state.open === open) state.taskUsage = usage;
-  } catch { state.taskUsage = null; }
+    if (state.open === open && current()) state.taskUsage = usage;
+  } catch { if (current()) state.taskUsage = null; }
 }
 
 /// A run's usage block: tokens, cost and what they rest on, or why there
 /// is none. See `usage-model.js`.
-function usageHtml(usage) {
+function comparisonHtml(label, comparison, unit) {
+  const view = estimateComparisonView(comparison, unit);
+  if (!view) return "";
+  const meter = view.percent === null ? "" : `<div class="estimate-meter"><span style="width:${view.percent}%"></span></div>`;
+  return `<div class="estimate-actual" data-tone="${view.tone}"><div class="sub">${esc(label)}: ${esc(view.label)}</div>${meter}</div>`;
+}
+
+function usageHtml(usage, entry) {
   const v = runUsageView(usage);
   let h = `<label>Usage</label><div class="usage usage-${v.tone}"><div${v.tone === "known" ? "" : ` class="sub"`}>${esc(v.headline)}</div>`;
   for (const line of v.lines) h += `<div class="sub">${esc(line)}</div>`;
   for (const note of v.notes) h += `<div class="sub warn">${esc(note)}</div>`;
+  h += comparisonHtml("Original time estimate", entry?.time_comparison, "time");
+  h += comparisonHtml("Original cost estimate", entry?.cost_comparison, "cost");
+  if (entry?.re_estimate) {
+    const re = entry.re_estimate;
+    const parts = [];
+    if (re.time) parts.push(`${re.time.low}s–${re.time.high}s (median ${re.time.expected}s)`);
+    if (re.active_seconds) parts.push(`${re.active_seconds.low}s–${re.active_seconds.high}s active`);
+    if (re.cost) parts.push(`$${re.cost.low.toFixed(2)}–$${re.cost.high.toFixed(2)} cost`);
+    const detail = re.reason || `${parts.join(" · ")} · ${re.sample_count} samples`;
+    h += `<div class="sub">First-turn re-estimate: ${esc(detail)}</div>`;
+  }
   return h + `</div>`;
 }
 
@@ -298,7 +322,8 @@ export function renderModal() {
 
   let meta = `<div class="sub">${esc(t.scope)} · ${esc(t.agent)} on ${esc(t.runtime)} · ${esc(scheduleLabel(t.schedule))}${pausedTag(t)}`;
   if (t.next_run_at && !t.schedule_paused) meta += ` · next ${new Date(t.next_run_at).toLocaleString()}`;
-  if (t.estimate_seconds) meta += ` · estimate ${shortSpan(t.estimate_seconds)}`;
+  if (t.estimate?.time) meta += ` · estimate ${shortSpan(t.estimate.time.low)}–${shortSpan(t.estimate.time.high)} (expected ${shortSpan(t.estimate.time.expected)})`;
+  else if (t.estimate_seconds) meta += ` · estimate ${shortSpan(t.estimate_seconds)}`;
   if (t.ack_timeout_seconds) meta += ` · ack ${t.ack_timeout_seconds}s`;
   if (t.timeout_seconds) meta += ` · timeout ${t.timeout_seconds}s`;
   if (t.worktree) meta += ` · own worktree`;
@@ -328,7 +353,8 @@ export function renderModal() {
     if (r.worktree_path) meta += ` at <code>${esc(r.worktree_path)}</code>`;
     meta += `</div>`;
   }
-  if (r) meta += usageHtml(r.usage);
+  const usageEntry = state.taskUsage?.runs?.find(entry => entry.run_id === r?.id);
+  if (r) meta += usageHtml(r.usage, usageEntry);
   const total = state.taskUsage && state.taskUsage.task_id === t.id ? taskUsageLine(state.taskUsage.total) : null;
   if (total) meta += `<div class="sub">${esc(total)}</div>`;
   if (r && r.result) meta += `<label>Result</label><pre>${esc(r.result)}</pre>`;
@@ -349,7 +375,7 @@ export function renderModal() {
     b.onclick = () => {
       state.run = b.dataset.run;
       writeHash();
-      renderModal(); loadJournal(); retimeTerminal();
+      renderModal(); void loadJournal(); retimeTerminal();
     };
   }
 }

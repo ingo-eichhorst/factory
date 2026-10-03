@@ -38,10 +38,11 @@
 //! [`evaluate`] takes the applicable controls, a bundle of [`Evidence`]
 //! Factory already has lying around, and `now`, and produces a
 //! [`ControlStatus`] per control -- pure, so a caller passes `now` in rather
-//! than this module reading the clock. `evaluate` now understands all ten
-//! of `Check`'s kinds: `knowledge` and `attestation` (v1), `task`,
+//! than this module reading the clock. `evaluate` now understands all
+//! eleven of `Check`'s kinds: `knowledge` and `attestation` (v1), `task`,
 //! `workflow` and `gate` (`#81`), and `roles`, `sandbox`, `secrets` and
-//! `daemon` (`#82`), plus `dependencies` (`#123`). The four config checks read facts the engine resolves once,
+//! `daemon` (`#82`), plus `dependencies` (`#123`) and `attested` (`#158`).
+//! The four config checks read facts the engine resolves once,
 //! synchronously, from the live config snapshot rather than a store --
 //! `Evidence::agents` (`Engine::agent_facts_for`, `Scope::agents_with` and
 //! `Engine::roles_for`), `Evidence::secrets` (`Engine::credential_inventory`,
@@ -96,6 +97,7 @@
 //! [`KNOWN_SECRETS_LOCATIONS`].
 
 use crate::bench::Verdict;
+use crate::conformance::{AttestedRun, StepEvidence};
 use crate::dataset::is_slug;
 use crate::dependencies::{DependenciesFact, Severity};
 use crate::role::Grant;
@@ -125,85 +127,14 @@ pub enum Kind {
 }
 
 /// A freshness window, written in the catalogue as `Nd`, `Nh`, or `Nw`
-/// (days, hours, weeks). Stored as whole hours, so two durations compare
-/// and take a minimum exactly, with nothing to round at the edges.
-/// `chrono::Duration` has no serde support of its own and no `Ord`, so this
-/// is its own small type rather than a wrapper around that one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct Duration {
-    hours: u64,
-}
-
-impl Duration {
-    pub fn from_hours(hours: u64) -> Self {
-        Self { hours }
-    }
-
-    pub fn as_hours(&self) -> u64 {
-        self.hours
-    }
-
-    /// This window as a `chrono::TimeDelta`, capped at `TimeDelta::MAX`
-    /// rather than panicking. The grammar happily parses `9999999999999999h`,
-    /// which is far past what a `TimeDelta` holds, and `TimeDelta::hours`
-    /// panics on that; a window that long means "never stale" either way.
-    /// The one conversion every freshness check here and in `quality.rs`
-    /// goes through.
-    pub fn as_time_delta(&self) -> chrono::TimeDelta {
-        i64::try_from(self.hours)
-            .ok()
-            .and_then(chrono::TimeDelta::try_hours)
-            .unwrap_or(chrono::TimeDelta::MAX)
-    }
-}
-
-impl std::str::FromStr for Duration {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let bad = || format!("{s:?} is not a duration like 30d, 12h, or 2w");
-        if s.len() < 2 {
-            return Err(bad());
-        }
-        let (num, unit) = s.split_at(s.len() - 1);
-        let n: u64 = num.parse().map_err(|_| bad())?;
-        let hours = match unit {
-            "h" => Some(n),
-            "d" => n.checked_mul(24),
-            "w" => n.checked_mul(24 * 7),
-            _ => None,
-        }
-        .ok_or_else(bad)?;
-        Ok(Duration { hours })
-    }
-}
-
-impl std::fmt::Display for Duration {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.hours != 0 && self.hours.is_multiple_of(24 * 7) {
-            write!(f, "{}w", self.hours / (24 * 7))
-        } else if self.hours != 0 && self.hours.is_multiple_of(24) {
-            write!(f, "{}d", self.hours / 24)
-        } else {
-            write!(f, "{}h", self.hours)
-        }
-    }
-}
-
-impl TryFrom<String> for Duration {
-    type Error = String;
-
-    fn try_from(s: String) -> std::result::Result<Self, Self::Error> {
-        s.parse()
-    }
-}
-
-impl From<Duration> for String {
-    fn from(d: Duration) -> String {
-        d.to_string()
-    }
-}
+/// (days, hours, weeks). Moved to the L0 kernel (#193, phase 1, F7): it is
+/// imported below L6 (`dependencies.rs`, `quality.rs`, `config.rs`, and the
+/// daemon's own `dependencies.rs` tests), so it belongs where nothing above
+/// it can accidentally deepen the dependency the wrong way. Re-exported
+/// here unchanged, so `policy.rs` and everything L6 and up keeps naming it
+/// `policy::Duration` and the serialized form -- `"30d"`, `"12h"`, `"2w"` --
+/// stays exactly what it was.
+pub use factory_kernel::Duration;
 
 /// A control's stable identity, everywhere but inside the file that defines
 /// it: `framework/id`, e.g. `cra/annex-i-2-1`. Serializes as exactly that
@@ -272,10 +203,10 @@ impl From<ControlRef> for String {
 
 /// One thing Factory already records that can stand as evidence for a
 /// control. Every kind the ADR names is parsed here and `evaluate` now
-/// understands all ten -- v1 shipped `knowledge` and `attestation` writable
-/// ahead of evaluation, and every ticket since (`#81`, `#82`) taught
-/// `evaluate` a few more kinds without ever having to change the file format
-/// underneath an author who already wrote one.
+/// understands all eleven -- v1 shipped `knowledge` and `attestation`
+/// writable ahead of evaluation, and every ticket since (`#81`, `#82`,
+/// `#123`, `#158`) taught `evaluate` a few more kinds without ever having to
+/// change the file format underneath an author who already wrote one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "check", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Check {
@@ -332,10 +263,13 @@ pub enum Check {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         absent: Vec<String>,
     },
-    /// The newest declared dependency inventory and its derived open findings.
+    /// The newest declared and built dependency inventories and their derived
+    /// open findings.
     Dependencies {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sbom_max_age: Option<Duration>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        built_sbom: bool,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         max_open: BTreeMap<Severity, u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -346,6 +280,22 @@ pub enum Check {
     /// other name is a [`Finding`] ([`FindingKind::UnknownDaemonFact`]) and
     /// stays `open`.
     Daemon { fact: String },
+    /// `#158` phase 1: whether finished runs of `category` actually
+    /// conformed to their own control plan's `step`, within `max_age` --
+    /// the "did the plant do what it says it does" counterpart to
+    /// `attestation`'s "a person said so". Evidence is
+    /// `Evidence::attested`, a batch read of finished runs and their
+    /// `StepAttestation`s (`Engine::attested_runs`), never re-derived here;
+    /// see `direct_status` for the satisfied/stale/open rule and
+    /// `factory_core::conformance` for the per-run judging it reuses
+    /// (`control_plan::judge`). `max_age` is required -- coverage needs a
+    /// window, so leaving it out is a catalogue-wide `ParseFailed` rather
+    /// than a silently open control.
+    Attested {
+        category: String,
+        step: String,
+        max_age: Duration,
+    },
 }
 
 /// The `daemon` check's fixed vocabulary -- everything else `DaemonConfig`
@@ -359,7 +309,15 @@ pub enum Check {
 /// - `http_loopback_only` -- every `http` interface the daemon mounts binds
 ///   to a loopback address, or none is mounted at all.
 /// - `power_assertion` -- `daemon.power_assertion`.
-pub const KNOWN_DAEMON_FACTS: &[&str] = &["foreman_enabled", "http_loopback_only", "power_assertion"];
+/// - `backup_recent` -- `#154`: the newest backup is within its schedule (or
+///   the unscheduled yardstick) plus grace -- [`crate::backup::BackupFact::recent`].
+/// - `backup_offsite` -- `#154`: the destination is not on the same device
+///   as the instance root -- [`crate::backup::BackupFact::offsite`].
+/// - `backup_verified` -- `#154`: the newest verification of a snapshot
+///   still in the destination passed, within 30 days --
+///   [`crate::backup::BackupFact::verified`].
+pub const KNOWN_DAEMON_FACTS: &[&str] =
+    &["foreman_enabled", "http_loopback_only", "power_assertion", "backup_recent", "backup_offsite", "backup_verified"];
 
 /// The `secrets` check's fixed vocabulary -- exactly the locations the L2
 /// Secrets tab already reports on (`Engine::credential_inventory`): the
@@ -384,14 +342,19 @@ impl Check {
             Check::Secrets { .. } => "secrets",
             Check::Dependencies { .. } => "dependencies",
             Check::Daemon { .. } => "daemon",
+            Check::Attested { .. } => "attested",
         }
     }
 
-    /// This check's own `max_age`, for the kinds that carry one.
+    /// This check's own `max_age`, for the kinds that carry one. `attested`
+    /// always contributes one -- its field is a required `Duration`, never
+    /// `Option`, so `applicable`'s fold always has something to fold in for
+    /// a control that carries this check.
     fn own_max_age(&self) -> Option<Duration> {
         match self {
             Check::Task { max_age, .. } | Check::Workflow { max_age, .. } | Check::Gate { max_age, .. } => *max_age,
             Check::Dependencies { sbom_max_age, .. } => *sbom_max_age,
+            Check::Attested { max_age, .. } => Some(*max_age),
             _ => None,
         }
     }
@@ -434,12 +397,16 @@ impl Check {
                 }
             }
             Check::Daemon { fact } => format!("daemon: {fact}"),
-            Check::Dependencies { sbom_max_age, max_open, exploited_open } => {
+            Check::Dependencies { sbom_max_age, built_sbom, max_open, exploited_open } => {
                 let mut terms = Vec::new();
                 if let Some(age) = sbom_max_age { terms.push(format!("SBOM max_age {age}")); }
+                if *built_sbom { terms.push("built SBOM required".to_string()); }
                 for (severity, limit) in max_open { terms.push(format!("{} <= {limit}", severity.as_str())); }
                 if let Some(limit) = exploited_open { terms.push(format!("exploited <= {limit}")); }
                 format!("dependencies: {}", terms.join(", "))
+            }
+            Check::Attested { category, step, max_age } => {
+                format!("attested: {category}/{step} (max_age {max_age})")
             }
         }
     }
@@ -523,6 +490,11 @@ pub enum FindingKind {
     /// command, a category that is not a name. Kept, never dropped: see
     /// `control_plan::Requirement::problems`.
     BadRequirement,
+    /// An `attested` check's `category` or `step` is not a name
+    /// (`control_plan::is_name`) -- it could never match a run's own
+    /// `category`/`RequiredStep::step`, so the check can never be
+    /// satisfied. `#158`.
+    BadCheckTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -567,6 +539,22 @@ pub fn check_vocabulary(check: &Check) -> Vec<(FindingKind, String)> {
                 )
             })
             .collect(),
+        Check::Attested { category, step, .. } => {
+            let mut findings = Vec::new();
+            if !crate::control_plan::is_name(category) {
+                findings.push((
+                    FindingKind::BadCheckTarget,
+                    format!("names attested category {category:?}, which is not a name: lowercase letters, digits, '-' and '_', starting with a letter or digit"),
+                ));
+            }
+            if !crate::control_plan::is_name(step) {
+                findings.push((
+                    FindingKind::BadCheckTarget,
+                    format!("names attested step {step:?}, which is not a name: lowercase letters, digits, '-' and '_', starting with a letter or digit"),
+                ));
+            }
+            findings
+        }
         _ => Vec::new(),
     }
 }
@@ -994,6 +982,14 @@ pub struct Attestation {
     pub expires_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub withdrawn: Option<Withdrawal>,
+    /// A submission against the CRA Art. 14 reporting clock, phase 1 of
+    /// `#157` -- absent for every attestation recorded before this and for
+    /// an ordinary one recorded since. `direct_status`'s `attestation`
+    /// check skips a row that carries one: a single notification is not the
+    /// whole control being met. `policy_attest` (`factory-daemon/src/
+    /// policies/mod.rs`) is the only writer, and only for `cra/art-14`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<crate::reporting_clock::ClockMark>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1169,16 +1165,23 @@ pub struct DaemonFact {
     pub power_assertion: bool,
 }
 
-/// The value [`KNOWN_DAEMON_FACTS`]'s names read off a [`DaemonFact`] --
-/// `None` for a name outside that list, which `direct_status` never passes
-/// in (it checks membership itself, to give the "not a fact this build
-/// knows" reason its own wording), so in practice `None` here only ever
-/// means `http_loopback_only`'s own "could not be determined".
-fn daemon_fact_value(fact: &str, facts: &DaemonFact) -> Option<bool> {
+/// The value [`KNOWN_DAEMON_FACTS`]'s names read off `evidence` -- outer
+/// `None` for a name whose source was never gathered (`evidence.daemon`/
+/// `evidence.backup` is `None`), inner `None` for a name that was gathered
+/// but could not itself be determined (`http_loopback_only`'s own
+/// indeterminate reading, or a `backup_*` fact while the destination is
+/// missing or unmounted). `direct_status` never passes in a name outside
+/// [`KNOWN_DAEMON_FACTS`] (it checks membership itself, to give the "not a
+/// fact this build knows" reason its own wording), so in practice the `_`
+/// arm below is unreachable.
+fn daemon_fact_value(fact: &str, evidence: &Evidence) -> Option<Option<bool>> {
     match fact {
-        "foreman_enabled" => Some(facts.foreman_enabled),
-        "http_loopback_only" => facts.http_loopback_only,
-        "power_assertion" => Some(facts.power_assertion),
+        "foreman_enabled" => evidence.daemon.map(|facts| Some(facts.foreman_enabled)),
+        "http_loopback_only" => evidence.daemon.map(|facts| facts.http_loopback_only),
+        "power_assertion" => evidence.daemon.map(|facts| Some(facts.power_assertion)),
+        "backup_recent" => evidence.backup.as_ref().map(|facts| facts.recent),
+        "backup_offsite" => evidence.backup.as_ref().map(|facts| facts.offsite),
+        "backup_verified" => evidence.backup.as_ref().map(|facts| facts.verified),
         _ => None,
     }
 }
@@ -1239,6 +1242,19 @@ pub struct Evidence {
     /// never gathered, not an empty inventory.
     #[serde(default)]
     pub dependencies: Option<DependenciesFact>,
+    /// `#154`: the `backup_recent`/`backup_offsite`/`backup_verified` names
+    /// `Check::Daemon` can also mean -- see [`crate::backup::BackupFact`].
+    /// `None` means "never gathered", the same as `daemon`; gathered lazily,
+    /// only when some applicable control names a `backup_*` fact.
+    #[serde(default)]
+    pub backup: Option<crate::backup::BackupFact>,
+    /// `#158`: every finished run `Engine::attested_runs` resolved for the
+    /// evaluated scope, across whichever categories some applicable
+    /// `attested` check names -- see [`Check::Attested`]. `None` means
+    /// "never gathered", the same as `daemon`/`backup`; gathered lazily,
+    /// only when some applicable control names one.
+    #[serde(default)]
+    pub attested: Option<Vec<AttestedRun>>,
 }
 
 // =============================================================== evaluate
@@ -1437,12 +1453,16 @@ fn workflow_run_status_str(status: WorkflowRunStatus) -> &'static str {
 }
 
 /// This control's status from its own checks alone, and the refs those
-/// checks can point at -- every one of `Check`'s ten kinds now evaluated
+/// checks can point at -- every one of `Check`'s eleven kinds now evaluated
 /// for real (`knowledge`/`attestation` in v1, `task`/`workflow`/`gate` in
-/// `#81`, `roles`/`sandbox`/`secrets`/`daemon` in `#82`). None of the last
-/// four carries a ref: nothing behind them is an id a UI could link to
-/// (an agent name is not yet one of `EvidenceRefKind`'s kinds, and a
-/// daemon/secrets fact is not tied to any one record at all).
+/// `#81`, `roles`/`sandbox`/`secrets`/`daemon` in `#82`, `dependencies` in
+/// `#123`, `attested` in `#158`). None of `roles`/`sandbox`/`secrets`/`daemon`/
+/// `dependencies` carries a ref: nothing behind them is an id a UI could
+/// link to (an agent name is not yet one of `EvidenceRefKind`'s kinds, and a
+/// daemon/secrets/dependencies fact is not tied to any one record at all).
+/// `attested` is the exception among the newer kinds: its evidence is a
+/// concrete task and run, so it carries `Task`/`Run` refs the same way
+/// `task`/`workflow` do.
 fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> (Status, Vec<EvidenceRef>) {
     let mut satisfied = Vec::new();
     let mut satisfied_refs = Vec::new();
@@ -1467,7 +1487,10 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                 let mut expired: Option<&Attestation> = None;
                 let mut any_valid = false;
                 for att in &evidence.attestations {
-                    if att.control != applied.control || att.withdrawn.is_some() {
+                    // A clock submission (`#157`) is evidence for one
+                    // deadline, not for the control as a whole -- skip it
+                    // here exactly like a withdrawn row.
+                    if att.control != applied.control || att.withdrawn.is_some() || att.clock.is_some() {
                         continue;
                     }
                     if att.expires_at > now {
@@ -1792,17 +1815,15 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                         "daemon: `{fact}` is not a fact this build knows -- see the README's \"Policies\" section for the list"
                     ));
                 } else {
-                    match evidence.daemon.as_ref().and_then(|facts| daemon_fact_value(fact, facts)) {
-                        Some(true) => satisfied.push(format!("daemon: `{fact}` holds")),
-                        Some(false) => open.push(format!("daemon: `{fact}` does not hold")),
-                        None if evidence.daemon.is_none() => {
-                            open.push(format!("daemon: not resolved for `{fact}`"));
-                        }
-                        None => open.push(format!("daemon: `{fact}` could not be determined")),
+                    match daemon_fact_value(fact, evidence) {
+                        Some(Some(true)) => satisfied.push(format!("daemon: `{fact}` holds")),
+                        Some(Some(false)) => open.push(format!("daemon: `{fact}` does not hold")),
+                        Some(None) => open.push(format!("daemon: `{fact}` could not be determined")),
+                        None => open.push(format!("daemon: not resolved for `{fact}`")),
                     }
                 }
             }
-            Check::Dependencies { sbom_max_age: _, max_open, exploited_open } => {
+            Check::Dependencies { sbom_max_age: _, built_sbom, max_open, exploited_open } => {
                 let Some(fact) = &evidence.dependencies else {
                     open.push("dependencies: not resolved for this scope".to_string());
                     continue;
@@ -1816,6 +1837,9 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                         )),
                         Some(_) => {}
                     }
+                }
+                if *built_sbom && fact.built_sbom_at.is_none() {
+                    breaches.push("no built SBOM for the newest release".to_string());
                 }
                 for (severity, limit) in max_open {
                     let actual = fact.open.get(severity).copied().unwrap_or_default();
@@ -1834,6 +1858,100 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                     satisfied.push("dependencies: inventory and findings are within policy".to_string());
                 } else {
                     open.extend(breaches.into_iter().map(|reason| format!("dependencies: {reason}")));
+                }
+            }
+            Check::Attested { category, step, .. } => {
+                let Some(runs) = &evidence.attested else {
+                    open.push(format!("attested: not resolved for {category}/{step}"));
+                    continue;
+                };
+                // `own_max_age` always sets one for `attested`, so
+                // `applicable`'s fold always leaves `applied.max_age`
+                // `Some` for a control that carries this check.
+                let w = applied
+                    .max_age
+                    .expect("`attested`'s own `max_age` always sets one");
+                let two_w = Duration::from_hours(w.as_hours().saturating_mul(2));
+                let name = |r: &AttestedRun| {
+                    if r.holds(step) {
+                        format!("run {} (task {})", r.run_id, r.task_id)
+                    } else {
+                        format!(
+                            "run {} (task {}), never held to `{step}`",
+                            r.run_id, r.task_id
+                        )
+                    }
+                };
+                let relevant: Vec<&AttestedRun> = runs
+                    .iter()
+                    .filter(|r| &r.category == category && r.status == RunStatus::Done)
+                    .collect();
+                let recent: Vec<&AttestedRun> = relevant
+                    .iter()
+                    .copied()
+                    .filter(|r| within_max_age(Some(w), r.ended_at, now))
+                    .collect();
+                if !recent.is_empty() {
+                    let bad: Vec<&AttestedRun> = recent
+                        .iter()
+                        .copied()
+                        .filter(|r| r.step_evidence(step) != StepEvidence::Passed)
+                        .collect();
+                    if bad.is_empty() {
+                        satisfied.push(format!(
+                            "attested: {category}/{step} -- {} run(s) within {w} all passed",
+                            recent.len()
+                        ));
+                        for r in &recent {
+                            satisfied_refs.push(EvidenceRef::task(&r.task_id));
+                            satisfied_refs.push(EvidenceRef::run(&r.run_id));
+                        }
+                    } else {
+                        let names: Vec<String> = bad.iter().take(3).map(|r| name(r)).collect();
+                        open.push(format!(
+                            "attested: {category}/{step} -- {} of {} run(s) within {w} did not pass: {}",
+                            bad.len(),
+                            recent.len(),
+                            names.join("; ")
+                        ));
+                        for r in &bad {
+                            open_refs.push(EvidenceRef::task(&r.task_id));
+                            open_refs.push(EvidenceRef::run(&r.run_id));
+                        }
+                    }
+                } else {
+                    let stale_candidates: Vec<&AttestedRun> = relevant
+                        .iter()
+                        .copied()
+                        .filter(|r| {
+                            let age = now - r.ended_at;
+                            age > w.as_time_delta() && age <= two_w.as_time_delta()
+                        })
+                        .collect();
+                    match stale_candidates.iter().copied().max_by_key(|r| r.ended_at) {
+                        Some(newest) if newest.step_evidence(step) == StepEvidence::Passed => {
+                            stale.push(format!(
+                                "attested: {category}/{step} -- newest run {} passed at {}, older than {w}",
+                                name(newest),
+                                newest.ended_at
+                            ));
+                            stale_refs.push(EvidenceRef::task(&newest.task_id));
+                            stale_refs.push(EvidenceRef::run(&newest.run_id));
+                        }
+                        Some(newest) => {
+                            open.push(format!(
+                                "attested: {category}/{step} -- newest run within {two_w} did not pass: {}",
+                                name(newest)
+                            ));
+                            open_refs.push(EvidenceRef::task(&newest.task_id));
+                            open_refs.push(EvidenceRef::run(&newest.run_id));
+                        }
+                        None => {
+                            open.push(format!(
+                                "attested: {category}/{step} -- no run of this category ended done within {two_w}"
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -2172,20 +2290,17 @@ mod tests {
         assert!("framework/".parse::<ControlRef>().is_err());
     }
 
-    // -- Duration ----------------------------------------------------------
+    // -- Duration ------------------------------------------------------------
+    //
+    // `Duration` itself -- parsing, `Display`, and the overflow cap -- moved
+    // to `factory-kernel` with the type (#193, phase 1, F7); see
+    // `factory_kernel::duration::tests`. What is left here is policy-level:
+    // `within_max_age` and `parse_expiry` are this module's own functions,
+    // not the kernel's, so their tests stay, using the re-exported type.
 
     #[test]
-    fn a_duration_parses_days_hours_and_weeks() {
-        assert_eq!("30d".parse::<Duration>().unwrap().as_hours(), 30 * 24);
-        assert_eq!("12h".parse::<Duration>().unwrap().as_hours(), 12);
-        assert_eq!("2w".parse::<Duration>().unwrap().as_hours(), 2 * 24 * 7);
-    }
-
-    #[test]
-    fn an_absurdly_long_duration_caps_instead_of_panicking() {
+    fn an_absurdly_long_max_age_never_looks_stale_and_refuses_as_an_expiry() {
         let huge: Duration = "9999999999999999h".parse().unwrap();
-        assert_eq!(huge.as_time_delta(), chrono::TimeDelta::MAX);
-        assert_eq!("2d".parse::<Duration>().unwrap().as_time_delta(), chrono::TimeDelta::hours(48));
         let now = Utc::now();
         assert!(within_max_age(Some(huge), now - chrono::TimeDelta::days(10_000), now), "never stale");
         let e = parse_expiry("9999999999999999h", now).unwrap_err();
@@ -2199,19 +2314,21 @@ mod tests {
         let found = check_vocabulary(&Check::Daemon { fact: "power_asertion".into() });
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, FindingKind::UnknownDaemonFact);
+        // #154: the three backup facts are known, and a misspelling of one
+        // is caught the same way, at load time rather than only once
+        // evaluated.
+        for fact in ["backup_recent", "backup_offsite", "backup_verified"] {
+            assert!(check_vocabulary(&Check::Daemon { fact: fact.into() }).is_empty(), "{fact}");
+        }
+        let found = check_vocabulary(&Check::Daemon { fact: "backup_verfied".into() });
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, FindingKind::UnknownDaemonFact);
         let found = check_vocabulary(&Check::Secrets { absent: vec!["github".into(), "gitlab".into(), "nope".into()] });
         assert_eq!(
             found.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
             vec![FindingKind::UnknownSecretsLocation, FindingKind::UnknownSecretsLocation]
         );
         assert!(found[0].1.contains("gitlab"), "{}", found[0].1);
-    }
-
-    #[test]
-    fn a_duration_refuses_an_unknown_unit_or_a_bare_number() {
-        assert!("30m".parse::<Duration>().is_err());
-        assert!("30".parse::<Duration>().is_err());
-        assert!("abc".parse::<Duration>().is_err());
     }
 
     // -- parse_expiry --------------------------------------------------------
@@ -2482,6 +2599,37 @@ mod tests {
         assert_eq!(check, Check::Secrets { absent: Vec::new() });
         let json = serde_json::to_string(&check).unwrap();
         assert_eq!(json, "{\"check\":\"secrets\"}", "an empty `absent` is not written out");
+    }
+
+    #[test]
+    fn dependencies_built_sbom_requirement_parses_and_defaults_off() {
+        let required: Check =
+            serde_yaml_ng::from_str("check: dependencies\nbuilt_sbom: true\n").unwrap();
+        assert_eq!(
+            required,
+            Check::Dependencies {
+                sbom_max_age: None,
+                built_sbom: true,
+                max_open: BTreeMap::new(),
+                exploited_open: None,
+            }
+        );
+        assert_eq!(required.describe(), "dependencies: built SBOM required");
+
+        let optional: Check = serde_yaml_ng::from_str("check: dependencies\n").unwrap();
+        assert_eq!(
+            optional,
+            Check::Dependencies {
+                sbom_max_age: None,
+                built_sbom: false,
+                max_open: BTreeMap::new(),
+                exploited_open: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&optional).unwrap(),
+            "{\"check\":\"dependencies\"}"
+        );
     }
 
     // -- applicable ----------------------------------------------------------
@@ -2969,6 +3117,63 @@ mod tests {
         );
     }
 
+    /// `#154`: `evidence.backup` missing (never gathered) is "not resolved",
+    /// distinct from gathered-but-indeterminate ("could not be determined")
+    /// -- the same two-level reading `daemon_fact_value` now gives every
+    /// `daemon` name, backup or not.
+    #[test]
+    fn a_backup_fact_check_reads_not_resolved_when_never_gathered_and_could_not_be_determined_when_indeterminate() {
+        let applied = vec![applied_control(
+            "a",
+            vec![Check::Daemon { fact: "backup_verified".to_string() }],
+            Vec::new(),
+        )];
+        let statuses = evaluate(&applied, &Evidence::default(), Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(statuses[0].status.reasons().iter().any(|r| r.contains("not resolved")), "{:?}", statuses[0].status);
+
+        let backup_fact = crate::backup::BackupFact {
+            at: Utc::now(),
+            configured: true,
+            newest: None,
+            recent: None,
+            offsite: None,
+            verified: None,
+            last_verified: None,
+        };
+        let evidence = Evidence { backup: Some(backup_fact), ..Default::default() };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+        assert!(
+            statuses[0].status.reasons().iter().any(|r| r.contains("could not be determined")),
+            "{:?}",
+            statuses[0].status
+        );
+    }
+
+    #[test]
+    fn backup_daemon_checks_read_satisfied_or_open_off_the_backup_fact() {
+        let fact_with = |recent: Option<bool>, offsite: Option<bool>, verified: Option<bool>| crate::backup::BackupFact {
+            at: Utc::now(),
+            configured: true,
+            newest: Some(Utc::now()),
+            recent,
+            offsite,
+            verified,
+            last_verified: None,
+        };
+
+        let recent_applied = vec![applied_control("a", vec![Check::Daemon { fact: "backup_recent".to_string() }], Vec::new())];
+        let evidence = Evidence { backup: Some(fact_with(Some(true), Some(false), Some(false))), ..Default::default() };
+        assert_eq!(evaluate(&recent_applied, &evidence, Utc::now())[0].status.kind(), StatusKind::Satisfied);
+
+        let offsite_applied = vec![applied_control("a", vec![Check::Daemon { fact: "backup_offsite".to_string() }], Vec::new())];
+        let evidence = Evidence { backup: Some(fact_with(Some(true), Some(false), Some(false))), ..Default::default() };
+        let statuses = evaluate(&offsite_applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open, "the temp destination is the same device");
+        assert!(statuses[0].status.reasons().iter().any(|r| r.contains("does not hold")), "{:?}", statuses[0].status);
+    }
+
     #[test]
     fn an_unexpired_attestation_gives_attested() {
         let now = Utc::now();
@@ -2988,6 +3193,7 @@ mod tests {
                 attested_at: now,
                 expires_at: now + chrono::Duration::days(30),
                 withdrawn: None,
+                clock: None,
             }],
             ..Default::default()
         };
@@ -3010,6 +3216,7 @@ mod tests {
                 attested_at: now - chrono::Duration::days(400),
                 expires_at: now - chrono::Duration::days(1),
                 withdrawn: None,
+                clock: None,
             }],
             ..Default::default()
         };
@@ -3036,11 +3243,67 @@ mod tests {
                     by: "owner".to_string(),
                     reason: None,
                 }),
+                clock: None,
             }],
             ..Default::default()
         };
         let statuses = evaluate(&applied, &evidence, now);
         assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+    }
+
+    /// A CRA Art. 14 clock submission (`#157`, phase 1) is evidence for one
+    /// deadline, not for the whole control -- `direct_status` must skip it
+    /// exactly like a withdrawn row, leaving the control `open`.
+    #[test]
+    fn an_attestation_carrying_a_clock_mark_does_not_satisfy_the_control() {
+        let now = Utc::now();
+        let applied = vec![applied_control("a", vec![Check::Attestation], Vec::new())];
+        let evidence = Evidence {
+            attestations: vec![Attestation {
+                id: "att-1".to_string(),
+                control: ControlRef::new("cra", "a"),
+                scope: "root".to_string(),
+                evidence: "https://example.com/notice".to_string(),
+                note: None,
+                attested_by: "owner".to_string(),
+                attested_at: now,
+                expires_at: now + chrono::Duration::days(30),
+                withdrawn: None,
+                clock: Some(crate::reporting_clock::ClockMark {
+                    item: crate::reporting_clock::ClockItemRef::Finding {
+                        scope: "demo".to_string(),
+                        vulnerability: "CVE-2026-1234".to_string(),
+                    },
+                    deadline: crate::reporting_clock::ClockDeadlineKind::EarlyWarning,
+                }),
+            }],
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+    }
+
+    /// A row recorded before `#157` carries no `clock` field at all -- it
+    /// must still deserialize, and still count as an ordinary attestation.
+    #[test]
+    fn an_attestation_with_no_clock_field_still_deserializes_and_counts() {
+        let now = Utc::now();
+        let json = serde_json::json!({
+            "id": "att-1",
+            "control": "cra/a",
+            "scope": "root",
+            "evidence": "https://example.com/policy",
+            "attested_by": "owner",
+            "attested_at": now,
+            "expires_at": now + chrono::Duration::days(30),
+        });
+        let attestation: Attestation = serde_json::from_value(json).unwrap();
+        assert_eq!(attestation.clock, None);
+
+        let applied = vec![applied_control("a", vec![Check::Attestation], Vec::new())];
+        let evidence = Evidence { attestations: vec![attestation], ..Default::default() };
+        let statuses = evaluate(&applied, &evidence, now);
+        assert_eq!(statuses[0].status.kind(), StatusKind::Attested);
     }
 
     #[test]
@@ -3062,6 +3325,7 @@ mod tests {
                 attested_at: now - chrono::Duration::days(400),
                 expires_at: now - chrono::Duration::days(1),
                 withdrawn: None,
+                clock: None,
             }],
             ..Default::default()
         };
@@ -3123,6 +3387,7 @@ mod tests {
                 attested_at: now,
                 expires_at: now + chrono::Duration::days(30),
                 withdrawn: None,
+                clock: None,
             }],
             ..Default::default()
         };
@@ -4062,6 +4327,7 @@ mod tests {
     fn dependencies_check_enforces_freshness_severity_and_exploitation_limits() {
         let check = Check::Dependencies {
             sbom_max_age: Some("30d".parse().unwrap()),
+            built_sbom: false,
             max_open: BTreeMap::from([(Severity::Critical, 0)]),
             exploited_open: Some(0),
         };
@@ -4070,6 +4336,7 @@ mod tests {
         let mut evidence = Evidence::default();
         evidence.dependencies = Some(DependenciesFact {
             declared_sbom_at: Some(now - chrono::Duration::days(1)),
+            built_sbom_at: None,
             open: BTreeMap::new(),
             exploited_open: 0,
         });
@@ -4078,5 +4345,439 @@ mod tests {
         evidence.dependencies.as_mut().unwrap().open.insert(Severity::Critical, 1);
         evidence.dependencies.as_mut().unwrap().exploited_open = 1;
         assert_eq!(evaluate(&applied, &evidence, now)[0].status.kind(), StatusKind::Open);
+    }
+
+    #[test]
+    fn dependencies_check_requires_build_evidence_when_requested() {
+        let check = Check::Dependencies {
+            sbom_max_age: None,
+            built_sbom: true,
+            max_open: BTreeMap::new(),
+            exploited_open: None,
+        };
+        let applied = vec![applied_control("built-dependencies", vec![check], Vec::new())];
+        let now = "2026-09-25T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mut evidence = Evidence::default();
+        evidence.dependencies = Some(DependenciesFact::default());
+
+        let missing = evaluate(&applied, &evidence, now);
+        assert_eq!(missing[0].status.kind(), StatusKind::Open);
+        assert!(
+            missing[0]
+                .status
+                .reasons()
+                .iter()
+                .any(|reason| reason == "dependencies: no built SBOM for the newest release")
+        );
+
+        evidence.dependencies.as_mut().unwrap().built_sbom_at = Some(now);
+        assert_eq!(
+            evaluate(&applied, &evidence, now)[0].status.kind(),
+            StatusKind::Satisfied
+        );
+    }
+
+    // -- evaluate: attested (#158) -------------------------------------------
+
+    fn attested_run(
+        run_id: &str,
+        status: RunStatus,
+        ended_at: DateTime<Utc>,
+        required: Vec<crate::control_plan::RequiredStep>,
+        attestations: Vec<crate::control_plan::StepAttestation>,
+    ) -> AttestedRun {
+        AttestedRun {
+            run_id: run_id.to_string(),
+            task_id: format!("task-{run_id}"),
+            scope: "demo".to_string(),
+            category: "feature".to_string(),
+            agent: "worker".to_string(),
+            status,
+            ended_at,
+            fail_kind: None,
+            required_steps: required,
+            attestations,
+        }
+    }
+
+    fn gate_step(name: &str) -> crate::control_plan::RequiredStep {
+        crate::control_plan::RequiredStep {
+            step: name.to_string(),
+            kind: crate::control_plan::StepKind::Gate,
+            command: Some("true".to_string()),
+            timeout_seconds: None,
+            required_by: Vec::new(),
+            node_id: None,
+            by: None,
+            actor: None,
+        }
+    }
+
+    fn gate_attestation(
+        run_id: &str,
+        step: &str,
+        verdict: crate::control_plan::AttestationVerdict,
+        actor: &str,
+        at: DateTime<Utc>,
+    ) -> crate::control_plan::StepAttestation {
+        crate::control_plan::StepAttestation {
+            id: uuid::Uuid::new_v4().to_string(),
+            run_id: run_id.to_string(),
+            task_id: format!("task-{run_id}"),
+            scope: "demo".to_string(),
+            category: "feature".to_string(),
+            step: step.to_string(),
+            kind: crate::control_plan::StepKind::Gate,
+            actor: actor.to_string(),
+            verdict,
+            findings: None,
+            round: 0,
+            required_by: Vec::new(),
+            command: Some("true".to_string()),
+            exit_code: Some(
+                if verdict == crate::control_plan::AttestationVerdict::Pass {
+                    0
+                } else {
+                    1
+                },
+            ),
+            output: None,
+            dir: "/tmp".to_string(),
+            commit: None,
+            dirty: None,
+            worktree_digest: None,
+            node_id: None,
+            at,
+        }
+    }
+
+    fn attested_check(step: &str, max_age: &str) -> Check {
+        Check::Attested {
+            category: "feature".to_string(),
+            step: step.to_string(),
+            max_age: max_age.parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn attested_check_serde_round_trips_and_refuses_a_missing_max_age() {
+        let check = attested_check("tests", "7d");
+        let json = serde_json::to_string(&check).unwrap();
+        assert_eq!(serde_json::from_str::<Check>(&json).unwrap(), check);
+
+        // A catalogue that leaves `max_age` out fails the whole file --
+        // `deny_unknown_fields` and the required field both make this a
+        // parse failure, never a silently open control.
+        let bad = r#"{"check":"attested","category":"feature","step":"tests"}"#;
+        assert!(serde_json::from_str::<Check>(bad).is_err());
+        let unknown_field =
+            r#"{"check":"attested","category":"feature","step":"tests","max_age":"7d","extra":1}"#;
+        assert!(serde_json::from_str::<Check>(unknown_field).is_err());
+    }
+
+    #[test]
+    fn attested_describes_itself() {
+        // `Duration`'s own `Display` prefers the widest exact unit -- 7
+        // days is a whole week, so it prints `1w`, the same rule every
+        // other check's `max_age` formatting already follows.
+        assert_eq!(
+            attested_check("tests", "7d").describe(),
+            "attested: feature/tests (max_age 1w)"
+        );
+    }
+
+    #[test]
+    fn check_vocabulary_refuses_a_bad_attested_category_or_step() {
+        assert!(check_vocabulary(&attested_check("tests", "7d")).is_empty());
+        let found = check_vocabulary(&Check::Attested {
+            category: "Not A Name".to_string(),
+            step: "tests".to_string(),
+            max_age: "7d".parse().unwrap(),
+        });
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, FindingKind::BadCheckTarget);
+        let found = check_vocabulary(&Check::Attested {
+            category: "feature".to_string(),
+            step: "Not A Name".to_string(),
+            max_age: "7d".parse().unwrap(),
+        });
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, FindingKind::BadCheckTarget);
+    }
+
+    #[test]
+    fn gathered_is_true_only_once_attested_evidence_was_read() {
+        let check = attested_check("tests", "7d");
+        assert!(!crate::quality::gathered(&check, &Evidence::default()));
+        let evidence = Evidence {
+            attested: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert!(crate::quality::gathered(&check, &evidence));
+    }
+
+    #[test]
+    fn attested_is_satisfied_when_every_run_within_max_age_passed() {
+        let applied = vec![with_max_age(
+            applied_control(
+                "attested-a",
+                vec![attested_check("tests", "7d")],
+                Vec::new(),
+            ),
+            "7d",
+        )];
+        let now = Utc::now();
+        let ended = now - chrono::Duration::days(1);
+        let run = attested_run(
+            "r1",
+            RunStatus::Done,
+            ended,
+            vec![gate_step("tests")],
+            vec![gate_attestation(
+                "r1",
+                "tests",
+                crate::control_plan::AttestationVerdict::Pass,
+                "factory-daemon",
+                ended,
+            )],
+        );
+        let evidence = Evidence {
+            attested: Some(vec![run]),
+            ..Default::default()
+        };
+        let status = evaluate(&applied, &evidence, now)[0].status.clone();
+        assert_eq!(status.kind(), StatusKind::Satisfied);
+        assert!(
+            status.reasons().iter().any(|r| r.starts_with("attested: ")),
+            "{status:?}"
+        );
+    }
+
+    #[test]
+    fn attested_is_open_when_an_in_window_run_failed_or_was_never_held() {
+        let applied = vec![with_max_age(
+            applied_control(
+                "attested-b",
+                vec![attested_check("tests", "7d")],
+                Vec::new(),
+            ),
+            "7d",
+        )];
+        let now = Utc::now();
+        let ended = now - chrono::Duration::days(1);
+        // Failed the gate.
+        let failed = attested_run(
+            "r1",
+            RunStatus::Done,
+            ended,
+            vec![gate_step("tests")],
+            vec![gate_attestation(
+                "r1",
+                "tests",
+                crate::control_plan::AttestationVerdict::Fail,
+                "factory-daemon",
+                ended,
+            )],
+        );
+        let mut evidence = Evidence {
+            attested: Some(vec![failed]),
+            ..Default::default()
+        };
+        let status = evaluate(&applied, &evidence, now)[0].status.clone();
+        assert_eq!(status.kind(), StatusKind::Open);
+
+        // Never held to `tests` at all.
+        let never_held = attested_run("r2", RunStatus::Done, ended, Vec::new(), Vec::new());
+        evidence.attested = Some(vec![never_held]);
+        let status = evaluate(&applied, &evidence, now)[0].status.clone();
+        assert_eq!(status.kind(), StatusKind::Open);
+        assert!(
+            status.reasons().iter().any(|r| r.contains("never held to")),
+            "{status:?}"
+        );
+    }
+
+    #[test]
+    fn attested_is_stale_when_only_an_older_run_within_2w_passed() {
+        let applied = vec![with_max_age(
+            applied_control(
+                "attested-c",
+                vec![attested_check("tests", "7d")],
+                Vec::new(),
+            ),
+            "7d",
+        )];
+        let now = Utc::now();
+        // 10 days ago: outside the 7d window, inside the 14d lookback.
+        let ended = now - chrono::Duration::days(10);
+        let run = attested_run(
+            "r1",
+            RunStatus::Done,
+            ended,
+            vec![gate_step("tests")],
+            vec![gate_attestation(
+                "r1",
+                "tests",
+                crate::control_plan::AttestationVerdict::Pass,
+                "factory-daemon",
+                ended,
+            )],
+        );
+        let evidence = Evidence {
+            attested: Some(vec![run]),
+            ..Default::default()
+        };
+        let status = evaluate(&applied, &evidence, now)[0].status.clone();
+        assert_eq!(status.kind(), StatusKind::Stale);
+    }
+
+    #[test]
+    fn attested_is_open_when_nothing_ended_done_within_2w() {
+        let applied = vec![with_max_age(
+            applied_control(
+                "attested-d",
+                vec![attested_check("tests", "7d")],
+                Vec::new(),
+            ),
+            "7d",
+        )];
+        let now = Utc::now();
+        // Nothing at all.
+        let mut evidence = Evidence {
+            attested: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate(&applied, &evidence, now)[0].status.kind(),
+            StatusKind::Open
+        );
+
+        // Something, but older than 2W (14d here).
+        let ended = now - chrono::Duration::days(20);
+        let run = attested_run(
+            "r1",
+            RunStatus::Done,
+            ended,
+            vec![gate_step("tests")],
+            vec![gate_attestation(
+                "r1",
+                "tests",
+                crate::control_plan::AttestationVerdict::Pass,
+                "factory-daemon",
+                ended,
+            )],
+        );
+        evidence.attested = Some(vec![run]);
+        assert_eq!(
+            evaluate(&applied, &evidence, now)[0].status.kind(),
+            StatusKind::Open
+        );
+    }
+
+    #[test]
+    fn attested_is_open_when_never_gathered() {
+        let applied = vec![with_max_age(
+            applied_control(
+                "attested-e",
+                vec![attested_check("tests", "7d")],
+                Vec::new(),
+            ),
+            "7d",
+        )];
+        let status = evaluate(&applied, &Evidence::default(), Utc::now())[0]
+            .status
+            .clone();
+        assert_eq!(status.kind(), StatusKind::Open);
+        assert!(
+            status.reasons().iter().any(|r| r.contains("not resolved")),
+            "{status:?}"
+        );
+    }
+
+    #[test]
+    fn a_self_attested_gate_never_satisfies_attested() {
+        let applied = vec![with_max_age(
+            applied_control(
+                "attested-f",
+                vec![attested_check("tests", "7d")],
+                Vec::new(),
+            ),
+            "7d",
+        )];
+        let now = Utc::now();
+        let ended = now - chrono::Duration::days(1);
+        // Attested by the run's own agent -- `control_plan::judge`'s own
+        // exclusion, so this must not satisfy the check.
+        let run = attested_run(
+            "r1",
+            RunStatus::Done,
+            ended,
+            vec![gate_step("tests")],
+            vec![gate_attestation(
+                "r1",
+                "tests",
+                crate::control_plan::AttestationVerdict::Pass,
+                "worker",
+                ended,
+            )],
+        );
+        let evidence = Evidence {
+            attested: Some(vec![run]),
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate(&applied, &evidence, now)[0].status.kind(),
+            StatusKind::Open
+        );
+    }
+
+    #[test]
+    fn a_scope_tighten_on_attested_max_age_is_honoured_by_evaluate() {
+        // The catalogue's own `attested` check names 30d; a scope tightens
+        // it to 7d. `direct_status` must read `applied.max_age` (7d, the
+        // tightened value), never the check's own raw field (30d) --
+        // otherwise a run 10 days old would wrongly read `satisfied`.
+        let mut ctl = control("a");
+        ctl.evidence = vec![Check::Attested {
+            category: "feature".to_string(),
+            step: "tests".to_string(),
+            max_age: "30d".parse().unwrap(),
+        }];
+        let catalogues = vec![cra_catalogue(vec![ctl])];
+        let mut root = layer("root", &["cra"]);
+        root.tighten.insert(
+            ControlRef::new("cra", "a"),
+            Tighten {
+                max_age: Some("7d".parse().unwrap()),
+            },
+        );
+        let (applied, findings) = applicable(&catalogues, &[root]);
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(applied[0].max_age, Some("7d".parse().unwrap()));
+
+        let now = Utc::now();
+        let ended = now - chrono::Duration::days(10);
+        let run = attested_run(
+            "r1",
+            RunStatus::Done,
+            ended,
+            vec![gate_step("tests")],
+            vec![gate_attestation(
+                "r1",
+                "tests",
+                crate::control_plan::AttestationVerdict::Pass,
+                "factory-daemon",
+                ended,
+            )],
+        );
+        let evidence = Evidence {
+            attested: Some(vec![run]),
+            ..Default::default()
+        };
+        // Stale, not satisfied: 10 days is outside the tightened 7d window.
+        assert_eq!(
+            evaluate(&applied, &evidence, now)[0].status.kind(),
+            StatusKind::Stale
+        );
     }
 }

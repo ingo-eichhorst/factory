@@ -4,6 +4,7 @@ A daemon that gives tasks to coding agents and watches what happens.
 
 ## Layout
 
+    crates/factory-kernel    L0: pure vocabulary shared by every level (Duration, nearest_rank/percentile) -- depends on no other factory-* crate
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
@@ -32,7 +33,10 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/{scenarios,scenarios-model}.js                         the L6 Scenarios tab and its pure shaping logic
     ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic
     ui/js/{environments,environments-model}.js                   the L1 Operations tab (#185) and its pure shaping logic
+    ui/js/{doctor,doctor-model}.js                               the L1 Doctor dependency view and its pure shaping logic
     ui/js/dashboard-model.js                                     the dashboard's tile vocabulary, default layout and row packing (#163), pure
+    ui/js/dashboard-tiles-model.js                                metric-tile and view-tile shaping, and which endpoints a layout needs (#162), pure
+    ui/js/dashboard-editor-model.js                               the Customise tile editor's catalogue, search and list edits (#160), pure
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
 
@@ -55,6 +59,13 @@ The `shell` agent runs the task's instructions as a shell command and reports
 the exit status and stdout, so the whole dispatch path can be exercised
 without spending a model call. Use it for anything that is not specifically
 about an AI harness.
+
+Factory releases are built and scanned outside the daemon with
+`examples/factory-dependency-scan.sh built`: it runs `cargo auditable build
+--workspace --release` and attaches separate CycloneDX build SBOM and
+vulnerability documents. The `running` mode scans only the installed
+`~/.local/bin/factory` and `factory-daemon` binaries. The daemon and L1 Doctor
+only read those immutable attachments; they never invoke a scanner.
 
 Set the hooks up once per clone, before writing any code, from the primary
 checkout:
@@ -110,6 +121,10 @@ done`. A branch left only in a run's worktree is work nobody reviews, and the
 worktree is not where anyone looks for it. If the checks cannot be made green,
 open it as a draft and say what fails. Merging is the step that waits for a
 person -- never merge, approve or enable auto-merge on your own pull request.
+That prohibition is about the pull request to `main`: Factory's single-writer
+integrator may locally merge child task branches into a dedicated, non-`main`
+integration branch so it can test their combined result and open that one PR.
+Those internal merges are coordination, not permission to merge the final PR.
 Whoever writes a task says so too, and never writes "do not push".
 `.agents/skills/implement-github-issue` is the whole procedure for an issue.
 
@@ -148,12 +163,14 @@ something impossible.
   instance root's `.factory/`; never put the database, socket, worktrees, or
   other daemon-owned state inside a scope. `.factory/knowledge/`,
   `.factory/datasets/`, `.factory/policies/` (including its `drafts/`
-  subdirectory), `.factory/goals/`, `.factory/scenarios/` and
-  `.factory/quality/` and `.factory/vex/` are the one exception: authored
+  subdirectory), `.factory/goals/`, `.factory/scenarios/`,
+  `.factory/quality/`, `.factory/vex/` and `.factory/intake/` are the one
+  exception: authored
   content -- pages,
   dataset YAML, policy catalogues (real and draft), the goals
-  direction/cycle files, scenario files, quality profiles and VEX judgments a
-  person or an agent wrote by hand -- that nothing in Factory ever deletes
+  direction/cycle files, scenario files, quality profiles, VEX judgments and
+  per-scope definitions of ready a person or an agent wrote by hand -- that
+  nothing in Factory ever deletes
   or regenerates, and that is worth backing up like a scope's own files,
   even though it sits under the instance root's `.factory/` alongside
   everything the daemon does own.

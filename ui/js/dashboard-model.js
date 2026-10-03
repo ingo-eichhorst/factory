@@ -1,9 +1,15 @@
 //! The dashboard's tile vocabulary (#163, phase 2 of the layout epic #150):
 //! what a tile is, the fixed sizes it can be, the fixed view ids it can
-//! name, and the default layout that reproduces today's page. Pure -- no
-//! DOM, no imports of `core.js` -- so it can be tested without a page and
-//! read by whatever eventually validates a scope's own `dashboard:` config
-//! (#150 phase 4) the same way it is read here.
+//! name, and the default layout that reproduces today's page. #162 (phase
+//! 3) added the span-aware grid geometry (`rowTemplate`/`rowIsAllSmall`)
+//! and made every registry metric and the rest of #150's view catalogue
+//! renderable (`isTileRenderable`); the value/unit shaping and the
+//! per-endpoint fetch gating those tiles need live in
+//! `dashboard-tiles-model.js`, kept separate so this file stays the one
+//! place a tile's layout (kind, size, row) is decided. Pure -- no DOM, no
+//! imports of `core.js` -- so it can be tested without a page and read by
+//! whatever eventually validates a scope's own `dashboard:` config (#150
+//! phase 4) the same way it is read here.
 //!
 //! A tile is `{ view: "<id>", size: "<s|m|l|xl>" }` or, from phase 3 on,
 //! `{ metric: "<registry id>", size: "<s|m|l|xl>" }` -- the same two shapes
@@ -15,10 +21,10 @@
 //! never a question of its own.
 
 /// The two shapes a tile comes in. A `metric` tile binds a registry
-/// `MetricId` (#150 §3); none render yet (excluded this phase), so
-/// `DEFAULT_DASHBOARD` below has none, but the vocabulary and validator
-/// already know the shape so phase 3 does not have to touch this file's
-/// contract, only `dashboard.js`'s renderer map.
+/// `MetricId` (#150 §3) -- every one of them renders, as of #162, off
+/// whatever `/api/metrics` answers for it; `DEFAULT_DASHBOARD` below still
+/// has none, since the hard requirement is that the built-in default stays
+/// exactly what it always drew.
 export const TILE_KINDS = Object.freeze(["metric", "view"]);
 
 /// Sizes name a span on a 12-column row, not a pixel width -- the same
@@ -31,12 +37,11 @@ export const TILE_KINDS = Object.freeze(["metric", "view"]);
 /// and leaves `l + m === 12` so the pair fills a row on its own -- see
 /// `DEFAULT_DASHBOARD` and `dashboard.js`'s `renderDashboard`, where that
 /// identity is what makes today's two-card row fall out of `packRows`
-/// rather than being hard-coded. `xl` is a full row. `s` renders nothing
-/// this phase (no metric tile does yet) but is fixed at `2` now because
-/// that is what reproduces today's six-across KPI row exactly (`6 × 2 =
-/// 12`) once phase 3 splits the `kpis` view tile into one metric tile per
-/// figure -- so a size chosen for a tile that does not exist yet is still
-/// chosen for a reason that already exists.
+/// rather than being hard-coded. `xl` is a full row. `s` is fixed at `2`
+/// because that is what reproduces today's six-across KPI row exactly
+/// (`6 × 2 = 12`) if a layout ever splits the `kpis` view tile into one
+/// metric tile per figure -- `DEFAULT_DASHBOARD` never does, but a `metric`
+/// tile (#162) renders at any size, `s` included.
 export const SIZES = Object.freeze({
   s: Object.freeze({ cols: 2 }),
   m: Object.freeze({ cols: 4 }),
@@ -71,14 +76,25 @@ export const EPIC_VIEW_IDS = Object.freeze([
 /// the epic's design.
 export const VIEW_IDS = Object.freeze(["kpis", ...EPIC_VIEW_IDS]);
 
-/// What phase 2 actually renders, in the order `DEFAULT_DASHBOARD` uses --
-/// see `dashboard.js`'s `VIEW_RENDERERS`, which has exactly these keys.
+/// What this page can draw a card for, in the order `DEFAULT_DASHBOARD`
+/// uses the first five of -- see `dashboard.js`'s `VIEW_RENDERERS`, which
+/// has exactly these keys. Phase 2 (#163) built the first five; #162
+/// (phase 3) gave the rest of #150's view catalogue their own renderer too,
+/// so this is now every `view` id `VIEW_IDS` names -- nothing left for the
+/// placeholder to catch but a shape the closed enum itself should already
+/// have refused.
 export const RENDERABLE_VIEW_IDS = Object.freeze([
   "kpis",
   "throughput",
   "on_the_line",
   "production_year",
   "by_scope",
+  "agent_hours_by_scope",
+  "agent_hours_by_agent",
+  "occupancy_strip",
+  "inbox",
+  "compliance",
+  "cost",
 ]);
 
 /// `"view"` or `"metric"` for a well-shaped tile, `null` for anything else
@@ -212,13 +228,50 @@ export function resolveDashboard(fetchedTiles) {
   return Array.isArray(fetchedTiles) && fetchedTiles.length > 0 ? fetchedTiles : DEFAULT_DASHBOARD;
 }
 
-/// Whether `dashboard.js`'s `VIEW_RENDERERS` map can draw `tile` today: a
-/// `view` id in `RENDERABLE_VIEW_IDS`. A `metric` tile (no renderer exists
-/// yet, this phase or the next) and a `view` id from the wider epic
-/// vocabulary (`EPIC_VIEW_IDS`) that phase 3 has not built a card for yet
-/// both read `false` here, so `dashboard.js` can draw a neutral
-/// placeholder instead of nothing or a crash -- the config or the
-/// catalogue may already be ahead of what this page knows how to render.
+/// Whether `dashboard.js` can draw `tile` today: a `view` id in
+/// `RENDERABLE_VIEW_IDS`, or any well-shaped `metric` tile -- #162 (phase 3)
+/// gives every registry metric id a card (`dashboard.js`'s `metricTile`,
+/// off whatever `/api/metrics` answered, including its own "not available"
+/// reason), so a `metric` tile never needs the registry loaded client-side
+/// to know it is drawable. `false` only for a malformed tile (`tileKind`
+/// already `null`) or a `view` id outside the vocabulary -- a config or a
+/// catalogue ahead of what this build knows how to render, which stays a
+/// named placeholder rather than nothing or a crash.
 export function isTileRenderable(tile) {
-  return tileKind(tile) === "view" && RENDERABLE_VIEW_IDS.includes(tile.view);
+  const kind = tileKind(tile);
+  if (kind === "metric") return typeof tile.metric === "string" && tile.metric.trim() !== "";
+  return kind === "view" && RENDERABLE_VIEW_IDS.includes(tile.view);
+}
+
+// ----------------------------------------------------------- grid (#162)
+
+/// The `.drow` grid's own `grid-template-columns`: one `minmax(0,<cols>fr)`
+/// term per tile in `row`, fr-weighted by each tile's own span (`tileSpan`)
+/// -- a two-tile row of `[l, m]` (8 and 4) reduces to exactly `8fr / 4fr`,
+/// the same ratio as `2fr / 1fr` with the same single gap between them, so
+/// it is pixel-identical to `.drow`'s own CSS fallback and this returns
+/// `null` for exactly that pair: nothing to override, the default row's
+/// markup stays untouched. A row that does not use the full 12 columns (an
+/// `m` and an `s` sharing a row a config asks for, say) gets one trailing
+/// filler term so the leftover width stays blank rather than stretching the
+/// real tiles to fill it -- a true 12-column grid's own behaviour, the same
+/// as an unused span in a Bootstrap-style row. `null` for a one-tile row
+/// too: `renderTiles` draws that bare, same as before this existed.
+export function rowTemplate(row) {
+  if (!Array.isArray(row) || row.length < 2) return null;
+  const cols = row.map((tile) => tileSpan(tile) ?? GRID_COLUMNS);
+  if (cols.length === 2 && cols[0] === SIZES.l.cols && cols[1] === SIZES.m.cols) return null;
+  const used = cols.reduce((a, b) => a + b, 0);
+  const terms = cols.map((c) => `minmax(0,${c}fr)`);
+  if (used < GRID_COLUMNS) terms.push(`minmax(0,${GRID_COLUMNS - used}fr)`);
+  return terms.join(" ");
+}
+
+/// Whether every tile sharing a row is the smallest size -- `dashboard.js`
+/// marks that row `drow-s` so the narrow breakpoint gives it two columns
+/// instead of one; a row of six `s` tiles stacked one-per-line reads worse
+/// than two-up does. Never true for a one-tile row (nothing to pair) or the
+/// default layout, which has no `s` tile at all.
+export function rowIsAllSmall(row) {
+  return Array.isArray(row) && row.length > 1 && row.every((tile) => tile?.size === "s");
 }

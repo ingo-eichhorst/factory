@@ -467,4 +467,117 @@ mod tests {
         assert!(engine.goal_context(root.clone(), Some("obj/nope".to_string())).await.is_none());
         assert!(engine.goal_context(root, None).await.is_none());
     }
+
+    /// `#158`: a key result over `conformance_rate.<category>` scores off a
+    /// real run through the same registry every computed metric already
+    /// goes through -- `goals_report` names no special case for it.
+    #[tokio::test]
+    async fn a_key_result_over_conformance_rate_scores_from_a_real_held_run() {
+        use factory_core::adapter::store::task_from_new;
+        use factory_core::control_plan::{
+            AttestationVerdict, RequiredStep, StepAttestation, StepKind, GATE_ACTOR,
+        };
+        use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
+        use factory_core::task::NewTask;
+
+        let engine = test_engine();
+        write(
+            &goals::goals_dir(&engine.factory_snapshot().root),
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives:\n\
+             \x20\x20- id: obj\n\x20\x20\x20\x20title: T\n\x20\x20\x20\x20key_results:\n\
+             \x20\x20\x20\x20\x20\x20- {id: kr, title: Feature conformance, kind: committed, metric: conformance_rate.feature, baseline: 0, target: 1}\n",
+        );
+
+        // A held, conforming `feature` run -- built directly through the
+        // store, the same shape `metrics::tests::held_run` builds.
+        let task = engine
+            .store
+            .create(&task_from_new(
+                NewTask {
+                    title: "t".into(),
+                    category: Some("feature".into()),
+                    ..Default::default()
+                },
+                "demo".into(),
+                "worker".into(),
+                "shell".into(),
+            ))
+            .await
+            .unwrap();
+        let run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "worker".into(),
+                adapter: "shell".into(),
+                runtime: "shell".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        let required = vec![RequiredStep {
+            step: "tests".into(),
+            kind: StepKind::Gate,
+            command: Some("true".into()),
+            timeout_seconds: None,
+            required_by: Vec::new(),
+            node_id: None,
+            actor: None,
+            by: None,
+        }];
+        let now = Utc::now();
+        let run = engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(now),
+                    required_steps: Some(required),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        engine
+            .policies
+            .append_step_attestation(&StepAttestation {
+                id: uuid::Uuid::new_v4().to_string(),
+                run_id: run.id.clone(),
+                task_id: task.id.clone(),
+                scope: "demo".into(),
+                category: "feature".into(),
+                step: "tests".into(),
+                kind: StepKind::Gate,
+                actor: GATE_ACTOR.to_string(),
+                verdict: AttestationVerdict::Pass,
+                required_by: Vec::new(),
+                command: Some("true".into()),
+                exit_code: Some(0),
+                output: None,
+                dir: "/tmp".into(),
+                commit: None,
+                dirty: None,
+                node_id: None,
+                at: now,
+                findings: None,
+                round: 0,
+                worktree_digest: None,
+            })
+            .await
+            .unwrap();
+        let report = engine.goals_report(None, Some("2026-q4")).await.unwrap();
+        let kr_result = &report.report.as_ref().unwrap().objectives[0].key_results[0];
+        assert_eq!(kr_result.value, Some(1.0), "the one held run conforms");
+        assert_eq!(
+            kr_result.score,
+            Some(1.0),
+            "baseline 0, target 1 -- a value of 1.0 scores 1.0"
+        );
+    }
 }

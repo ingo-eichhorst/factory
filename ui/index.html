@@ -61,7 +61,7 @@
     <span class="lv-n">L2</span><span class="lv-name">Environment</span><span class="lv-sub">Sandboxes, secrets and dependencies</span>
   </button>
   <button id="lv-infra" class="lvl" data-level="infra" data-lv="1">
-    <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Host, daemon, AI accounts, operations and backup</span>
+    <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Host, daemon, Doctor, operations and backup</span>
   </button>
 </nav>
 
@@ -92,6 +92,7 @@
   <button id="tab-knowledge" hidden>Knowledge</button>
   <button id="tab-quality" hidden>Quality</button>
   <button id="tab-infrastructure" hidden>Infrastructure</button>
+  <button id="tab-doctor" hidden>Doctor</button>
   <button id="tab-environments" hidden>Operations</button>
   <button id="tab-backup" hidden>Backup</button>
 </nav>
@@ -113,6 +114,7 @@
         <button data-w="d14" class="on">14 days</button>
         <button data-w="d90">90 days</button>
       </div>
+      <button class="btn" id="dashCustomise">Customise</button>
       <button class="btn primary" id="newTaskFromDash">New task</button>
     </div>
     <div class="dash" id="dash">loading…</div>
@@ -309,6 +311,12 @@
       <h3>Findings</h3>
       <div id="policy-findings"></div>
       <div class="empty" id="policy-no-findings" hidden>No findings.</div>
+    </section>
+
+    <section style="margin-top:14px">
+      <h3>Workflow enforcement</h3>
+      <div id="policy-workflow-enforcement"></div>
+      <div class="empty" id="policy-no-workflow-enforcement" hidden>No stored workflow requires injected controls.</div>
     </section>
   </div>
 
@@ -955,6 +963,21 @@
       before <code>/api/environments</code> existed. Rebuild and restart the daemon to see environments here.</p>
     <p class="env-note bad" id="environments-error" hidden></p>
     <div class="bk-page" id="environments" hidden></div>
+  </div>
+
+  <div id="view-doctor" hidden>
+    <div class="bar">
+      <h2>Doctor</h2>
+      <span class="sp"></span>
+      <button class="btn" id="doctor-refresh">Refresh</button>
+    </div>
+    <p class="env-note">Doctor compares the newest Factory build evidence with SBOM evidence read from the
+      installed <code>factory</code> and <code>factory-daemon</code> binaries. Scanning runs in the factory
+      scope's workflow, outside the daemon; this page only reads immutable attachments.</p>
+    <p class="env-note" id="doctor-unavailable" hidden>Doctor is not available on this daemon: it was built before
+      <code>/api/doctor</code> existed. Rebuild and restart the daemon to inspect the installed release.</p>
+    <p class="env-note bad" id="doctor-error" hidden></p>
+    <div class="doctor-page" id="doctor" hidden></div>
   </div>
 
   <div id="view-backup" hidden>

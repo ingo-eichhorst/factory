@@ -10,21 +10,21 @@ use factory_core::adapter::agent::{
 use factory_core::adapter::runtime::{
     RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource,
 };
-use factory_core::adapter::TaskStore;
+use factory_core::adapter::{Agent, AgentRuntime, TaskStore};
 use factory_core::config::{Factory, Sandbox, ScopeAgent, SHELL_HARNESS};
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
 use factory_core::protocol::{
-    AgentActivity, AgentView, CredentialRow, DaemonFacts, Envelope, InterfaceFacts, Payload,
-    ProviderAgent, ProviderRow, Request, Response, RuntimeConnectionView, SandboxRow, ScopeView,
-    StatusInfo, StoreFacts, UnassignedAgent,
+    AgentActivity, AgentView, CapacityRow, CredentialRow, DaemonFacts, Envelope, Payload, ProviderAgent,
+    ProviderRow, ProviderRun, ProviderWindow, Request, Response, RuntimeConnectionView, SandboxRow,
+    ScopeView, StatusInfo, StoreFacts, UnassignedAgent,
 };
 use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
 use factory_core::run::{BlockSource, FailKind, NewRun, Run, RunPatch, RunStatus, Trigger};
 use factory_core::task::{
-    NewTask, PendingRetry, RetryPolicy, Task, TaskEntry, TaskFailure, TaskFilter, TaskPatch, TaskReport,
-    TaskStatus, WorkflowOrigin,
+    NewTask, PendingRetry, RetryPolicy, SlotWait, Task, TaskEntry, TaskFailure, TaskFilter, TaskPatch,
+    TaskReport, TaskStatus, WorkflowOrigin,
 };
 use factory_plugins::registry::Registry;
 use std::path::{Path, PathBuf};
@@ -63,14 +63,65 @@ impl Due {
     }
 }
 
+/// What the capacity-release worker (`Engine::spawn_capacity_release_worker`)
+/// was sent (`#179`). One channel, one consumer, processed one event at a
+/// time: `Release` and `Sweep` both admit from `waiting_tasks()`, and
+/// `dispatch` has no guard against two overlapping admission attempts for
+/// the same waiting task -- keeping them off separate concurrent tasks is
+/// what closes that race, not anything inside `dispatch` itself.
+pub(crate) enum CapacityEvent {
+    /// A run ending: try to admit whatever is waiting on this (scope, agent).
+    Release(String, String),
+    /// The scheduler tick's own sweep: try every waiting task, for a
+    /// restart, a raised limit, or a `Release` this channel dropped.
+    Sweep,
+}
+
+/// Where `place_run` should put a run's working directory -- pulled out so
+/// the decision of *which* is `resolve_continue`'s alone, and `place_run`
+/// itself only ever carries one out (`#178`).
+enum Workspace {
+    /// Today's behaviour: `git worktree add` a new one, or work in the scope
+    /// directly when the task has no worktree of its own.
+    Fresh,
+    /// `factory task run --continue`, having confirmed the previous run's
+    /// worktree is still one of the scope's registered worktrees
+    /// (`worktree::is_registered`): reuse it exactly as it stands, on its
+    /// own branch, rather than cutting a new one.
+    Reuse { path: PathBuf, branch: String },
+}
+
+/// What `resolve_continue` decided about a `--continue` request: resume, with
+/// everything `dispatch` needs to launch into the same conversation, or fall
+/// back to a fresh session with the exact reason to journal (`#178`).
+enum ContinueOutcome {
+    Resume(ResumePlan),
+    Fresh { reason: String },
+}
+
+struct ResumePlan {
+    /// The harness's own session id being picked back up.
+    session_id: String,
+    /// `Agent::resume_spec`'s args, prepended to the launch.
+    resume_args: Vec<String>,
+    /// `Some` only when the task uses a worktree of its own and the previous
+    /// run's is still there to reuse.
+    workspace: Option<(PathBuf, String)>,
+}
+
 /// Why a `schedule_skipped` entry's slots passed -- `data.reason` on the
-/// entry. Two causes produce the same state (a past `next_run_at` on a
+/// entry. Three causes produce the same state (a past `next_run_at` on a
 /// pending task), so the entry says which one it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SkipReason {
     /// The task's previous run was still going when the first skipped slot
     /// came round -- `due()` only fires a `pending` task.
     StillActive,
+    /// Held on a declared `max_sessions` limit (`#179`): the run this streak
+    /// eventually got was already queued for it, just not started yet, when
+    /// the slot came round. A task with no capacity limit never sees this --
+    /// its run either starts at once or `StillActive` already explains it.
+    Queued,
     /// Nothing was running: the daemon was not there to fire it.
     NotRunning,
 }
@@ -97,11 +148,16 @@ fn dispatchable_from(
 }
 
 /// `Engine::skip_reason`'s rule, apart from the store: the newest run was
-/// open at `first` (started by then, not yet ended) or it was not.
+/// open at `first` (started by then, not yet ended), already queued for but
+/// not yet started at `first` (`#179`: it was waiting for a capacity slot),
+/// or neither.
 fn skip_reason_of(newest: Option<&Run>, first: chrono::DateTime<Utc>) -> SkipReason {
     match newest {
         Some(run) if run.started_at <= first && run.ended_at.is_none_or(|end| end >= first) => {
             SkipReason::StillActive
+        }
+        Some(run) if run.queued_at.is_some_and(|q| q <= first) && first < run.started_at => {
+            SkipReason::Queued
         }
         _ => SkipReason::NotRunning,
     }
@@ -111,6 +167,7 @@ impl SkipReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::StillActive => "still_active",
+            Self::Queued => "queued",
             Self::NotRunning => "not_running",
         }
     }
@@ -118,6 +175,7 @@ impl SkipReason {
     fn describe(self) -> &'static str {
         match self {
             Self::StillActive => "the previous run was still going",
+            Self::Queued => "it was already queued, waiting for a capacity slot",
             Self::NotRunning => "nothing was running it: the daemon was down, asleep or behind",
         }
     }
@@ -169,6 +227,18 @@ pub struct Engine {
     /// Deployments, releases and health samples -- see
     /// `environments::EnvironmentStore` (`#185`).
     pub(crate) environments: crate::environments::EnvironmentStore,
+    /// Deployment transitions are read-modify-write operations. Keep starts,
+    /// supersession and finishes ordered, including post-deploy verification.
+    pub(crate) deployment_edit: tokio::sync::Mutex<()>,
+    /// `#156`: the due slot and reason a verification drill last skipped for
+    /// (an encrypted newest snapshot with no identity), so the job logs it
+    /// once per slot rather than on every tick -- the same skip can recur
+    /// for as long as the newest snapshot stays encrypted and unverified.
+    /// Lost on restart, like `seen_status`: the first tick after one is
+    /// genuinely new information. Never read by `backup_report`'s own
+    /// `verify_skipped`, which is a plain projection of the live facts
+    /// instead -- see `backup::report`'s own comment.
+    pub(crate) verify_drill_skip: std::sync::Mutex<Option<(chrono::DateTime<Utc>, String)>>,
     /// Serializes a bench run's own read-modify-write: choosing which
     /// pending attempts to start, and recomputing the run's own status once
     /// every attempt has settled. Coarse -- one lock for every run, the same
@@ -178,6 +248,13 @@ pub struct Engine {
     /// them all back, write the derived `usage` -- so two snapshots landing
     /// together never leave the older sum on the run (`costs.rs`).
     pub(crate) usage_edit: tokio::sync::Mutex<()>,
+    /// Turn-ended reads begin in chronological order but runtime calls may
+    /// finish out of order. Keep their observation times until each call has
+    /// settled so only the earliest outstanding turn can journal the one
+    /// first-turn re-estimate (`costs.rs`).
+    pub(crate) turn_usage_pending: std::sync::Mutex<
+        std::collections::HashMap<String, std::collections::BTreeSet<chrono::DateTime<Utc>>>,
+    >,
     /// Task ids already enqueued for judgement, or currently being judged by
     /// the worker: the guard that keeps a report and a cancel racing each
     /// other (or a live enqueue racing recovery's own sweep) from queuing
@@ -203,10 +280,11 @@ pub struct Engine {
     /// to spawn it from.
     pub(crate) bench_judge_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
     pub(crate) dataset_locks: crate::datasets::DatasetLocks,
-    /// Run ids queued for, or in, verification (`#118`) -- the dedup that
-    /// keeps one run's gates from running twice at once. See
-    /// `verification.rs`.
-    pub(crate) verifying: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Run ids queued for, or in, verification (`#118`). The bool remembers
+    /// a wake-up that arrived while the verifier owned the run, so releasing
+    /// that ownership replays it instead of losing a fast review result.
+    /// See `verification.rs`.
+    pub(crate) verifying: std::sync::Mutex<std::collections::HashMap<String, bool>>,
     /// Where `report` hands a `done` that needs verifying. The verifier
     /// (`spawn_verifier`) holds the other end; like `bench_judge_tx`, this is
     /// how a gate that runs for minutes stays off the report's own path.
@@ -284,6 +362,31 @@ pub struct Engine {
     /// computing them runs the metrics they name. See
     /// `Engine::triggered_signposts_cached`.
     pub(crate) signpost_cache: std::sync::Mutex<Option<crate::operations::SignpostCache>>,
+    /// Serializes a `max_sessions` admission decision with the run it gates
+    /// (`#179`): read the live counts, decide, `create_run` -- all under this
+    /// one lock, so two dispatches racing for the last slot cannot both take
+    /// it. Held only across that read-decide-write; never across the slower,
+    /// fallible steps dispatch takes afterward (the worktree, the harness's
+    /// own launch).
+    pub(crate) admission_lock: tokio::sync::Mutex<()>,
+    /// Serializes an intake receipt's identity lookup with its create
+    /// (`#167`): whether an item with the same `(kind, provider, reference)`
+    /// already exists, and minting a new one if not, all under one lock --
+    /// the same shape `admission_lock` uses for a dispatch's read-decide-write.
+    /// GitHub's poller and a relayed email/chat's `intake_add` both go
+    /// through `Engine::receive_intake`, so the rule lives in one place.
+    pub(crate) intake_receipt_lock: tokio::sync::Mutex<()>,
+    /// A run ending, or the scheduler tick, sends a [`CapacityEvent`] here so
+    /// one worker admits waiting tasks one event at a time -- without the
+    /// `&self` sites that notice a run end (`report`, `cancel_task_run`)
+    /// needing an `Arc<Self>` of their own, the same shape
+    /// `verify_tx`/`spawn_verifier` already use for exactly that reason, and
+    /// without a release and the tick's own sweep ever running at once: both
+    /// read `waiting_tasks()` and admit from it, and `dispatch` has no
+    /// existing-run guard of its own to fall back on if two admission
+    /// attempts for the same waiting task overlapped.
+    pub(crate) capacity_release_tx: tokio::sync::mpsc::UnboundedSender<CapacityEvent>,
+    pub(crate) capacity_release_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<CapacityEvent>>>,
 }
 
 impl Engine {
@@ -296,6 +399,7 @@ impl Engine {
     ) -> Self {
         let (bench_judge_tx, bench_judge_rx) = tokio::sync::mpsc::unbounded_channel();
         let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (capacity_release_tx, capacity_release_rx) = tokio::sync::mpsc::unbounded_channel();
         let power = crate::power::PowerAssertions::new(factory.config.daemon.power_assertion);
         Self {
             factory: std::sync::RwLock::new(factory),
@@ -316,8 +420,11 @@ impl Engine {
             backup_busy: tokio::sync::Mutex::new(()),
             environments: crate::environments::EnvironmentStore::in_memory()
                 .expect("an in-memory environment store should open"),
+            deployment_edit: tokio::sync::Mutex::new(()),
+            verify_drill_skip: std::sync::Mutex::new(None),
             bench_edit: tokio::sync::Mutex::new(()),
             usage_edit: tokio::sync::Mutex::new(()),
+            turn_usage_pending: Default::default(),
             bench_judging: Default::default(),
             bench_judge_tx,
             bench_judge_rx: std::sync::Mutex::new(Some(bench_judge_rx)),
@@ -340,6 +447,10 @@ impl Engine {
             quality_guide_cache: Default::default(),
             schedule_lock: tokio::sync::Mutex::new(()),
             signpost_cache: std::sync::Mutex::new(None),
+            admission_lock: tokio::sync::Mutex::new(()),
+            intake_receipt_lock: tokio::sync::Mutex::new(()),
+            capacity_release_tx,
+            capacity_release_rx: std::sync::Mutex::new(Some(capacity_release_rx)),
         }
     }
 
@@ -448,6 +559,16 @@ impl Engine {
         factory.config.roles = roles;
     }
 
+    /// The instance root's own top-level `dashboard:`, after a write to its
+    /// config -- `replace_instance_roles`, for the dashboard layer (`#160`).
+    pub(crate) fn replace_instance_dashboard(&self, dashboard: Option<factory_core::dashboard::DashboardConfig>) {
+        let mut factory = self
+            .factory
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        factory.config.dashboard = dashboard;
+    }
+
     pub(crate) fn replace_scope(&self, id: &str, replacement: factory_core::config::Scope) {
         let mut factory = self
             .factory
@@ -470,7 +591,10 @@ impl Engine {
         if let Err(e) = self.authorize(&caller, &request).await {
             return Response::error(e.code(), e.to_string());
         }
-        match self.dispatch_request(&caller, request).await {
+        // The request dispatcher covers the whole protocol and is a large
+        // future in debug builds. Poll it from the heap so callers do not
+        // need a multi-megabyte stack merely to issue a small request.
+        match Box::pin(self.dispatch_request(&caller, request)).await {
             Ok(payload) => Response::ok(payload),
             Err(e) => Response::error(e.code(), e.to_string()),
         }
@@ -573,7 +697,13 @@ impl Engine {
             Request::DependenciesVex { scope } => Ok(Payload::Text {
                 text: self.dependencies_vex(&scope).await?,
             }),
-            Request::Infrastructure => Ok(self.infrastructure().await),
+            Request::Doctor => Ok(Payload::Doctor {
+                report: self.doctor_report().await?,
+            }),
+            // Keep the provider/snapshot projection out of this already-large
+            // request future's stack frame. Every request variant shares that
+            // frame even when Infrastructure was not the one selected.
+            Request::Infrastructure => Ok(Box::pin(self.infrastructure()).await),
             Request::Backup => Ok(Payload::Backup {
                 report: Box::new(self.backup_report().await?),
             }),
@@ -601,13 +731,13 @@ impl Engine {
                 let (scope, release) = self.release_add(req).await?;
                 Ok(Payload::ReleaseAdded { scope, release })
             }
-            Request::BackupVerify { snapshot } => Ok(Payload::BackupVerify {
+            Request::BackupVerify { snapshot, identity } => Ok(Payload::BackupVerify {
                 verification: self
-                    .backup_verify(snapshot, crate::policies::caller_name(caller))
+                    .backup_verify(snapshot, identity, crate::policies::caller_name(caller))
                     .await?,
             }),
-            Request::BackupRestore { snapshot, into } => Ok(Payload::BackupRestore {
-                restoration: self.backup_restore(snapshot, into).await?,
+            Request::BackupRestore { snapshot, into, identity } => Ok(Payload::BackupRestore {
+                restoration: self.backup_restore(snapshot, into, identity).await?,
             }),
             Request::Knowledge => {
                 let root = self.factory_snapshot().root;
@@ -773,6 +903,9 @@ impl Engine {
             Request::Policy { scope } => Ok(Payload::Policy {
                 report: self.policy_report(scope.as_deref()).await?,
             }),
+            Request::PolicyClock { scope } => Ok(Payload::PolicyClock {
+                clock: self.policy_clock(scope.as_deref()).await?,
+            }),
             Request::PolicyControl { control, scope } => Ok(Payload::PolicyControl {
                 detail: self.policy_control(control, &scope).await?,
             }),
@@ -782,9 +915,10 @@ impl Engine {
                 evidence,
                 note,
                 expires_at,
+                clock,
             } => {
                 let attestation = self
-                    .policy_attest(caller, control, scope, evidence, note, expires_at)
+                    .policy_attest(caller, control, scope, evidence, note, expires_at, clock)
                     .await?;
                 self.bus.publish(Event::PolicyChanged {
                     scope: attestation.scope.clone(),
@@ -811,10 +945,10 @@ impl Engine {
                 let (filename, body) = self.policy_export_render(scope.as_deref(), &format).await?;
                 Ok(Payload::PolicyExport { format, filename, body })
             }
-            Request::Metrics { ids } => {
+            Request::Metrics { ids, scope, window } => {
                 let now = Utc::now();
                 let ids = if ids.is_empty() { self.default_metric_ids().await } else { ids };
-                let metrics = self.metrics(&ids, now).await?;
+                let metrics = self.metrics_for(&ids, now, scope.as_deref(), window).await?;
                 Ok(Payload::Metrics {
                     values: metrics.values,
                     series: metrics.series,
@@ -823,6 +957,24 @@ impl Engine {
             }
             Request::Dashboard { scope } => {
                 let (dashboard, source) = self.dashboard_for(scope.as_deref())?;
+                Ok(Payload::Dashboard {
+                    tiles: dashboard.map(|d| d.tiles),
+                    source,
+                })
+            }
+            Request::DashboardSet { scope, tiles } => {
+                let scope = self.set_dashboard(&scope, tiles)?;
+                self.bus.publish(Event::DashboardChanged { scope: scope.clone() });
+                let (dashboard, source) = self.dashboard_for(Some(&scope))?;
+                Ok(Payload::Dashboard {
+                    tiles: dashboard.map(|d| d.tiles),
+                    source,
+                })
+            }
+            Request::DashboardReset { scope } => {
+                let scope = self.reset_dashboard(&scope)?;
+                self.bus.publish(Event::DashboardChanged { scope: scope.clone() });
+                let (dashboard, source) = self.dashboard_for(Some(&scope))?;
                 Ok(Payload::Dashboard {
                     tiles: dashboard.map(|d| d.tiles),
                     source,
@@ -957,8 +1109,22 @@ impl Engine {
                 })
             }
             Request::TaskDelete { id } => {
+                // A confirmed security report is CRA evidence (`#170`):
+                // checked before anything else touches the run or the row,
+                // whatever the task's current status or stage.
+                if let Some(task) = self.store.get(&id).await? {
+                    if let Some(reason) = factory_core::intake::confirmed_security_delete_guard(&task) {
+                        return Err(FactoryError::BadRequest(reason));
+                    }
+                }
                 if let Some(run) = self.store.active_run(&id).await? {
                     self.close_session(&run).await;
+                    // Deleting the task ends the run without ever reaching
+                    // `finish_run` (there is no row left to mirror), so the
+                    // slot it held is freed here instead (`#179`).
+                    if let Ok(Some(task)) = self.store.get(&id).await {
+                        self.enqueue_capacity_release(&task.scope, &run.agent);
+                    }
                 }
                 let deleted = self.store.delete(&id).await?;
                 if deleted {
@@ -966,7 +1132,7 @@ impl Engine {
                 }
                 Ok(Payload::Deleted { deleted })
             }
-            Request::TaskRun { id, reason } => {
+            Request::TaskRun { id, reason, continue_run } => {
                 let task = self.require(&id).await?;
                 // The gate (`#119`): an item still in intake has not been
                 // released, and nothing but a decision releases it.
@@ -974,6 +1140,13 @@ impl Engine {
                     return Err(FactoryError::BadRequest(
                         "this task is still in intake: triage it and release it (factory intake decide) before it can run".into(),
                     ));
+                }
+                let blockers = self.dependency_blockers(&task).await?;
+                if !blockers.is_empty() {
+                    return Err(FactoryError::BadRequest(format!(
+                        "this task is waiting for: {}",
+                        blockers.join(", ")
+                    )));
                 }
                 // A task is a standing intent; a run is one attempt at it. Two
                 // attempts at once would race for the same working directory.
@@ -984,6 +1157,52 @@ impl Engine {
                         run.status.as_str()
                     )));
                 }
+                // Already waiting for a slot (`#179`): a second request would
+                // only spawn a second hold attempt on the same wait, and the
+                // journal would say so twice for no reason.
+                if let Some(wait) = &task.slot_wait {
+                    return Err(FactoryError::BadRequest(format!(
+                        "this task is already waiting for a {} slot, since {}; cancel or close it, or wait for a slot to open",
+                        wait.agent,
+                        wait.since.to_rfc3339(),
+                    )));
+                }
+                // `#178`: `--continue` is refused outright -- not merely
+                // fallen back from -- unless the task's newest run is
+                // terminal and ended on an infrastructure failure.
+                // `resolve_continue` decides, per session, whether that run
+                // can actually be resumed; this only decides whether asking
+                // is sensible at all.
+                let continue_from = if continue_run {
+                    let Some(prev) = self.store.runs(&id, 1).await?.into_iter().next() else {
+                        return Err(FactoryError::BadRequest("this task has no previous run to continue".into()));
+                    };
+                    if !prev.status.is_terminal() {
+                        return Err(FactoryError::BadRequest(format!(
+                            "attempt {} of this task is still {}; cancel it before continuing",
+                            prev.attempt,
+                            prev.status.as_str()
+                        )));
+                    }
+                    let infra = match prev.fail_kind {
+                        Some(kind) if kind.is_infrastructure() => {
+                            kind != FailKind::DispatchFailed || prev.last_session.is_some()
+                        }
+                        _ => false,
+                    };
+                    if !infra {
+                        return Err(FactoryError::BadRequest(format!(
+                            "attempt {} of this task ended {}, which is not an infrastructure failure; \
+                             --continue is only for an ack timeout, a run timeout, a session gone, or a \
+                             dispatch failure after a session had already come up",
+                            prev.attempt,
+                            prev.fail_kind.map_or(prev.status.as_str(), FailKind::as_str),
+                        )));
+                    }
+                    Some(prev)
+                } else {
+                    None
+                };
                 // Who asked, written down before the run exists: the record
                 // otherwise says only that a run was `manual`, which a
                 // person and an agent both are (`#106`).
@@ -994,11 +1213,16 @@ impl Engine {
                 // which does not exist yet: the Operations report leaves a
                 // run an agent asked for out of the interventions by it.
                 let asked = crate::operations::Asked::new(caller, reason);
+                let words = if let Some(prev) = &continue_from {
+                    format!("{} (continuing attempt {})", asked.words(), prev.attempt)
+                } else {
+                    asked.words()
+                };
                 self.entry(
                     &id,
                     asked.entry(
                         crate::operations::RUN_REQUESTED_KIND,
-                        format!("run requested {}", asked.words()),
+                        format!("run requested {words}"),
                         serde_json::json!({ "queued_at": due.queued_at }),
                     ),
                 )
@@ -1007,7 +1231,10 @@ impl Engine {
                 // Dispatch can take a minute: opening a pane, waiting for an
                 // agent to be ready. The caller gets its answer now.
                 tokio::spawn(async move {
-                    engine.start_run_due(&id, Trigger::Manual, due).await;
+                    match continue_from {
+                        Some(prev) => engine.start_run_due_continue(&id, due, prev).await,
+                        None => engine.start_run_due(&id, Trigger::Manual, due).await,
+                    }
                 });
                 Ok(Payload::Ok)
             }
@@ -1083,8 +1310,13 @@ impl Engine {
             // `TaskUpdated` itself; the board is a read over tasks. The
             // big ones are boxed: releasing starts a workflow and splitting
             // makes tasks, and inline they would size every request's
-            // future -- enough to overflow a test thread's stack.
-            Request::IntakeAdd(new) => Ok(Payload::Task { task: self.intake_add(caller, new).await? }),
+            // future -- enough to overflow a test thread's stack. `add`
+            // joined them in `#167`: relaying grew `NewIntake` and
+            // `IntakeSource` enough that the HTTP interface's own deeper
+            // extractor-and-routing chain, on top of this dispatch, on top
+            // of `intake_add`'s own chain, overflowed the default stack a
+            // socket caller's shallower path did not.
+            Request::IntakeAdd(new) => Ok(Payload::Task { task: Box::pin(self.intake_add(caller, new)).await? }),
             Request::IntakeBoard { scope } => Ok(Payload::IntakeBoard {
                 board: Box::pin(self.intake_board(scope.as_deref())).await?,
             }),
@@ -1099,6 +1331,18 @@ impl Engine {
             }),
             Request::IntakeInfo { id, text } => Ok(Payload::Task {
                 task: self.intake_info(caller, &id, &text).await?,
+            }),
+            Request::IntakeFlagSecurity { id, reason } => Ok(Payload::Task {
+                task: self.intake_flag_security(caller, &id, &reason).await?,
+            }),
+            Request::IntakeSecurity { id, verdict, evidence } => Ok(Payload::Task {
+                task: self.intake_security_decision(caller, &id, verdict, &evidence).await?,
+            }),
+            Request::IntakeSecurityReports { scope } => Ok(Payload::IntakeSecurityReports {
+                reports: self.confirmed_security_reports(scope.as_deref()).await?,
+            }),
+            Request::IntakePublish { id } => Ok(Payload::Task {
+                task: Box::pin(self.intake_publish(caller, &id)).await?,
             }),
 
             Request::WorkflowCreate(draft) => Ok(Payload::Workflow {
@@ -1134,6 +1378,29 @@ impl Engine {
             Request::RunAttestations { id } => Ok(Payload::Attestations {
                 attestations: self.run_attestations(&id).await?,
             }),
+            Request::RunApprove { id, reason } => Ok(Payload::Run {
+                run: Box::pin(self.decide_approval(
+                        caller,
+                        &id,
+                        factory_core::control_plan::AttestationVerdict::Pass,
+                        &reason,
+                    ))
+                    .await?
+                    .redacted(),
+            }),
+            Request::RunReject { id, reason } => Ok(Payload::Run {
+                run: Box::pin(self.decide_approval(
+                        caller,
+                        &id,
+                        factory_core::control_plan::AttestationVerdict::Fail,
+                        &reason,
+                    ))
+                    .await?
+                    .redacted(),
+            }),
+            Request::RunRework { id } => Ok(Payload::Run {
+                run: Box::pin(self.accept_rework(caller, &id)).await?.redacted(),
+            }),
 
             Request::RunList { task_id, limit } => Ok(Payload::Runs {
                 runs: self
@@ -1157,7 +1424,9 @@ impl Engine {
                 usage: self.task_usage(&id).await?,
             }),
             Request::Costs { group_by, from, to, scope } => Ok(Payload::Costs {
-                report: self.costs_report(group_by, from, to, scope.as_deref()).await?,
+                report: self
+                    .spend(&factory_core::usage::SpendQuery { scope, from, to, group_by })
+                    .await?,
             }),
             Request::RunEntries { id, limit } => Ok(Payload::Entries {
                 entries: self.store.run_entries(&id, limit.unwrap_or(200)).await?,
@@ -1178,6 +1447,24 @@ impl Engine {
     async fn status(&self) -> Result<StatusInfo> {
         let factory = self.factory_snapshot();
         let tasks = self.store.list(&TaskFilter::default()).await?;
+        let mut capacity = Vec::new();
+        // `config.scopes` alone is every scope, root included: discovery
+        // already folds the root's own `scope:` block into it
+        // (`discovery::apply`), the same list `reconcile_agents` walks.
+        // Chaining `config.scope` on top, as `Config::validate` does to
+        // cover its own pre-discovery call, would count the root twice.
+        for scope in &factory.config.scopes {
+            for agent in scope.declared_agents() {
+                let Some(max) = agent.max_sessions else { continue };
+                let name = agent.name();
+                let cap = self.capacity_for(&scope.name, &name, Some(max)).await?;
+                let waiting = tasks
+                    .iter()
+                    .filter(|t| t.slot_wait.as_ref().is_some_and(|w| w.scope == scope.name && w.agent == name))
+                    .count() as u32;
+                capacity.push(CapacityRow { scope: scope.name.clone(), agent: name, in_use: cap.in_use, max, waiting });
+            }
+        }
         Ok(StatusInfo {
             instance: factory.config.instance.name.clone(),
             instance_id: factory.config.instance.id.clone(),
@@ -1188,6 +1475,7 @@ impl Engine {
             tasks_active: self.store.active_runs().await?.len(),
             subscribers: self.bus.subscriber_count(),
             interfaces: self.interfaces.clone(),
+            capacity,
             scopes: factory.scope_names(),
         })
     }
@@ -1300,23 +1588,7 @@ impl Engine {
 
         let database = factory.database_path();
         let size_bytes = tokio::fs::metadata(&database).await.ok().map(|m| m.len());
-        let interfaces = daemon_config
-            .interfaces
-            .iter()
-            .map(|interface| InterfaceFacts {
-                kind: interface.kind.clone(),
-                bind: match interface.kind.as_str() {
-                    // A socket, shown on its own line, not an address.
-                    "cli" => None,
-                    "http" => Some(
-                        interface
-                            .string("bind")
-                            .unwrap_or_else(|| crate::interfaces::http::DEFAULT_BIND.to_string()),
-                    ),
-                    _ => interface.string("bind"),
-                },
-            })
-            .collect();
+        let interfaces = crate::interfaces::interface_facts(&daemon_config.interfaces);
         // The herdr session is the daemon's own operational setting, which
         // its service definition sets and every herdr call it makes
         // inherits -- not a credential, and not a provider's `env:`, which is
@@ -1354,6 +1626,9 @@ impl Engine {
                 plan: p.plan.clone(),
                 env: p.env.clone(),
                 agents: Vec::new(),
+                windows: Vec::new(),
+                active_runs: Vec::new(),
+                usage_unknown: None,
             })
             .collect();
         let mut unassigned = Vec::new();
@@ -1379,6 +1654,158 @@ impl Engine {
                         harness: agent.harness.clone(),
                     }),
                 }
+            }
+        }
+
+        // Provider usage is derived from the same append-only run snapshots
+        // as cost. It is deliberately not persisted as a second aggregate.
+        let now = Utc::now();
+        let mut recent_runs = self
+            .store
+            .runs_between(now - chrono::Duration::days(8), now + chrono::Duration::seconds(1))
+            .await
+            .unwrap_or_default();
+        if let Ok(active) = self.store.active_runs().await {
+            for active_run in active {
+                if !recent_runs.iter().any(|candidate| candidate.id == active_run.id) {
+                    recent_runs.push(active_run);
+                }
+            }
+        }
+        let mut task_scopes = std::collections::BTreeMap::new();
+        for run in &recent_runs {
+            if !task_scopes.contains_key(&run.task_id) {
+                let scope = self
+                    .store
+                    .get(&run.task_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|task| factory.canonical_scope_name(&task.scope))
+                    .unwrap_or_else(|| "?".into());
+                task_scopes.insert(run.task_id.clone(), scope);
+            }
+        }
+        let mut snapshots_by_run = std::collections::BTreeMap::new();
+        for run in recent_runs.iter().filter(|run| run.provider_account.is_some()) {
+            let snapshots = self.store.usage_snapshots(&run.id).await.unwrap_or_default();
+            snapshots_by_run.insert(run.id.clone(), snapshots);
+        }
+        let bound_runs: Vec<Run> =
+            recent_runs.iter().filter(|run| run.provider_account.is_some()).cloned().collect();
+        let allocation = factory_core::usage::allocate_plan_share(&bound_runs, &snapshots_by_run);
+        for provider in &mut providers {
+            let bound: Vec<&Run> = recent_runs
+                .iter()
+                .filter(|run| run.provider_account.as_deref() == Some(provider.name.as_str()))
+                .collect();
+            provider.active_runs = bound
+                .iter()
+                .filter(|run| !run.status.is_terminal())
+                .map(|run| ProviderRun {
+                    run_id: run.id.clone(),
+                    task_id: run.task_id.clone(),
+                    scope: task_scopes.get(&run.task_id).cloned().unwrap_or_else(|| "?".into()),
+                    agent: run.agent.clone(),
+                    instance: run.session.as_ref().map(|session| session.handle.clone()),
+                })
+                .collect();
+
+            // One timeline per window across every run bound to the account,
+            // ordered by when the runtime sampled each reading: a handoff from
+            // one run to the next is still one window moving.
+            let mut timelines: std::collections::BTreeMap<(u32, String), Vec<WindowReading>> =
+                std::collections::BTreeMap::new();
+            for run in &bound {
+                for snapshot in snapshots_by_run.get(&run.id).into_iter().flatten() {
+                    let Some(usage) = &snapshot.usage else { continue };
+                    let sampled_at = factory_core::usage::observed_at(snapshot);
+                    for session in &usage.sessions {
+                        let Some(rate) = &session.rate_limit else { continue };
+                        for window in &rate.windows {
+                            let (Some(minutes), Some(reset)) = (window.window_minutes, window.resets_at.clone()) else {
+                                continue;
+                            };
+                            let Ok(reset_at) = chrono::DateTime::parse_from_rfc3339(&reset) else {
+                                continue;
+                            };
+                            if reset_at.with_timezone(&Utc) <= now {
+                                continue;
+                            }
+                            timelines.entry((minutes, reset)).or_default().push(WindowReading {
+                                sampled_at,
+                                sample_time_estimated: usage.sampled_at.is_none(),
+                                used_percent: window.used_percent.filter(|used| used.is_finite()),
+                                plan_type: rate.plan_type.clone(),
+                                attribution_quality: rate.attribution_quality.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            provider.windows = timelines
+                .into_iter()
+                .filter_map(|((minutes, reset), mut readings)| {
+                    // Readings sampled in one instant are one observation,
+                    // the highest standing for it -- the rule plan share
+                    // uses (`factory_core::usage::PROVIDER_WINDOW_TIE`), so
+                    // the value shown and its badge come from the same one.
+                    readings.sort_by(|a, b| {
+                        a.sampled_at.cmp(&b.sampled_at).then_with(|| {
+                            let used = |r: &WindowReading| r.used_percent.unwrap_or(f64::NEG_INFINITY);
+                            used(a).total_cmp(&used(b))
+                        })
+                    });
+                    let latest = readings.pop()?;
+                    let trend = latest.used_percent.zip(
+                        readings
+                            .iter()
+                            .rev()
+                            .find(|prior| prior.sampled_at < latest.sampled_at && prior.used_percent.is_some())
+                            .and_then(|prior| prior.used_percent),
+                    )
+                    .map(|(current, prior)| current - prior);
+                    // Who the reading is charged to is a fact about the
+                    // interval it closed, fixed when it was sampled -- not
+                    // about who happens to be running when the page is read.
+                    let interval = allocation.intervals.iter().find(|interval| {
+                        interval.provider_account == provider.name
+                            && interval.window_minutes == minutes
+                            && interval.resets_at == reset
+                            && interval.to == latest.sampled_at
+                    });
+                    let attribution_unknown = match interval {
+                        Some(interval) => interval.unknown.clone(),
+                        None if latest.used_percent.is_some() => Some(
+                            "no earlier sample of this window to attribute the reading's change from".into(),
+                        ),
+                        None => None,
+                    };
+                    Some(ProviderWindow {
+                        window_minutes: minutes,
+                        used_percent: latest.used_percent,
+                        resets_at: reset,
+                        sampled_at: latest.sampled_at,
+                        sample_time_estimated: latest.sample_time_estimated,
+                        plan_type: latest.plan_type,
+                        attribution_quality: latest.attribution_quality,
+                        attribution: interval.and_then(|interval| interval.attribution),
+                        attribution_unknown,
+                        // A reading that does not say when it was sampled
+                        // cannot be vouched for as fresh.
+                        stale: latest.sample_time_estimated
+                            || now - latest.sampled_at > chrono::Duration::minutes(15),
+                        trend_percent: trend,
+                        unknown: latest
+                            .used_percent
+                            .is_none()
+                            .then(|| "provider did not report used percent".into()),
+                    })
+                })
+                .collect();
+            provider.windows.sort_by_key(|window| window.window_minutes);
+            if provider.kind == factory_core::config::ProviderKind::Subscription && provider.windows.is_empty() {
+                provider.usage_unknown = Some("no current rate-limit observation from a bound run".into());
             }
         }
 
@@ -1834,8 +2261,23 @@ impl Engine {
                 "a task estimate must be at least one second".into(),
             ));
         }
+        if let Some(estimate) = &patch.estimate {
+            estimate.validate().map_err(FactoryError::BadRequest)?;
+            patch.estimate_seconds = Some(estimate.time.expected);
+        } else if let Some(seconds) = patch.estimate_seconds {
+            patch.estimate = Some(factory_core::task::Estimate::point(seconds));
+        }
         if let Some(category) = &patch.category {
             factory_core::control_plan::check_category(category).map_err(FactoryError::BadRequest)?;
+        }
+        if patch.labels.as_ref().is_some_and(|labels| {
+            labels.contains_key(crate::verification::REVIEW_RUN_LABEL)
+                || labels.contains_key(crate::verification::REVIEW_STEP_LABEL)
+                || labels.contains_key(crate::verification::REVIEW_DIGEST_LABEL)
+        }) {
+            return Err(FactoryError::BadRequest(
+                "factory.review_* labels are reserved for daemon-created review tasks".into(),
+            ));
         }
 
         let scope = patch.scope.clone().unwrap_or_else(|| current.scope.clone());
@@ -1860,6 +2302,13 @@ impl Engine {
         }
         if let Some(rt) = &patch.runtime {
             self.registry.runtime(rt)?;
+        }
+        // A wait names the agent and scope it is waiting on (`#179`); moving
+        // either makes the wait meaningless -- it would go on counting
+        // against a slot this task no longer means to use.
+        let clears_wait = current.slot_wait.is_some() && (patch.agent.is_some() || patch.scope.is_some());
+        if clears_wait {
+            patch.clear_slot_wait = true;
         }
         if let Some(s) = &patch.schedule {
             patch.next_run_at = Some(schedule::next_after(s, Utc::now())?);
@@ -1973,6 +2422,17 @@ impl Engine {
             };
             self.entry(&task.id, entry).await;
         }
+        if clears_wait && task.slot_wait.is_none() {
+            self.entry(
+                &task.id,
+                TaskEntry::new(
+                    "daemon",
+                    "capacity_wait_cleared",
+                    "no longer waiting for a slot: its agent or scope changed",
+                ),
+            )
+            .await;
+        }
         self.bus.publish(Event::TaskUpdated { task: task.clone() });
         Ok(task)
     }
@@ -1980,7 +2440,7 @@ impl Engine {
     // -- creating ----------------------------------------------------------
 
     pub async fn create(&self, new: NewTask) -> Result<Task> {
-        self.create_task(new, None, None, None, None).await
+        self.create_task(new, None, None, None, None, false).await
     }
 
     /// A task born inside the intake gate (`#119`): `TaskStatus::Intake`
@@ -1995,7 +2455,7 @@ impl Engine {
                 "an intake item has no schedule; release it first, then schedule the task".into(),
             ));
         }
-        self.create_task(new, None, None, None, Some(intake)).await
+        self.create_task(new, None, None, None, Some(intake), false).await
     }
 
     pub(crate) async fn create_workflow_task(
@@ -2004,7 +2464,7 @@ impl Engine {
         origin: WorkflowOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, Some(origin), None, Some(id), None).await
+        self.create_task(new, Some(origin), None, Some(id), None, false).await
     }
 
     pub(crate) async fn create_bench_task(
@@ -2013,16 +2473,26 @@ impl Engine {
         origin: factory_core::bench::BenchOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, None, Some(origin), Some(id), None).await
+        self.create_task(new, None, Some(origin), Some(id), None, false).await
+    }
+
+    pub(crate) async fn create_review_task(
+        &self,
+        new: NewTask,
+        origin: Option<WorkflowOrigin>,
+        id: String,
+    ) -> Result<Task> {
+        self.create_task(new, origin, None, Some(id), None, true).await
     }
 
     async fn create_task(
         &self,
-        new: NewTask,
+        mut new: NewTask,
         workflow_origin: Option<WorkflowOrigin>,
         bench_origin: Option<factory_core::bench::BenchOrigin>,
         id: Option<String>,
         intake: Option<factory_core::intake::Intake>,
+        internal_review: bool,
     ) -> Result<Task> {
         let factory = self.factory_snapshot();
         if new.title.trim().is_empty() {
@@ -2032,6 +2502,21 @@ impl Engine {
             return Err(FactoryError::BadRequest(
                 "a task estimate must be at least one second".into(),
             ));
+        }
+        if !internal_review
+            && (new.labels.contains_key(crate::verification::REVIEW_RUN_LABEL)
+                || new.labels.contains_key(crate::verification::REVIEW_STEP_LABEL)
+                || new.labels.contains_key(crate::verification::REVIEW_DIGEST_LABEL))
+        {
+            return Err(FactoryError::BadRequest(
+                "factory.review_* labels are reserved for daemon-created review tasks".into(),
+            ));
+        }
+        if let Some(estimate) = &new.estimate {
+            estimate.validate().map_err(FactoryError::BadRequest)?;
+            new.estimate_seconds = Some(estimate.time.expected);
+        } else if let Some(seconds) = new.estimate_seconds {
+            new.estimate = Some(factory_core::task::Estimate::point(seconds));
         }
         // A retry policy governs what happens after a *scheduled* run fails
         // (`Engine::settle_retry` never looks at it for a task with no
@@ -2102,6 +2587,57 @@ impl Engine {
         Ok(task)
     }
 
+    /// Human-readable dependencies that are not successfully complete.
+    /// Missing ids block too: silently treating a deleted prerequisite as
+    /// success would run work with an input it never received.
+    async fn dependency_blockers(&self, task: &Task) -> Result<Vec<String>> {
+        let mut blockers = Vec::new();
+        for id in &task.depends_on {
+            match self.store.get(id).await? {
+                Some(parent) if parent.status == TaskStatus::Done => {}
+                Some(parent) => blockers.push(format!(
+                    "{} ({}, {})",
+                    parent.title,
+                    parent.id,
+                    parent.status.as_str()
+                )),
+                None => blockers.push(format!("{id} (missing)")),
+            }
+        }
+        Ok(blockers)
+    }
+
+    /// Pending decomposition tasks which became runnable since the last
+    /// scheduler tick, including never-started roots recovered after a
+    /// restart. `runs == 0` is deliberate: plan release starts a task once;
+    /// retrying an attempt that failed remains an explicit act.
+    pub(crate) async fn dependency_ready_tasks(&self) -> Result<Vec<Task>> {
+        let tasks = self.store.list(&TaskFilter::default()).await?;
+        let mut ready = Vec::new();
+        for task in tasks.into_iter().filter(|task| {
+            task.status == TaskStatus::Pending
+                && task.runs == 0
+                && task.slot_wait.is_none()
+                && task.parent_task_id.is_some()
+                && task.decomposition_part.is_some()
+        }) {
+            if let Some(origin) = &task.workflow_origin {
+                if self
+                    .workflows
+                    .get_run(&origin.workflow_run_id)
+                    .await?
+                    .is_some_and(|run| run.integration.is_some())
+                {
+                    continue;
+                }
+            }
+            if self.dependency_blockers(&task).await?.is_empty() {
+                ready.push(task);
+            }
+        }
+        Ok(ready)
+    }
+
     // -- running -----------------------------------------------------------
 
     /// Start one attempt at a task and hand it to an agent, due now -- what
@@ -2117,6 +2653,20 @@ impl Engine {
     /// the dispatch got going. Failures here end the run rather than
     /// escaping, because nobody is waiting on the answer.
     pub async fn start_run_due(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due) {
+        self.start_run_due_inner(task_id, trigger, due, None).await
+    }
+
+    /// `factory task run --continue` (`#178`): the same dispatch path, with
+    /// the run being resumed carried through to `Engine::dispatch`, which
+    /// asks `resolve_continue` what to do with it. A thin wrapper rather
+    /// than a new parameter on `start_run_due` itself, so its dozen other
+    /// callers -- the scheduler, retries, waiting-slot releases -- need no
+    /// change at all.
+    pub async fn start_run_due_continue(self: &Arc<Self>, task_id: &str, due: Due, continue_from: Run) {
+        self.start_run_due_inner(task_id, Trigger::Manual, due, Some(continue_from)).await
+    }
+
+    async fn start_run_due_inner(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) {
         // However it was asked for, an item still in intake is not started --
         // and not failed either, which is what a dispatch error below would
         // do to it (`#119`).
@@ -2129,13 +2679,90 @@ impl Engine {
                 .await;
                 return;
             }
+            match self.dependency_blockers(&task).await {
+                Ok(blockers) if !blockers.is_empty() => {
+                    self.entry(
+                        task_id,
+                        TaskEntry::new(
+                            "daemon",
+                            "dependency_held",
+                            format!("not started: waiting for {}", blockers.join(", ")),
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(task = task_id, "could not check dependencies: {error}");
+                    return;
+                }
+                _ => {}
+            }
         }
-        let run = match self.dispatch(task_id, trigger, due).await {
+        let run = match self.dispatch(task_id, trigger, due, continue_from).await {
             Ok(run) => run,
             // Blocked, not failed: `harness_gate` has already said why on
             // the task, and there is no run to close.
             Err(FactoryError::HarnessUnhealthy(reason)) => {
                 tracing::warn!(task = task_id, "held on its harness: {reason}");
+                self.record_workflow_task_state(task_id).await;
+                self.record_bench_task_state(task_id).await;
+                return;
+            }
+            // Held on `max_sessions` (`#179`), not failed either -- the task
+            // stays `Pending`, waiting for a slot, rather than `Blocked`
+            // waiting for a person. A repeat hold on the same wait (the tick
+            // sweep, another trigger arriving while it already waits) keeps
+            // the original `slot_wait` rather than restarting its clock or
+            // spamming the journal every time.
+            Err(FactoryError::CapacityHeld { agent, in_use, max }) => {
+                let reason = format!("waiting for a {agent} slot ({in_use}/{max} in use)");
+                if let Ok(Some(task)) = self.store.get(task_id).await {
+                    let already_this_wait = task
+                        .slot_wait
+                        .as_ref()
+                        .is_some_and(|w| w.agent == agent && w.scope == task.scope);
+                    // The tick sweep re-tries every waiting task every few
+                    // seconds; only the first hold is worth an info line.
+                    if already_this_wait {
+                        tracing::debug!(task = task_id, "{reason}");
+                    } else {
+                        tracing::info!(task = task_id, "{reason}");
+                        let wait = SlotWait {
+                            agent,
+                            scope: task.scope.clone(),
+                            trigger,
+                            queued_at: due.queued_at,
+                            scheduled_for: due.scheduled_for,
+                            since: Utc::now(),
+                        };
+                        // Forced to `Pending` even from `Blocked` (a
+                        // scheduled task that exhausted its retries, tried
+                        // again on its next regular slot, and hit capacity):
+                        // `waiting_tasks` only ever lists `Pending` rows, so
+                        // a wait left sitting on `Blocked` would never be
+                        // seen by a release or the tick sweep, and `fires()`
+                        // already keeps the schedule from retrying it in the
+                        // meantime. `failure` stays -- `TaskFailure`'s own
+                        // doc note is that `Pending` with a failure still
+                        // set is exactly what a queued retry already looks
+                        // like, and `create_run` clears it once this
+                        // actually dispatches.
+                        let _ = self
+                            .store
+                            .update(
+                                task_id,
+                                &TaskPatch {
+                                    status: Some(TaskStatus::Pending),
+                                    slot_wait: Some(wait),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                        self.entry(task_id, TaskEntry::new("daemon", "capacity_held", reason)).await;
+                        self.publish_task(task_id).await;
+                    }
+                }
                 self.record_workflow_task_state(task_id).await;
                 self.record_bench_task_state(task_id).await;
                 return;
@@ -2186,7 +2813,7 @@ impl Engine {
         self.record_bench_task_state(task_id).await;
     }
 
-    async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due) -> Result<Run> {
+    pub(crate) async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) -> Result<Run> {
         let task = self.require(task_id).await?;
         // Resolve again rather than trusting what was written down: the config
         // may have changed since the task was created.
@@ -2200,6 +2827,19 @@ impl Engine {
         // `ack_timeout` three minutes later.
         self.harness_gate(&task, agent.as_ref(), trigger).await?;
         let factory = self.factory_snapshot();
+        let provider_account = declaration
+            .as_ref()
+            .and_then(|declared| factory.config.infrastructure.provider_for(declared))
+            .map(|(provider, _)| provider.name.clone())
+            .or_else(|| {
+                factory
+                    .config
+                    .infrastructure
+                    .providers
+                    .iter()
+                    .find(|provider| provider.harnesses.iter().any(|harness| harness == &adapter_name))
+                    .map(|provider| provider.name.clone())
+            });
         let scope_path = factory.scope_path(&task.scope)?;
         if !scope_path.is_dir() {
             return Err(FactoryError::BadRequest(format!(
@@ -2209,25 +2849,106 @@ impl Engine {
             )));
         }
 
+        // `#178`: decided before the run row exists, since none of it needs
+        // one -- `resolve_continue` only ever reads the previous run and this
+        // dispatch's freshly resolved agent/runtime.
+        let continue_outcome = match &continue_from {
+            Some(prev) => Some(
+                self.resolve_continue(&task, (&agent_name, &adapter_name), agent.as_ref(), runtime.as_ref(), prev, &scope_path)
+                    .await,
+            ),
+            None => None,
+        };
+
         // What `done` will need, fixed now (`#118`) -- before the run row
         // exists, so a plan that cannot be resolved fails the dispatch
         // rather than letting the work start unplanned.
-        let required_steps = self.required_steps_for_task(&task).await?;
+        let required_steps = self.required_steps_for_task(&task, &agent_name).await?;
 
-        let token = factory_core::new_token();
-        let run = self
-            .store
-            .create_run(&NewRun {
-                task_id: task.id.clone(),
-                trigger,
-                agent: agent_name.clone(),
-                adapter: adapter_name.clone(),
-                runtime: task.runtime.clone(),
-                token: token.clone(),
-                queued_at: Some(due.queued_at),
-                scheduled_for: due.scheduled_for,
-            })
-            .await?;
+        // An approval-held run already exists but has never launched. Once
+        // approved, resume that exact frozen snapshot instead of creating a
+        // second attempt that would ask for the same approval again.
+        let existing = self.store.active_run(task_id).await?.filter(|run| {
+            run.status == RunStatus::Blocked
+                && run.blocked_source == Some(BlockSource::Verification)
+                && run.session.is_none()
+                && run
+                    .required_steps
+                    .iter()
+                    .any(|s| s.kind == factory_core::control_plan::StepKind::Approval)
+        });
+        let resumed = existing.is_some();
+        let token = existing
+            .as_ref()
+            .and_then(|r| r.token.clone())
+            .unwrap_or_else(factory_core::new_token);
+        // Reserve capacity under the same lock for a fresh attempt and an
+        // approved held run. An approval-held run has no session and is not
+        // counted as occupying a slot until it resumes dispatch.
+        let run = {
+            let _admission = self.admission_lock.lock().await;
+            let agent_max = declaration.as_ref().and_then(|d| d.max_sessions);
+            let cap = self.capacity_for(&task.scope, &agent_name, agent_max).await?;
+            if cap.held() {
+                let (in_use, max) = cap.holding_pair();
+                return Err(FactoryError::CapacityHeld { agent: agent_name.clone(), in_use, max });
+            }
+            match existing {
+                Some(run) => self.store.update_run(
+                    &run.id,
+                    &RunPatch { status: Some(RunStatus::Dispatching), clear_blocked: true, ..Default::default() },
+                ).await?,
+                None => self.store.create_run(&NewRun {
+                    task_id: task.id.clone(),
+                    trigger,
+                    agent: agent_name.clone(),
+                    adapter: adapter_name.clone(),
+                    runtime: task.runtime.clone(),
+                    token: token.clone(),
+                    queued_at: Some(due.queued_at),
+                    scheduled_for: due.scheduled_for,
+                }).await?,
+            }
+        };
+        if resumed && task.slot_wait.is_some() {
+            self.store.update(task_id, &TaskPatch {
+                clear_slot_wait: true,
+                ..Default::default()
+            }).await?;
+        }
+        let mut initial_patch = RunPatch {
+            original_estimate: task.effective_estimate(),
+            provider_account,
+            ..Default::default()
+        };
+        // `#178`: recorded whether or not the continuation actually managed
+        // to resume -- `continued_from` and the voided-token chain both hold
+        // regardless, since this run is `--continue`'s answer either way;
+        // `resumed_session` only when it truly resumed.
+        if let Some(prev) = &continue_from {
+            let mut superseded = prev.superseded_token_sha256s.clone();
+            if let Some(spent) = &prev.spent_token_sha256 {
+                superseded.push(spent.clone());
+            }
+            initial_patch.superseded_token_sha256s = superseded;
+            initial_patch.continued_from = Some(prev.id.clone());
+        }
+        if let Some(ContinueOutcome::Resume(plan)) = &continue_outcome {
+            initial_patch.resumed_session = Some(plan.session_id.clone());
+        }
+        let run = self.store.update_run(&run.id, &initial_patch).await?;
+        if let Some(ContinueOutcome::Fresh { reason }) = &continue_outcome {
+            self.entry(
+                task_id,
+                TaskEntry::new(
+                    "daemon",
+                    "continue_fallback",
+                    format!("continuing attempt {}'s session was not possible: {reason}; dispatching fresh", run.attempt.saturating_sub(1)),
+                )
+                .in_run(&run.id),
+            )
+            .await;
+        }
 
         // The run exists from here on, so it holds its share of the power
         // assertion from here on too -- every `?` below this point ends the
@@ -2237,9 +2958,7 @@ impl Engine {
         // before the worktree and the agent/runtime calls rather than after
         // them: those are exactly the slow, fallible steps a sleeping host
         // could stall inside, which is the case this issue is about.
-        self.power.acquire(&run.id).await;
-
-        let run = if required_steps.is_empty() {
+        let run = if resumed || required_steps.is_empty() {
             run
         } else {
             self.store
@@ -2247,19 +2966,25 @@ impl Engine {
                 .await?
         };
 
-        self.bus.publish(Event::RunStarted { run: run.clone() });
+        if resumed {
+            self.bus.publish(Event::RunUpdated { run: run.clone() });
+        } else {
+            self.bus.publish(Event::RunStarted { run: run.clone() });
+        }
         self.publish_task(task_id).await;
-        self.entry(
-            task_id,
-            TaskEntry::new(
-                "daemon",
-                "started",
-                format!("attempt {} started ({})", run.attempt, trigger.as_str()),
+        if !resumed {
+            self.entry(
+                task_id,
+                TaskEntry::new(
+                    "daemon",
+                    "started",
+                    format!("attempt {} started ({})", run.attempt, trigger.as_str()),
+                )
+                .in_run(&run.id),
             )
-            .in_run(&run.id),
-        )
-        .await;
-        if !run.required_steps.is_empty() {
+            .await;
+        }
+        if !resumed && !run.required_steps.is_empty() {
             let steps: Vec<String> = run
                 .required_steps
                 .iter()
@@ -2285,12 +3010,74 @@ impl Engine {
             .await;
         }
 
+        let approval_evidence = self.policies.step_attestations(&run.id).await?;
+        let pending_approval = run
+            .required_steps
+            .iter()
+            .filter(|s| s.kind == factory_core::control_plan::StepKind::Approval)
+            .find(|approval| {
+                !approval_evidence
+                    .iter()
+                    .rev()
+                    .find(|a| {
+                        a.step == approval.step
+                            && a.kind == factory_core::control_plan::StepKind::Approval
+                    })
+                    .is_some_and(|a| {
+                        a.verdict == factory_core::control_plan::AttestationVerdict::Pass
+                    })
+            });
+        if let Some(approval) = pending_approval {
+                let held = self
+                    .store
+                    .update_run(
+                        &run.id,
+                        &RunPatch {
+                            status: Some(RunStatus::Blocked),
+                            blocked_since: Some(Utc::now()),
+                            blocked_source: Some(BlockSource::Verification),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                self.entry(
+                    task_id,
+                    TaskEntry::new(
+                        "daemon",
+                        "blocked",
+                        format!("approval {} is required before dispatch", approval.step),
+                    )
+                    .in_run(&run.id)
+                    .with_data(
+                        serde_json::json!({ "approval": approval.step, "actor": approval.actor }),
+                    ),
+                )
+                .await;
+                self.bus.publish(Event::RunUpdated { run: held.clone() });
+                self.mirror_to_task(&held).await;
+                return Ok(held);
+        }
+
+        // Approval has passed (or none was required); only now does this run
+        // acquire its liveness assertion and create an outward agent session.
+        self.power.acquire(&run.id).await;
+
         // A worktree of its own, made now rather than left to the harness --
         // the run row already exists, so it is named after it. Nothing below
         // this point may hand the agent the scope itself when the checkbox is
         // on: a failure here ends the run right here, with git's own
-        // complaint, rather than quietly falling back to the scope.
-        let (cwd, run) = self.place_run(&task, run, &scope_path).await?;
+        // complaint, rather than quietly falling back to the scope. A
+        // `--continue` that resumed and has a worktree of its own to go back
+        // to reuses it instead (`Workspace::Reuse`); every other case is
+        // `Fresh`, today's behaviour unchanged.
+        let workspace = match &continue_outcome {
+            Some(ContinueOutcome::Resume(plan)) => match &plan.workspace {
+                Some((path, branch)) => Workspace::Reuse { path: path.clone(), branch: branch.clone() },
+                None => Workspace::Fresh,
+            },
+            _ => Workspace::Fresh,
+        };
+        let (cwd, run) = self.place_run(&task, run, &scope_path, workspace).await?;
 
         // Resolved the same way `caller_for` resolves it for every other
         // request, off the agent this run actually landed on rather than
@@ -2331,6 +3118,7 @@ impl Engine {
                 attempt: run.attempt,
                 token,
                 worktree_branch: run.worktree_branch.clone(),
+                resumed_session: run.resumed_session.clone(),
                 upstream,
                 knowledge,
                 required_steps: run.required_steps.clone(),
@@ -2344,6 +3132,14 @@ impl Engine {
         };
 
         let mut launch = agent.launch_spec(&ctx).await?;
+        // `#178`: the resume args go first -- `codex resume <id>` is a
+        // subcommand, which has to lead, and a flag like claude's
+        // `--resume <id>` does not mind leading either.
+        if let Some(ContinueOutcome::Resume(plan)) = &continue_outcome {
+            let mut args = plan.resume_args.clone();
+            args.append(&mut launch.args);
+            launch.args = args;
+        }
         append_declared_args(&mut launch, declaration.as_ref());
         // A task's stored `scope` can still be a scope's legacy bare name --
         // canonicalize it the same way `start_agent` does, so a legacy-named
@@ -2386,8 +3182,7 @@ impl Engine {
         // had already used -- a pane an earlier run left behind, a harness
         // that spent tokens coming up -- is not this run's (#117). Never a
         // `?`: a runtime with no usage to give must not fail the run.
-        self.snapshot_usage(&run, factory_core::usage::SnapshotPoint::Dispatch)
-            .await;
+        Box::pin(self.snapshot_usage(&run, factory_core::usage::SnapshotPoint::Dispatch)).await;
 
         let prompt = agent.prompt(&ctx).await?;
         runtime.submit(&session, &prompt).await?;
@@ -2406,6 +3201,82 @@ impl Engine {
         Ok(run)
     }
 
+    /// Whether `factory task run --continue`'s (`#178`) previous run can
+    /// really be resumed, and with what. Every fallback below ends in
+    /// `ContinueOutcome::Fresh`, never an error: a `--continue` that cannot
+    /// continue still dispatches, exactly as a plain `task run` would,
+    /// journaled with the one reason it fell back rather than left to a
+    /// person to guess from a session that just looks fresh.
+    async fn resolve_continue(
+        &self,
+        task: &Task,
+        (agent_name, adapter_name): (&str, &str),
+        agent: &dyn Agent,
+        runtime: &dyn AgentRuntime,
+        prev: &Run,
+        scope_path: &Path,
+    ) -> ContinueOutcome {
+        // Rule 5: the previous run's agent is not necessarily this
+        // dispatch's -- the task may have been edited since. Resuming a
+        // `codex` conversation with `claude-code`'s launch args makes no
+        // sense, so this is checked before anything else.
+        if prev.agent != agent_name || prev.adapter != adapter_name {
+            return ContinueOutcome::Fresh {
+                reason: format!(
+                    "the task's agent changed since the previous run (was {}/{}, now {agent_name}/{adapter_name})",
+                    prev.agent, prev.adapter
+                ),
+            };
+        }
+
+        // The previous run's newest usage snapshot entry for this adapter,
+        // or -- failing that -- the session id a `turn-ended` hook recorded
+        // on it. Never "the latest session in this directory" (rule 6).
+        let snapshots = self.store.usage_snapshots(&prev.id).await.unwrap_or_default();
+        let session_id = factory_core::usage::newest_session_id_for_adapter(&snapshots, adapter_name)
+            .or_else(|| prev.turn_ended_session_id.clone());
+        let Some(session_id) = session_id else {
+            return ContinueOutcome::Fresh { reason: "no session id was recorded for the previous run".into() };
+        };
+
+        let Some(resume) = agent.resume_spec(&session_id) else {
+            return ContinueOutcome::Fresh { reason: format!("the {adapter_name} adapter declares no resume") };
+        };
+
+        let workspace = if task.worktree {
+            match &prev.worktree_path {
+                Some(path) if worktree::is_registered(scope_path, Path::new(path)).await => {
+                    let Some(branch) = &prev.worktree_branch else {
+                        return ContinueOutcome::Fresh {
+                            reason: "the previous run's worktree branch was not recorded".into(),
+                        };
+                    };
+                    Some((PathBuf::from(path), branch.clone()))
+                }
+                _ => {
+                    return ContinueOutcome::Fresh { reason: "the previous run's worktree is gone".into() };
+                }
+            }
+        } else {
+            None
+        };
+
+        // Rule 1: never run two processes on one conversation. An error
+        // asking is treated the same as "not confirmed gone" -- silence is
+        // not the same as a `Gone` answer.
+        let confirmed_gone = match &prev.last_session {
+            Some(session) => matches!(runtime.status(session).await, Ok(RuntimeStatus::Gone)),
+            None => false,
+        };
+        if !confirmed_gone {
+            return ContinueOutcome::Fresh {
+                reason: "the previous run's session is not confirmed gone".into(),
+            };
+        }
+
+        ContinueOutcome::Resume(ResumePlan { session_id, resume_args: resume.args, workspace })
+    }
+
     /// Where a run actually works: its own worktree, or the scope directly.
     /// Pulled out of `dispatch` so the decision -- and the one way it can
     /// fail -- has no need of a real agent or runtime on the other end of it,
@@ -2414,16 +3285,51 @@ impl Engine {
     /// `task.worktree` off is the whole of the "quietly ignored" case this
     /// function refuses to have: it is checked once, here, and every path out
     /// of it either returns the scope path unchanged or a worktree that
-    /// `git worktree add` actually made. There is no third path.
-    async fn place_run(&self, task: &Task, run: Run, scope_path: &Path) -> Result<(PathBuf, Run)> {
+    /// `git worktree add` actually made (`Workspace::Fresh`) or that a
+    /// previous run already made and `--continue` (`#178`) is reusing
+    /// (`Workspace::Reuse`). There is no other path.
+    async fn place_run(&self, task: &Task, run: Run, scope_path: &Path, workspace: Workspace) -> Result<(PathBuf, Run)> {
         if !task.worktree {
             return Ok((scope_path.to_path_buf(), run));
+        }
+        if let Workspace::Reuse { path, branch } = workspace {
+            // Already confirmed still registered by `resolve_continue` --
+            // nothing here runs `git worktree add` again, and nothing resets
+            // it: a bench reset on a tree an agent is about to pick back up
+            // would wipe exactly the work `--continue` exists to save.
+            let run = self
+                .store
+                .update_run(
+                    &run.id,
+                    &RunPatch {
+                        worktree_path: Some(path.display().to_string()),
+                        worktree_branch: Some(branch.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            self.bus.publish(Event::RunUpdated { run: run.clone() });
+            self.entry(
+                &run.task_id,
+                TaskEntry::new(
+                    "daemon",
+                    "worktree",
+                    format!("resuming in {} on {branch}", path.display()),
+                )
+                .in_run(&run.id),
+            )
+            .await;
+            return Ok((path, run));
         }
         let branch = worktree::branch_name(&task.id, &task.title, run.attempt);
         let dir = self.factory_snapshot().worktrees_dir().join(&run.id);
         let base = match &task.bench_origin {
             Some(origin) => self.bench_case_base(origin).await,
-            None => None,
+            None => task
+                .workflow_origin
+                .as_ref()
+                .and_then(|origin| origin.workspace.as_ref())
+                .map(|workspace| workspace.base_ref.clone()),
         };
         worktree::create(scope_path, &dir, &branch, base.as_deref())
             .await
@@ -2468,15 +3374,37 @@ impl Engine {
         Ok((dir, run))
     }
 
-    /// This task's direct parents in a workflow, in the definition's own edge
-    /// order (deterministic run to run), with the result each finished with.
-    /// Empty for a root node or a task outside any workflow at all. A store
-    /// or workflow-run read failure is logged and treated as "nothing found"
-    /// rather than failing the dispatch -- the task still runs, just without
-    /// the section or file it would otherwise have carried.
+    /// This task's direct dependencies -- decomposition predecessors first,
+    /// then workflow parents in definition order -- with the result each
+    /// finished with. A store or workflow-run read failure is logged and
+    /// treated as "nothing found" rather than failing dispatch.
     async fn upstream_outputs(&self, task: &Task) -> Vec<UpstreamOutput> {
+        let mut outputs = Vec::new();
+        for parent_task_id in &task.depends_on {
+            match self.store.get(parent_task_id).await {
+                Ok(Some(parent)) => outputs.push(UpstreamOutput {
+                    node_id: parent.decomposition_part.clone().unwrap_or_else(|| "dependency".into()),
+                    task_id: parent.id.clone(),
+                    title: parent.title.clone(),
+                    result: parent
+                        .result
+                        .as_deref()
+                        .map(|result| truncate_tail(result, UPSTREAM_RESULT_BYTE_CAP).into_owned()),
+                }),
+                Ok(None) => tracing::warn!(
+                    task = task.id,
+                    parent_task = parent_task_id,
+                    "dependency task no longer exists"
+                ),
+                Err(error) => tracing::warn!(
+                    task = task.id,
+                    parent_task = parent_task_id,
+                    "reading dependency output: {error}"
+                ),
+            }
+        }
         let Some(origin) = &task.workflow_origin else {
-            return Vec::new();
+            return outputs;
         };
         let run = match self.workflows.get_run(&origin.workflow_run_id).await {
             Ok(Some(run)) => run,
@@ -2486,7 +3414,7 @@ impl Engine {
                     workflow_run = origin.workflow_run_id,
                     "workflow run not found; dispatching without upstream outputs"
                 );
-                return Vec::new();
+                return outputs;
             }
             Err(error) => {
                 tracing::warn!(
@@ -2494,11 +3422,10 @@ impl Engine {
                     workflow_run = origin.workflow_run_id,
                     "reading workflow run for upstream outputs: {error}"
                 );
-                return Vec::new();
+                return outputs;
             }
         };
 
-        let mut outputs = Vec::new();
         for edge in run.definition.edges.iter().filter(|edge| edge.to == origin.node_id) {
             let Some(parent_task_id) = run
                 .nodes
@@ -2541,27 +3468,39 @@ impl Engine {
             .find(|node| node.node_id == origin.node_id && node.task_id.as_deref() == Some(task.id.as_str()))
             .and_then(|node| node.rework_request.clone());
         if let Some(request) = request {
-            match self.store.get(&request.from_task).await {
-                Ok(Some(reviewer)) => {
-                    let said: Vec<&str> = [reviewer.error.as_deref(), reviewer.result.as_deref()]
-                        .into_iter()
-                        .flatten()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    outputs.push(UpstreamOutput {
-                        node_id: request.from_node.clone(),
-                        task_id: reviewer.id.clone(),
-                        title: format!(
-                            "{} sent this work back -- rework round {} of {}",
-                            reviewer.title, request.round, request.max_rounds
-                        ),
-                        result: (!said.is_empty())
-                            .then(|| truncate_tail(&said.join("\n\n"), UPSTREAM_RESULT_BYTE_CAP).into_owned()),
-                    });
+            if let Some(feedback) = request.feedback.as_deref() {
+                outputs.push(UpstreamOutput {
+                    node_id: request.from_node.clone(),
+                    task_id: request.from_task.clone(),
+                    title: format!(
+                        "Integration sent this work back -- rework round {} of {}",
+                        request.round, request.max_rounds
+                    ),
+                    result: Some(truncate_tail(feedback, UPSTREAM_RESULT_BYTE_CAP).into_owned()),
+                });
+            } else {
+                match self.store.get(&request.from_task).await {
+                    Ok(Some(reviewer)) => {
+                        let said: Vec<&str> = [reviewer.error.as_deref(), reviewer.result.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        outputs.push(UpstreamOutput {
+                            node_id: request.from_node.clone(),
+                            task_id: reviewer.id.clone(),
+                            title: format!(
+                                "{} sent this work back -- rework round {} of {}",
+                                reviewer.title, request.round, request.max_rounds
+                            ),
+                            result: (!said.is_empty())
+                                .then(|| truncate_tail(&said.join("\n\n"), UPSTREAM_RESULT_BYTE_CAP).into_owned()),
+                        });
+                    }
+                    Ok(None) => tracing::warn!(task = task.id, from_task = request.from_task, "rework source no longer exists"),
+                    Err(error) => tracing::warn!(task = task.id, from_task = request.from_task, "reading rework source: {error}"),
                 }
-                Ok(None) => tracing::warn!(task = task.id, from_task = request.from_task, "rework source no longer exists"),
-                Err(error) => tracing::warn!(task = task.id, from_task = request.from_task, "reading rework source: {error}"),
             }
         }
         outputs
@@ -2608,6 +3547,19 @@ impl Engine {
         };
         match given {
             Some(given) if given == expected => Ok(()),
+            // `#178`: a stale token this exact run's `--continue` replaced,
+            // told apart from a plain wrong one -- see `caller_for`'s own
+            // copy of this check. Only the digest is ever compared.
+            Some(given)
+                if run
+                    .superseded_token_sha256s
+                    .iter()
+                    .any(|d| d == &factory_core::run::token_digest(given)) =>
+            {
+                Err(FactoryError::Denied(format!(
+                    "a newer run of task {task_id} exists; use the latest reporting commands"
+                )))
+            }
             Some(_) => Err(FactoryError::Denied(format!(
                 "wrong token for attempt {} of task {task_id}",
                 run.attempt
@@ -2629,8 +3581,18 @@ impl Engine {
         })?;
 
         self.check_run_token(&run, report.token.as_deref(), task_id)?;
-        self.validate_workflow_send_to(task_id, report.status, report.send_to.as_deref())
-            .await?;
+        let reporting_task = self.require(task_id).await?;
+        let review_report = reporting_task
+            .labels
+            .contains_key(crate::verification::REVIEW_RUN_LABEL);
+        if !review_report {
+            self.validate_workflow_send_to(task_id, report.status, report.send_to.as_deref())
+                .await?;
+        } else if report.send_to.is_some() && report.status != Some(RunStatus::Done) {
+            return Err(FactoryError::BadRequest(
+                "a review rejects only with status done and --send-to".into(),
+            ));
+        }
 
         // While its gates run, a run's status is the verifier's to set. The
         // agent may still add a note, or give the run up; nothing else.
@@ -2720,27 +3682,31 @@ impl Engine {
             }
             Some(_) => patch.clear_blocked = true,
             None => {}
-        }
+        };
 
-        match report.status {
+        let updated = match report.status {
             // `#118`'s done gate: a run held to required steps is not done on
             // its agent's word. The session stays open -- see
             // `verification.rs`.
             Some(RunStatus::Done) if !run.required_steps.is_empty() => {
-                self.begin_verification(&run, patch).await
+                self.begin_verification(&run, patch).await?
             }
             Some(status) if status.is_terminal() => {
                 self.close_session(&run).await;
                 self.finish_run(&run.id, status, patch, &format!("attempt {} ended", run.attempt))
-                    .await
+                .await?
             }
             _ => {
                 let run = self.store.update_run(&run.id, &patch).await?;
                 self.bus.publish(Event::RunUpdated { run: run.clone() });
                 self.mirror_to_task(&run).await;
-                Ok(run)
+                run
             }
+        };
+        if review_report && report.status == Some(RunStatus::Done) {
+            self.settle_review_task(&reporting_task, &updated).await?;
         }
+        Ok(updated)
     }
 
     /// Cancel a task's active run. `kind` says on whose word -- a person, an
@@ -2783,6 +3749,22 @@ impl Engine {
         patch: RunPatch,
         _why: &str,
     ) -> Result<Run> {
+        // `#178`: what `token` is about to lose to `clear_token` below,
+        // carried forward as a digest (`spent_token_sha256`) -- never the
+        // token itself, which is read back off the store rather than
+        // trusted from a caller only long enough to hash it, since nothing
+        // that reaches `finish_run` is handed the run it is closing. A later
+        // `--continue`'s new run copies the digest into
+        // `superseded_token_sha256s`, which is the only thing that ever
+        // reads it; a digest match authorizes nothing.
+        let spent_token_sha256 = self
+            .store
+            .get_run(run_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.token)
+            .map(|t| factory_core::run::token_digest(&t));
         let run = self
             .store
             .update_run(
@@ -2791,6 +3773,7 @@ impl Engine {
                     status: Some(status),
                     clear_session: true,
                     clear_token: true,
+                    spent_token_sha256,
                     // A run that has ended is not waiting on anybody, so the
                     // block's own clock and the runtime's standing guess both
                     // go with the session -- `blocked_since` is documented to
@@ -2816,10 +3799,116 @@ impl Engine {
         if let Ok(Some(task)) = self.store.get(&run.task_id).await {
             self.record_gone(&format!("run:{}", run.id), &task.scope, &run.agent)
                 .await;
+            // A slot just freed: wake whatever is waiting on this (scope,
+            // agent) -- `close_session`, called just before this by every
+            // caller, only closes the pane; the run is still non-terminal
+            // (and so still counted as using a slot) until this write lands,
+            // which is why the wakeup goes here and not there (`#179`).
+            self.enqueue_capacity_release(&task.scope, &run.agent);
         }
         self.mirror_to_task(&run).await;
         self.settle_retry(&run).await;
+        if status != RunStatus::Done {
+            if let Ok(Some(task)) = self.store.get(&run.task_id).await {
+                if let Some(subject) = task.labels.get(crate::verification::REVIEW_RUN_LABEL) {
+                    self.enqueue_verification(subject);
+                }
+            }
+        }
         Ok(run)
+    }
+
+    // -- max_sessions: releasing a slot (#179) ------------------------------
+
+    /// A run just stopped using a slot: send `(scope, agent)` to the capacity
+    /// worker so whatever is waiting on it wakes right away. `&self`
+    /// deliberately -- `finish_run`, `report` and `cancel_task_run` are not
+    /// `Arc<Self>`, and a channel send needs no more than that, the same
+    /// reason `enqueue_verification` gets away with it.
+    pub(crate) fn enqueue_capacity_release(&self, scope: &str, agent: &str) {
+        let _ = self.capacity_release_tx.send(CapacityEvent::Release(scope.to_string(), agent.to_string()));
+    }
+
+    /// The scheduler tick's own sweep, queued rather than run inline: a tick
+    /// that blocked on one slow dispatch would delay every due task it fires
+    /// afterward, the ack/run-timeout checks, and `supervise_agents` behind
+    /// it -- exactly why the due-task loop already spawns each dispatch
+    /// instead of awaiting it in place, and `recheck_harnesses` backgrounds
+    /// itself. Going through the same channel `Release` does also means a
+    /// sweep and a release can never run at once.
+    pub(crate) fn enqueue_capacity_sweep(&self) {
+        let _ = self.capacity_release_tx.send(CapacityEvent::Sweep);
+    }
+
+    /// Start the capacity-release worker: every [`CapacityEvent`]
+    /// `enqueue_capacity_release`/`enqueue_capacity_sweep` sends is handled
+    /// here, one at a time, where an `Arc<Self>` is available. One consumer
+    /// is the point: `release_waiting` and `recheck_capacity` both read
+    /// `waiting_tasks()` and admit from it, and `dispatch` has no guard
+    /// against two overlapping admission attempts for the same waiting task,
+    /// so running them one after another here -- never on separate spawned
+    /// tasks -- is what keeps a release and a sweep from both admitting the
+    /// same task at once. Called once, at startup, like `spawn_verifier`; a
+    /// second call is a no-op.
+    pub fn spawn_capacity_release_worker(self: &Arc<Self>) {
+        let Some(mut rx) = self.capacity_release_rx.lock().unwrap().take() else {
+            return;
+        };
+        let engine = self.clone();
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CapacityEvent::Release(scope, agent) => engine.release_waiting(&scope, &agent).await,
+                    CapacityEvent::Sweep => engine.recheck_capacity().await,
+                }
+            }
+        });
+    }
+
+    /// Every `Pending` task with a `slot_wait`, oldest wait first -- FIFO,
+    /// exactly the order `queued_at` gives it.
+    async fn waiting_tasks(&self) -> Vec<Task> {
+        let mut tasks: Vec<Task> = self
+            .store
+            .list(&TaskFilter { status: Some(TaskStatus::Pending), ..Default::default() })
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.slot_wait.is_some())
+            .collect();
+        tasks.sort_by_key(|t| t.slot_wait.as_ref().unwrap().queued_at);
+        tasks
+    }
+
+    /// Try to admit every waiting task whose own wait names `scope` or
+    /// `agent` -- oldest first. Each attempt is an ordinary `start_run_due`,
+    /// which re-checks live capacity under `admission_lock` on its own
+    /// terms: one run ending frees at most what it frees, so a task that
+    /// still does not fit is simply held again, at no cost beyond the check
+    /// itself. `dispatch` will see every earlier admission this loop already
+    /// made, so the order tried is the order admitted.
+    pub(crate) async fn release_waiting(self: &Arc<Self>, scope: &str, agent: &str) {
+        for task in self.waiting_tasks().await {
+            let Some(wait) = task.slot_wait.clone() else { continue };
+            if wait.scope != scope && wait.agent != agent {
+                continue;
+            }
+            let due = Due { queued_at: wait.queued_at, scheduled_for: wait.scheduled_for };
+            self.start_run_due(&task.id, wait.trigger, due).await;
+        }
+    }
+
+    /// The scheduler tick's sweep, next to `recheck_harnesses`: try every
+    /// waiting task, not just the ones a specific release names. Covers what
+    /// a single `(scope, agent)` wakeup cannot -- a restart (nothing sent
+    /// anything, but the wait is still on disk), a limit raised while tasks
+    /// were already waiting, and a wakeup this channel dropped.
+    pub(crate) async fn recheck_capacity(self: &Arc<Self>) {
+        for task in self.waiting_tasks().await {
+            let Some(wait) = task.slot_wait.clone() else { continue };
+            let due = Due { queued_at: wait.queued_at, scheduled_for: wait.scheduled_for };
+            self.start_run_due(&task.id, wait.trigger, due).await;
+        }
     }
 
     /// After the task's mirror is updated, decide what a scheduled task's
@@ -3175,9 +4264,21 @@ impl Engine {
                 }
             }
             // The last reading, while the session is still there to ask.
-            self.snapshot_usage(run, factory_core::usage::SnapshotPoint::RunEnd)
+            Box::pin(self.snapshot_usage(run, factory_core::usage::SnapshotPoint::RunEnd)).await;
+            // `#178`: a failed stop used to be silently discarded here (`let
+            // _ =`); journaled instead, since `resolve_continue`'s "never
+            // run two processes on one conversation" check relies on the
+            // runtime's own word that this session is gone, and a stop that
+            // did not take is exactly what would make that check right to
+            // refuse a later `--continue`.
+            if let Err(e) = runtime.stop(session).await {
+                self.entry(
+                    &run.task_id,
+                    TaskEntry::new("daemon", "stop_failed", format!("could not stop the session: {e}"))
+                        .in_run(&run.id),
+                )
                 .await;
-            let _ = runtime.stop(session).await;
+            }
         }
     }
 
@@ -3497,6 +4598,17 @@ impl Engine {
     }
 }
 
+/// One provider rate-limit window as one run's snapshot saw it -- what the
+/// L1 provider card's timeline is built from (`Engine::infrastructure`).
+struct WindowReading {
+    sampled_at: chrono::DateTime<Utc>,
+    /// The runtime gave no `sampled_at`, so `sampled_at` is when Factory asked.
+    sample_time_estimated: bool,
+    used_percent: Option<f64>,
+    plan_type: Option<String>,
+    attribution_quality: Option<String>,
+}
+
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -3634,6 +4746,15 @@ mod tests {
     use factory_core::task::Schedule;
     use factory_plugins::{Registry, SqliteStore};
 
+    #[test]
+    fn request_future_stays_bounded_as_control_orchestration_grows() {
+        let engine = test_engine(PathBuf::from("/tmp"));
+        let caller = crate::access::Caller::Owner;
+        let future = engine.dispatch_request(&caller, Request::Status);
+        let bytes = std::mem::size_of_val(&future);
+        assert!(bytes < 64 * 1024, "request future uses {bytes} bytes before HTTP routing frames");
+    }
+
     /// A scope pointed at `scope_path`, one store in memory, and every
     /// built-in adapter registered -- enough to dispatch a task without a
     /// real herdr or a real agent, since the paths under test here never
@@ -3673,10 +4794,12 @@ mod tests {
                 runtime: None,
                 git: None,
                 task_store: None,
+                max_sessions: None,
                 roles: Default::default(),
                 dashboard: None,
                 policies: Default::default(),
                 quality: Default::default(),
+                intake: Default::default(),
                 dependencies: Default::default(),
                 environments: Vec::new(),
             }],
@@ -3702,6 +4825,480 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("factory-engine-test-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // ==================================================================
+    // #179: max_sessions enforced with a real admission queue
+    // ==================================================================
+    mod capacity_tests {
+        use super::*;
+        use async_trait::async_trait;
+        use factory_core::adapter::runtime::{AgentRuntime, RuntimeEventStream};
+        use factory_core::config::HarnessHealthConfig;
+        use factory_core::task::SessionRef;
+
+        /// A runtime that opens a session without doing anything real: a
+        /// dispatch really succeeds and the run really stays open -- counted
+        /// as using a slot -- until something reports on it. No subprocess,
+        /// no herdr socket, nothing the machine running the test needs.
+        struct StubRuntime;
+
+        #[async_trait]
+        impl AgentRuntime for StubRuntime {
+            fn name(&self) -> &str {
+                "stub"
+            }
+            async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
+                Ok(SessionRef { runtime: "stub".into(), handle: format!("stub-{}", req.id), meta: Default::default() })
+            }
+            async fn submit(&self, _session: &SessionRef, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn status(&self, _session: &SessionRef) -> Result<RuntimeStatus> {
+                Ok(RuntimeStatus::Unknown)
+            }
+            async fn send_text(&self, _session: &SessionRef, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn send_keys(&self, _session: &SessionRef, _keys: &[String]) -> Result<()> {
+                Ok(())
+            }
+            async fn read(&self, _session: &SessionRef, _lines: u32) -> Result<String> {
+                Ok(String::new())
+            }
+            async fn stop(&self, _session: &SessionRef) -> Result<()> {
+                Ok(())
+            }
+            async fn watch(&self) -> Result<Option<RuntimeEventStream>> {
+                Ok(None)
+            }
+        }
+
+        /// A scope declaring `agents` over a `stub` runtime with the harness
+        /// probe off, so a dispatch really succeeds and really keeps its
+        /// session open -- exactly what counting slots needs.
+        fn capacity_engine(agents: Vec<ScopeAgent>, scope_max_sessions: Option<u32>) -> Arc<Engine> {
+            let scope_path = temp_dir("capacity");
+            let config = Config {
+                version: 1,
+                instance: Instance { id: "test".into(), name: "test".into() },
+                daemon: DaemonConfig {
+                    power_assertion: false,
+                    harness_health: HarnessHealthConfig { enabled: false, ..Default::default() },
+                    ..DaemonConfig::default()
+                },
+                roles: Default::default(),
+                dashboard: None,
+                policies: Default::default(),
+                quality: Default::default(),
+                scope: None,
+                scopes: vec![Scope {
+                    id: "scope-id".into(),
+                    name: "demo".into(),
+                    path: scope_path,
+                    agent: None,
+                    agents,
+                    runtime: Some("stub".into()),
+                    git: None,
+                    task_store: None,
+                    max_sessions: scope_max_sessions,
+                    roles: Default::default(),
+                    dashboard: None,
+                    policies: Default::default(),
+                    quality: Default::default(),
+                    intake: Default::default(),
+                    dependencies: Default::default(),
+                    environments: Vec::new(),
+                }],
+                infrastructure: Default::default(),
+                plugins_dir: None,
+            };
+            let factory = Factory {
+                root: std::env::temp_dir().join(format!("factory-capacity-test-{}", uuid::Uuid::new_v4())),
+                config,
+            };
+            let mut registry = Registry::with_builtins();
+            registry.add_runtime(Arc::new(StubRuntime), "test");
+            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+            Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()))
+        }
+
+        fn agent(name: &str, harness: &str, max_sessions: Option<u32>) -> ScopeAgent {
+            ScopeAgent {
+                name: Some(name.into()),
+                harness: harness.into(),
+                lifetime: Lifetime::Task,
+                role: Role::default(),
+                autostart: None,
+                args: Vec::new(),
+                sandbox: Sandbox::None,
+                provider: None,
+                max_sessions,
+            }
+        }
+
+        async fn task(engine: &Arc<Engine>, title: &str, agent_name: &str) -> Task {
+            engine
+                .create(NewTask {
+                    title: title.into(),
+                    instructions: "true".into(),
+                    scope: Some("demo".into()),
+                    agent: Some(agent_name.into()),
+                    worktree: Some(false),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        }
+
+        async fn report_done(engine: &Arc<Engine>, task_id: &str) {
+            let run = engine.store.active_run(task_id).await.unwrap().unwrap();
+            engine
+                .report(
+                    task_id,
+                    TaskReport {
+                        status: Some(RunStatus::Done),
+                        message: None,
+                        result: Some("ok".into()),
+                        send_to: None,
+                        error: None,
+                        token: run.token.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        /// The triage's own scenario: `max_sessions: 2` on a shell agent,
+        /// four manual runs -- two run, two wait with their reason journaled.
+        #[tokio::test]
+        async fn capacity_holds_the_third_and_fourth_of_four_manual_runs_at_a_limit_of_two() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(2))], None);
+            let mut tasks = Vec::new();
+            for i in 0..4 {
+                let t = task(&engine, &format!("run {i}"), "codex").await;
+                engine.start_run(&t.id, Trigger::Manual).await;
+                tasks.push(t);
+            }
+
+            let mut running = 0;
+            let mut waiting = 0;
+            for t in &tasks {
+                let stored = engine.store.get(&t.id).await.unwrap().unwrap();
+                if engine.store.active_run(&t.id).await.unwrap().is_some() {
+                    running += 1;
+                    assert!(stored.slot_wait.is_none());
+                } else {
+                    waiting += 1;
+                    let wait = stored.slot_wait.expect("a held task carries its wait");
+                    assert_eq!(wait.agent, "codex");
+                    assert_eq!(wait.scope, "demo");
+                    assert_eq!(wait.trigger, Trigger::Manual);
+                    assert_eq!(stored.status, TaskStatus::Pending, "waiting for a slot, not blocked on a person");
+                    let entries = engine.store.entries(&t.id, 10).await.unwrap();
+                    assert!(
+                        entries.iter().any(|e| e.kind == "capacity_held"),
+                        "a held task journals why: {entries:?}"
+                    );
+                }
+            }
+            assert_eq!(running, 2, "the limit");
+            assert_eq!(waiting, 2);
+        }
+
+        /// Finishing one of the two running tasks should wake the oldest
+        /// waiting one, through the capacity-release channel, and carry its
+        /// original queue-wait forward onto the run it finally gets.
+        #[tokio::test]
+        async fn capacity_finishing_a_run_admits_the_oldest_waiting_task_with_its_original_queued_at() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(1))], None);
+            engine.spawn_capacity_release_worker();
+            let first = task(&engine, "first", "codex").await;
+            engine.start_run(&first.id, Trigger::Manual).await;
+            let second = task(&engine, "second", "codex").await;
+            engine.start_run(&second.id, Trigger::Manual).await;
+
+            let waiting = engine.store.get(&second.id).await.unwrap().unwrap();
+            let original_queued_at = waiting.slot_wait.expect("held").queued_at;
+            assert!(engine.store.active_run(&second.id).await.unwrap().is_none());
+
+            let mut bus = engine.bus.subscribe();
+            report_done(&engine, &first.id).await;
+
+            // The release goes through a channel to a spawned worker; wait
+            // for its effect instead of sleeping for it.
+            let started = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if let Event::RunStarted { run } = bus.recv().await.unwrap() {
+                        if run.task_id == second.id {
+                            return run;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the waiting task should be admitted once the slot frees");
+
+            assert_eq!(started.queued_at, Some(original_queued_at), "the whole wait counts as queue wait");
+            let settled = engine.store.get(&second.id).await.unwrap().unwrap();
+            assert!(settled.slot_wait.is_none(), "the wait is over");
+        }
+
+        /// The release channel is a convenience; the scheduler tick's own
+        /// sweep must reach the same waiting task on its own, for a restart
+        /// or a wakeup the channel dropped.
+        #[tokio::test]
+        async fn capacity_release_also_works_through_the_tick_sweep_alone() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(1))], None);
+            // Deliberately never spawned: `recheck_capacity` is the only
+            // thing that may admit the waiting task in this test.
+            let first = task(&engine, "first", "codex").await;
+            engine.start_run(&first.id, Trigger::Manual).await;
+            let second = task(&engine, "second", "codex").await;
+            engine.start_run(&second.id, Trigger::Manual).await;
+            assert!(engine.store.active_run(&second.id).await.unwrap().is_none());
+
+            report_done(&engine, &first.id).await;
+            assert!(
+                engine.store.active_run(&second.id).await.unwrap().is_none(),
+                "nothing has swept yet"
+            );
+
+            engine.recheck_capacity().await;
+            assert!(engine.store.active_run(&second.id).await.unwrap().is_some(), "the sweep admitted it");
+            assert!(engine.store.get(&second.id).await.unwrap().unwrap().slot_wait.is_none());
+        }
+
+        /// A release and the tick's own sweep both read `waiting_tasks()`
+        /// and admit from it, and `dispatch` has no guard of its own against
+        /// two overlapping admission attempts for the same waiting task --
+        /// routing both through the one capacity-release worker, never onto
+        /// separate spawned tasks, is what keeps them from both admitting
+        /// the same waiter at once. A burst of releases and sweeps racing
+        /// for the one freed slot must still open exactly one run.
+        #[tokio::test]
+        async fn capacity_a_release_and_a_sweep_racing_for_the_same_slot_never_both_admit_it() {
+            let engine = capacity_engine(vec![agent("shell", "shell", Some(1))], None);
+            engine.spawn_capacity_release_worker();
+            let holder = task(&engine, "holder", "shell").await;
+            engine.start_run(&holder.id, Trigger::Manual).await;
+            let waiter = task(&engine, "waiter", "shell").await;
+            engine.start_run(&waiter.id, Trigger::Manual).await;
+            assert!(engine.store.active_run(&waiter.id).await.unwrap().is_none());
+
+            let mut bus = engine.bus.subscribe();
+            report_done(&engine, &holder.id).await;
+            // A burst: before the fix, `release_waiting` and
+            // `recheck_capacity` ran on separate spawned tasks and could
+            // both pass admission for `waiter` before either cleared its
+            // wait.
+            for _ in 0..20 {
+                engine.enqueue_capacity_release("demo", "shell");
+                engine.enqueue_capacity_sweep();
+            }
+
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if let Event::RunStarted { run } = bus.recv().await.unwrap() {
+                        if run.task_id == waiter.id {
+                            return;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the waiter should be admitted once");
+
+            let runs = engine.store.runs(&waiter.id, 10).await.unwrap();
+            assert_eq!(runs.len(), 1, "admitted exactly once, however many release/sweep events raced for it: {runs:?}");
+        }
+
+        /// A scope-wide cap holds across every agent in it, with no agent
+        /// cap of its own on either.
+        #[tokio::test]
+        async fn capacity_a_scope_cap_holds_across_two_different_agents() {
+            let engine = capacity_engine(
+                vec![agent("codex", "shell", None), agent("claude", "shell", None)],
+                Some(2),
+            );
+            let a1 = task(&engine, "a1", "codex").await;
+            engine.start_run(&a1.id, Trigger::Manual).await;
+            let b1 = task(&engine, "b1", "claude").await;
+            engine.start_run(&b1.id, Trigger::Manual).await;
+            let a2 = task(&engine, "a2", "codex").await;
+            engine.start_run(&a2.id, Trigger::Manual).await;
+
+            assert!(engine.store.active_run(&a1.id).await.unwrap().is_some());
+            assert!(engine.store.active_run(&b1.id).await.unwrap().is_some());
+            assert!(engine.store.active_run(&a2.id).await.unwrap().is_none(), "the scope is already at 2/2");
+            let wait = engine.store.get(&a2.id).await.unwrap().unwrap().slot_wait.unwrap();
+            assert_eq!(wait.agent, "codex");
+        }
+
+        /// Every trigger dispatch can arrive on is held the same way, and
+        /// carries through to the wait it leaves behind.
+        #[tokio::test]
+        async fn capacity_holds_a_task_however_it_was_triggered() {
+            for trigger in [Trigger::Manual, Trigger::Schedule, Trigger::Retry, Trigger::Workflow, Trigger::Agent] {
+                let engine = capacity_engine(vec![agent("codex", "shell", Some(1))], None);
+                let holder = task(&engine, "holder", "codex").await;
+                engine.start_run(&holder.id, Trigger::Manual).await;
+                let waiter = task(&engine, "waiter", "codex").await;
+
+                let due = Due::now();
+                engine.start_run_due(&waiter.id, trigger, due).await;
+
+                let stored = engine.store.get(&waiter.id).await.unwrap().unwrap();
+                let wait = stored.slot_wait.unwrap_or_else(|| panic!("{trigger:?} should have been held"));
+                assert_eq!(wait.trigger, trigger);
+                assert_eq!(stored.status, TaskStatus::Pending);
+            }
+        }
+
+        /// A scheduled task that exhausted its retries is `Blocked` (with a
+        /// `failure`), not `Pending` -- but its next regular slot still
+        /// tries it again (`fires()`'s `blocked_by_failure` branch). If that
+        /// attempt is held on capacity, the hold must force it out of
+        /// `Blocked`: `waiting_tasks` only ever lists `Pending` rows, so a
+        /// wait left sitting on `Blocked` would be invisible to every
+        /// release and the tick sweep alike, and stay stuck forever.
+        #[tokio::test]
+        async fn capacity_a_task_blocked_by_a_failure_is_forced_pending_when_held_and_still_gets_released() {
+            let engine = capacity_engine(vec![agent("shell", "shell", Some(1))], None);
+            let failing = task(&engine, "exhausted its retries", "shell").await;
+            let after_failure = engine.fail_task_for_test(&failing.id, FailKind::AgentFailed).await;
+            assert_eq!(after_failure.status, TaskStatus::Blocked, "sanity: blocked by the failure, not pending");
+
+            let holder = task(&engine, "holds the one slot", "shell").await;
+            engine.start_run(&holder.id, Trigger::Manual).await;
+            assert!(engine.store.active_run(&holder.id).await.unwrap().is_some());
+
+            // Its next regular slot tries again, and is held.
+            engine.start_run_due(&failing.id, Trigger::Schedule, Due::now()).await;
+            let stored = engine.store.get(&failing.id).await.unwrap().unwrap();
+            assert_eq!(stored.status, TaskStatus::Pending, "forced out of Blocked so it can be found and released");
+            assert!(stored.slot_wait.is_some());
+
+            // Free the slot; the tick sweep (not just a same-agent release)
+            // must still find and admit it.
+            report_done(&engine, &holder.id).await;
+            engine.recheck_capacity().await;
+            assert!(
+                engine.store.active_run(&failing.id).await.unwrap().is_some(),
+                "the previously-blocked task was admitted, not left waiting forever"
+            );
+        }
+
+        /// `factory status`'s own reading: one row per agent that declares
+        /// its own `max_sessions`, with the same in-use count admission
+        /// uses and the waiting count alongside it.
+        #[tokio::test]
+        async fn capacity_shows_up_in_status_as_in_use_and_waiting_per_agent() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(2))], None);
+            for i in 0..4 {
+                let t = task(&engine, &format!("t{i}"), "codex").await;
+                engine.start_run(&t.id, Trigger::Manual).await;
+            }
+            let status = engine.status().await.unwrap();
+            let row = status.capacity.iter().find(|r| r.agent == "codex").expect("a row for the declared cap");
+            assert_eq!(row.scope, "demo");
+            assert_eq!((row.in_use, row.max, row.waiting), (2, 2, 2));
+        }
+
+        /// Regression: `discovery::apply` folds the instance root's own
+        /// `scope:` block into `config.scopes` and leaves `config.scope` set
+        /// too (`Config::validate`'s own `self.scope.iter().chain(&self.scopes)`
+        /// relies on exactly this to also cover its pre-discovery call). A
+        /// runtime reader that chains the same way, after discovery has
+        /// already run, counts the root scope's agents twice.
+        #[tokio::test]
+        async fn capacity_root_scope_is_not_counted_twice_after_discovery() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(2))], None);
+            {
+                let mut factory = engine.factory.write().unwrap();
+                let root = factory.config.scopes[0].clone();
+                factory.config.scope = Some(root);
+            }
+            let status = engine.status().await.unwrap();
+            assert_eq!(
+                status.capacity.iter().filter(|r| r.agent == "codex").count(),
+                1,
+                "one row, not one per place the root scope's data is reachable from: {:?}",
+                status.capacity
+            );
+        }
+
+        /// A run this daemon is holding open on someone's answer, with no
+        /// session of its own (the `#184` approval-hold shape) -- built
+        /// directly, per the triage's own testing note, rather than
+        /// dispatched -- must not consume a slot.
+        #[tokio::test]
+        async fn capacity_a_session_less_blocked_run_does_not_consume_a_slot() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(1))], None);
+            let held = task(&engine, "approval held", "codex").await;
+            let run = engine
+                .store
+                .create_run(&NewRun {
+                    task_id: held.id.clone(),
+                    trigger: Trigger::Manual,
+                    agent: "codex".into(),
+                    adapter: "shell".into(),
+                    runtime: "stub".into(),
+                    token: "tok".into(),
+                    queued_at: None,
+                    scheduled_for: None,
+                })
+                .await
+                .unwrap();
+            // `Blocked`, no session: an approval hold, not a dispatch. It
+            // must stay non-terminal so it still shows up in `active_runs`.
+            engine
+                .store
+                .update_run(&run.id, &RunPatch { status: Some(RunStatus::Blocked), ..Default::default() })
+                .await
+                .unwrap();
+            assert!(engine.store.active_run(&held.id).await.unwrap().is_some(), "still open, just not counted");
+
+            let waiter = task(&engine, "waiter", "codex").await;
+            engine.start_run(&waiter.id, Trigger::Manual).await;
+            assert!(
+                engine.store.active_run(&waiter.id).await.unwrap().is_some(),
+                "the approval-held run left the one slot free"
+            );
+        }
+
+        /// The atomicity guarantee itself: with the admission lock doing its
+        /// job, ten dispatches racing for one slot never open more than one
+        /// run between them, however they interleave.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        async fn capacity_ten_concurrent_dispatches_against_a_limit_of_one_never_open_more_than_one_run() {
+            let engine = capacity_engine(vec![agent("codex", "shell", Some(1))], None);
+            let mut tasks = Vec::new();
+            for i in 0..10 {
+                tasks.push(task(&engine, &format!("t{i}"), "codex").await);
+            }
+            let mut handles = Vec::new();
+            for t in &tasks {
+                let engine = engine.clone();
+                let id = t.id.clone();
+                handles.push(tokio::spawn(async move {
+                    engine.start_run(&id, Trigger::Manual).await;
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+
+            let open = engine.store.active_runs().await.unwrap();
+            assert_eq!(open.len(), 1, "never more than the declared limit, however the dispatches interleaved");
+            let mut waiting_count = 0;
+            for t in &tasks {
+                if engine.store.get(&t.id).await.unwrap().unwrap().slot_wait.is_some() {
+                    waiting_count += 1;
+                }
+            }
+            assert_eq!(waiting_count, 9);
+        }
     }
 
     #[tokio::test]
@@ -3836,11 +5433,248 @@ mod tests {
             daemon.interfaces.iter().map(|i| (i.kind.as_str(), i.bind.as_deref())).collect();
         assert_eq!(
             interfaces,
-            vec![("cli", None), ("http", Some(crate::interfaces::http::DEFAULT_BIND))],
+            vec![("cli", None), ("http", Some(factory_core::config::DEFAULT_HTTP_BIND))],
             "the default interfaces, with the address http falls back to"
         );
         assert!(daemon.started_at <= Utc::now());
         assert_eq!(host.arch.as_deref(), Some(std::env::consts::ARCH));
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
+    /// A subscription provider, a task, and `n` runs bound to it -- all
+    /// started now, so every sample below is placed relative to that start.
+    async fn provider_runs(engine: &Arc<Engine>, n: usize) -> (Vec<Run>, chrono::DateTime<Utc>) {
+        {
+            let mut factory = engine.factory.write().unwrap();
+            factory.config.infrastructure = serde_yaml_ng::from_str(
+                "providers:\n\
+                 \x20 - name: claude-max\n    vendor: anthropic\n    kind: subscription\n    harnesses: [claude-code]\n",
+            )
+            .unwrap();
+        }
+        let task = engine
+            .create(NewTask {
+                title: "plan share".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut runs = Vec::new();
+        for i in 0..n {
+            let run = engine
+                .store
+                .create_run(&factory_core::run::NewRun {
+                    task_id: task.id.clone(),
+                    trigger: factory_core::run::Trigger::Manual,
+                    agent: "builder".into(),
+                    adapter: "claude-code".into(),
+                    runtime: "herdr".into(),
+                    token: format!("token-{i}"),
+                    queued_at: None,
+                    scheduled_for: None,
+                })
+                .await
+                .unwrap();
+            let run = engine
+                .store
+                .update_run(&run.id, &RunPatch { provider_account: Some("claude-max".into()), ..Default::default() })
+                .await
+                .unwrap();
+            runs.push(run);
+        }
+        let start = runs.iter().map(|run| run.started_at).max().unwrap();
+        (runs, start)
+    }
+
+    /// One reading of `run`, sampled `seconds` after `start`, with the
+    /// harness's cumulative tokens and, if given, the 5-hour window's use.
+    fn provider_snapshot(
+        run: &Run,
+        start: chrono::DateTime<Utc>,
+        seconds: i64,
+        tokens: u64,
+        used_percent: Option<f64>,
+    ) -> factory_core::usage::UsageSnapshot {
+        use factory_core::usage::*;
+        let sampled = start + chrono::Duration::seconds(seconds);
+        let resets_at = (start + chrono::Duration::hours(5)).to_rfc3339();
+        UsageSnapshot {
+            run_id: run.id.clone(),
+            task_id: run.task_id.clone(),
+            point: if seconds <= 1 { SnapshotPoint::Dispatch } else { SnapshotPoint::TurnEnded },
+            at: sampled,
+            runtime: "herdr".into(),
+            usage: Some(SessionUsage {
+                schema: USAGE_SCHEMA,
+                handle: None,
+                sampled_at: Some(sampled),
+                sessions: vec![HarnessUsage {
+                    session_id: run.id.clone(),
+                    adapter: Some("claude-code".into()),
+                    model: None,
+                    tokens: TokenCounts { input: Some(tokens), output: Some(0), cache_read: Some(0), cache_write: Some(0) },
+                    cost: UsageCost::default(),
+                    elapsed_seconds: None,
+                    active_seconds: None,
+                    subagents: Vec::new(),
+                    rate_limit: used_percent.map(|used| RateLimit {
+                        provider: Some("anthropic".into()),
+                        plan_type: Some("max".into()),
+                        attribution_quality: Some("confirmed".into()),
+                        windows: vec![RateLimitWindow {
+                            window_minutes: Some(300),
+                            used_percent: Some(used),
+                            resets_at: Some(resets_at.clone()),
+                        }],
+                    }),
+                    unavailable: Default::default(),
+                }],
+            }),
+            unknown: None,
+        }
+    }
+
+    async fn five_hour_window(engine: &Arc<Engine>) -> ProviderWindow {
+        let Payload::Infrastructure { providers, .. } = engine.infrastructure().await else {
+            panic!("not an infrastructure payload");
+        };
+        let provider = providers.into_iter().find(|p| p.name == "claude-max").unwrap();
+        assert_eq!(provider.windows.len(), 1, "{:?}", provider.windows);
+        provider.windows.into_iter().next().unwrap()
+    }
+
+    /// A window read by one run and then by the next is one window moving:
+    /// the trend spans the handoff, and the badge is the interval's.
+    #[tokio::test]
+    async fn a_provider_window_trend_spans_a_handoff_between_runs() {
+        let scope_dir = temp_dir("provider-handoff");
+        let engine = test_engine(scope_dir.clone());
+        let (runs, start) = provider_runs(&engine, 2).await;
+        let (a, b) = (&runs[0], &runs[1]);
+        for snapshot in [
+            provider_snapshot(a, start, 1, 0, Some(40.0)),
+            provider_snapshot(b, start, 1, 0, None),
+            provider_snapshot(a, start, 3, 50, Some(42.0)),
+            provider_snapshot(b, start, 3, 0, None),
+            provider_snapshot(b, start, 5, 100, Some(45.0)),
+        ] {
+            engine.store.append_usage(&snapshot).await.unwrap();
+        }
+        engine
+            .store
+            .update_run(&a.id, &RunPatch {
+                status: Some(RunStatus::Done),
+                ended_at: Some(start + chrono::Duration::seconds(3)),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let window = five_hour_window(&engine).await;
+        assert_eq!(window.used_percent, Some(45.0), "the newest sample, whichever run took it");
+        assert_eq!(window.sampled_at, start + chrono::Duration::seconds(5));
+        assert!((window.trend_percent.unwrap() - 3.0).abs() < 1e-9, "42 -> 45 across the handoff: {window:?}");
+        assert_eq!(window.attribution, Some(factory_core::usage::PlanShareAttribution::Direct));
+        assert_eq!(window.attribution_unknown, None);
+        assert!(!window.sample_time_estimated);
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
+    /// An apportioned reading stays apportioned after one of its consumers
+    /// ends: the badge is what the sampled interval said, not who is live.
+    #[tokio::test]
+    async fn an_apportioned_reading_keeps_its_badge_after_a_consumer_ends() {
+        let scope_dir = temp_dir("provider-apportioned");
+        let engine = test_engine(scope_dir.clone());
+        let (runs, start) = provider_runs(&engine, 2).await;
+        let (a, b) = (&runs[0], &runs[1]);
+        for snapshot in [
+            provider_snapshot(a, start, 1, 0, Some(10.0)),
+            provider_snapshot(b, start, 1, 0, None),
+            provider_snapshot(a, start, 4, 100, Some(14.0)),
+            provider_snapshot(b, start, 4, 300, None),
+        ] {
+            engine.store.append_usage(&snapshot).await.unwrap();
+        }
+        let apportioned = Some(factory_core::usage::PlanShareAttribution::Apportioned);
+        assert_eq!(five_hour_window(&engine).await.attribution, apportioned);
+
+        for run in [b, a] {
+            engine
+                .store
+                .update_run(&run.id, &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(start + chrono::Duration::seconds(6)),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let window = five_hour_window(&engine).await;
+            assert_eq!(window.attribution, apportioned, "after {} ended: {window:?}", run.id);
+        }
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
+    /// Two runs reading the window in one instant are one observation: the
+    /// card shows the highest, as plan share does, whichever was stored last,
+    /// and its badge is that reading's interval.
+    #[tokio::test]
+    async fn simultaneous_provider_readings_show_the_one_plan_share_used() {
+        let scope_dir = temp_dir("provider-tie");
+        let engine = test_engine(scope_dir.clone());
+        let (runs, start) = provider_runs(&engine, 2).await;
+        let (a, b) = (&runs[0], &runs[1]);
+        for snapshot in [
+            provider_snapshot(a, start, 1, 0, Some(10.0)),
+            provider_snapshot(b, start, 1, 0, None),
+            provider_snapshot(a, start, 4, 100, Some(13.0)),
+            provider_snapshot(b, start, 4, 300, Some(12.0)),
+        ] {
+            engine.store.append_usage(&snapshot).await.unwrap();
+        }
+        let window = five_hour_window(&engine).await;
+        assert_eq!(window.used_percent, Some(13.0), "{window:?}");
+        assert!((window.trend_percent.unwrap() - 3.0).abs() < 1e-9);
+        assert_eq!(window.attribution, Some(factory_core::usage::PlanShareAttribution::Apportioned));
+
+        std::fs::remove_dir_all(scope_dir).ok();
+    }
+
+    /// A reading is as fresh as its sample, not its request: a cached answer
+    /// sampled forty minutes ago is stale however recently it was asked for,
+    /// and one that does not say when it was sampled is never called fresh.
+    #[tokio::test]
+    async fn a_provider_reading_is_dated_by_its_sample_time() {
+        let scope_dir = temp_dir("provider-stale");
+        let engine = test_engine(scope_dir.clone());
+        let (runs, start) = provider_runs(&engine, 1).await;
+        let run = &runs[0];
+        let mut cached = provider_snapshot(run, start, 1, 0, Some(20.0));
+        let sampled = Utc::now() - chrono::Duration::minutes(40);
+        cached.usage.as_mut().unwrap().sampled_at = Some(sampled);
+        cached.at = Utc::now();
+        engine.store.append_usage(&cached).await.unwrap();
+
+        let window = five_hour_window(&engine).await;
+        assert_eq!(window.sampled_at, sampled);
+        assert!(window.stale, "{window:?}");
+        assert!(!window.sample_time_estimated);
+
+        let mut undated = provider_snapshot(run, start, 2, 0, Some(21.0));
+        undated.usage.as_mut().unwrap().sampled_at = None;
+        undated.at = Utc::now();
+        engine.store.append_usage(&undated).await.unwrap();
+        let window = five_hour_window(&engine).await;
+        assert_eq!(window.used_percent, Some(21.0));
+        assert_eq!(window.sampled_at, undated.at, "the request time stands in");
+        assert!(window.sample_time_estimated);
+        assert!(window.stale, "an undated reading is never vouched for as fresh");
 
         std::fs::remove_dir_all(scope_dir).ok();
     }
@@ -3866,6 +5700,7 @@ mod tests {
                 args: Vec::new(),
                 sandbox: Sandbox::Docker,
                 provider: None,
+                max_sessions: None,
             });
         }
 
@@ -4281,6 +6116,7 @@ mod tests {
                 args: vec!["--model".into(), "opus".into(), "--api-key".into(), "s3cret".into()],
                 sandbox: Sandbox::None,
                 provider: None,
+                max_sessions: None,
             });
             factory.config.daemon.foreman.enabled = true;
         }
@@ -4392,7 +6228,7 @@ mod tests {
         // `dispatch` directly rather than through `start_run` is what lets
         // this test see the assertion still held: `start_run` would carry
         // the same error straight into `fail_run` and release it again.
-        let err = engine.dispatch(&task.id, Trigger::Manual, Due::now()).await.unwrap_err();
+        let err = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap_err();
         assert!(err.to_string().contains("not a git repository"), "got: {err}");
 
         assert_eq!(
@@ -4582,6 +6418,7 @@ mod tests {
             error_details: None,
             last_message: Some("I think that is everything.".into()),
             token: token.map(str::to_string),
+            session_id: None,
         }
     }
 
@@ -5076,7 +6913,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (cwd, run) = engine.place_run(&task, run, &scope_dir).await.unwrap();
+        let (cwd, run) = engine.place_run(&task, run, &scope_dir, Workspace::Fresh).await.unwrap();
         assert_eq!(cwd, scope_dir, "the checkbox is off, so this stays the scope itself");
         assert!(run.worktree_path.is_none());
         assert!(run.worktree_branch.is_none());
@@ -5168,7 +7005,7 @@ mod tests {
             .unwrap();
         let run_id = run.id.clone();
 
-        let (cwd, run) = engine.place_run(&task, run, &scope_dir).await.unwrap();
+        let (cwd, run) = engine.place_run(&task, run, &scope_dir, Workspace::Fresh).await.unwrap();
         assert_ne!(cwd, scope_dir, "the checkbox is on, so this is not the scope itself");
         assert_eq!(cwd, engine.factory_snapshot().worktrees_dir().join(&run_id), "named after the run");
         assert!(cwd.join(".git").exists(), "a real worktree, not just a path");
@@ -5419,7 +7256,15 @@ mod tests {
             worktree_branch: None,
             runtime: "herdr".into(),
             session: None,
+            last_session: None,
             token: None,
+            spent_token_sha256: None,
+            superseded_token_sha256s: Vec::new(),
+            continued_from: None,
+            resumed_session: None,
+            original_estimate: None,
+            provider_account: None,
+            re_estimate: None,
             result: None,
             routed_to: None,
             error: None,
@@ -5433,6 +7278,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            turn_ended_session_id: None,
             required_steps: Vec::new(),
             usage: None,
         };
@@ -5443,6 +7289,57 @@ mod tests {
         run.ended_at = None;
         assert_eq!(skip_reason_of(Some(&run), first), SkipReason::StillActive);
         assert_eq!(skip_reason_of(None, first), SkipReason::NotRunning);
+    }
+
+    /// `#179`: a slot that passed while its run was already queued but held
+    /// on `max_sessions`, not yet started, reads as `Queued` rather than
+    /// `NotRunning` -- detected from the run row alone, no extra state.
+    #[test]
+    fn a_skip_is_blamed_on_a_capacity_wait_when_the_run_was_queued_but_not_yet_started() {
+        let t0 = Utc::now();
+        let run = Run {
+            id: "r".into(),
+            task_id: "t".into(),
+            attempt: 1,
+            status: RunStatus::Running,
+            trigger: Trigger::Schedule,
+            agent: "codex".into(),
+            adapter: "codex".into(),
+            worktree_path: None,
+            worktree_branch: None,
+            runtime: "herdr".into(),
+            session: None,
+            last_session: None,
+            token: None,
+            spent_token_sha256: None,
+            superseded_token_sha256s: Vec::new(),
+            continued_from: None,
+            resumed_session: None,
+            original_estimate: None,
+            provider_account: None,
+            re_estimate: None,
+            result: None,
+            routed_to: None,
+            error: None,
+            // Queued at the original slot, but not actually started (held on
+            // capacity) until well past the next one.
+            started_at: t0 + chrono::Duration::minutes(12),
+            ended_at: None,
+            queued_at: Some(t0),
+            scheduled_for: Some(t0),
+            fail_kind: None,
+            blocked_since: None,
+            blocked_source: None,
+            block_suspected_since: None,
+            turn_ended_at: None,
+            turn_end_reason: None,
+            turn_ended_session_id: None,
+            required_steps: Vec::new(),
+            usage: None,
+        };
+        let first = t0 + chrono::Duration::minutes(5);
+        assert_eq!(skip_reason_of(Some(&run), first), SkipReason::Queued);
+        assert_eq!(SkipReason::Queued.describe(), "it was already queued, waiting for a capacity slot");
     }
 
     #[tokio::test]
@@ -5583,7 +7480,15 @@ mod tests {
             worktree_branch: None,
             runtime: "herdr".into(),
             session: None,
+            last_session: None,
             token: None,
+            spent_token_sha256: None,
+            superseded_token_sha256s: Vec::new(),
+            continued_from: None,
+            resumed_session: None,
+            original_estimate: None,
+            provider_account: None,
+            re_estimate: None,
             result: None,
             routed_to: None,
             error: None,
@@ -5597,6 +7502,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            turn_ended_session_id: None,
             required_steps: Vec::new(),
             usage: None,
         };
@@ -6070,5 +7976,453 @@ mod tests {
         assert_eq!(engine.require(&fine.id).await.unwrap().status, TaskStatus::Pending);
         assert_eq!(engine.migrate_failed_tasks().await, 0, "nothing writes failed any more, so a second start finds none");
         std::fs::remove_dir_all(&scope_dir).ok();
+    }
+
+    // ==================================================================
+    // #178: `factory task run --continue` after an infrastructure failure
+    // ==================================================================
+    mod continue_tests {
+        use super::*;
+        use async_trait::async_trait;
+        use factory_core::adapter::agent::{LaunchKind, ResumeSpec};
+        use factory_core::adapter::runtime::RuntimeEventStream;
+        use factory_core::task::SessionRef;
+        use factory_core::usage::{HarnessUsage, SessionUsage, SnapshotPoint, UsageSnapshot};
+        use std::sync::Mutex;
+
+        /// Declares `resume_spec` when `resumable`, exactly the shape
+        /// `claude-code`/`codex` are given in `factory-plugins`; `false` is
+        /// every other built-in's shape (`pi`, `opencode`, and -- used
+        /// directly in one test below -- `shell`).
+        struct RecordingAgent {
+            resumable: bool,
+        }
+
+        #[async_trait]
+        impl Agent for RecordingAgent {
+            fn name(&self) -> &str {
+                "recording"
+            }
+            async fn launch_spec(&self, _ctx: &AgentContext) -> Result<LaunchSpec> {
+                Ok(LaunchSpec { kind: LaunchKind::Command(vec!["true".into()]), args: Vec::new(), env: Default::default() })
+            }
+            async fn prompt(&self, _ctx: &AgentContext) -> Result<String> {
+                Ok(String::new())
+            }
+            fn resume_spec(&self, session_id: &str) -> Option<ResumeSpec> {
+                self.resumable.then(|| ResumeSpec { args: vec!["--resume".into(), session_id.into()] })
+            }
+        }
+
+        /// A runtime that opens a session without doing anything real
+        /// (`capacity_tests::StubRuntime`'s own comment explains why), with
+        /// two knobs this module's tests need on top: every `StartRequest`
+        /// it was asked to `start` (so a test can inspect the resume args
+        /// and the working directory an agent actually launched into), and
+        /// a configurable `status` answer (so a test can say whether the
+        /// previous run's session is confirmed gone).
+        struct RecordingRuntime {
+            status: Mutex<RuntimeStatus>,
+            starts: Mutex<Vec<StartRequest>>,
+        }
+
+        impl RecordingRuntime {
+            fn new(status: RuntimeStatus) -> Self {
+                Self { status: Mutex::new(status), starts: Mutex::new(Vec::new()) }
+            }
+        }
+
+        #[async_trait]
+        impl AgentRuntime for RecordingRuntime {
+            fn name(&self) -> &str {
+                "stub-run"
+            }
+            async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
+                self.starts.lock().unwrap().push(req.clone());
+                Ok(SessionRef { runtime: "stub-run".into(), handle: format!("stub-{}", req.id), meta: Default::default() })
+            }
+            async fn submit(&self, _session: &SessionRef, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn status(&self, _session: &SessionRef) -> Result<RuntimeStatus> {
+                Ok(*self.status.lock().unwrap())
+            }
+            async fn send_text(&self, _session: &SessionRef, _text: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn send_keys(&self, _session: &SessionRef, _keys: &[String]) -> Result<()> {
+                Ok(())
+            }
+            async fn read(&self, _session: &SessionRef, _lines: u32) -> Result<String> {
+                Ok(String::new())
+            }
+            async fn stop(&self, _session: &SessionRef) -> Result<()> {
+                Ok(())
+            }
+            async fn watch(&self) -> Result<Option<RuntimeEventStream>> {
+                Ok(None)
+            }
+        }
+
+        fn continue_engine(scope_path: PathBuf, resumable: bool, runtime_status: RuntimeStatus) -> (Arc<Engine>, Arc<RecordingRuntime>) {
+            let config = Config {
+                version: 1,
+                instance: Instance { id: "test".into(), name: "test".into() },
+                daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+                roles: Default::default(),
+                dashboard: None,
+                policies: Default::default(),
+                quality: Default::default(),
+                scope: None,
+                scopes: vec![Scope {
+                    id: "scope-id".into(),
+                    name: "demo".into(),
+                    path: scope_path,
+                    agent: None,
+                    agents: Vec::new(),
+                    runtime: None,
+                    git: None,
+                    task_store: None,
+                    max_sessions: None,
+                    roles: Default::default(),
+                    dashboard: None,
+                    policies: Default::default(),
+                    quality: Default::default(),
+                    intake: Default::default(),
+                    dependencies: Default::default(),
+                    environments: Vec::new(),
+                }],
+                infrastructure: Default::default(),
+                plugins_dir: None,
+            };
+            let factory = Factory {
+                root: std::env::temp_dir().join(format!("factory-continue-test-{}", uuid::Uuid::new_v4())),
+                config,
+            };
+            let mut registry = Registry::with_builtins();
+            registry.add_agent(Arc::new(RecordingAgent { resumable }), "test");
+            let runtime = Arc::new(RecordingRuntime::new(runtime_status));
+            registry.add_runtime(runtime.clone(), "test");
+            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+            let engine = Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()));
+            (engine, runtime)
+        }
+
+        async fn task_for(engine: &Arc<Engine>, worktree: bool) -> Task {
+            engine
+                .create(NewTask {
+                    title: "resume me".into(),
+                    instructions: "true".into(),
+                    scope: Some("demo".into()),
+                    agent: Some("recording".into()),
+                    runtime: Some("stub-run".into()),
+                    worktree: Some(worktree),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        }
+
+        fn harness_usage(session_id: &str, adapter: &str) -> HarnessUsage {
+            serde_json::from_value(serde_json::json!({ "session_id": session_id, "adapter": adapter })).unwrap()
+        }
+
+        /// A later usage snapshot naming `session_id` for the `recording`
+        /// adapter -- what `resolve_continue` reads to find a resumable
+        /// session (`usage::newest_session_id_for_adapter`).
+        async fn seed_session_id(engine: &Arc<Engine>, run: &Run, session_id: &str) {
+            engine
+                .store
+                .append_usage(&UsageSnapshot {
+                    run_id: run.id.clone(),
+                    task_id: run.task_id.clone(),
+                    point: SnapshotPoint::RunEnd,
+                    at: Utc::now(),
+                    runtime: "stub-run".into(),
+                    usage: Some(SessionUsage {
+                        schema: 1,
+                        handle: None,
+                        sampled_at: None,
+                        sessions: vec![harness_usage(session_id, "recording")],
+                    }),
+                    unknown: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        /// A real dispatch (fresh, not `--continue`) failed with `kind` --
+        /// what every fallback and success test in this module starts from,
+        /// so the previous run's session, worktree and token are exactly
+        /// what a real `dispatch` would have left, not a hand-rolled
+        /// approximation of it.
+        async fn dispatched_then_failed(engine: &Arc<Engine>, task: &Task, kind: FailKind) -> Run {
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            engine.fail_run(&run.id, kind, "infra hiccup").await;
+            engine.store.get_run(&run.id).await.unwrap().unwrap()
+        }
+
+        async fn git_scope_dir(name: &str) -> PathBuf {
+            let dir = temp_dir(name);
+            for args in [
+                vec!["init", "-q"],
+                vec!["config", "user.email", "factory@example.com"],
+                vec!["config", "user.name", "factory"],
+                vec!["commit", "-q", "--allow-empty", "-m", "base"],
+            ] {
+                assert!(tokio::process::Command::new("git").args(&args).current_dir(&dir).status().await.unwrap().success());
+            }
+            dir
+        }
+
+        async fn continue_fallback_reasons(engine: &Engine, task_id: &str) -> Vec<String> {
+            engine
+                .store
+                .entries(task_id, 50)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.kind == "continue_fallback")
+                .map(|e| e.message)
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn continuing_resumes_in_the_same_worktree_with_a_new_token() {
+            let scope_dir = git_scope_dir("continue-resume").await;
+            let (engine, runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, true).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            assert!(prev.worktree_path.is_some(), "sanity: the failed run got a worktree");
+            seed_session_id(&engine, &prev, "sess-123").await;
+            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert_eq!(run.worktree_path, prev.worktree_path, "the same worktree, not a fresh one");
+            assert_eq!(run.resumed_session.as_deref(), Some("sess-123"));
+            assert_eq!(run.continued_from.as_deref(), Some(prev.id.as_str()));
+            assert_ne!(run.token, prev.token, "a new token");
+            assert!(
+                run.superseded_token_sha256s.contains(prev.spent_token_sha256.as_ref().unwrap()),
+                "{:?}",
+                run.superseded_token_sha256s
+            );
+
+            let starts = runtime.starts.lock().unwrap();
+            let start = starts.last().unwrap();
+            assert_eq!(start.launch.args.first().map(String::as_str), Some("--resume"), "{:?}", start.launch.args);
+            assert_eq!(start.launch.args.get(1).map(String::as_str), Some("sess-123"), "{:?}", start.launch.args);
+            assert_eq!(start.cwd, PathBuf::from(prev.worktree_path.clone().unwrap()));
+
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_falls_back_to_fresh_when_no_session_id_was_recorded() {
+            let scope_dir = temp_dir("continue-no-session-id");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            // No usage snapshot seeded, and no `turn-ended` hook ever fired:
+            // nothing to resume from.
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert!(run.resumed_session.is_none());
+            assert_eq!(run.continued_from.as_deref(), Some(prev.id.as_str()), "recorded even though it fell back");
+            let reasons = continue_fallback_reasons(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("no session id was recorded")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_falls_back_to_fresh_when_the_adapter_declares_no_resume() {
+            let scope_dir = temp_dir("continue-no-resume-spec");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), false, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &prev, "sess-456").await;
+            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert!(run.resumed_session.is_none());
+            let reasons = continue_fallback_reasons(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("declares no resume")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_falls_back_to_fresh_when_the_previous_session_is_not_confirmed_gone() {
+            let scope_dir = temp_dir("continue-not-gone");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Working);
+            let task = task_for(&engine, false).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &prev, "sess-789").await;
+            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert!(run.resumed_session.is_none());
+            let reasons = continue_fallback_reasons(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("not confirmed gone")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_falls_back_to_fresh_when_the_worktree_is_gone() {
+            let scope_dir = git_scope_dir("continue-worktree-gone").await;
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, true).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &prev, "sess-gone").await;
+            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            // Removed by hand -- Factory itself never does this -- the way
+            // `worktree::is_registered` is meant to catch.
+            std::fs::remove_dir_all(prev.worktree_path.as_ref().unwrap()).unwrap();
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert!(run.resumed_session.is_none());
+            assert_ne!(run.worktree_path, prev.worktree_path, "a fresh worktree, not the missing one");
+            let reasons = continue_fallback_reasons(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("worktree is gone")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_falls_back_to_fresh_when_the_worktree_branch_was_not_recorded() {
+            let scope_dir = git_scope_dir("continue-worktree-no-branch").await;
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, true).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &prev, "sess-no-branch").await;
+            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            assert!(prev.worktree_path.is_some(), "sanity: the failed run got a worktree");
+            assert!(prev.worktree_branch.is_some(), "sanity: a real dispatch always records both");
+            // Nothing in this codebase ever clears `worktree_branch` once
+            // set -- this simulates the one way it could still be missing:
+            // a run row from before the field existed, the same shape
+            // `queued_at`/`fail_kind` handle for an older row elsewhere.
+            let mut old_shape = serde_json::to_value(&prev).unwrap();
+            old_shape.as_object_mut().unwrap().remove("worktree_branch");
+            let prev: Run = serde_json::from_value(old_shape).unwrap();
+            assert!(prev.worktree_branch.is_none(), "sanity: the field really is gone now");
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert!(run.resumed_session.is_none());
+            assert_ne!(run.worktree_path, prev.worktree_path, "a fresh worktree, not one reused with a guessed branch");
+            let reasons = continue_fallback_reasons(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("worktree branch was not recorded")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_falls_back_to_fresh_when_the_agent_changed_since_the_previous_run() {
+            let scope_dir = temp_dir("continue-agent-changed");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &prev, "sess-changed").await;
+            let mut prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            // Nothing changed the task's own agent -- only the *previous
+            // run's own record* of what it ran as, which is what a task
+            // whose agent was edited after that run would actually look
+            // like from `resolve_continue`'s side.
+            prev.agent = "someone-else".into();
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+
+            assert!(run.resumed_session.is_none());
+            let reasons = continue_fallback_reasons(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("agent changed")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_is_refused_outright_when_the_newest_run_did_not_fail_on_infrastructure() {
+            let scope_dir = temp_dir("continue-not-infra");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            dispatched_then_failed(&engine, &task, FailKind::AgentFailed).await;
+
+            let response = engine
+                .handle_request(Request::TaskRun { id: task.id.clone(), reason: None, continue_run: true })
+                .await;
+            let message = match response {
+                Response::Error { message, .. } => message,
+                other => panic!("expected a refusal, got {other:?}"),
+            };
+            assert!(message.contains("not an infrastructure failure"), "{message}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_is_refused_outright_when_the_task_has_no_previous_run() {
+            let scope_dir = temp_dir("continue-no-previous-run");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+
+            let response = engine
+                .handle_request(Request::TaskRun { id: task.id.clone(), reason: None, continue_run: true })
+                .await;
+            let message = match response {
+                Response::Error { message, .. } => message,
+                other => panic!("expected a refusal, got {other:?}"),
+            };
+            assert!(message.contains("no previous run"), "{message}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_stale_token_after_continue_names_the_newer_run_instead_of_a_generic_refusal() {
+            let scope_dir = temp_dir("continue-stale-token");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            // Inlined, not `dispatched_then_failed`: the raw token has to be
+            // captured before `fail_run` clears it -- once cleared, only its
+            // digest (`spent_token_sha256`) survives, by design.
+            let first = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            let old_token = first.token.clone().expect("sanity: a fresh run has a token");
+            engine.fail_run(&first.id, FailKind::AckTimeout, "infra hiccup").await;
+            let prev = engine.store.get_run(&first.id).await.unwrap().unwrap();
+            assert_eq!(
+                prev.spent_token_sha256.as_deref(),
+                Some(factory_core::run::token_digest(&old_token).as_str()),
+                "sanity: finish_run recorded the digest of the token that just cleared"
+            );
+            seed_session_id(&engine, &prev, "sess-stale").await;
+            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+            assert!(run.resumed_session.is_some(), "sanity: this one actually resumed");
+
+            let stale_report = TaskReport {
+                status: Some(RunStatus::Running),
+                message: Some("still going".into()),
+                result: None,
+                send_to: None,
+                error: None,
+                token: Some(old_token),
+            };
+            let err = engine.report(&task.id, stale_report).await.unwrap_err();
+            assert!(err.to_string().contains("a newer run"), "{err}");
+            assert!(err.to_string().contains(&task.id), "{err}");
+
+            // The new run's own token still works.
+            let fresh_report = TaskReport {
+                status: Some(RunStatus::Running),
+                message: Some("continuing".into()),
+                result: None,
+                send_to: None,
+                error: None,
+                token: run.token.clone(),
+            };
+            assert!(engine.report(&task.id, fresh_report).await.is_ok());
+
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
     }
 }

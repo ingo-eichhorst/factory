@@ -3,18 +3,23 @@ use crate::engine::Engine;
 use crate::verification::run_shell_capture;
 #[cfg(not(test))]
 use crate::verification::DEFAULT_GATE_TIMEOUT_SECS;
+use crate::worktree;
 use chrono::Utc;
 use factory_core::control_plan::AttestationVerdict;
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
+use factory_core::intake::{Routing, SplitPart};
 #[cfg(test)]
 use factory_core::run::FailKind;
 use factory_core::run::{RunStatus, Trigger};
-use factory_core::task::{Task, TaskEntry, TaskStatus, WorkflowOrigin};
+use factory_core::task::{Task, TaskEntry, TaskPatch, TaskStatus, WorkflowOrigin};
 use factory_core::workflow::{
-    SendBack, WorkflowDefinition, WorkflowDraft, WorkflowNodeKind, WorkflowNodeStatus, WorkflowRun, WorkflowRunStatus,
+    CanvasPoint, ExpandCancelPolicy, ExpandJoin, ExpandSpec, IntegrationPart, ReworkRequest, SendBack,
+    WorkflowDefinition, WorkflowDraft, WorkflowEdge, WorkflowIntegration, WorkflowNode, WorkflowNodeKind,
+    WorkflowNodeStatus, WorkflowRun, WorkflowRunStatus,
 };
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(not(test))]
@@ -171,10 +176,12 @@ mod tests {
                 runtime: Some("quiet".into()),
                 git: None,
                 task_store: None,
+                max_sessions: None,
                 roles: Default::default(),
                 dashboard: None,
                 policies: Default::default(),
                 quality: Default::default(),
+                intake: Default::default(),
                 dependencies: Default::default(),
                 environments: Vec::new(),
             }],
@@ -190,6 +197,85 @@ mod tests {
             PathBuf::from("factory"),
             Vec::new(),
         ))
+    }
+
+    fn engine_in_git_scope(root: PathBuf, repo: PathBuf) -> Arc<Engine> {
+        let config = Config {
+            version: 1,
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
+            daemon: DaemonConfig {
+                power_assertion: false,
+                harness_health: factory_core::config::HarnessHealthConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..DaemonConfig::default()
+            },
+            roles: Default::default(),
+            dashboard: None,
+            policies: Default::default(),
+            quality: Default::default(),
+            scope: None,
+            scopes: vec![Scope {
+                id: "demo-id".into(),
+                name: "demo".into(),
+                path: repo,
+                agent: None,
+                agents: Vec::new(),
+                runtime: Some("quiet".into()),
+                git: None,
+                task_store: None,
+                max_sessions: None,
+                roles: Default::default(),
+                dashboard: None,
+                policies: Default::default(),
+                quality: Default::default(),
+                intake: Default::default(),
+                dependencies: Default::default(),
+                environments: Vec::new(),
+            }],
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let mut registry = Registry::with_builtins();
+        registry.add_runtime(Arc::new(QuietRuntime), "test");
+        Arc::new(Engine::new(
+            Factory { root, config },
+            registry,
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
+    }
+
+    async fn wait_for_worktree_run(engine: &Engine, task_id: &str) -> factory_core::Run {
+        for _ in 0..200 {
+            if let Some(run) = engine.store.active_run(task_id).await.unwrap() {
+                if run.worktree_path.is_some() && run.token.is_some() {
+                    return run;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("task {task_id} never acquired a worktree");
+    }
+
+    async fn git_ok(dir: &Path, args: &[&str]) {
+        let output = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// Like `engine()`, but the instance names its own roles and scope
@@ -257,10 +343,12 @@ mod tests {
                 runtime: Some("quiet".into()),
                 git: None,
                 task_store: None,
+                max_sessions: None,
                 roles: Default::default(),
                 dashboard: None,
                 policies: Default::default(),
                 quality: Default::default(),
+                intake: Default::default(),
                 dependencies: Default::default(),
                 environments: Vec::new(),
             }],
@@ -310,6 +398,7 @@ mod tests {
             },
             gate: None,
             exits: Vec::new(),
+            expand: None,
         }
     }
 
@@ -334,6 +423,7 @@ mod tests {
             },
             gate: None,
             exits: Vec::new(),
+            expand: None,
         }
     }
 
@@ -1039,10 +1129,12 @@ mod tests {
                     runtime: Some("quiet".into()),
                     git: None,
                     task_store: None,
+                    max_sessions: None,
                     roles: Default::default(),
                     dashboard: None,
                     policies: Default::default(),
                     quality: Default::default(),
+                    intake: Default::default(),
                     dependencies: Default::default(),
                     environments: Vec::new(),
                 }],
@@ -1633,12 +1725,415 @@ mod tests {
             "the stored definition keeps its placeholders"
         );
     }
+
+    #[tokio::test]
+    async fn decomposition_integrates_in_dependency_order_checks_the_union_and_cleans_every_worktree(
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("factory-integration-test-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-q", "-b", "main"]).await;
+        git_ok(&repo, &["config", "user.email", "factory@example.test"]).await;
+        git_ok(&repo, &["config", "user.name", "Factory Test"]).await;
+        std::fs::write(repo.join("README.md"), "base\n").unwrap();
+        git_ok(&repo, &["add", "README.md"]).await;
+        git_ok(&repo, &["commit", "-q", "-m", "base"]).await;
+
+        let engine = engine_in_git_scope(root.clone(), repo.clone());
+        let parent = engine
+            .create(NewTask {
+                title: "Build two slices".into(),
+                instructions: "one integrated result".into(),
+                scope: Some("demo".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let parts = vec![
+            SplitPart {
+                id: "foundation".into(),
+                title: "Foundation".into(),
+                instructions: "add foundation.txt".into(),
+                acceptance: Some("test -f foundation.txt".into()),
+                owns: vec!["foundation.txt".into()],
+                interface: Some("foundation.txt exists".into()),
+                estimate_seconds: Some(60),
+                ..Default::default()
+            },
+            SplitPart {
+                id: "surface".into(),
+                title: "Surface".into(),
+                instructions: "add surface.txt".into(),
+                depends_on: vec!["foundation".into()],
+                acceptance: Some(
+                    "test -f surface.txt && test -f foundation.txt && test -f fixed.txt".into(),
+                ),
+                owns: vec!["surface.txt".into()],
+                interface: Some("surface consumes foundation".into()),
+                estimate_seconds: Some(60),
+            },
+        ];
+        let routing = Routing {
+            scope: "demo".into(),
+            agent: Some("shell".into()),
+            ..Default::default()
+        };
+        let workflow = engine
+            .start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner)
+            .await
+            .unwrap();
+        let integration_path =
+            PathBuf::from(workflow.integration.as_ref().unwrap().worktree_path.clone());
+        let children = engine
+            .store
+            .list(&factory_core::TaskFilter {
+                parent_task_id: Some(parent.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let foundation = children
+            .iter()
+            .find(|task| task.decomposition_part.as_deref() == Some("foundation"))
+            .unwrap();
+        let surface = children
+            .iter()
+            .find(|task| task.decomposition_part.as_deref() == Some("surface"))
+            .unwrap();
+        assert_eq!(surface.depends_on, vec![foundation.id.clone()]);
+
+        let foundation_run = wait_for_worktree_run(&engine, &foundation.id).await;
+        let foundation_path = PathBuf::from(foundation_run.worktree_path.clone().unwrap());
+        std::fs::write(foundation_path.join("foundation.txt"), "foundation\n").unwrap();
+        git_ok(&foundation_path, &["add", "foundation.txt"]).await;
+        git_ok(&foundation_path, &["commit", "-q", "-m", "foundation"]).await;
+        engine
+            .report(
+                &foundation.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    result: Some("foundation complete".into()),
+                    token: foundation_run.token,
+                    message: None,
+                    send_to: None,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+        engine.advance_workflow(&workflow.id).await.unwrap();
+
+        let surface_run = wait_for_worktree_run(&engine, &surface.id).await;
+        let surface_path = PathBuf::from(surface_run.worktree_path.clone().unwrap());
+        assert!(
+            surface_path.join("foundation.txt").exists(),
+            "a dependant branches from the integrated predecessor"
+        );
+        std::fs::write(surface_path.join("surface.txt"), "surface\n").unwrap();
+        git_ok(&surface_path, &["add", "surface.txt"]).await;
+        git_ok(&surface_path, &["commit", "-q", "-m", "surface"]).await;
+        engine
+            .report(
+                &surface.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    result: Some("surface complete".into()),
+                    token: surface_run.token,
+                    message: None,
+                    send_to: None,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+        engine.advance_workflow(&workflow.id).await.unwrap();
+
+        let rework_run = wait_for_worktree_run(&engine, &surface.id).await;
+        assert_eq!(
+            rework_run.attempt, 2,
+            "the failed combined check returns only its owning child"
+        );
+        let rework_path = PathBuf::from(rework_run.worktree_path.clone().unwrap());
+        assert!(
+            rework_path.join("surface.txt").exists(),
+            "rework starts from the combined branch that failed"
+        );
+        std::fs::write(rework_path.join("fixed.txt"), "fixed\n").unwrap();
+        git_ok(&rework_path, &["add", "fixed.txt"]).await;
+        git_ok(&rework_path, &["commit", "-q", "-m", "fix combined check"]).await;
+        engine
+            .report(
+                &surface.id,
+                TaskReport {
+                    status: Some(RunStatus::Done),
+                    result: Some("combined check fixed".into()),
+                    token: rework_run.token,
+                    message: None,
+                    send_to: None,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+        engine.advance_workflow(&workflow.id).await.unwrap();
+
+        let finished = engine.workflow_run(&workflow.id).await.unwrap();
+        assert_eq!(finished.status, WorkflowRunStatus::Done);
+        let integration = finished.integration.unwrap();
+        assert_eq!(integration.merged_nodes, vec!["foundation", "surface"]);
+        assert!(integration.checks_passed);
+        assert!(integration.cleanup_complete);
+        assert!(!integration_path.exists());
+        assert!(!foundation_path.exists());
+        assert!(!surface_path.exists());
+        assert!(!rework_path.exists());
+        assert!(engine
+            .require(&parent.id)
+            .await
+            .unwrap()
+            .result
+            .unwrap()
+            .contains("Integrated on"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn integration_pushes_once_and_opens_one_parent_pr_without_merging_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("factory-pr-test-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        let remote = root.join("remote.git");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&remote).unwrap();
+        git_ok(
+            &remote,
+            &["init", "--bare", "-q", "--initial-branch", "main"],
+        )
+        .await;
+        git_ok(&repo, &["init", "-q", "-b", "main"]).await;
+        git_ok(&repo, &["config", "user.email", "factory@example.test"]).await;
+        git_ok(&repo, &["config", "user.name", "Factory Test"]).await;
+        std::fs::write(repo.join("README.md"), "base\n").unwrap();
+        git_ok(&repo, &["add", "README.md"]).await;
+        git_ok(&repo, &["commit", "-q", "-m", "base"]).await;
+        git_ok(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        )
+        .await;
+        git_ok(&repo, &["push", "-q", "-u", "origin", "main"]).await;
+
+        let engine = engine_in_git_scope(root.clone(), repo.clone());
+        let parent = engine
+            .create(NewTask {
+                title: "One reviewed change".into(),
+                scope: Some("demo".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let definition = WorkflowDefinition::from_draft(WorkflowDraft {
+            name: "integration".into(),
+            scope: "demo".into(),
+            nodes: vec![node("work")],
+            ..Default::default()
+        });
+        let mut run = WorkflowRun::new(definition, factory_core::workflow::WorkflowActor::Owner);
+        let integration_dir = root.join("integration");
+        worktree::create(
+            &repo,
+            &integration_dir,
+            "factory/issue-180",
+            Some("origin/main"),
+        )
+        .await
+        .unwrap();
+        std::fs::write(integration_dir.join("done.txt"), "done\n").unwrap();
+        git_ok(&integration_dir, &["add", "done.txt"]).await;
+        git_ok(&integration_dir, &["commit", "-q", "-m", "integrated"]).await;
+        run.integration = Some(WorkflowIntegration {
+            parent_task_id: parent.id,
+            base_ref: "origin/main".into(),
+            branch: "factory/issue-180".into(),
+            worktree_path: integration_dir.display().to_string(),
+            repository: Some("acme/widgets".into()),
+            issue_number: Some(180),
+            checks_passed: true,
+            ..Default::default()
+        });
+
+        let log = root.join("gh.log");
+        let gh = root.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"pr view\" ]; then exit 1; fi\nprintf '%s\\n' 'https://github.com/acme/widgets/pull/99'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&gh).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).unwrap();
+
+        let url = engine
+            .ensure_integration_pr_with_gh(&run, &gh)
+            .await
+            .unwrap();
+        assert_eq!(
+            url.as_deref(),
+            Some("https://github.com/acme/widgets/pull/99")
+        );
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert_eq!(calls.matches("pr create").count(), 1, "{calls}");
+        assert!(calls.contains("--base main"), "{calls}");
+        assert!(calls.contains("--head factory/issue-180"), "{calls}");
+        assert!(calls.contains("Closes #180"), "{calls}");
+        let remote_branch = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["ls-remote", "--heads", "origin", "factory/issue-180"])
+            .output()
+            .await
+            .unwrap();
+        assert!(remote_branch.status.success());
+        assert!(
+            !remote_branch.stdout.is_empty(),
+            "the integration branch was pushed"
+        );
+        let _ = worktree::remove(&repo, &integration_dir, "factory/issue-180").await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn expand_join_can_tolerate_a_declared_number_of_failed_children() {
+        let engine = engine();
+        let parent = engine
+            .create(NewTask {
+                title: "Tolerant fan-out".into(),
+                scope: Some("demo".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let parts = ["left", "right"].map(|id| SplitPart {
+            id: id.into(),
+            title: id.into(),
+            instructions: format!("complete {id}"),
+            acceptance: Some("true".into()),
+            owns: vec![format!("{id}.txt")],
+            interface: Some(format!("{id} result")),
+            estimate_seconds: Some(60),
+            ..Default::default()
+        });
+        let routing = Routing { scope: "demo".into(), agent: Some("shell".into()), ..Default::default() };
+        let mut run = engine
+            .start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner)
+            .await
+            .unwrap();
+        run.definition
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == WorkflowNodeKind::Expand)
+            .unwrap()
+            .expand
+            .as_mut()
+            .unwrap()
+            .join
+            .tolerate = 1;
+        engine.workflows.put_run(&run).await.unwrap();
+
+        let children = wait_for_tasks(&engine, 3).await;
+        let left = children.iter().find(|task| task.decomposition_part.as_deref() == Some("left")).unwrap();
+        let right = children.iter().find(|task| task.decomposition_part.as_deref() == Some("right")).unwrap();
+        finish(&engine, &left.id, RunStatus::Failed).await;
+        finish(&engine, &right.id, RunStatus::Done).await;
+
+        let finished = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(finished.status, WorkflowRunStatus::Done);
+        assert_eq!(finished.nodes.iter().filter(|node| node.status == WorkflowNodeStatus::Failed).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn expand_abandon_cancel_leaves_dispatched_children_running() {
+        let engine = engine();
+        let parent = engine
+            .create(NewTask {
+                title: "Abandoned fan-out".into(),
+                scope: Some("demo".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let parts = vec![SplitPart {
+            id: "child".into(),
+            title: "child".into(),
+            instructions: "keep running".into(),
+            acceptance: Some("true".into()),
+            owns: vec!["child.txt".into()],
+            interface: Some("child result".into()),
+            estimate_seconds: Some(60),
+            ..Default::default()
+        }];
+        let routing = Routing { scope: "demo".into(), agent: Some("shell".into()), ..Default::default() };
+        let mut run = engine
+            .start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner)
+            .await
+            .unwrap();
+        run.definition
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == WorkflowNodeKind::Expand)
+            .unwrap()
+            .expand
+            .as_mut()
+            .unwrap()
+            .cancel = ExpandCancelPolicy::Abandon;
+        engine.workflows.put_run(&run).await.unwrap();
+        let child = wait_for_tasks(&engine, 2)
+            .await
+            .into_iter()
+            .find(|task| task.decomposition_part.as_deref() == Some("child"))
+            .unwrap();
+
+        let cancelled = engine.cancel_workflow(&run.id).await.unwrap();
+        assert_eq!(cancelled.status, WorkflowRunStatus::Cancelled);
+        assert!(engine.store.active_run(&child.id).await.unwrap().is_some());
+        assert_ne!(engine.require(&child.id).await.unwrap().status, TaskStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn a_terminal_verifier_review_blocks_its_control_node_for_retry() {
+        let engine = engine();
+        let mut review = engine.create(NewTask {
+            title: "review".into(),
+            scope: Some("demo".into()),
+            ..Default::default()
+        }).await.unwrap();
+        review.labels.insert(crate::verification::REVIEW_RUN_LABEL.into(), "subject".into());
+        review.status = TaskStatus::Cancelled;
+        assert_eq!(node_status(&review), WorkflowNodeStatus::Blocked);
+    }
 }
 
 /// A node's status, read off its task. A task blocked by a failure is a
 /// failed node (`#122`): the task waits for a person, but the workflow's
 /// step did fail, and its on-failure edges and retries must see that.
 fn node_status(task: &Task) -> WorkflowNodeStatus {
+    if task.labels.contains_key(crate::verification::REVIEW_RUN_LABEL)
+        && (task.has_failed() || task.status == TaskStatus::Cancelled)
+    {
+        // A verifier-owned review attempt may be retried. Its failure blocks
+        // the control node and subject for a person; it does not consume the
+        // whole workflow as a failed business step.
+        return WorkflowNodeStatus::Blocked;
+    }
     if task.has_failed() {
         return WorkflowNodeStatus::Failed;
     }
@@ -1657,6 +2152,275 @@ fn node_status(task: &Task) -> WorkflowNodeStatus {
 }
 
 impl Engine {
+    /// Turn one approved intake decomposition into one durable workflow run.
+    /// The definition is generated from the validated plan, while the run
+    /// owns the fetched integration branch, merge ledger, combined checks
+    /// and final PR hand-off.
+    pub(crate) async fn start_decomposition_workflow(
+        self: &Arc<Self>,
+        item: &Task,
+        parts: &[SplitPart],
+        routing: &Routing,
+        caller: &Caller,
+    ) -> Result<WorkflowRun> {
+        let factory = self.factory_snapshot();
+        let scope = factory.scope(&routing.scope)?.clone();
+        let scope_path = factory.scope_path(&scope.name)?;
+        let github = item
+            .intake
+            .as_ref()
+            .and_then(|record| Some((record.source.repository.clone()?, record.source.number?)));
+        let (worktree_capable, worktree_reason) = worktree::capability(&scope_path).await;
+        if github.is_some() && !worktree_capable {
+            return Err(FactoryError::BadRequest(format!(
+                "a GitHub decomposition needs an integration worktree, but this scope is not worktree-capable: {}",
+                worktree_reason.unwrap_or_else(|| "unknown reason".into())
+            )));
+        }
+        let mut labels = item.labels.clone();
+        labels.insert(factory_core::intake::PARENT_LABEL.into(), item.id.clone());
+
+        let child_ids: Vec<String> = parts.iter().map(|part| part.id.clone()).collect();
+        let mut nodes = vec![WorkflowNode {
+            id: "expand".into(),
+            position: CanvasPoint::default(),
+            kind: WorkflowNodeKind::Expand,
+            task: factory_core::NewTask {
+                title: format!("Decompose: {}", item.title),
+                scope: Some(scope.name.clone()),
+                worktree: Some(false),
+                ..Default::default()
+            },
+            gate: None,
+            exits: Vec::new(),
+            expand: Some(ExpandSpec {
+                join: ExpandJoin { tolerate: 0 },
+                cancel: ExpandCancelPolicy::Terminate,
+                children: child_ids.clone(),
+                max_rework_rounds: 3,
+            }),
+        }];
+        let mut edges = Vec::new();
+        let mut integration_parts = Vec::new();
+        for (index, part) in parts.iter().enumerate() {
+            let acceptance = part.acceptance.as_deref().unwrap_or_default().trim();
+            let ownership = part
+                .owns
+                .iter()
+                .map(|owned| owned.trim())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let interface = part.interface.as_deref().unwrap_or_default().trim();
+            let instructions = format!(
+                "{}\n\nDone when: {}\n\nOwned surface: {}\n\nInterface / hand-off: {}\n\n---\nPart {} of task {} ({}). The parent request, for context:\n\n{}",
+                part.instructions.trim(),
+                acceptance,
+                ownership,
+                interface,
+                part.id,
+                item.id,
+                item.title,
+                item.instructions.trim(),
+            );
+            let mut part_labels = labels.clone();
+            part_labels.insert(factory_core::intake::PART_LABEL.into(), part.id.clone());
+            nodes.push(WorkflowNode {
+                id: part.id.clone(),
+                position: CanvasPoint {
+                    x: 240.0 + index as f64 * 180.0,
+                    y: 140.0,
+                },
+                kind: WorkflowNodeKind::Task,
+                task: factory_core::NewTask {
+                    title: part.title.trim().to_string(),
+                    instructions,
+                    scope: Some(scope.name.clone()),
+                    agent: routing.agent.clone(),
+                    parent_task_id: Some(item.id.clone()),
+                    decomposition_part: Some(part.id.clone()),
+                    estimate_seconds: part.estimate_seconds,
+                    labels: part_labels,
+                    worktree: Some(worktree_capable),
+                    category: item
+                        .intake
+                        .as_ref()
+                        .and_then(|record| record.triage.as_ref())
+                        .map(|triage| triage.assessment.category.clone()),
+                    ..Default::default()
+                },
+                gate: None,
+                exits: Vec::new(),
+                expand: None,
+            });
+            integration_parts.push(IntegrationPart {
+                node_id: part.id.clone(),
+                part_id: part.id.clone(),
+                acceptance: acceptance.to_string(),
+                owns: part.owns.clone(),
+            });
+            if part.depends_on.is_empty() {
+                edges.push(WorkflowEdge {
+                    id: format!("expand-{}", part.id),
+                    from: "expand".into(),
+                    to: part.id.clone(),
+                });
+            } else {
+                for dependency in &part.depends_on {
+                    edges.push(WorkflowEdge {
+                        id: format!("{}-{}", dependency, part.id),
+                        from: dependency.clone(),
+                        to: part.id.clone(),
+                    });
+                }
+            }
+        }
+
+        let draft = WorkflowDraft {
+            name: format!("Decomposition: {}", item.title),
+            description: format!("Generated from approved intake task {}", item.id),
+            scope: scope.name.clone(),
+            category: item
+                .intake
+                .as_ref()
+                .and_then(|record| record.triage.as_ref())
+                .map(|triage| triage.assessment.category.clone()),
+            inputs: Vec::new(),
+            nodes,
+            edges,
+        };
+        let definition = WorkflowDefinition::from_draft(draft);
+        definition.validate().map_err(FactoryError::BadRequest)?;
+        for node in definition
+            .nodes
+            .iter()
+            .filter(|node| node.kind == WorkflowNodeKind::Task)
+        {
+            self.authorize_workflow_spawn(caller, &node.task).await?;
+        }
+        let plans = self.control_plans(&definition).await?;
+        let (definition, _) = definition.inject(&plans);
+        definition.validate().map_err(FactoryError::BadRequest)?;
+
+        let mut run = WorkflowRun::new(definition.clone(), caller.as_workflow_actor());
+        if let Some(expand) = run.nodes.iter_mut().find(|node| node.node_id == "expand") {
+            expand.status = WorkflowNodeStatus::Done;
+            expand.exits_evaluated = true;
+        }
+        if worktree_capable {
+            let (base_ref, branch) = match github.as_ref() {
+                Some((_, number)) => {
+                    worktree::fetch(&scope_path, "origin", "main")
+                        .await
+                        .map_err(|error| FactoryError::adapter("git", error))?;
+                    ("origin/main".to_string(), format!("factory/issue-{number}"))
+                }
+                None => (
+                    "HEAD".to_string(),
+                    format!("factory/task-{}", &item.id[..8.min(item.id.len())]),
+                ),
+            };
+            let integration_dir = factory
+                .worktrees_dir()
+                .join(format!("integration-{}", run.id));
+            worktree::create(&scope_path, &integration_dir, &branch, Some(&base_ref))
+                .await
+                .map_err(|error| FactoryError::adapter("git", error))?;
+            run.integration = Some(WorkflowIntegration {
+                parent_task_id: item.id.clone(),
+                base_ref,
+                branch,
+                worktree_path: integration_dir.display().to_string(),
+                repository: github.as_ref().map(|(repository, _)| repository.clone()),
+                issue_number: github.map(|(_, number)| number),
+                parts: integration_parts,
+                ..Default::default()
+            });
+        }
+
+        // The expand node materialises every child task at once, including
+        // dependants.  They therefore appear as scheduled work immediately;
+        // only roots are dispatched below.  Persist the chosen ids before
+        // creating rows so recovery can fill the exact same children after a
+        // crash rather than fan out twice.
+        for node in run.nodes.iter_mut().filter(|node| {
+            definition.nodes.iter().any(|snapshot| {
+                snapshot.id == node.node_id && snapshot.kind == WorkflowNodeKind::Task
+            })
+        }) {
+            node.task_id = Some(uuid::Uuid::new_v4().to_string());
+            node.status = WorkflowNodeStatus::Pending;
+        }
+
+        if let Err(error) = self.workflows.put_definition(&definition).await {
+            if let Some(integration) = &run.integration {
+                let _ = worktree::remove(
+                    &scope_path,
+                    Path::new(&integration.worktree_path),
+                    &integration.branch,
+                )
+                .await;
+            }
+            return Err(error);
+        }
+        self.workflows.put_run(&run).await?;
+        self.bus
+            .publish(Event::WorkflowRunUpdated { run: run.clone() });
+        for node in run.nodes.iter().filter(|node| node.task_id.is_some()) {
+            let task_id = node.task_id.clone().expect("filtered");
+            let mut template = definition
+                .nodes
+                .iter()
+                .find(|snapshot| snapshot.id == node.node_id)
+                .expect("run nodes come from the snapshot")
+                .task
+                .clone();
+            template.depends_on = definition
+                .edges
+                .iter()
+                .filter(|edge| edge.to == node.node_id)
+                .filter_map(|edge| {
+                    run.nodes
+                        .iter()
+                        .find(|candidate| candidate.node_id == edge.from)
+                        .and_then(|candidate| candidate.task_id.clone())
+                })
+                .collect();
+            let origin = WorkflowOrigin {
+                workflow_id: run.workflow_id.clone(),
+                workflow_run_id: run.id.clone(),
+                node_id: node.node_id.clone(),
+                workspace: run.integration.as_ref().map(|integration| {
+                    factory_core::task::WorkflowWorkspace {
+                        base_ref: integration.branch.clone(),
+                    }
+                }),
+            };
+            if let Err(error) = self.create_workflow_task(template, origin, task_id).await {
+                let mut failed = self.workflow_run(&run.id).await?;
+                if let Some(current) = failed
+                    .nodes
+                    .iter_mut()
+                    .find(|candidate| candidate.node_id == node.node_id)
+                {
+                    current.task_id = None;
+                    current.status = WorkflowNodeStatus::Failed;
+                    current.error = Some(error.to_string());
+                }
+                failed.status = WorkflowRunStatus::Failed;
+                failed.failure_node_id = Some(node.node_id.clone());
+                failed.error = Some(error.to_string());
+                failed.updated_at = Utc::now();
+                self.workflows.put_run(&failed).await?;
+                self.bus.publish(Event::WorkflowRunUpdated {
+                    run: failed.clone(),
+                });
+                return Ok(failed);
+            }
+        }
+        self.advance_workflow(&run.id).await?;
+        self.workflow_run(&run.id).await
+    }
+
     /// Validate the agent-selected half of ordered exits before accepting a
     /// report. Checks are the daemon's choice and need no flag; only an
     /// `agent:` exit may be named here.
@@ -1840,7 +2604,8 @@ impl Engine {
         // immutable snapshot as locked gate nodes. The stored definition is
         // untouched -- a later plan applies to later runs, never this one.
         let plans = self.control_plans(&definition).await?;
-        let (definition, _) = definition.inject(&plans);
+        let (mut definition, _) = definition.inject(&plans);
+        self.bind_functionaries(&mut definition)?;
         definition.validate().map_err(FactoryError::BadRequest)?;
         let mut run = WorkflowRun::new(definition, caller.as_workflow_actor());
         run.inputs = inputs;
@@ -1860,11 +2625,18 @@ impl Engine {
             }
             run.status = WorkflowRunStatus::Cancelled;
             run.updated_at = Utc::now();
+            let abandon = run.definition.nodes.iter().any(|node| {
+                node.expand
+                    .as_ref()
+                    .is_some_and(|expand| expand.cancel == ExpandCancelPolicy::Abandon)
+            });
             let mut task_ids = Vec::new();
             for node in &mut run.nodes {
                 if !node.status.is_terminal() {
                     if let Some(task_id) = &node.task_id {
+                        if !abandon {
                         task_ids.push(task_id.clone());
+                        }
                     } else {
                         node.status = WorkflowNodeStatus::Skipped;
                     }
@@ -1896,6 +2668,465 @@ impl Engine {
         self.bus
             .publish(Event::WorkflowRunUpdated { run: run.clone() });
         Ok(run)
+    }
+
+    fn integration_rework_limit(run: &WorkflowRun) -> u32 {
+        run.definition
+            .nodes
+            .iter()
+            .find_map(|node| node.expand.as_ref().map(|expand| expand.max_rework_rounds))
+            .unwrap_or(3)
+    }
+
+    /// Put one already-completed child back on the line with concrete merge
+    /// or combined-gate feedback.  The same task gets a new run, preserving
+    /// its real parent/dependency identity; the caller resumes its harness
+    /// session and exact worktree when the adapter can.
+    async fn request_integration_rework(
+        &self,
+        run: &mut WorkflowRun,
+        node_id: &str,
+        feedback: String,
+    ) -> Result<Option<(String, factory_core::Run)>> {
+        let limit = Self::integration_rework_limit(run);
+        let Some(node) = run.nodes.iter_mut().find(|node| node.node_id == node_id) else {
+            return Ok(None);
+        };
+        let Some(task_id) = node.task_id.clone() else {
+            node.status = WorkflowNodeStatus::Failed;
+            node.error = Some(feedback);
+            return Ok(None);
+        };
+        if node.round >= limit {
+            node.status = WorkflowNodeStatus::Failed;
+            node.error = Some(format!(
+                "integration rework exhausted after {limit} rounds: {feedback}"
+            ));
+            return Ok(None);
+        }
+        let previous = self.store.runs(&task_id, 1).await?.into_iter().next();
+        let Some(previous) = previous else {
+            node.status = WorkflowNodeStatus::Failed;
+            node.error = Some(format!(
+                "cannot rework integration: task {task_id} has no completed run"
+            ));
+            return Ok(None);
+        };
+        node.round += 1;
+        node.status = WorkflowNodeStatus::Pending;
+        node.error = Some(feedback.clone());
+        node.exits_evaluated = false;
+        node.rework_request = Some(ReworkRequest {
+            from_node: "integration".into(),
+            from_task: task_id.clone(),
+            round: node.round,
+            max_rounds: limit,
+            feedback: Some(feedback.clone()),
+        });
+        if let Some(integration) = run.integration.as_mut() {
+            integration.merged_nodes.retain(|merged| merged != node_id);
+            integration.checks_passed = false;
+        }
+        self.store
+            .update(
+                &task_id,
+                &TaskPatch {
+                    status: Some(TaskStatus::Pending),
+                    clear_result: true,
+                    clear_error: true,
+                    clear_failure: true,
+                    clear_closure: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        self.entry(
+            &task_id,
+            TaskEntry::new(
+                "daemon",
+                "integration_rework",
+                format!(
+                    "integration sent this child back (round {} of {limit}): {feedback}",
+                    node.round
+                ),
+            ),
+        )
+        .await;
+        Ok(Some((task_id, previous)))
+    }
+
+    /// Merge every newly completed child in dependency order.  This method
+    /// is called while `workflow_edit` is held, making the integration branch
+    /// a literal single-writer resource.
+    async fn integrate_ready_children(
+        &self,
+        run: &mut WorkflowRun,
+    ) -> Result<Vec<(String, factory_core::Run)>> {
+        let Some(integration) = run.integration.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let integration_dir = PathBuf::from(&integration.worktree_path);
+        let part_nodes: std::collections::BTreeSet<String> = integration
+            .parts
+            .iter()
+            .map(|part| part.node_id.clone())
+            .collect();
+        let mut merged = integration.merged_nodes.clone();
+        let order = run
+            .definition
+            .validate()
+            .map_err(FactoryError::BadRequest)?;
+        let mut rework = Vec::new();
+
+        for node_id in order.into_iter().filter(|node| part_nodes.contains(node)) {
+            if merged.contains(&node_id) {
+                continue;
+            }
+            let parents_merged = run
+                .definition
+                .edges
+                .iter()
+                .filter(|edge| edge.to == node_id && part_nodes.contains(&edge.from))
+                .all(|edge| merged.contains(&edge.from));
+            if !parents_merged {
+                continue;
+            }
+            let Some(node) = run.nodes.iter().find(|node| node.node_id == node_id) else {
+                continue;
+            };
+            if node.status != WorkflowNodeStatus::Done {
+                continue;
+            }
+            let Some(task_id) = node.task_id.clone() else {
+                continue;
+            };
+            let Some(attempt) = self.store.runs(&task_id, 1).await?.into_iter().next() else {
+                continue;
+            };
+            let (Some(path), Some(branch)) = (
+                attempt.worktree_path.as_deref(),
+                attempt.worktree_branch.as_deref(),
+            ) else {
+                if let Some(request) = self
+                    .request_integration_rework(
+                        run,
+                        &node_id,
+                        "the completed child has no recorded worktree and branch to integrate"
+                            .into(),
+                    )
+                    .await?
+                {
+                    rework.push(request);
+                }
+                break;
+            };
+            match worktree::dirty(Path::new(path)).await {
+                Ok(Some(status)) => {
+                    if let Some(request) = self
+                        .request_integration_rework(
+                            run,
+                            &node_id,
+                            format!("commit every intended change before integration; the worktree is dirty:\n{status}"),
+                        )
+                        .await?
+                    {
+                        rework.push(request);
+                    }
+                    break;
+                }
+                Err(error) => {
+                    if let Some(request) = self
+                        .request_integration_rework(
+                            run,
+                            &node_id,
+                            format!("could not inspect the child worktree: {error}"),
+                        )
+                        .await?
+                    {
+                        rework.push(request);
+                    }
+                    break;
+                }
+                Ok(None) => {}
+            }
+            if let Err(error) = worktree::merge(&integration_dir, branch).await {
+                if let Some(request) = self
+                    .request_integration_rework(
+                        run,
+                        &node_id,
+                        format!(
+                            "merge the integration branch into your branch, resolve and commit the conflict, then report done: {error}"
+                        ),
+                    )
+                    .await?
+                {
+                    rework.push(request);
+                }
+                break;
+            }
+            merged.push(node_id.clone());
+            if let Some(current) = run.integration.as_mut() {
+                current.merged_nodes = merged.clone();
+            }
+            self.entry(
+                &task_id,
+                TaskEntry::new(
+                    "daemon",
+                    "integrated",
+                    format!(
+                        "merged {branch} into {}",
+                        run.integration.as_ref().unwrap().branch
+                    ),
+                ),
+            )
+            .await;
+        }
+        Ok(rework)
+    }
+
+    /// Run every child's acceptance command against the union.  The command
+    /// identifies the responsible child, so a failure returns to that child
+    /// rather than turning the whole workflow into an unactionable red box.
+    async fn run_combined_checks(
+        &self,
+        run: &mut WorkflowRun,
+    ) -> Result<Vec<(String, factory_core::Run)>> {
+        let Some(integration) = run.integration.as_ref() else {
+            return Ok(Vec::new());
+        };
+        if integration.checks_passed || integration.merged_nodes.len() != integration.parts.len() {
+            return Ok(Vec::new());
+        }
+        let dir = PathBuf::from(&integration.worktree_path);
+        let checks = integration.parts.clone();
+        for part in checks {
+            let (code, output) =
+                run_shell_capture(&dir, &part.acceptance, EXIT_CHECK_TIMEOUT_SECS).await;
+            if code != Some(0) {
+                let feedback = format!(
+                    "the combined integration check for part {} failed ({}) while running `{}`:\n{}",
+                    part.part_id,
+                    code.map(|value| format!("exit {value}")).unwrap_or_else(|| "timeout or launch error".into()),
+                    part.acceptance,
+                    factory_core::bench::tail_4kib(&output),
+                );
+                return Ok(self
+                    .request_integration_rework(run, &part.node_id, feedback)
+                    .await?
+                    .into_iter()
+                    .collect());
+            }
+        }
+        if let Some(integration) = run.integration.as_mut() {
+            integration.checks_passed = true;
+        }
+        Ok(Vec::new())
+    }
+
+    async fn gh_output(gh: &Path, dir: &Path, args: &[String]) -> Result<std::process::Output> {
+        let mut command = tokio::process::Command::new(gh);
+        command.current_dir(dir).args(args).kill_on_drop(true);
+        tokio::time::timeout(crate::github_intake::GH_TIMEOUT, command.output())
+            .await
+            .map_err(|_| FactoryError::adapter("github", "gh timed out"))?
+            .map_err(|error| FactoryError::adapter("github", error.to_string()))
+    }
+
+    async fn ensure_integration_pr_with_gh(
+        &self,
+        run: &WorkflowRun,
+        gh: &Path,
+    ) -> Result<Option<String>> {
+        let Some(integration) = run.integration.as_ref() else {
+            return Ok(None);
+        };
+        let (Some(repository), Some(issue)) =
+            (integration.repository.as_deref(), integration.issue_number)
+        else {
+            return Ok(None);
+        };
+        let dir = Path::new(&integration.worktree_path);
+        worktree::push(dir, "origin", &integration.branch)
+            .await
+            .map_err(|error| FactoryError::adapter("git", error))?;
+
+        let view_args = vec![
+            "pr".into(),
+            "view".into(),
+            integration.branch.clone(),
+            "--repo".into(),
+            repository.to_string(),
+            "--json".into(),
+            "url".into(),
+            "--jq".into(),
+            ".url".into(),
+        ];
+        let existing = Self::gh_output(gh, dir, &view_args).await?;
+        if existing.status.success() {
+            let url = String::from_utf8_lossy(&existing.stdout).trim().to_string();
+            if !url.is_empty() {
+                return Ok(Some(url));
+            }
+        }
+
+        let parent = self.require(&integration.parent_task_id).await?;
+        let mut rows = Vec::new();
+        for part in &integration.parts {
+            let task = run
+                .nodes
+                .iter()
+                .find(|node| node.node_id == part.node_id)
+                .and_then(|node| node.task_id.as_deref());
+            if let Some(task_id) = task {
+                if let Some(task) = self.store.get(task_id).await? {
+                    rows.push(format!(
+                        "- `{}` — {}: {}",
+                        part.part_id,
+                        task.title,
+                        task.result.unwrap_or_else(|| "completed".into())
+                    ));
+                }
+            }
+        }
+        let body = format!(
+            "Closes #{issue}\n\nFactory decomposed this request into internal tasks, integrated them in dependency order, and ran every child acceptance command against the combined branch.\n\n{}",
+            rows.join("\n")
+        );
+        let create_args = vec![
+            "pr".into(),
+            "create".into(),
+            "--repo".into(),
+            repository.to_string(),
+            "--base".into(),
+            "main".into(),
+            "--head".into(),
+            integration.branch.clone(),
+            "--title".into(),
+            format!("{} (#{issue})", parent.title),
+            "--body".into(),
+            body,
+        ];
+        let created = Self::gh_output(gh, dir, &create_args).await?;
+        if !created.status.success() {
+            let stderr = String::from_utf8_lossy(&created.stderr).trim().to_string();
+            return Err(FactoryError::adapter(
+                "github",
+                if stderr.is_empty() {
+                    format!("gh pr create exited with {}", created.status)
+                } else {
+                    format!("gh pr create exited with {}: {stderr}", created.status)
+                },
+            ));
+        }
+        let url = String::from_utf8_lossy(&created.stdout).trim().to_string();
+        if url.is_empty() {
+            return Err(FactoryError::adapter(
+                "github",
+                "gh pr create returned no pull request URL",
+            ));
+        }
+        Ok(Some(url))
+    }
+
+    async fn cleanup_integration_worktrees(&self, run: &WorkflowRun) -> Result<()> {
+        let Some(integration) = run.integration.as_ref() else {
+            return Ok(());
+        };
+        let factory = self.factory_snapshot();
+        let scope_path = factory.scope_path(&run.scope)?;
+        let mut workspaces = std::collections::BTreeSet::new();
+        for node in &run.nodes {
+            let Some(task_id) = &node.task_id else {
+                continue;
+            };
+            for attempt in self.store.runs(task_id, u32::MAX).await? {
+                if let (Some(path), Some(branch)) = (attempt.worktree_path, attempt.worktree_branch)
+                {
+                    workspaces.insert((path, branch));
+                }
+            }
+        }
+        // Preflight every directory before removing any of them.  Cleanup is
+        // all-or-nothing with respect to uncommitted work: a late edit in
+        // one child, or a check that modified the combined tree, preserves
+        // every workspace for inspection instead of deleting some first.
+        for path in workspaces
+            .iter()
+            .map(|(path, _)| Path::new(path))
+            .chain(std::iter::once(Path::new(&integration.worktree_path)))
+        {
+            if path.exists() {
+                if let Some(status) = worktree::dirty(path)
+                    .await
+                    .map_err(|error| FactoryError::adapter("git cleanup", error))?
+                {
+                    return Err(FactoryError::adapter(
+                        "git cleanup",
+                        format!("refusing to remove dirty worktree {}:\n{status}", path.display()),
+                    ));
+                }
+            }
+        }
+        for (path, branch) in workspaces {
+            worktree::remove(&scope_path, Path::new(&path), &branch)
+                .await
+                .map_err(|error| FactoryError::adapter("git cleanup", error))?;
+        }
+        worktree::remove(
+            &scope_path,
+            Path::new(&integration.worktree_path),
+            &integration.branch,
+        )
+        .await
+        .map_err(|error| FactoryError::adapter("git cleanup", error))
+    }
+
+    async fn handoff_integration(&self, run: &mut WorkflowRun) -> Result<()> {
+        let Some(integration) = run.integration.as_ref() else {
+            return Ok(());
+        };
+        if !integration.checks_passed {
+            return Err(FactoryError::BadRequest(
+                "the combined integration checks have not passed".into(),
+            ));
+        }
+        let pr_url = if let Some(url) = integration.pr_url.clone() {
+            Some(url)
+        } else {
+            self.ensure_integration_pr_with_gh(run, Path::new("gh"))
+                .await?
+        };
+        if let Some(current) = run.integration.as_mut() {
+            current.pr_url = pr_url.clone();
+        }
+        // Persist the externally visible hand-off before deleting local
+        // workspaces.  Recovery can now find the same PR if cleanup is
+        // interrupted, without opening a duplicate.
+        run.updated_at = Utc::now();
+        self.workflows.put_run(run).await?;
+        self.cleanup_integration_worktrees(run).await?;
+        if let Some(current) = run.integration.as_mut() {
+            current.cleanup_complete = true;
+        }
+        let result = match pr_url {
+            Some(url) => format!("Implemented in {url}"),
+            None => format!("Integrated on {}", run.integration.as_ref().unwrap().branch),
+        };
+        self.store
+            .update(
+                &run.integration.as_ref().unwrap().parent_task_id,
+                &TaskPatch {
+                    result: Some(result.clone()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        self.entry(
+            &run.integration.as_ref().unwrap().parent_task_id,
+            TaskEntry::new("daemon", "integration_handed_off", result),
+        )
+        .await;
+        Ok(())
     }
 
     /// Reconcile persisted node decisions with authoritative task state, then
@@ -1982,10 +3213,52 @@ impl Engine {
             self.evaluate_node_exits(&mut run, &done).await?;
         }
 
+        let mut to_continue = self.integrate_ready_children(&mut run).await?;
+        if to_continue.is_empty() {
+            to_continue = self.run_combined_checks(&mut run).await?;
+        }
+        if !to_continue.is_empty() {
+            run.updated_at = Utc::now();
+            self.workflows.put_run(&run).await?;
+            self.bus
+                .publish(Event::WorkflowRunUpdated { run: run.clone() });
+            drop(_guard);
+            for (task_id, previous) in to_continue {
+                let engine = self.clone();
+                tokio::spawn(async move {
+                    engine
+                        .start_run_due_continue(&task_id, crate::engine::Due::now(), previous)
+                        .await;
+                });
+            }
+            return Ok(());
+        }
+
+        let expand_policy = run
+            .definition
+            .nodes
+            .iter()
+            .find_map(|node| node.expand.as_ref().cloned());
+        let tolerated_failures = expand_policy
+            .as_ref()
+            .map_or(0, |expand| expand.join.tolerate as usize);
+        let failed_children = expand_policy.as_ref().map_or(0, |expand| {
+            expand
+                .children
+                .iter()
+                .filter(|child| {
+                    run.nodes
+                        .iter()
+                        .find(|node| &node.node_id == *child)
+                        .is_some_and(|node| node.status == WorkflowNodeStatus::Failed)
+                })
+                .count()
+        });
         if let Some(failed) = run
             .nodes
             .iter()
             .find(|n| n.status == WorkflowNodeStatus::Failed)
+            .filter(|_| expand_policy.is_none() || failed_children > tolerated_failures)
         {
             run.status = WorkflowRunStatus::Failed;
             run.failure_node_id = Some(failed.node_id.clone());
@@ -2002,13 +3275,30 @@ impl Engine {
         {
             run.status = WorkflowRunStatus::Cancelled;
             run.failure_node_id = Some(cancelled.node_id.clone());
+        } else if run.integration.is_none()
+            && failed_children > 0
+            && failed_children <= tolerated_failures
+            && run.nodes.iter().all(|node| node.status.is_terminal())
+        {
+            run.status = WorkflowRunStatus::Done;
         } else if run.nodes.iter().all(|node| {
             matches!(
                 node.status,
                 WorkflowNodeStatus::Done | WorkflowNodeStatus::SkippedByRoute
             )
         }) {
-            run.status = WorkflowRunStatus::Done;
+            if run.integration.is_some() {
+                match self.handoff_integration(&mut run).await {
+                    Ok(()) => run.status = WorkflowRunStatus::Done,
+                    Err(error) => {
+                        run.status = WorkflowRunStatus::Failed;
+                        run.failure_node_id = Some("integration".into());
+                        run.error = Some(format!("integration hand-off failed: {error}"));
+                    }
+                }
+            } else {
+                run.status = WorkflowRunStatus::Done;
+            }
         }
         if run.status.is_terminal() {
             for node in &mut run.nodes {
@@ -2025,12 +3315,30 @@ impl Engine {
         let eligible: Vec<String> = run
             .nodes
             .iter()
-            .filter(|node| node.status == WorkflowNodeStatus::Unstarted)
+            .filter(|node| {
+                node.status == WorkflowNodeStatus::Unstarted
+                    || (node.status == WorkflowNodeStatus::Pending && node.task_id.is_some())
+            })
             .filter(|node| {
                 run.definition
                     .nodes
                     .iter()
                     .any(|n| n.id == node.node_id && n.kind == WorkflowNodeKind::Task)
+            })
+            .filter(|node| {
+                run.integration.as_ref().is_none_or(|integration| {
+                    run.definition
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.to == node.node_id)
+                        .filter(|edge| {
+                            run.definition.nodes.iter().any(|candidate| {
+                                candidate.id == edge.from
+                                    && candidate.kind == WorkflowNodeKind::Task
+                            })
+                        })
+                        .all(|edge| integration.merged_nodes.contains(&edge.from))
+                })
             })
             .filter(|node| {
                 run.definition
@@ -2056,10 +3364,15 @@ impl Engine {
                         // is itself done -- a step that passed in a round
                         // that then blocked on another step is not a
                         // verified run to build on.
-                        finished(&edge.from)
-                            && match run.definition.nodes.iter().find(|n| n.id == edge.from) {
-                                Some(n) if n.kind == WorkflowNodeKind::Gate => {
-                                    run.nodes
+                        match run.definition.nodes.iter().find(|n| n.id == edge.from) {
+                            // Approval is enforced by the subject run's
+                            // pre-dispatch hold. Let the task/run exist so
+                            // the Inbox has a concrete run to decide.
+                            Some(n) if n.kind == WorkflowNodeKind::Approval => true,
+                            Some(n) if n.kind == WorkflowNodeKind::Gate => {
+                                finished(&edge.from)
+                                    && (run
+                                        .nodes
                                         .iter()
                                         .find(|node| node.node_id == edge.from)
                                         .is_some_and(|node| {
@@ -2068,10 +3381,10 @@ impl Engine {
                                         || run
                                             .definition
                                             .gate_subject(&n.id)
-                                            .is_some_and(|subject| done(&subject))
-                                }
-                                _ => true,
+                                            .is_some_and(|subject| done(&subject)))
                             }
+                            _ => finished(&edge.from),
+                        }
                     })
             })
             .filter(|node| {
@@ -2087,6 +3400,12 @@ impl Engine {
                             .iter()
                             .find(|n| n.node_id == edge.from)
                             .is_some_and(|n| n.status == WorkflowNodeStatus::Done)
+                            || run
+                                .definition
+                                .nodes
+                                .iter()
+                                .find(|n| n.id == edge.from)
+                                .is_some_and(|n| n.kind == WorkflowNodeKind::Approval)
                     })
             })
             .map(|node| node.node_id.clone())
@@ -2099,6 +3418,26 @@ impl Engine {
             // start. The rest keep reading `unstarted` until the sweep below.
             if run.status.is_terminal() {
                 break;
+            }
+
+            // An expand node materialises all decomposition tasks up front.
+            // For one of those, eligibility means dispatching the existing
+            // zero-attempt row, not creating a second child.
+            if let Some(existing_id) = run
+                .nodes
+                .iter()
+                .find(|node| node.node_id == node_id)
+                .and_then(|node| node.task_id.clone())
+            {
+                if self
+                    .store
+                    .get(&existing_id)
+                    .await?
+                    .is_some_and(|task| task.status == TaskStatus::Pending && task.runs == 0)
+                {
+                    to_start.push(existing_id);
+                }
+                continue;
             }
 
             let snapshot_node = run
@@ -2154,6 +3493,11 @@ impl Engine {
                 workflow_id: run.workflow_id.clone(),
                 workflow_run_id: run.id.clone(),
                 node_id: node_id.clone(),
+                workspace: run.integration.as_ref().map(|integration| {
+                    factory_core::task::WorkflowWorkspace {
+                        base_ref: integration.branch.clone(),
+                    }
+                }),
             };
             match self
                 .create_workflow_task(template, origin, task_id.clone())
@@ -2362,52 +3706,98 @@ impl Engine {
     /// * it failed or was cancelled -- the gate never will run: `skipped`;
     /// * anything else -- not reached yet.
     async fn mirror_gate_nodes(&self, run: &mut WorkflowRun) {
-        let gates: Vec<(String, String, String)> = run
+        let gates: Vec<(String, String, String, WorkflowNodeKind)> = run
             .definition
             .nodes
             .iter()
-            .filter(|n| n.kind == WorkflowNodeKind::Gate)
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    WorkflowNodeKind::Gate | WorkflowNodeKind::Review | WorkflowNodeKind::Approval
+                )
+            })
             .filter_map(|n| {
                 let subject = run.definition.gate_subject(&n.id)?;
-                Some((n.id.clone(), subject, n.gate.as_ref()?.step.clone()))
+                Some((n.id.clone(), subject, n.gate.as_ref()?.step.clone(), n.kind))
             })
             .collect();
-        for (gate_id, subject, step) in gates {
+        for (gate_id, subject, step, kind) in gates {
+            if kind == WorkflowNodeKind::Review
+                && run
+                    .nodes
+                    .iter()
+                    .find(|n| n.node_id == gate_id)
+                    .and_then(|n| n.task_id.as_ref())
+                    .is_some()
+            {
+                continue;
+            }
             let Some(task_id) = run.nodes.iter().find(|n| n.node_id == subject).and_then(|n| n.task_id.clone()) else {
                 continue;
             };
             let Ok(Some(subject_run)) = self.store.runs(&task_id, 1).await.map(|r| r.into_iter().next()) else {
                 continue;
             };
-            let (status, error) = match subject_run.status {
-                RunStatus::Done => (WorkflowNodeStatus::Done, None),
-                RunStatus::Verifying => (WorkflowNodeStatus::Verifying, None),
-                RunStatus::Failed | RunStatus::Cancelled => (WorkflowNodeStatus::Skipped, None),
-                RunStatus::Blocked
-                    if subject_run.blocked_source == Some(factory_core::run::BlockSource::Verification) =>
-                {
-                    let since = subject_run.blocked_since.unwrap_or(subject_run.started_at);
-                    let newest = self
-                        .policies
-                        .step_attestations(&subject_run.id)
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|a| a.step == step && a.at <= since)
-                        .max_by_key(|a| a.at);
-                    match newest {
-                        Some(a) if a.verdict == AttestationVerdict::Pass => (WorkflowNodeStatus::Done, None),
-                        Some(a) => (
-                            WorkflowNodeStatus::Blocked,
-                            Some(format!(
-                                "{step} failed ({})",
-                                a.exit_code.map(|c| format!("exit {c}")).unwrap_or_else(|| "did not finish".into())
-                            )),
-                        ),
-                        None => (WorkflowNodeStatus::Unstarted, None),
+            let evidence = self
+                .policies
+                .step_attestations(&subject_run.id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|a| a.step == step)
+                .max_by_key(|a| a.at);
+            let approval_status = if kind == WorkflowNodeKind::Approval {
+                match &evidence {
+                    Some(a) if a.verdict == AttestationVerdict::Pass => Some((WorkflowNodeStatus::Done, None)),
+                    Some(a) => Some((WorkflowNodeStatus::Blocked, a.findings.clone())),
+                    None if subject_run.status == RunStatus::Blocked => {
+                        Some((WorkflowNodeStatus::Blocked, Some("waiting for approval".into())))
                     }
+                    None => None,
                 }
-                _ => (WorkflowNodeStatus::Unstarted, None),
+            } else {
+                None
+            };
+            let (status, error) = if let Some(status) = approval_status {
+                status
+            } else {
+                match subject_run.status {
+                    RunStatus::Done => (WorkflowNodeStatus::Done, None),
+                    RunStatus::Verifying => (WorkflowNodeStatus::Verifying, None),
+                    RunStatus::Failed | RunStatus::Cancelled => {
+                        (WorkflowNodeStatus::Skipped, None)
+                    }
+                    RunStatus::Blocked
+                        if subject_run.blocked_source
+                            == Some(factory_core::run::BlockSource::Verification) =>
+                    {
+                        let since = subject_run.blocked_since.unwrap_or(subject_run.started_at);
+                        let newest = self
+                            .policies
+                            .step_attestations(&subject_run.id)
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|a| a.step == step && a.at <= since)
+                            .max_by_key(|a| a.at);
+                        match newest {
+                            Some(a) if a.verdict == AttestationVerdict::Pass => {
+                                (WorkflowNodeStatus::Done, None)
+                            }
+                            Some(a) => (
+                                WorkflowNodeStatus::Blocked,
+                                Some(format!(
+                                    "{step} failed ({})",
+                                    a.exit_code
+                                        .map(|c| format!("exit {c}"))
+                                        .unwrap_or_else(|| "did not finish".into())
+                                )),
+                            ),
+                            None => (WorkflowNodeStatus::Unstarted, None),
+                        }
+                    }
+                    _ => (WorkflowNodeStatus::Unstarted, None),
+                }
             };
             if let Some(node) = run.nodes.iter_mut().find(|n| n.node_id == gate_id) {
                 if !matches!(
@@ -2530,7 +3920,7 @@ impl Engine {
                         continue;
                     }
                 }
-                let Some(template) = run
+                let Some(mut template) = run
                     .definition
                     .nodes
                     .iter()
@@ -2539,6 +3929,20 @@ impl Engine {
                 else {
                     continue;
                 };
+                if run.integration.is_some() {
+                    template.depends_on = run
+                        .definition
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.to == node.node_id)
+                        .filter_map(|edge| {
+                            run.nodes
+                                .iter()
+                                .find(|candidate| candidate.node_id == edge.from)
+                                .and_then(|candidate| candidate.task_id.clone())
+                        })
+                        .collect();
+                }
                 // Re-authorize exactly as a live spawn would: the actor
                 // recorded on the run may have lost the grant it started
                 // with while the daemon was down.
@@ -2565,6 +3969,11 @@ impl Engine {
                     workflow_id: run.workflow_id.clone(),
                     workflow_run_id: run.id.clone(),
                     node_id: node.node_id.clone(),
+                    workspace: run.integration.as_ref().map(|integration| {
+                        factory_core::task::WorkflowWorkspace {
+                            base_ref: integration.branch.clone(),
+                        }
+                    }),
                 };
                 if let Err(error) = self
                     .create_workflow_task(template, origin, task_id.clone())

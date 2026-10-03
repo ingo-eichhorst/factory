@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/factory-kernel",
     "crates/factory-core",
     "crates/factory-plugins",
     "crates/factory-daemon",

@@ -9,18 +9,24 @@ import {
   ageBadge,
   backupFailure,
   checkRows,
+  codeRows,
   destinationLevel,
   destinationText,
   fmtAgo,
   fmtIn,
   fmtSpan,
   fmtWhen,
+  identityHint,
   includeCount,
   isBackupEvent,
   keepText,
   keptByText,
   lastVerifiedText,
+  nextDrillLevel,
+  nextDrillText,
+  rowVerifyState,
   scheduleText,
+  timeMachineText,
   verifiedCell,
 } from "../js/backup-model.js";
 
@@ -75,15 +81,44 @@ const REPORT = {
     { path: ".factory/logs/", why: "the daemon's logs", included: false, files: null, bytes: null },
   ],
   exclude: [{ path: ".factory/secrets.yaml", why: "a secret: never read, never copied" }],
+  // #155: the wire shape `RepositoryFact`/`TimeMachineFact` serialize to --
+  // pinned by a Rust test (`a_repository_fact_and_a_time_machine_fact_serialize_the_way_the_ui_expects`).
+  code: [
+    {
+      scopes: ["factory"],
+      path: "projects/factory",
+      state: { state: "tracked", remote: "origin", upstream: "origin/main", ahead: 2 },
+      remote_url: "https://github.com/o/factory.git",
+    },
+    {
+      scopes: ["root", "nested"],
+      path: ".",
+      state: { state: "tracked", remote: "origin", upstream: "origin/main", ahead: 0 },
+      remote_url: "https://github.com/o/root.git",
+    },
+    { scopes: ["no-remote"], path: "projects/no-remote", state: { state: "no_remote" }, remote_url: null },
+    { scopes: ["no-upstream"], path: "projects/no-upstream", state: { state: "no_upstream" }, remote_url: null },
+    { scopes: ["detached"], path: "projects/detached", state: { state: "detached_head" }, remote_url: null },
+    { scopes: ["fresh"], path: "projects/fresh", state: { state: "no_commits" }, remote_url: null },
+    { scopes: ["not-a-repo"], path: "projects/not-a-repo", state: { state: "not_a_repository" }, remote_url: null },
+    { scopes: ["gone"], path: "gone", state: { state: "no_directory" }, remote_url: null },
+    {
+      scopes: ["flaky"],
+      path: "projects/flaky",
+      state: { state: "inspection_failed", reason: "git timed out after 5s" },
+      remote_url: null,
+    },
+  ],
+  time_machine: { state: "not_configured" },
 };
 
 // ------------------------------------------------------------------ the tab
 
 test("L1 gains a Backup tab after Infrastructure, with a view and a sub-label that names it", () => {
-  assert.match(page, /id="tab-infrastructure"[^>]*>Infrastructure<\/button>\s*<button id="tab-environments" hidden>Operations<\/button>\s*<button id="tab-backup" hidden>Backup<\/button>/);
+  assert.match(page, /id="tab-infrastructure"[^>]*>Infrastructure<\/button>[\s\S]*<button id="tab-backup" hidden>Backup<\/button>/);
   assert.match(page, /id="view-backup"/);
-  assert.match(page, /<span class="lv-sub">Host, daemon, AI accounts, operations and backup<\/span>/);
-  assert.match(app, /infra: \["infrastructure", "environments", "backup"\]/);
+  assert.match(page, /<span class="lv-sub">Host, daemon, Doctor, operations and backup<\/span>/);
+  assert.match(app, /infra: \["infrastructure", "doctor", "environments", "backup"\]/);
   assert.match(app, /backup: \{ onShow: startBackup, onHide: stopAgentPoll \}/);
   assert.match(app, /state\.tab === "backup"/, "the rail's re-render names every tab");
   assert.match(app, /isBackupEvent\(ev\) && state\.tab === "backup"/, "backup_* events refetch the page");
@@ -152,7 +187,35 @@ test("the schedule, retention and last verification read as a person would say t
   assert.equal(lastVerifiedText({ ...REPORT, last_verified: null }), "never");
 });
 
-test("the config snippet is the issue's block, without the encryption v1 refuses", () => {
+// -------------------------------------------------------------------- #156
+
+test("nextDrillText reads next_verify against the report's own clock, and names a skip reason", () => {
+  const withDrill = {
+    ...REPORT,
+    config: { ...REPORT.config, verify_schedule: { cron: "*/30 * * * *" } },
+    next_verify: "2026-09-26T00:00:00Z",
+  };
+  assert.match(nextDrillText(withDrill), /^in /);
+  assert.match(nextDrillText(withDrill), /2026-09-26 00:00 UTC/);
+  assert.equal(nextDrillLevel(withDrill), null);
+
+  const skipped = { ...withDrill, verify_skipped: "newest snapshot is encrypted; verify it with --identity" };
+  assert.match(nextDrillText(skipped), /skipped: newest snapshot is encrypted/);
+  assert.equal(nextDrillLevel(skipped), "warn");
+
+  const none = { ...REPORT, config: { ...REPORT.config, verify_schedule: undefined }, next_verify: null, verify_skipped: null };
+  assert.equal(nextDrillText(none), "no drill scheduled");
+  assert.equal(nextDrillLevel(none), "warn");
+
+  assert.equal(nextDrillText(null), "no drill scheduled");
+});
+
+test("the hero draws the next drill from the report, not recomputed here", () => {
+  assert.match(view, /nextDrillText\(report\)/);
+  assert.match(view, /Next drill/);
+});
+
+test("the config snippet is the issue's block, minimal -- encrypt_to is optional and left out", () => {
   assert.match(CONFIG_SNIPPET, /^infrastructure:\n {2}backup:/m);
   assert.match(CONFIG_SNIPPET, /keep: \{ daily: 7, weekly: 4, monthly: 6 \}/);
   assert.doesNotMatch(CONFIG_SNIPPET, /encrypt_to/);
@@ -185,6 +248,46 @@ test("the buttons: nothing before a config, nothing while running, no verify wit
   assert.match(empty.why, /no snapshot/);
 });
 
+// -------------------------------------------------------------------- #152
+
+test("an encrypted newest snapshot disables the hero Verify with the CLI hint, but never Back up now", () => {
+  const encrypted = {
+    ...REPORT,
+    snapshots: [{ ...REPORT.snapshots[0], name: "factory-backup-dev-20260925T090000Z.tar.zst.age", encrypted: true }],
+  };
+  const can = actions(encrypted);
+  assert.equal(can.run, true, "encryption never stops taking a backup");
+  assert.equal(can.verify, false);
+  assert.match(can.why, /--identity/);
+  assert.match(can.why, /factory backup verify/);
+});
+
+test("identityHint names the CLI command for the given snapshot", () => {
+  assert.equal(
+    identityHint("factory-backup-dev-20260925T090000Z.tar.zst.age"),
+    "encrypted: run `factory backup verify factory-backup-dev-20260925T090000Z.tar.zst.age --identity <file>`"
+  );
+});
+
+test("a row's Verify is enabled for a plaintext snapshot and disabled with a hint for an encrypted one", () => {
+  const plain = REPORT.snapshots[0];
+  assert.deepEqual(rowVerifyState(plain), { enabled: true, title: "" });
+  const encrypted = { ...plain, encrypted: true };
+  const state = rowVerifyState(encrypted);
+  assert.equal(state.enabled, false);
+  assert.match(state.title, /--identity/);
+  assert.deepEqual(rowVerifyState(null), { enabled: true, title: "" });
+});
+
+test("the hero reads the configured recipient from encrypt_to, never a hardcoded no", () => {
+  assert.match(view, /config\.encrypt_to/, "the hero reads encrypt_to from the config");
+  assert.doesNotMatch(view, /no -- v1 writes plaintext archives/, "the old v1-only line is gone");
+});
+
+test("history rows read encrypted state through rowVerifyState, not their own logic", () => {
+  assert.match(view, /rowVerifyState/);
+});
+
 test("a verification's steps keep their order and draw a failure red", () => {
   const rows = checkRows({
     checks: [
@@ -207,4 +310,63 @@ test("only backup_* events are the page's", () => {
   assert.equal(isBackupEvent({ type: "backup_verified" }), true);
   assert.equal(isBackupEvent({ type: "task_updated" }), false);
   assert.equal(isBackupEvent(null), false);
+});
+
+// -------------------------------------------------------------------- #155
+
+test("code is a row per scope, sharing one repository's state and remote", () => {
+  const rows = codeRows(REPORT);
+  // The 9 facts above cover 10 scope rows: one fact lists two scopes.
+  assert.equal(rows.length, 10);
+  const factory = rows.find(r => r.scope === "factory");
+  assert.deepEqual(factory, { scope: "factory", remote: "https://github.com/o/factory.git", level: "warn", text: "2 unpushed (as of last fetch)" });
+  const shared = rows.filter(r => r.scope === "root" || r.scope === "nested");
+  assert.equal(shared.length, 2);
+  for (const row of shared) {
+    assert.equal(row.level, "ok");
+    assert.equal(row.text, "up to date (as of last fetch)");
+    assert.equal(row.remote, "https://github.com/o/root.git");
+  }
+});
+
+test("an unpushed commit is a warning; up to date and unknown states are not", () => {
+  assert.equal(codeRows({ code: [{ scopes: ["a"], state: { state: "tracked", ahead: 1 } }] })[0].level, "warn");
+  assert.equal(codeRows({ code: [{ scopes: ["a"], state: { state: "tracked", ahead: 0 } }] })[0].level, "ok");
+  assert.equal(codeRows({ code: [{ scopes: ["a"], state: { state: "no_remote" } }] })[0].level, "warn");
+  assert.equal(codeRows({ code: [{ scopes: ["a"], state: { state: "no_upstream" } }] })[0].level, "warn");
+  // Never shown as a problem or as fine: unknown, exactly as the daemon warns.
+  for (const state of ["detached_head", "no_commits", "not_a_repository", "no_directory", "inspection_failed"]) {
+    assert.equal(codeRows({ code: [{ scopes: ["a"], state: { state } }] })[0].level, "none", state);
+  }
+  assert.deepEqual(codeRows({ code: [] }), []);
+  assert.deepEqual(codeRows({}), []);
+  assert.deepEqual(codeRows(null), []);
+});
+
+test("no scope name reads as the missing dash instead of an empty row", () => {
+  const rows = codeRows({ code: [{ scopes: [], state: { state: "no_remote" } }] });
+  assert.equal(rows[0].scope, MISSING);
+});
+
+test("time machine reads observed, unknown or unsupported -- never asserted from nothing", () => {
+  assert.deepEqual(timeMachineText({ time_machine: { state: "configured", destinations: ["Backup Disk"] } }), {
+    level: "ok",
+    text: "configured -- Backup Disk",
+  });
+  assert.equal(timeMachineText(REPORT).level, "warn");
+  assert.equal(timeMachineText(REPORT).text, "not configured");
+  const unavailable = timeMachineText({ time_machine: { state: "unavailable", reason: "tmutil is missing" } });
+  assert.equal(unavailable.level, "none");
+  assert.match(unavailable.text, /tmutil is missing/);
+  assert.deepEqual(timeMachineText({ time_machine: { state: "unsupported" } }), { level: "none", text: "not supported on this platform" });
+  assert.deepEqual(timeMachineText({}), { level: "none", text: "unknown" });
+  assert.deepEqual(timeMachineText(null), { level: "none", text: "unknown" });
+});
+
+test("the Code section renders for every report, not gated on report.config the way history and contents are", () => {
+  assert.match(view, /function codeSection\(report\)/);
+  assert.match(
+    view,
+    /\[hero\(report\), warningStrip\(report\.warnings\), codeSection\(report\), history\(report\), contents\(report\)\]/
+  );
 });

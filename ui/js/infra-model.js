@@ -147,6 +147,51 @@ export function kindBadge(kind) {
   return fact(kind);
 }
 
+/// When a rate-limit window resets, relative to `now`: "resets in 2h 10m".
+/// `null` when the time is missing or unreadable -- never a guess.
+export function resetsIn(resetsAt, now = Date.now()) {
+  if (!resetsAt) return null;
+  const t = new Date(resetsAt).getTime();
+  if (!Number.isFinite(t)) return null;
+  const secs = (t - (now instanceof Date ? now.getTime() : now)) / 1000;
+  if (secs <= 0) return "reset passed";
+  const m = Math.max(1, Math.ceil(secs / 60));
+  if (m < 60) return `resets in ${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `resets in ${h}h ${m % 60}m`;
+  return `resets in ${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+/// A provider's rate-limit window as an honest bar model. Unknown readings
+/// have no percentage and stale/apportioned observations keep those labels.
+export function providerWindowView(window, now = Date.now()) {
+  if (!window) return { name: "window", percent: null, tone: "unknown", detail: "unknown" };
+  const name = window.window_minutes === 300
+    ? "5-hour"
+    : (window.window_minutes === 10080 ? "weekly" : `${fact(window.window_minutes)}-minute`);
+  const used = typeof window.used_percent === "number" && Number.isFinite(window.used_percent)
+    ? Math.min(100, Math.max(0, window.used_percent))
+    : null;
+  const labels = [];
+  if (used === null) labels.push(window.unknown || "usage unknown");
+  else labels.push(`${Math.round(used * 10) / 10}% used`);
+  const resets = resetsIn(window.resets_at, now);
+  if (resets) labels.push(resets);
+  if (window.stale) labels.push(window.sample_time_estimated ? "stale · sample time not reported" : "stale");
+  if (window.attribution) labels.push(window.attribution);
+  else if (window.attribution_unknown) labels.push(`attribution unknown — ${window.attribution_unknown}`);
+  if (window.attribution_quality) labels.push(window.attribution_quality);
+  if (typeof window.trend_percent === "number" && Number.isFinite(window.trend_percent)) {
+    labels.push(`${window.trend_percent >= 0 ? "+" : ""}${window.trend_percent.toFixed(1)} points`);
+  }
+  return {
+    name,
+    percent: used,
+    tone: used === null ? "unknown" : (window.stale ? "stale" : "known"),
+    detail: labels.join(" · "),
+  };
+}
+
 /// Where an agent's name links to: the roster, with the agent's scope
 /// selected on the rail -- the roster has no per-agent anchor, so its scope
 /// is the narrowest place a link can land, the same way `roles.js` links a

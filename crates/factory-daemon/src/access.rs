@@ -89,7 +89,8 @@ impl Engine {
             return Ok(Caller::Owner);
         };
 
-        for run in self.store.active_runs().await? {
+        let active = self.store.active_runs().await?;
+        for run in &active {
             if run.token.as_deref() == Some(token) {
                 let scope = self
                     .store
@@ -100,10 +101,26 @@ impl Engine {
                 let role = self.effective_role(&scope, &run.agent).await;
                 return Ok(Caller::Agent {
                     scope,
-                    name: run.agent,
+                    name: run.agent.clone(),
                     role,
-                    run_id: Some(run.id),
+                    run_id: Some(run.id.clone()),
                 });
+            }
+        }
+
+        // `#178`: a token from a run `--continue` replaced is not just
+        // unknown -- it is *this task's own*, one generation stale. Told
+        // apart from a genuinely unknown token so the caller hears why,
+        // rather than the generic denial below; never a grant (only a
+        // digest is ever compared, never the token itself), since the
+        // active run above already had its chance to match.
+        let given_digest = factory_core::run::token_digest(token);
+        for run in &active {
+            if run.superseded_token_sha256s.iter().any(|d| d == &given_digest) {
+                return Err(FactoryError::Denied(format!(
+                    "a newer run of task {} exists; use the latest reporting commands",
+                    run.task_id
+                )));
             }
         }
 
@@ -173,11 +190,24 @@ impl Engine {
         Needs::Grant(match request {
             Request::TaskCreate(_) => Grant::TaskCreate,
             Request::TaskUpdate { .. } => Grant::TaskEdit,
-            // Intake (`#119`) reuses the task grants: handing something in
-            // is creating a task, triaging one is editing it. The `triager`
-            // role that narrows this is v2.
-            Request::IntakeAdd(_) | Request::IntakeTriage { .. } | Request::IntakeInfo { .. } => Grant::TaskCreate,
-            Request::IntakeAssess { .. } | Request::IntakeDecide { .. } => Grant::TaskEdit,
+            // Intake (`#119`) used to reuse the task grants: handing
+            // something in was creating a task, triaging one was editing it.
+            // `#172` gives it its own vocabulary instead, one grant per
+            // request and no wildcard arm here either -- a new intake
+            // request still fails to compile until it is mapped.
+            Request::IntakeAdd(_) => Grant::IntakeAdd,
+            Request::IntakeInfo { .. } => Grant::IntakeInfo,
+            Request::IntakeTriage { .. } => Grant::IntakeTriage,
+            Request::IntakeAssess { .. } => Grant::IntakeAssess,
+            Request::IntakeDecide { .. } => Grant::IntakeDecide,
+            // The one outward-effect grant: never `foreman`'s free ALL,
+            // never a wildcard, named exactly or not at all (`#171`).
+            Request::IntakePublish { .. } => Grant::IntakePublish,
+            // Flagging only adds scrutiny -- the same door `intake.assess`
+            // already opens, not a sixth grant (`#170`). Confirming or
+            // dismissing is never an agent's, whatever it holds: see the
+            // `Needs::Owner` arm below.
+            Request::IntakeFlagSecurity { .. } => Grant::IntakeAssess,
             Request::TaskDelete { .. } => Grant::TaskDelete,
             Request::TaskRun { .. } => Grant::TaskRun,
             Request::TaskCancel { .. } => Grant::TaskCancel,
@@ -193,11 +223,16 @@ impl Engine {
             Request::TaskAttach { .. } => Grant::TaskAttach,
             Request::AgentStart { .. } => Grant::AgentStart,
             Request::AgentConfigure { .. } | Request::AgentDelete { .. } => Grant::AgentConfigure,
+            // Saving or resetting a scope's own dashboard layout (`#160`).
+            // An ordinary grant, unlike the role-layer writes it otherwise
+            // resembles: a layout cannot widen what an agent may do.
+            Request::DashboardSet { .. } | Request::DashboardReset { .. } => Grant::DashboardEdit,
             Request::AgentStop { .. } => Grant::AgentStop,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
             // Typing into a run's session, however narrowed (`#106`).
             Request::RunAnswer { .. } => Grant::RunInput,
+            Request::RunApprove { .. } | Request::RunReject { .. } | Request::RunRework { .. } => Grant::RunApprove,
             Request::WorkflowCreate(_) => Grant::WorkflowCreate,
             Request::WorkflowUpdate { .. } => Grant::WorkflowEdit,
             Request::WorkflowDelete { .. } => Grant::WorkflowDelete,
@@ -225,6 +260,11 @@ impl Engine {
             // Checked against the root scope for the same reason
             // `policy.attest` is -- see `in_root_scope`.
             Request::GoalsCheckIn { .. } => Grant::GoalsCheckIn,
+            // Verifying with a supplied identity decrypts an encrypted
+            // snapshot (`#152`) -- the owner's alone, like restore, and
+            // checked before the shared arm below: a role grant must never
+            // become "read this key file".
+            Request::BackupVerify { identity: Some(_), .. } => return Needs::Owner,
             // Checked against the root scope too: a backup is of the whole
             // instance's state (`#116`).
             Request::BackupRun | Request::BackupVerify { .. } => Grant::BackupRun,
@@ -247,6 +287,7 @@ impl Engine {
             | Request::Environment
             | Request::Dependencies { .. }
             | Request::DependenciesVex { .. }
+            | Request::Doctor
             | Request::Infrastructure
             // Lists the destination and reads the history; writes nothing.
             | Request::Backup
@@ -260,6 +301,10 @@ impl Engine {
             | Request::BenchRuns { .. }
             | Request::BenchRunGet { .. }
             | Request::Policy { .. }
+            // The CRA Art. 14 reporting clock (`#157`, phase 1): a
+            // projection over the same L2/L4 reads `Policy` folds, and
+            // itself computed fresh on every call. Open the same way.
+            | Request::PolicyClock { .. }
             | Request::PolicyControl { .. }
             | Request::PolicyExport { .. }
             | Request::Metrics { .. }
@@ -280,6 +325,10 @@ impl Engine {
             | Request::Operations { .. }
             // A projection over the task list, like `Operations` (`#119`).
             | Request::IntakeBoard { .. }
+            // The confirmed-report read (`#170`): a projection over the task
+            // list too, and the L4 fact `#157`'s clock will read -- open the
+            // same way `IntakeBoard` is.
+            | Request::IntakeSecurityReports { .. }
             | Request::TaskGet { .. }
             | Request::TaskList(_)
             | Request::TaskEntries { .. }
@@ -320,6 +369,12 @@ impl Engine {
             // run/verify, no role grant opens it: choosing a cutover candidate
             // is the owner's decision alone (#153).
             Request::BackupRestore { .. } => return Needs::Owner,
+            // Confirming or dismissing a possible security report is a
+            // person's call, never an agent's, whatever role it holds --
+            // AGENTS.md's "bounds what an agent does by accident, not what
+            // it could do" (`#170`). Flagging (above) stays `intake.assess`;
+            // this is the one door no grant opens.
+            Request::IntakeSecurity { .. } => return Needs::Owner,
         })
     }
 
@@ -460,6 +515,15 @@ impl Engine {
                 }
                 in_scope(&assessment.routing.scope)
             }
+            // Flagging (`#170`): the same reach `IntakeAssess` checks, minus
+            // the route -- there is none to be in scope of.
+            Request::IntakeFlagSecurity { id, .. } => {
+                let Some(item) = self.store.get(id).await? else { return Ok(()) };
+                if task_in_reach(def, &item).is_err() && !self.is_items_triage_run(caller, &item).await? {
+                    return Err(deny("flag an intake item that is neither in its reach nor its own triage run's"));
+                }
+                Ok(())
+            }
             Request::IntakeDecide { id, decision } => {
                 let Some(item) = self.store.get(id).await? else { return Ok(()) };
                 if task_in_reach(def, &item).is_err() {
@@ -472,12 +536,31 @@ impl Engine {
                         return Err(deny("split an intake item it only triages -- propose the split in the assessment"));
                     }
                 }
+                // Deliberate tightening (`#172`): releasing and dispatching
+                // in the same call needs `task.run` too. A workflow-routed
+                // release already needs it, through `start_workflow`'s
+                // create-and-run-every-node rule -- a direct release should
+                // not be the one door around task execution.
+                if matches!(decision, factory_core::intake::Decision::Ready { run: true }) && !def.allows(Grant::TaskRun)
+                {
+                    return Err(deny(&format!(
+                        "release an intake item with run: true without holding {}",
+                        Grant::TaskRun.as_str()
+                    )));
+                }
                 let routed = item.intake.as_ref().and_then(|i| i.triage.as_ref()).map(|t| &t.assessment.routing.scope);
                 match (decision, routed) {
                     (factory_core::intake::Decision::Ready { .. }, Some(routed)) => in_scope(routed),
                     _ => Ok(()),
                 }
             }
+            // Publishing: reach over the item, like `IntakeTriage` -- no
+            // triage-run fallback, since publishing is never a run's own
+            // work the way assessing or deciding can be.
+            Request::IntakePublish { id } => match self.store.get(id).await? {
+                Some(item) => task_in_reach(def, &item),
+                None => Ok(()),
+            },
             // Answering a needs-info: reach over the item, or having handed
             // it in.
             Request::IntakeInfo { id, .. } => {
@@ -533,6 +616,13 @@ impl Engine {
                 Reach::Own => Err(deny("configure an agent declaration")),
             },
 
+            Request::DashboardSet { scope: s, .. } | Request::DashboardReset { scope: s } => {
+                match def.reach {
+                    Reach::Scope => in_scope(s),
+                    Reach::Own => Err(deny("edit a scope's dashboard layout")),
+                }
+            }
+
             Request::AgentStop { id } | Request::AgentInput { id, .. } => match def.reach {
                 Reach::Scope => match self.store.get_agent(id).await? {
                     Some(agent) => in_scope(&agent.scope),
@@ -551,6 +641,13 @@ impl Engine {
                     Some(own) if own == id => Ok(()),
                     _ => Err(deny("type into another agent's session")),
                 },
+            },
+
+            Request::RunApprove { id, .. }
+            | Request::RunReject { id, .. }
+            | Request::RunRework { id } => match self.task_of_run(id).await? {
+                Some(task) => task_in_reach(def, &task),
+                None => Ok(()),
             },
 
             Request::WorkflowCreate(draft) => match def.reach {
@@ -686,6 +783,7 @@ impl Engine {
             &Request::TaskRun {
                 id: uuid::Uuid::new_v4().to_string(),
                 reason: None,
+                continue_run: false,
             },
         )
         .await
@@ -704,8 +802,9 @@ mod tests {
     use chrono::Utc;
     use factory_core::agent::Lifetime;
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, ScopeAgent};
+    use factory_core::intake::{Assessment, Decision, Level, NewIntake, Routing, WontfixReason};
     use factory_core::run::{NewRun, RunStatus, Trigger};
-    use factory_core::task::{NewTask, Task, TaskPatch, TaskReport, TaskStatus};
+    use factory_core::task::{CloseReason, NewTask, Task, TaskPatch, TaskReport, TaskStatus};
     use factory_core::workflow::WorkflowDraft;
     use factory_plugins::registry::Registry;
     use factory_plugins::SqliteStore;
@@ -948,6 +1047,7 @@ mod tests {
             evidence: "https://example.com/policy".into(),
             note: None,
             expires_at: Utc::now() + chrono::Duration::days(30),
+            clock: None,
         };
         let withdraw = Request::PolicyWithdraw { id: "att-1".into(), reason: None };
 
@@ -991,6 +1091,7 @@ mod tests {
                     evidence: "https://example.com/policy".into(),
                     note: None,
                     expires_at: Utc::now() + chrono::Duration::days(30),
+                    clock: None,
                 }
             )
             .await
@@ -1007,6 +1108,7 @@ mod tests {
                     evidence: "https://example.com/policy".into(),
                     note: None,
                     expires_at: Utc::now() + chrono::Duration::days(30),
+                    clock: None,
                 }
             )
             .await
@@ -1029,7 +1131,7 @@ mod tests {
             role: Role::new(role),
             run_id: None,
         };
-        let verify = Request::BackupVerify { snapshot: None };
+        let verify = Request::BackupVerify { snapshot: None, identity: None };
 
         assert!(allowed(&e, &caller("demo", "keeper"), Request::BackupRun).await);
         assert!(allowed(&e, &caller("demo", "keeper"), verify.clone()).await);
@@ -1043,7 +1145,29 @@ mod tests {
         );
         assert!(!allowed(&e, &worker("w"), verify).await, "a worker holds no backup.run");
         assert!(allowed(&e, &worker("w"), Request::Backup).await, "reading the status is open to every agent");
+        assert!(allowed(&e, &worker("w"), Request::Doctor).await, "Doctor is a read open to every agent");
         assert!(allowed(&e, &Caller::Owner, Request::BackupRun).await);
+    }
+
+    /// `#152`: verifying an encrypted snapshot decrypts it, so an `identity`
+    /// makes the request the owner's alone -- even for a caller whose role
+    /// holds `backup.run` and reaches the whole scope.
+    #[tokio::test]
+    async fn backup_verify_with_an_identity_is_the_owners_alone_even_with_backup_run() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  keeper:\n    grants: [backup.run]\n    reach: scope\n",
+        );
+        let caller = Caller::Agent { scope: "demo".into(), name: "w".into(), role: Role::new("keeper"), run_id: None };
+        let with_identity = Request::BackupVerify { snapshot: None, identity: Some(PathBuf::from("/tmp/key.txt")) };
+        assert!(
+            !allowed(&e, &caller, with_identity.clone()).await,
+            "a role grant must never become \"read this key file\""
+        );
+        assert!(allowed(&e, &Caller::Owner, with_identity).await);
+        // Without an identity, the same caller's `backup.run` still works --
+        // this is not a general backup.verify regression.
+        assert!(allowed(&e, &caller, Request::BackupVerify { snapshot: None, identity: None }).await);
     }
 
     #[tokio::test]
@@ -1052,6 +1176,7 @@ mod tests {
         let request = Request::BackupRestore {
             snapshot: "factory-backup-demo-20260925T030000Z.tar.zst".into(),
             into: PathBuf::from("/tmp/restored-factory"),
+            identity: None,
         };
         assert!(allowed(&e, &Caller::Owner, request.clone()).await);
         assert!(!allowed(&e, &wearing("everything"), request.clone()).await);
@@ -1292,6 +1417,7 @@ mod tests {
             status: TaskStatus::Pending,
             schedule: None,
             estimate_seconds: None,
+            estimate: None,
             result: None,
             routed_to: None,
             error: None,
@@ -1307,6 +1433,9 @@ mod tests {
             last_run_at: None,
             next_run_at: None,
             workflow_origin: None,
+            parent_task_id: None,
+            decomposition_part: None,
+            depends_on: Vec::new(),
             bench_origin: None,
             retry: None,
             pending_retry: None,
@@ -1315,6 +1444,7 @@ mod tests {
             intake: None,
             failure: None,
             closure: None,
+            slot_wait: None,
         };
         engine.store.create(&task).await.unwrap()
     }
@@ -1335,6 +1465,40 @@ mod tests {
             .await
             .unwrap()
             .id
+    }
+
+    #[tokio::test]
+    async fn run_approval_is_a_central_grant_and_follows_the_subject_tasks_reach() {
+        let e =
+            engine_with_roles("roles:\n  approver:\n    grants: [run.approve]\n    reach: scope\n");
+        task_in(&e, "mine", "demo", "maker").await;
+        task_in(&e, "theirs", "other", "maker").await;
+        let mine = run_of(&e, "mine", "maker").await;
+        let theirs = run_of(&e, "theirs", "maker").await;
+        let request = |id: &str| Request::RunApprove {
+            id: id.into(),
+            reason: "checked".into(),
+        };
+        assert!(
+            !allowed(&e, &worker("maker"), request(&mine)).await,
+            "worker has no run.approve"
+        );
+        assert!(allowed(&e, &wearing("approver"), request(&mine)).await);
+        let executing_approver = Caller::Agent {
+            scope: "demo".into(),
+            name: "maker".into(),
+            role: Role::new("approver"),
+            run_id: Some(mine.clone()),
+        };
+        assert!(
+            allowed(&e, &executing_approver, Request::RunRework { id: mine.clone() }).await,
+            "reach/grant admits the request; the engine's identity check must reject self-rework"
+        );
+        assert!(
+            !allowed(&e, &wearing("approver"), request(&theirs)).await,
+            "scope reach stops at demo"
+        );
+        assert!(allowed(&e, &Caller::Owner, request(&theirs)).await);
     }
 
     fn report() -> TaskReport {
@@ -1526,6 +1690,7 @@ mod tests {
             error_details: None,
             last_message: None,
             token: None,
+            session_id: None,
         };
         assert!(allowed(&e, &worker("w"), Request::TaskTurnEnded { id: "mine".into(), turn: turn() }).await);
         assert!(!allowed(&e, &worker("w"), Request::TaskTurnEnded { id: "theirs".into(), turn: turn() }).await);
@@ -1641,7 +1806,7 @@ mod tests {
         for request in [
             Request::TaskCreate(NewTask::default()),
             Request::TaskDelete { id: "t".into() },
-            Request::TaskRun { id: "t".into(), reason: None },
+            Request::TaskRun { id: "t".into(), reason: None, continue_run: false },
             Request::TaskCancel { id: "t".into(), reason: None, run: None },
             // Closing a task is a decision about it, not work on it (`#122`).
             Request::TaskClose {
@@ -1703,7 +1868,7 @@ mod tests {
                 reason: None,
             },
             Request::TaskDelete { id: "here".into() },
-            Request::TaskRun { id: "here".into(), reason: None },
+            Request::TaskRun { id: "here".into(), reason: None, continue_run: false },
             Request::TaskCancel { id: "here".into(), reason: None, run: None },
             Request::TaskSkipNext { id: "here".into(), reason: None, slot: None },
             Request::TaskReport {
@@ -1758,6 +1923,7 @@ mod tests {
             Request::TaskRun {
                 id: "elsewhere".into(),
                 reason: None,
+                continue_run: false,
             },
             Request::TaskCancel {
                 id: "elsewhere".into(),
@@ -1847,7 +2013,7 @@ mod tests {
             "roles:\n  runner:\n    grants: [task.run, task.cancel]\n    reach: scope\n",
         );
         task_in(&e, "here", "demo", "somebody").await;
-        assert!(allowed(&e, &wearing("runner"), Request::TaskRun { id: "here".into(), reason: None }).await);
+        assert!(allowed(&e, &wearing("runner"), Request::TaskRun { id: "here".into(), reason: None, continue_run: false }).await);
         assert!(allowed(&e, &wearing("runner"), Request::TaskCancel { id: "here".into(), reason: None, run: None }).await);
         // Not granted: it may look at the board, and start what is on it.
         assert!(allowed(&e, &wearing("runner"), Request::TaskList(Default::default())).await);
@@ -1963,6 +2129,327 @@ mod tests {
         assert!(allowed(&e, &wearing("ghost"), Request::TaskList(Default::default())).await);
     }
 
+    // -- intake (`#172`): its own grants, never `task.create`/`task.edit` --
+
+    fn intake_assessment(routed: &str) -> Assessment {
+        Assessment {
+            axes: Vec::new(),
+            category: "bugfix".into(),
+            impact: Level::Medium,
+            urgency: Level::Medium,
+            complexity: 3,
+            estimate: None,
+            routing: Routing { scope: routed.into(), ..Default::default() },
+            summary: String::new(),
+            questions: Vec::new(),
+            split: Vec::new(),
+            duplicates: Vec::new(),
+            checks: Vec::new(),
+            areas: Vec::new(),
+        }
+    }
+
+    fn ready(run: bool) -> Decision {
+        Decision::Ready { run }
+    }
+
+    fn needs_info() -> Decision {
+        Decision::NeedsInfo { questions: Vec::new() }
+    }
+
+    fn wontfix() -> Decision {
+        Decision::Wontfix { reason: WontfixReason::Invalid, evidence: "not ours".into(), duplicate_of: None }
+    }
+
+    fn split() -> Decision {
+        Decision::Split { parts: Vec::new() }
+    }
+
+    #[tokio::test]
+    async fn intake_add_needs_its_own_grant_and_follows_task_creates_scope_rule() {
+        let e = engine();
+        let new = |scope: &str| {
+            Request::IntakeAdd(NewIntake { title: "x".into(), scope: Some(scope.into()), ..Default::default() })
+        };
+        assert!(!allowed(&e, &worker("w"), new("demo")).await, "worker never had task.create, so never intake.add");
+        assert!(allowed(&e, &foreman(), new("demo")).await);
+        assert!(!allowed(&e, &foreman(), new("other")).await, "a foreman's authority stops at its scope");
+        assert!(allowed(&e, &wearing("triager"), new("demo")).await);
+        assert!(!allowed(&e, &wearing("triager"), new("other")).await);
+    }
+
+    #[tokio::test]
+    async fn intake_info_needs_its_own_grant_and_reach_over_the_item() {
+        let e = engine();
+        task_in(&e, "mine", "demo", "w").await;
+        task_in(&e, "not_mine", "demo", "someone").await;
+        task_in(&e, "far", "other", "anyone").await;
+        let info = |id: &str| Request::IntakeInfo { id: id.into(), text: "more".into() };
+
+        // `worker` never held `task.create`, so it never held `intake.info`
+        // either -- own reach over the item is not enough without the grant.
+        assert!(!allowed(&e, &worker("w"), info("mine")).await);
+        assert!(!allowed(&e, &worker("w"), info("not_mine")).await);
+        assert!(allowed(&e, &foreman(), info("not_mine")).await, "scope reach covers everything in demo");
+        assert!(!allowed(&e, &foreman(), info("far")).await, "out of the foreman's scope");
+        assert!(allowed(&e, &wearing("triager"), info("not_mine")).await);
+        assert!(!allowed(&e, &wearing("triager"), info("far")).await);
+    }
+
+    #[tokio::test]
+    async fn intake_triage_needs_its_own_grant_and_reach_over_the_item() {
+        let e = engine();
+        task_in(&e, "mine", "demo", "w").await;
+        task_in(&e, "not_mine", "demo", "someone").await;
+        task_in(&e, "far", "other", "anyone").await;
+        let triage = |id: &str| Request::IntakeTriage { id: id.into(), agent: None };
+
+        // `worker` never held `task.create`, so it never held `intake.triage`
+        // either -- own reach over the item is not enough without the grant.
+        assert!(!allowed(&e, &worker("w"), triage("mine")).await);
+        assert!(allowed(&e, &foreman(), triage("not_mine")).await);
+        assert!(!allowed(&e, &foreman(), triage("far")).await, "out of the foreman's scope");
+        assert!(allowed(&e, &wearing("triager"), triage("not_mine")).await);
+        assert!(!allowed(&e, &wearing("triager"), triage("far")).await);
+    }
+
+    #[tokio::test]
+    async fn intake_assess_needs_its_own_grant_reach_over_the_item_and_the_routes_own_scope() {
+        let e = engine();
+        task_in(&e, "mine", "demo", "w").await;
+        task_in(&e, "not_mine", "demo", "someone").await;
+        task_in(&e, "far", "other", "anyone").await;
+        let assess = |id: &str, routed: &str| Request::IntakeAssess {
+            id: id.into(),
+            assessment: intake_assessment(routed),
+            decide: false,
+        };
+
+        // What `task.edit` used to give a worker for intake.
+        assert!(allowed(&e, &worker("w"), assess("mine", "demo")).await);
+        assert!(
+            !allowed(&e, &worker("w"), assess("not_mine", "demo")).await,
+            "not assigned to it, and it holds no triage run of its own"
+        );
+        assert!(allowed(&e, &foreman(), assess("not_mine", "demo")).await, "scope reach covers everything in demo");
+        assert!(!allowed(&e, &foreman(), assess("far", "demo")).await, "the item is out of the foreman's scope");
+        assert!(!allowed(&e, &foreman(), assess("not_mine", "other")).await, "routing it out of the foreman's own scope");
+        assert!(allowed(&e, &wearing("triager"), assess("not_mine", "demo")).await);
+        assert!(!allowed(&e, &wearing("triager"), assess("far", "demo")).await);
+        assert!(!allowed(&e, &wearing("triager"), assess("not_mine", "other")).await);
+    }
+
+    #[tokio::test]
+    async fn intake_decide_needs_its_own_grant_and_reach_and_a_run_release_also_needs_task_run() {
+        let e = engine();
+        task_in(&e, "mine", "demo", "w").await;
+        task_in(&e, "not_mine", "demo", "someone").await;
+        task_in(&e, "far", "other", "anyone").await;
+        let decide = |id: &str, decision: Decision| Request::IntakeDecide { id: id.into(), decision };
+
+        // worker: own reach, and intake.decide is what task.edit used to give
+        // it -- except releasing with `run: true`, the one worker behaviour
+        // this narrowing deliberately changes (it needs `task.run` now).
+        assert!(allowed(&e, &worker("w"), decide("mine", ready(false))).await);
+        assert!(!allowed(&e, &worker("w"), decide("not_mine", ready(false))).await, "not assigned to it");
+        assert!(!allowed(&e, &worker("w"), decide("mine", ready(true))).await, "no task.run");
+        assert!(allowed(&e, &worker("w"), decide("mine", needs_info())).await);
+        assert!(allowed(&e, &worker("w"), decide("mine", wontfix())).await);
+        assert!(allowed(&e, &worker("w"), decide("mine", split())).await);
+
+        // foreman: scope reach and every grant, task.run included.
+        assert!(allowed(&e, &foreman(), decide("not_mine", ready(false))).await);
+        assert!(allowed(&e, &foreman(), decide("not_mine", ready(true))).await);
+        assert!(!allowed(&e, &foreman(), decide("far", ready(false))).await, "out of scope");
+
+        // triager: scope reach and all five intake grants, but it runs
+        // nothing -- `Ready { run: true }` needs `task.run`, which it lacks.
+        assert!(allowed(&e, &wearing("triager"), decide("not_mine", ready(false))).await);
+        assert!(!allowed(&e, &wearing("triager"), decide("not_mine", ready(true))).await, "the triager runs nothing");
+        assert!(allowed(&e, &wearing("triager"), decide("not_mine", needs_info())).await);
+        assert!(allowed(&e, &wearing("triager"), decide("not_mine", wontfix())).await);
+        assert!(allowed(&e, &wearing("triager"), decide("not_mine", split())).await);
+        assert!(!allowed(&e, &wearing("triager"), decide("far", ready(false))).await, "out of scope");
+    }
+
+    #[tokio::test]
+    async fn a_worker_deciding_ready_with_run_is_denied_and_names_task_run() {
+        let e = engine();
+        task_in(&e, "mine", "demo", "w").await;
+        let why = e
+            .authorize(&worker("w"), &Request::IntakeDecide { id: "mine".into(), decision: ready(true) })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("task.run"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn a_triager_may_do_nothing_but_coordinate_intake_in_its_own_scope() {
+        let e = engine();
+        task_in(&e, "t", "demo", "somebody").await;
+        let triager = wearing("triager");
+
+        assert!(!allowed(&e, &triager, Request::TaskCreate(NewTask { scope: Some("demo".into()), ..Default::default() })).await);
+        assert!(
+            !allowed(&e, &triager, Request::TaskUpdate { id: "t".into(), patch: titled("renamed"), reason: None }).await
+        );
+        assert!(!allowed(&e, &triager, Request::TaskRun { id: "t".into(), reason: None, continue_run: false }).await);
+        assert!(
+            !allowed(
+                &e,
+                &triager,
+                Request::TaskClose { id: "t".into(), reason: CloseReason::NotPlanned, duplicate_of: None, note: None }
+            )
+            .await
+        );
+        assert!(!allowed(&e, &triager, Request::TaskReport { id: "t".into(), report: report() }).await);
+        assert!(
+            !allowed(&e, &triager, Request::AgentConfigure { scope: "demo".into(), agent: declaration() }).await
+        );
+        assert!(!allowed(&e, &triager, Request::AgentStart { scope: "demo".into(), name: "x".into() }).await);
+        assert!(!allowed(&e, &triager, Request::WorkflowStart { id: "wf".into(), inputs: Default::default() }).await);
+
+        // And intake in a sibling scope is exactly as far out of reach.
+        task_in(&e, "elsewhere", "other", "anybody").await;
+        assert!(!allowed(&e, &triager, Request::IntakeInfo { id: "elsewhere".into(), text: "x".into() }).await);
+        assert!(!allowed(&e, &triager, Request::IntakeTriage { id: "elsewhere".into(), agent: None }).await);
+        assert!(
+            !allowed(
+                &e,
+                &triager,
+                Request::IntakeAssess { id: "elsewhere".into(), assessment: intake_assessment("other"), decide: false }
+            )
+            .await
+        );
+        assert!(
+            !allowed(&e, &triager, Request::IntakeDecide { id: "elsewhere".into(), decision: ready(false) }).await
+        );
+        assert!(!allowed(&e, &triager, Request::IntakeAdd(NewIntake { title: "x".into(), scope: Some("other".into()), ..Default::default() })).await);
+    }
+
+    #[tokio::test]
+    async fn intake_publish_needs_its_own_grant_named_exactly_and_reach_over_the_item() {
+        let e = engine();
+        task_in(&e, "mine", "demo", "w").await;
+        task_in(&e, "far", "other", "anyone").await;
+        let publish = |id: &str| Request::IntakePublish { id: id.into() };
+
+        // Nobody gets it by accident: not a worker (never held `task.create`,
+        // so never `intake.publish` either), not `foreman` (otherwise every
+        // grant), not `triager` (coordinates triage, never posts outward).
+        assert!(!allowed(&e, &worker("w"), publish("mine")).await);
+        assert!(!allowed(&e, &foreman(), publish("mine")).await, "foreman holds every grant but this one (#171)");
+        assert!(!allowed(&e, &wearing("triager"), publish("mine")).await);
+
+        // A role written `*` or `intake.*` does not pick it up either --
+        // `Grant::expand` excludes it from both wildcards.
+        let starred = engine_with_roles("roles:\n  starred:\n    grants: ['*']\n    reach: scope\n");
+        task_in(&starred, "s", "demo", "anyone").await;
+        assert!(!allowed(&starred, &wearing("starred"), Request::IntakePublish { id: "s".into() }).await, "`*` excludes it");
+
+        let dotted = engine_with_roles("roles:\n  dotted:\n    grants: ['intake.*']\n    reach: scope\n");
+        task_in(&dotted, "d", "demo", "anyone").await;
+        assert!(!allowed(&dotted, &wearing("dotted"), Request::IntakePublish { id: "d".into() }).await, "`intake.*` excludes it");
+
+        // Named exactly, it works, and stops at the scope boundary like any
+        // other grant.
+        let named = engine_with_roles("roles:\n  publisher:\n    grants: [intake.publish]\n    reach: scope\n");
+        task_in(&named, "n", "demo", "anyone").await;
+        task_in(&named, "far", "other", "anyone").await;
+        assert!(allowed(&named, &wearing("publisher"), publish("n")).await);
+        assert!(!allowed(&named, &wearing("publisher"), publish("far")).await, "out of the role's scope");
+
+        // The owner always passes -- publishing itself is the approval.
+        assert!(allowed(&e, &Caller::Owner, publish("far")).await);
+    }
+
+    // -- intake security fast lane (`#170`) ---------------------------------
+
+    #[tokio::test]
+    async fn intake_flag_security_needs_intake_assess_and_reach_over_the_item() {
+        let e = engine();
+        task_in(&e, "mine", "demo", "w").await;
+        task_in(&e, "not_mine", "demo", "someone").await;
+        task_in(&e, "far", "other", "anyone").await;
+        let flag = |id: &str| Request::IntakeFlagSecurity { id: id.into(), reason: "looks exploitable".into() };
+
+        // Flagging rides `intake.assess` -- the same grant, not a sixth one.
+        assert!(allowed(&e, &worker("w"), flag("mine")).await);
+        assert!(!allowed(&e, &worker("w"), flag("not_mine")).await, "not assigned to it");
+        assert!(allowed(&e, &foreman(), flag("not_mine")).await, "scope reach covers everything in demo");
+        assert!(!allowed(&e, &foreman(), flag("far")).await, "out of the foreman's scope");
+        assert!(allowed(&e, &wearing("triager"), flag("not_mine")).await);
+        assert!(!allowed(&e, &wearing("triager"), flag("far")).await);
+    }
+
+    #[tokio::test]
+    async fn intake_security_confirm_or_dismiss_is_the_owners_alone() {
+        let e = engine();
+        task_in(&e, "mine", "demo", "w").await;
+        let confirm = || Request::IntakeSecurity {
+            id: "mine".into(),
+            verdict: factory_core::intake::SecurityVerdict::Confirm,
+            evidence: String::new(),
+        };
+        // Neither a worker in reach, a foreman with scope reach, nor the
+        // triager -- whatever grants a role holds -- may decide. Only the
+        // owner, no token at all, can.
+        assert!(!allowed(&e, &worker("w"), confirm()).await);
+        assert!(!allowed(&e, &foreman(), confirm()).await);
+        assert!(!allowed(&e, &wearing("triager"), confirm()).await);
+        assert!(allowed(&e, &Caller::Owner, confirm()).await);
+    }
+
+    #[tokio::test]
+    async fn intake_security_reports_needs_no_grant() {
+        let e = engine();
+        assert!(allowed(&e, &worker("w"), Request::IntakeSecurityReports { scope: None }).await);
+        assert!(allowed(&e, &Caller::Owner, Request::IntakeSecurityReports { scope: None }).await);
+    }
+
+    /// The CRA Art. 14 reporting clock (`#157`, phase 1) is a read, open the
+    /// same way `Request::Policy`/`Request::IntakeSecurityReports` are.
+    #[tokio::test]
+    async fn policy_clock_needs_no_grant() {
+        let e = engine();
+        assert!(allowed(&e, &worker("w"), Request::PolicyClock { scope: None }).await);
+        assert!(allowed(&e, &Caller::Owner, Request::PolicyClock { scope: None }).await);
+    }
+
+    /// A clock submission (`Request::PolicyAttest.clock`) is still an
+    /// ordinary `policy.attest` write underneath -- carrying one must never
+    /// let a `reach: own` role bypass the scope-reach rule an ordinary
+    /// attestation is already checked against.
+    #[tokio::test]
+    async fn policy_attest_with_a_clock_mark_is_still_refused_to_an_own_reach_agent() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  attestor:\n    grants: [policy.attest]\n    reach: own\n",
+        );
+        let caller = Caller::Agent {
+            scope: "demo".into(),
+            name: "w".into(),
+            role: Role::new("attestor"),
+            run_id: None,
+        };
+        let attest = Request::PolicyAttest {
+            control: "cra/art-14".parse().unwrap(),
+            scope: "demo".into(),
+            evidence: "https://example.com/notice".into(),
+            note: None,
+            expires_at: Utc::now() + chrono::Duration::days(30),
+            clock: Some(factory_core::reporting_clock::ClockMark {
+                item: factory_core::reporting_clock::ClockItemRef::Finding {
+                    scope: "demo".into(),
+                    vulnerability: "CVE-2026-1".into(),
+                },
+                deadline: factory_core::reporting_clock::ClockDeadlineKind::EarlyWarning,
+            }),
+        };
+        assert!(!allowed(&e, &caller, attest).await);
+    }
+
     // -- roles inherited down the scope tree -------------------------------
 
     /// A small tree whose scope names deliberately do not match their paths:
@@ -2030,7 +2517,7 @@ mod tests {
             allowed(&e, &critic, Request::TaskReport { id: "mine".into(), report: report() }).await,
             "demo-app is below projects on disk, so it has engineering's reviewer"
         );
-        assert!(!allowed(&e, &critic, Request::TaskRun { id: "mine".into(), reason: None }).await);
+        assert!(!allowed(&e, &critic, Request::TaskRun { id: "mine".into(), reason: None, continue_run: false }).await);
     }
 
     #[tokio::test]
@@ -2045,7 +2532,7 @@ mod tests {
             .to_string();
         assert!(err.contains("reviewer"), "{err}");
         assert!(
-            err.contains("available in engineering/outsider are: foreman, worker"),
+            err.contains("available in engineering/outsider are: foreman, triager, worker"),
             "a name that reads like engineering's child is not below it: {err}"
         );
     }
@@ -2062,10 +2549,10 @@ mod tests {
             task_in(&e, id, scope, "somebody").await;
         }
         let lead = in_scope("demo-app", "boss", "lead");
-        assert!(allowed(&e, &lead, Request::TaskRun { id: "here".into(), reason: None }).await);
+        assert!(allowed(&e, &lead, Request::TaskRun { id: "here".into(), reason: None, continue_run: false }).await);
         for elsewhere in ["parent", "sibling", "child"] {
             assert!(
-                !allowed(&e, &lead, Request::TaskRun { id: elsewhere.into(), reason: None }).await,
+                !allowed(&e, &lead, Request::TaskRun { id: elsewhere.into(), reason: None, continue_run: false }).await,
                 "inheriting lead from projects gives no authority over {elsewhere}"
             );
             assert!(!allowed(&e, &lead, Request::TaskCancel { id: elsewhere.into(), reason: None, run: None }).await);
@@ -2120,7 +2607,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("engineering/outsider"), "{err}");
-        assert!(err.contains("foreman, worker"), "it lists the roles that scope has: {err}");
+        assert!(err.contains("foreman, triager, worker"), "it lists the roles that scope has: {err}");
     }
 
     #[tokio::test]
@@ -2210,6 +2697,45 @@ mod tests {
         let e = engine();
         assert!(allowed(&e, &worker("w"), Request::Dashboard { scope: None }).await);
         assert!(allowed(&e, &Caller::Owner, Request::Dashboard { scope: None }).await);
+    }
+
+    fn a_tile() -> factory_core::dashboard::Tile {
+        serde_yaml_ng::from_str("view: kpis\nsize: s\n").unwrap()
+    }
+
+    #[tokio::test]
+    async fn setting_or_resetting_the_dashboard_needs_dashboard_edit_and_scope_reach() {
+        let e = engine_with_roles(
+            "roles:\n  self-editor:\n    grants: [dashboard.edit]\n    reach: own\n  scope-editor:\n    grants: [dashboard.edit]\n    reach: scope\n",
+        );
+        let set = |scope: &str| Request::DashboardSet { scope: scope.into(), tiles: vec![a_tile()] };
+        let reset = |scope: &str| Request::DashboardReset { scope: scope.into() };
+
+        // Own reach cannot edit a dashboard at all -- there is no "its own"
+        // dashboard the way there is its own task.
+        assert!(!allowed(&e, &wearing("self-editor"), set("demo")).await);
+        assert!(!allowed(&e, &wearing("self-editor"), reset("demo")).await);
+
+        // Scope reach can, and stops at the caller's own scope.
+        assert!(allowed(&e, &wearing("scope-editor"), set("demo")).await);
+        assert!(allowed(&e, &wearing("scope-editor"), reset("demo")).await);
+        assert!(!allowed(&e, &wearing("scope-editor"), set("other")).await);
+        assert!(!allowed(&e, &wearing("scope-editor"), reset("other")).await);
+
+        // Neither a worker, nor a custom role that simply does not hold the
+        // grant, gets it by accident.
+        assert!(!allowed(&e, &worker("w"), set("demo")).await);
+        let plain = engine_with_roles("roles:\n  plain:\n    grants: [task.edit]\n    reach: scope\n");
+        assert!(!allowed(&plain, &wearing("plain"), set("demo")).await);
+
+        // `foreman` holds every grant, `dashboard.edit` included, and a
+        // foreman outside the target scope's reach is still denied.
+        assert!(allowed(&e, &foreman(), set("demo")).await);
+        assert!(!allowed(&e, &foreman(), set("other")).await);
+
+        // The owner always passes.
+        assert!(allowed(&e, &Caller::Owner, set("other")).await);
+        assert!(allowed(&e, &Caller::Owner, reset("other")).await);
     }
 
     // -- giving an agent a role --------------------------------------------

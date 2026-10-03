@@ -1,7 +1,9 @@
 use crate::agent::Lifetime;
 use crate::dashboard::DashboardConfig;
-use crate::policy::{ControlRef, Duration, NotApplicable, PolicyLayer, Tighten};
+use crate::policy::{ControlRef, NotApplicable, PolicyLayer, Tighten};
+use factory_kernel::Duration;
 use crate::quality::QualityLayer;
+use crate::ready::IntakeLayer;
 use crate::role::{Role, RoleOrigin, RoleSpec, Roles};
 use crate::error::{FactoryError, Result};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -370,6 +372,19 @@ impl Config {
         })
     }
 
+    /// The instance root's own implicit definition-of-ready layer (`#169`)
+    /// -- always present, unlike `root_quality_layer`: `ready.yaml` needs
+    /// no list to bind it, so there is no "root binds nothing" case to
+    /// return `None` for. Named the same way `root_quality_layer` is.
+    fn root_intake_layer(&self) -> IntakeLayer {
+        let root_name = self
+            .scope
+            .as_ref()
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| self.instance.name.clone());
+        IntakeLayer { scope: root_name, files: vec!["ready".to_string()], required: false }
+    }
+
     /// Every quality layer that applies to `scope`, root first: the root's
     /// top-level `quality:`, then each ancestor's own `scope.quality` down to
     /// `scope` itself -- `policy_chain_for_scope`'s walk exactly (ancestry by
@@ -391,6 +406,29 @@ impl Config {
         chain
     }
 
+    /// Every definition-of-ready layer that applies to `scope` (`#169`),
+    /// root first through `ancestors_of` -- by `Scope.path`, never by name,
+    /// so a sibling never inherits, exactly `quality_chain_for_scope`'s
+    /// walk. Unlike that walk, though, the first layer is not conditional
+    /// on any list: it is the instance root's own implicit `"ready"` layer,
+    /// always present (`required: false` -- see `ready::IntakeLayer` and
+    /// the module doc's "Fail closed" section for what that flag does), and
+    /// named from the same root scope `root_quality_layer` uses. Every
+    /// further layer comes from an ancestor's own `scope.intake`, each
+    /// `required: true`: nothing silently drops a name a scope bound on
+    /// purpose. Folding the chain -- add or tighten only, fail closed on an
+    /// unreadable file -- is `ready::effective`'s job, not this method's.
+    pub fn intake_chain_for_scope(&self, scope: &Scope) -> Vec<IntakeLayer> {
+        let mut chain = vec![self.root_intake_layer()];
+        for layer in self.ancestors_of(scope).into_iter().chain(std::iter::once(scope)) {
+            if layer.intake.is_empty() {
+                continue;
+            }
+            chain.push(IntakeLayer { scope: layer.name.clone(), files: layer.intake.clone(), required: true });
+        }
+        chain
+    }
+
     /// Refuse a config that gives an agent a role nothing in its scope's chain
     /// defines, and say which agent it was and what that scope does have.
     /// Falling back to the default instead would demote an agent on a typo
@@ -400,12 +438,14 @@ impl Config {
         self.refuse_root_scope_roles()?;
         self.refuse_root_scope_policies()?;
         self.refuse_root_scope_quality()?;
+        self.refuse_root_scope_intake()?;
         self.refuse_root_scope_dashboard()?;
         self.validate_dashboards(self.scopes.iter())?;
         self.infrastructure.validate()?;
         self.validate_environments()?;
         for scope in self.scope.iter().chain(&self.scopes) {
             scope.validate_dependencies()?;
+            refuse_zero_max_sessions(scope)?;
             let roles = self.roles_for_scope(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
@@ -467,11 +507,13 @@ impl Config {
         self.refuse_root_scope_roles()?;
         self.refuse_root_scope_policies()?;
         self.refuse_root_scope_quality()?;
+        self.refuse_root_scope_intake()?;
         self.refuse_root_scope_dashboard()?;
         self.validate_dashboards(std::iter::empty())?;
         self.infrastructure.validate()?;
         if let Some(scope) = &self.scope {
             scope.validate_dependencies()?;
+            refuse_zero_max_sessions(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
                 self.infrastructure.refuse_unknown_provider(scope, &agent)?;
@@ -547,6 +589,25 @@ impl Config {
             _ => Ok(()),
         }
     }
+
+    /// Unlike `roles`, `policies` and `quality` above, the root's own
+    /// definition of ready (`#169`) is not a list to move a `scope.intake`
+    /// binding to -- `.factory/intake/ready.yaml` is the root's whole layer
+    /// automatically, if it exists, and nothing else. So the root's own
+    /// scope entry may not bind named definitions at all.
+    fn refuse_root_scope_intake(&self) -> Result<()> {
+        match &self.scope {
+            Some(scope) if !scope.intake.is_empty() => Err(FactoryError::BadRequest(format!(
+                "the instance root's config gives its scope {:?} a `scope.intake` block. \
+                 The root already applies .factory/intake/ready.yaml to every scope automatically; \
+                 a nested scope binds further definitions of ready with its own `scope.intake`, but \
+                 the root has no list of its own to move {} to",
+                scope.name,
+                scope.intake.join(", ")
+            ))),
+            _ => Ok(()),
+        }
+    }
 }
 
 fn refuse_shell_args(scope: &Scope, agent: &ScopeAgent) -> Result<()> {
@@ -556,6 +617,31 @@ fn refuse_shell_args(scope: &Scope, agent: &ScopeAgent) -> Result<()> {
             scope.name,
             agent.name(),
         )));
+    }
+    Ok(())
+}
+
+/// A `max_sessions: 0` would never run anything -- which is never what
+/// somebody meant by it, only ever a stand-in for "unlimited" that should
+/// have been left out (`#179`). Refused at load, naming the scope's path so
+/// there is no ambiguity about which of two same-named scopes it was.
+fn refuse_zero_max_sessions(scope: &Scope) -> Result<()> {
+    if scope.max_sessions == Some(0) {
+        return Err(FactoryError::BadRequest(format!(
+            "scope {:?} at {} sets max_sessions: 0, which would never run anything; leave it out for no limit",
+            scope.name,
+            scope.path.display(),
+        )));
+    }
+    for agent in scope.declared_agents() {
+        if agent.max_sessions == Some(0) {
+            return Err(FactoryError::BadRequest(format!(
+                "scope {:?} at {} gives {:?} max_sessions: 0, which would never run anything; leave it out for no limit",
+                scope.name,
+                scope.path.display(),
+                agent.name(),
+            )));
+        }
     }
     Ok(())
 }
@@ -909,6 +995,15 @@ impl Default for DaemonConfig {
     }
 }
 
+/// The `http` interface's bind address when its own `settings` name none --
+/// the listener's fallback, and now the one place that fallback is written
+/// down (#193, phase 1, F8): `interfaces/http.rs`'s listener,
+/// `Engine::infrastructure` (`DaemonFacts.interfaces`), and
+/// `policies::daemon_facts` (`http_loopback_only`) all resolve an http
+/// interface's bind through [`InterfaceConfig::http_bind`] rather than each
+/// keeping its own copy of this constant.
+pub const DEFAULT_HTTP_BIND: &str = "127.0.0.1:8787";
+
 /// An interface adapter to mount. `kind` names the adapter; everything else is
 /// passed through untouched, so a plugin interface can carry its own settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -924,6 +1019,14 @@ impl InterfaceConfig {
             serde_yaml_ng::Value::String(s) => Some(s.clone()),
             other => serde_yaml_ng::to_string(other).ok().map(|s| s.trim().to_string()),
         })
+    }
+
+    /// The bind this interface would use as `http`: its own `settings.bind`
+    /// when it names one, else [`DEFAULT_HTTP_BIND`]. Every reader of a
+    /// configured http interface's address goes through this rather than
+    /// repeating the fallback.
+    pub fn http_bind(&self) -> String {
+        self.string("bind").unwrap_or_else(|| DEFAULT_HTTP_BIND.to_string())
     }
 }
 
@@ -1215,6 +1318,10 @@ pub enum AgentRef {
         /// See `ScopeAgent::provider`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
+        /// See `ScopeAgent::max_sessions`. Instances written before `#179`
+        /// already carried this key; it just had no effect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_sessions: Option<u32>,
     },
 }
 
@@ -1242,9 +1349,9 @@ impl<'de> Deserialize<'de> for AgentRef {
             #[serde(default)]
             provider: Option<String>,
             // Older Factory configs wrote this in the singular declaration.
-            // It has no effect now, but those files must continue to load.
-            #[serde(default, rename = "max_sessions")]
-            _max_sessions: Option<u32>,
+            // It used to have no effect; `#179` makes it live.
+            #[serde(default)]
+            max_sessions: Option<u32>,
         }
 
         let value = serde_yaml_ng::Value::deserialize(deserializer)?;
@@ -1262,6 +1369,7 @@ impl<'de> Deserialize<'de> for AgentRef {
                     args: declaration.args,
                     sandbox: declaration.sandbox,
                     provider: declaration.provider,
+                    max_sessions: declaration.max_sessions,
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -1319,6 +1427,12 @@ pub struct ScopeAgent {
     /// is refused at load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// How many sessions of this agent may be open at once -- a run
+    /// `Dispatching` or holding a session, plus one for a live permanent
+    /// agent of this name (`#179`). Absent is unlimited, today's behaviour.
+    /// `0` is refused at load: it would never run anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<u32>,
 }
 
 impl ScopeAgent {
@@ -1356,6 +1470,12 @@ pub struct Scope {
     /// instance default, `daemon.task_store`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_store: Option<String>,
+    /// How many sessions this scope may hold open at once, across every
+    /// agent in it -- counted the same way an agent's own `max_sessions` is
+    /// (`#179`). Absent is unlimited. `0` is refused at load. The root
+    /// scope's own `scope:` block may set this too, for an instance-wide cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<u32>,
     /// Roles this scope names for itself and for every scope below it by
     /// path. A same-named role here replaces the inherited one whole. Only a
     /// nested scope writes these: the instance root uses its top-level
@@ -1384,6 +1504,18 @@ pub struct Scope {
     /// same as `policies` above.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quality: Vec<String>,
+    /// Named definitions of ready (`#169`) this scope binds for itself and
+    /// every scope below it by path, on top of the instance root's own
+    /// implicit `.factory/intake/ready.yaml` layer -- see
+    /// `Config::intake_chain_for_scope`. Each name is a file stem,
+    /// `.factory/intake/<name>.yaml`. Unlike `quality` above there is no
+    /// top-level list this binds instead of: the root layer is always
+    /// `ready.yaml` if it exists, nothing else, so the instance root's own
+    /// scope entry refuses this block outright
+    /// (`Config::refuse_root_scope_intake`) rather than being told where
+    /// else to put it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intake: Vec<String>,
     /// Declared product components and external services for L2 Dependencies.
     #[serde(default, skip_serializing_if = "DependenciesConfig::is_empty")]
     pub dependencies: DependenciesConfig,
@@ -1485,6 +1617,8 @@ impl Scope {
             sandbox: Sandbox::None,
             // Likewise: its harness's default provider, if one claims it.
             provider: None,
+            // And no cap of its own -- only the scope's, if it has one.
+            max_sessions: None,
         });
         out
     }
@@ -1509,6 +1643,7 @@ impl Scope {
             args,
             sandbox,
             provider,
+            max_sessions,
         }) = &self.agent
         {
             out.push(ScopeAgent {
@@ -1520,6 +1655,7 @@ impl Scope {
                 args: args.clone(),
                 sandbox: *sandbox,
                 provider: provider.clone(),
+                max_sessions: *max_sessions,
             });
         }
         for a in &self.agents {
@@ -1812,6 +1948,24 @@ impl Factory {
         crate::quality::quality_dir(&self.root)
     }
 
+    /// Every definition-of-ready layer that applies to the scope a name
+    /// resolves to, root first -- `quality_chain`'s fallback exactly: a
+    /// name that resolves to no scope gets only the instance root's own
+    /// implicit layer.
+    pub fn intake_chain(&self, scope: &str) -> Vec<IntakeLayer> {
+        match self.scope(scope) {
+            Ok(found) => self.config.intake_chain_for_scope(found),
+            Err(_) => vec![self.config.root_intake_layer()],
+        }
+    }
+
+    /// Where definitions of ready live: `<root>/.factory/intake/<name>.yaml`
+    /// -- authored content like `quality_dir`, delegating to
+    /// `ready::ready_dir` for the same reason.
+    pub fn intake_dir(&self) -> PathBuf {
+        crate::ready::ready_dir(&self.root)
+    }
+
     /// The absolute working directory for a scope.
     pub fn scope_path(&self, name: &str) -> Result<PathBuf> {
         let scope = self.scope(name)?;
@@ -1897,6 +2051,24 @@ mod tests {
         .unwrap();
         scope.path = PathBuf::from(path);
         scope
+    }
+
+    /// Locks `Duration`'s wire form inside a real config struct, not just
+    /// the type on its own: moving it into `factory-kernel` must not change
+    /// so much as a byte of what `max_age: 30d` looks like on disk (#193,
+    /// phase 1, F7). See `factory_kernel::duration::tests` for the JSON side
+    /// of the same lock.
+    #[test]
+    fn a_dependencies_max_age_round_trips_through_yaml_byte_identically() {
+        let cfg = DependenciesConfig {
+            scan_workflow: None,
+            max_age: Some("30d".parse().unwrap()),
+            services: Vec::new(),
+        };
+        let yaml = serde_yaml_ng::to_string(&cfg).unwrap();
+        assert_eq!(yaml, "max_age: 30d\n", "serialized form must stay byte-identical");
+        let back: DependenciesConfig = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(back.max_age, cfg.max_age);
     }
 
     #[test]
@@ -2708,6 +2880,131 @@ mod tests {
         assert_eq!(f.quality_dir(), crate::quality::quality_dir(&f.root));
     }
 
+    // -- intake_chain_for_scope (#169) ----------------------------------------
+
+    /// A scope at `path` named `name`, binding `names` under `scope.intake`
+    /// -- `scope_with_quality`, for definitions of ready.
+    fn scope_with_intake(name: &str, path: &str, names: &str) -> Scope {
+        let mut yaml = format!("id: {name}-id\nname: {name}\n");
+        if !names.is_empty() {
+            yaml.push_str(&format!("intake: {names}\n"));
+        }
+        let mut scope: Scope = serde_yaml_ng::from_str(&yaml).unwrap();
+        scope.path = PathBuf::from(path);
+        scope
+    }
+
+    /// `quality_tree()`'s shape, for intake: `engineering` (`projects`) adds
+    /// `security`, `demo-app` (`projects/demo`) adds `strict` -- plus the
+    /// same lookalike and sideways scopes, so the chain is proven to follow
+    /// the path and nothing else. The root binds nothing of its own here:
+    /// its layer is `ready`, always, whether or not the file exists.
+    fn intake_tree() -> Config {
+        let mut c = config_with("");
+        c.scopes = vec![
+            scope_with_intake("company", ".", ""),
+            scope_with_intake("engineering", "projects", "[security]"),
+            scope_with_intake("demo-app", "projects/demo", "[strict, security]"),
+            scope_with_intake("engineering/tools", "projects/tools", ""),
+            scope_with_intake("engineering/other", "elsewhere", ""),
+            scope_with_intake("lookalike", "projects-x", ""),
+        ];
+        c
+    }
+
+    fn intake_chain_of(chain: &[IntakeLayer]) -> Vec<(String, Vec<String>, bool)> {
+        chain.iter().map(|l| (l.scope.clone(), l.files.clone(), l.required)).collect()
+    }
+
+    #[test]
+    fn the_intake_chain_is_root_first_then_each_ancestor_down_to_the_scope_itself() {
+        let c = intake_tree();
+        let chain = c.intake_chain_for_scope(scope_named(&c, "demo-app"));
+        assert_eq!(
+            intake_chain_of(&chain),
+            vec![
+                ("n".to_string(), vec!["ready".to_string()], false),
+                ("engineering".to_string(), vec!["security".to_string()], true),
+                ("demo-app".to_string(), vec!["strict".to_string(), "security".to_string()], true),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_nested_scope_inherits_intake_bindings_down_the_path_tree_and_never_up_or_sideways() {
+        let c = intake_tree();
+        let tools = c.intake_chain_for_scope(scope_named(&c, "engineering/tools"));
+        let scopes: Vec<&str> = tools.iter().map(|l| l.scope.as_str()).collect();
+        assert_eq!(scopes, vec!["n", "engineering"]);
+
+        for elsewhere in ["company", "engineering/other", "lookalike"] {
+            let chain = c.intake_chain_for_scope(scope_named(&c, elsewhere));
+            let scopes: Vec<&str> = chain.iter().map(|l| l.scope.as_str()).collect();
+            assert_eq!(scopes, vec!["n"], "{elsewhere} is not below projects by path, whatever its name says");
+        }
+    }
+
+    #[test]
+    fn the_root_intake_layer_is_always_present_with_no_bindings_anywhere() {
+        let c = config_with("");
+        let chain = c.intake_chain_for_scope(&scope_at("demo", "demo"));
+        assert_eq!(intake_chain_of(&chain), vec![("n".to_string(), vec!["ready".to_string()], false)]);
+    }
+
+    #[test]
+    fn the_root_intake_layer_is_named_from_its_own_registered_scope_and_never_appears_twice() {
+        let mut c = config_with("");
+        let root_scope: Scope = serde_yaml_ng::from_str("id: root-id\nname: company\npath: .\n").unwrap();
+        c.scope = Some(root_scope.clone());
+        c.scopes = vec![root_scope, scope_with_intake("demo", "projects/demo", "[strict]")];
+
+        let chain = c.intake_chain_for_scope(scope_named(&c, "demo"));
+        assert_eq!(
+            intake_chain_of(&chain),
+            vec![
+                ("company".to_string(), vec!["ready".to_string()], false),
+                ("demo".to_string(), vec!["strict".to_string()], true),
+            ]
+        );
+    }
+
+    #[test]
+    fn factory_intake_chain_matches_config_and_falls_back_to_the_root_for_an_unknown_name() {
+        let f = factory_with(vec![scope_with_intake("demo", "demo", "[strict]")]);
+        let expected = f.config.intake_chain_for_scope(f.scope("demo").unwrap());
+        assert_eq!(f.intake_chain("demo"), expected);
+        assert_eq!(intake_chain_of(&f.intake_chain("gone")), vec![("n".to_string(), vec!["ready".to_string()], false)]);
+    }
+
+    #[test]
+    fn an_intake_declaration_round_trips_through_yaml_on_a_scope() {
+        let s: Scope = serde_yaml_ng::from_str("id: s\nname: demo\nintake: [strict]\n").unwrap();
+        let reparsed: Scope = serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&s).unwrap()).unwrap();
+        assert_eq!(reparsed.intake, vec!["strict".to_string()]);
+    }
+
+    #[test]
+    fn a_scope_binding_no_intake_round_trips_with_no_intake_key() {
+        let s: Scope = serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap();
+        assert!(!serde_yaml_ng::to_string(&s).unwrap().contains("intake"));
+    }
+
+    #[test]
+    fn the_root_config_refuses_scope_intake_and_says_there_is_nowhere_else_to_put_it() {
+        let c = config_with("scope:\n  name: company\n  intake: [strict]\n");
+        let e = c.validate_instance().unwrap_err().to_string();
+        assert!(e.contains("scope.intake"), "{e}");
+        assert!(e.contains("automatically"), "{e}");
+        assert!(e.contains("strict"), "{e}");
+        assert!(c.validate().is_err(), "validate() calls the same guard");
+    }
+
+    #[test]
+    fn intake_dir_delegates_to_the_ready_modules_path() {
+        let f = factory("/inst");
+        assert_eq!(f.intake_dir(), crate::ready::ready_dir(&f.root));
+    }
+
     #[test]
     fn the_instance_root_message_does_not_claim_to_list_every_role() {
         let c = config_with("scope:\n  name: company\n  agents:\n    - name: critic\n      harness: pi\n      role: reviewer\n");
@@ -2824,6 +3121,7 @@ mod tests {
         assert_eq!(a.name(), "reviewer");
         assert_eq!(a.lifetime, Lifetime::Temporary);
         assert!(!a.autostart(), "temporary agents wait to be asked for");
+        assert_eq!(a.max_sessions, Some(1), "the legacy singular block's value is kept, not thrown away (#179)");
     }
 
     #[test]
@@ -2840,6 +3138,43 @@ mod tests {
         assert!(!s.standing_agents()[0].autostart());
     }
 
+    /// `max_sessions` has to be added in three places -- `ScopeAgent`, the
+    /// hand-written `Declaration` inside `AgentRef`'s `Deserialize`, and the
+    /// `AgentRef::Declared` variant it builds -- exactly like `sandbox`'s own
+    /// comment on this file describes. Prove both spellings, plus a scope's
+    /// own cap, rather than assume the third site was enough (`#179`).
+    #[test]
+    fn max_sessions_loads_from_both_agent_spellings_and_from_the_scope_itself() {
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: a\npath: .\nmax_sessions: 4\nagents:\n  - name: codex\n    harness: codex\n    max_sessions: 3\n\
+             \x20 - name: bare\n    harness: shell\n",
+        )
+        .unwrap();
+        assert_eq!(s.max_sessions, Some(4), "the scope's own cap");
+        let declared = s.declared_agents();
+        assert_eq!(declared[0].max_sessions, Some(3), "the agents: list spelling");
+        assert_eq!(declared[1].max_sessions, None, "absent means unlimited");
+    }
+
+    #[test]
+    fn a_zero_max_sessions_is_refused_at_load_naming_the_scopes_path() {
+        let c = config_with(
+            "scopes:\n  - name: demo\n    path: projects/demo\n    agents:\n      - name: codex\n        harness: codex\n        max_sessions: 0\n",
+        );
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("projects/demo"), "{e}");
+        assert!(e.contains("codex"), "{e}");
+        assert!(e.contains("max_sessions: 0"), "{e}");
+    }
+
+    #[test]
+    fn a_zero_scope_max_sessions_is_refused_at_load() {
+        let c = config_with("scopes:\n  - name: demo\n    path: projects/demo\n    max_sessions: 0\n");
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("projects/demo"), "{e}");
+        assert!(e.contains("max_sessions: 0"), "{e}");
+    }
+
     #[test]
     fn a_scope_may_name_its_agent_either_way() {
         let plain: Scope = serde_yaml_ng::from_str("name: a\npath: .\nagent: pi\n").unwrap();
@@ -2850,6 +3185,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(declared.agent_adapter(), Some("pi"));
+        assert_eq!(declared.declared_agents()[0].max_sessions, Some(1));
 
         let none: Scope = serde_yaml_ng::from_str("name: a\npath: .\n").unwrap();
         assert_eq!(none.agent_adapter(), None);

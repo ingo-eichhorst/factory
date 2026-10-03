@@ -1,0 +1,25 @@
+# Apply with: factory workflow create --file workflows/factory-dependency-scan.yaml
+# The nodes are independent: release work runs `built`; the recurring instance
+# check can run `running` without rebuilding Factory.
+name: factory-dependency-scan
+description: Build auditable Factory releases and scan the installed instance.
+scope: factory
+nodes:
+  - id: built
+    position: { x: 0, y: 0 }
+    task:
+      title: Build and scan Factory release
+      agent: shell
+      timeout_seconds: 3600
+      labels: { workflow: factory-dependency-scan, lifecycle: built }
+      instructions: examples/factory-dependency-scan.sh built
+  - id: running
+    position: { x: 0, y: 180 }
+    task:
+      title: Scan installed Factory binaries
+      agent: shell
+      worktree: false
+      timeout_seconds: 1800
+      labels: { workflow: factory-dependency-scan, lifecycle: running }
+      instructions: examples/factory-dependency-scan.sh running
+edges: []

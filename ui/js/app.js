@@ -12,10 +12,11 @@ import { legacyAgentRoute, loadRuntimeConnections, renderRuntimeConnections } fr
 import { loadRoles, wireRoles } from "./roles.js";
 import { openCreate } from "./task-form.js";
 import { acceptWorkflowEvent, loadWorkflows, readWorkflowTail, renderWorkflows, wireWorkflows, workflowTail } from "./workflows.js";
-import { loadDashboard, renderDashboard, loadInbox, renderInbox, wireDashboard } from "./dashboard.js";
+import { loadDashboard, renderDashboard, loadInbox, renderInbox, wireDashboard, isDashboardEditorOpen } from "./dashboard.js";
 import { loadOperations, showOperations, hideOperations, wireOperations } from "./operations.js";
 import { loadIntake, showIntake, hideIntake, refreshIntake, wireIntake } from "./intake.js";
 import { touchesIntake } from "./intake-model.js";
+import { taskUsageMoved } from "./usage-model.js";
 import { initActivity, recordEvent, markWatching, renderActivity, activityFilter, setActivityFilter } from "./activity.js";
 import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
 import { loadEnvironment, renderSandboxes } from "./sandboxes.js";
@@ -26,6 +27,7 @@ import { loadDatasets, renderDatasetsSegment, wireDatasets } from "./datasets.js
 import { acceptBenchRunEvent, loadBenchRuns, renderBenchRunsSegment, wireBenchRuns } from "./bench-runs.js";
 import { loadKnowledge, renderKnowledge, knowledgeTail, readKnowledgeTail } from "./knowledge.js";
 import { loadInfrastructure, renderInfrastructure } from "./infrastructure.js";
+import { refreshDoctor, renderDoctor, wireDoctor } from "./doctor.js";
 import { refreshBackup, renderBackup, wireBackup } from "./backup.js";
 import { isBackupEvent } from "./backup-model.js";
 import { refreshEnvironments, wireEnvironments } from "./environments.js";
@@ -140,6 +142,7 @@ const VIEWS = {
   // -- and refetched on `deployment_updated` and
   // `environment_status_changed` (`onEvent` below).
   environments: { onShow: startEnvironments, onHide: stopAgentPoll },
+  doctor: { onShow: startDoctor, onHide: stopAgentPoll },
   // Polled like Infrastructure -- the destination is a disk that can be
   // unplugged, which fires no event -- and refetched on every `backup_*`
   // event (`onEvent` below), which the daemon's own job publishes too.
@@ -235,7 +238,7 @@ const LEVEL_VIEWS = {
   // Quality closes the row: benchmarks and knowledge are how the work gets
   // better, quality attributes whether it has got good enough.
   imp: ["benchmarks", "knowledge", "quality"],
-  infra: ["infrastructure", "environments", "backup"],
+  infra: ["infrastructure", "doctor", "environments", "backup"],
 };
 
 /// The live level that claims `tab`, for backfilling `state.level` before any
@@ -370,6 +373,7 @@ function rerender(route) {
   // the rail says; what narrows is the agents listed under each account and
   // under Unassigned -- the same split Secrets keeps for the home directory.
   else if (state.tab === "infrastructure") renderInfrastructure();
+  else if (state.tab === "doctor") renderDoctor();
   // A backup is of the whole instance: no rail selection narrows it.
   else if (state.tab === "backup") renderBackup();
 }
@@ -533,6 +537,12 @@ function startEnvironments() {
   state.agentPoll = setInterval(refreshEnvironments, 30000);
 }
 
+function startDoctor() {
+  stopAgentPoll();
+  refreshDoctor();
+  state.agentPoll = setInterval(refreshDoctor, 30000);
+}
+
 function startBackup() {
   stopAgentPoll();
   refreshBackup();
@@ -611,6 +621,7 @@ async function boot() {
   wireBenchRuns();
   $("knowledge-refresh").onclick = () => loadKnowledge();
   $("infrastructure-refresh").onclick = () => refreshInfrastructure();
+  wireDoctor();
   wireBackup();
   wireEnvironments();
   wireOccupancy();
@@ -696,9 +707,11 @@ function onEvent(ev) {
     case "run_updated":
       if (state.open === ev.run.task_id) {
         const i = state.runs.findIndex(r => r.id === ev.run.id);
-        // A new usage reading moves the task's sum too (#117); re-read it
-        // only then, not on every status flicker.
-        const usageMoved = JSON.stringify(i >= 0 ? state.runs[i].usage : null) !== JSON.stringify(ev.run.usage || null);
+        // A new usage reading moves the task's sum too (#117), and so does
+        // a run turning terminal, or gaining its re-estimate, with its usage
+        // unchanged -- the comparisons read those. Re-read only then, not
+        // on every flicker of something else.
+        const usageMoved = taskUsageMoved(i >= 0 ? state.runs[i] : null, ev.run);
         if (i >= 0) state.runs[i] = ev.run; else state.runs.unshift(ev.run);
         if (usageMoved) loadTaskUsage().then(renderModal);
         // A new run is the one worth watching.
@@ -739,6 +752,12 @@ function onEvent(ev) {
   // `/api/production` answers -- the dashboard's history cards refetch on it
   // rather than waiting for the window or scope to change.
   if (ev.type === "run_updated" && state.tab === "dashboard") loadDashboard();
+  // A dashboard layout was saved or reset, here or from another session
+  // (`#160`). Skipped while Customise is open on this page: a saver's own
+  // submit already refreshes locally and closes the editor before this
+  // could fire for it, so a refetch arriving here is always someone else's
+  // change, and it must never clobber a draft in progress.
+  if (ev.type === "dashboard_changed" && state.tab === "dashboard" && !isDashboardEditorOpen()) loadDashboard();
   // An attestation recorded or withdrawn, published on both -- see
   // `Event::PolicyChanged`. Reload whenever the tab is open, not only when
   // the scope it names is the one on screen: an ancestor's attestation can
@@ -755,6 +774,9 @@ function onEvent(ev) {
       || ev.type === "task_deleted")) {
     reloadPolicy();
   }
+  if (state.tab === "policy" && ["workflow_created", "workflow_updated", "workflow_deleted"].includes(ev.type)) {
+    reloadPolicy();
+  }
   // A check-in recorded against a manual key result -- see `Event::GoalsChanged`.
   // Reload whenever the tab is open: `reloadGoals` also refreshes the key
   // result detail modal, if one happens to be open on the checked-in key
@@ -764,6 +786,7 @@ function onEvent(ev) {
   if (isBackupEvent(ev) && state.tab === "backup") refreshBackup();
   // A deployment began or ended, or an environment's status changed.
   if (isEnvironmentsEvent(ev) && state.tab === "environments") refreshEnvironments();
+  if (state.tab === "doctor" && (ev.type === "task_entry" || ev.type === "run_updated")) refreshDoctor();
   // A scenario's own policy delta and goal-scenario probabilities are read
   // off the same live evidence and check-ins those two events already name;
   // `reloadScenarios` is a full reload (the forecast itself is a Monte Carlo

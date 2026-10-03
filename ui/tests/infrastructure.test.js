@@ -21,6 +21,8 @@ import {
   infraFailure,
   isEmptyProviders,
   kindBadge,
+  providerWindowView,
+  resetsIn,
   sortHarnesses,
   visibleAgents,
 } from "../js/infra-model.js";
@@ -75,16 +77,16 @@ const NULL_HOST = {
 
 // ------------------------------------------------------------------ the level
 
-test("L1 Infrastructure is live, with its sub-label, one tab and a view", () => {
+test("L1 Infrastructure is live, with its sub-label, tab and view", () => {
   assert.doesNotMatch(page, /id="lv-infra"[^>]*disabled/);
   assert.doesNotMatch(page, /id="lv-infra"[^>]*Not built yet/);
-  assert.match(page, /id="lv-infra"[\s\S]*?<span class="lv-sub">Host, daemon, AI accounts, operations and backup<\/span>/);
+  assert.match(page, /id="lv-infra"[\s\S]*?<span class="lv-sub">Host, daemon, Doctor, operations and backup<\/span>/);
   assert.match(page, /id="tab-infrastructure"[^>]*>Infrastructure<\/button>/);
   assert.match(page, /id="view-infrastructure"/);
 });
 
 test("LEVEL_VIEWS.infra names Infrastructure first, and the view is registered", () => {
-  assert.match(app, /infra: \["infrastructure", "environments", "backup"\]/);
+  assert.match(app, /infra: \["infrastructure", "doctor", "environments", "backup"\]/);
   assert.match(app, /infrastructure: \{ onShow: startInfrastructure, onHide: stopAgentPoll \}/);
   assert.match(app, /state\.tab === "infrastructure"/, "the rail's re-render names every tab");
 });
@@ -219,6 +221,48 @@ test("unassigned agents group the same way and narrow to the rail", () => {
 
 test("an agent links to the roster with its scope selected", () => {
   assert.equal(agentHref("factory"), "#factory/roster");
+});
+
+test("provider windows distinguish measured, stale, apportioned, and unknown", () => {
+  const measured = providerWindowView({
+    window_minutes: 300, used_percent: 42.25, stale: false,
+    attribution: "apportioned", attribution_quality: "confirmed", trend_percent: 3.5,
+  });
+  assert.equal(measured.name, "5-hour");
+  assert.equal(measured.percent, 42.25);
+  assert.match(measured.detail, /apportioned/);
+  assert.match(measured.detail, /\+3\.5 points/);
+  const stale = providerWindowView({ window_minutes: 10080, used_percent: 80, stale: true });
+  assert.equal(stale.name, "weekly");
+  assert.equal(stale.tone, "stale");
+  const unknown = providerWindowView({ window_minutes: 300, used_percent: null, unknown: "no baseline" });
+  assert.equal(unknown.percent, null);
+  assert.equal(unknown.tone, "unknown");
+  assert.match(unknown.detail, /no baseline/);
+});
+
+test("a provider window says when it resets, relative to now, and never guesses", () => {
+  const now = Date.parse("2026-09-26T12:00:00Z");
+  assert.equal(resetsIn("2026-09-26T14:10:00Z", now), "resets in 2h 10m");
+  assert.equal(resetsIn("2026-09-26T12:00:30Z", now), "resets in 1m");
+  assert.equal(resetsIn("2026-09-29T15:00:00Z", now), "resets in 3d 3h");
+  assert.equal(resetsIn("2026-09-26T11:00:00Z", now), "reset passed");
+  assert.equal(resetsIn("not a time", now), null);
+  assert.equal(resetsIn(undefined, now), null);
+  const view = providerWindowView({ window_minutes: 300, used_percent: 10, resets_at: "2026-09-26T14:10:00Z" }, now);
+  assert.match(view.detail, /resets in 2h 10m/);
+});
+
+test("a provider window's badge is the sampled interval's, and an unattributable change says why", () => {
+  const direct = providerWindowView({ window_minutes: 300, used_percent: 10, attribution: "direct" });
+  assert.match(direct.detail, /direct/);
+  const unknown = providerWindowView({
+    window_minutes: 300, used_percent: 10, attribution_unknown: "no earlier sample of this window",
+  });
+  assert.match(unknown.detail, /attribution unknown — no earlier sample of this window/);
+  const undated = providerWindowView({ window_minutes: 300, used_percent: 10, stale: true, sample_time_estimated: true });
+  assert.equal(undated.tone, "stale");
+  assert.match(undated.detail, /sample time not reported/);
 });
 
 // ------------------------------------------------------------------ fetch failures

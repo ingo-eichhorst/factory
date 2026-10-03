@@ -5,8 +5,8 @@
 //! scan attaches; it is deliberately not a sixth adapter seam.
 
 use crate::config::DependencyService;
-use crate::policy::Duration;
 use chrono::{DateTime, Utc};
+use factory_kernel::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -203,6 +203,41 @@ pub struct DocumentSummary {
     pub tool_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_time: Option<DateTime<Utc>>,
+    /// The released product this document describes. Old documents and
+    /// third-party scope scans need not carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<ProductIdentity>,
+}
+
+/// Factory's release identity. Version alone is not enough while releases
+/// still share the workspace's `0.1.0`; the source commit is part of the key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductIdentity {
+    pub version: String,
+    pub git_sha: String,
+}
+
+/// Read a release identity from CycloneDX's root component. Producers put the
+/// commit beside the component as a namespaced property, leaving the SBOM
+/// standard and useful to tools that know nothing about Factory.
+pub fn product_identity(document: &Value) -> Option<ProductIdentity> {
+    let component = document.get("metadata")?.get("component")?;
+    let version = component.get("version")?.as_str()?.trim();
+    let git_sha = component
+        .get("properties")?
+        .as_array()?
+        .iter()
+        .find(|property| property.get("name").and_then(Value::as_str) == Some("factory:git-sha"))?
+        .get("value")?
+        .as_str()?
+        .trim();
+    if version.is_empty() || git_sha.is_empty() || git_sha == "unknown" {
+        return None;
+    }
+    Some(ProductIdentity {
+        version: version.to_string(),
+        git_sha: git_sha.to_string(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -325,11 +360,79 @@ pub struct DependenciesReport {
     pub services: Vec<DependencyServiceView>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorStatus {
+    Current,
+    Behind,
+    Missing,
+}
+
+/// `GET /api/doctor`: Factory as installed on this instance, compared with
+/// the newest Factory build the dependency evidence knows about.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DoctorReport {
+    pub now: DateTime<Utc>,
+    pub status: DoctorStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built: Option<LifecycleDocuments>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<LifecycleDocuments>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<DependencyFinding>,
+}
+
+/// One (scope, vulnerability) sighted against a `built` or `running` SBOM
+/// that is KEV- or EUVD-listed -- the CRA Art. 14 reporting clock's L2 read
+/// (`#157`, phase 1). `Engine::exploited_findings` (daemon `dependencies.rs`)
+/// builds these by walking stored documents in `attached_at` order; the
+/// clock (`reporting_clock::compute`) turns each into an item with no
+/// further grouping, since there is already exactly one per vulnerability.
+///
+/// A **sighting** is a vulnerability document paired with a built or running
+/// SBOM that reports `kev || euvd` and whose `analysis.state` is not
+/// `not_affected`, `false_positive`, `resolved` or `resolved_with_pedigree`;
+/// a `declared` SBOM never counts. Once sighted, the item survives a later
+/// scan that drops or resolves it -- CRA counts from awareness, not from
+/// whatever the newest scan currently shows -- and `reported_now` says
+/// whether the newest built/running vulnerability document still mentions
+/// it at all. Only a *later* `not_affected`/`false_positive` in the newest
+/// built/running document that mentions the vulnerability excludes it
+/// (`latest_vex`), and an excluded item carries no clock deadlines.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExploitedFinding {
+    pub scope: String,
+    pub vulnerability: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<AffectedComponent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub states: Vec<LifecycleState>,
+    /// The first qualifying sighting's own vulnerability document's
+    /// `attached_at` -- never the SBOM's, and never the tool's own
+    /// `scan_time` (`DoctorReport`'s own reasoning): this is the CRA
+    /// awareness time, daemon-stamped.
+    pub first_seen_at: DateTime<Utc>,
+    pub first_document: Attachment,
+    /// The newest built/running document mentioning this vulnerability's own
+    /// `analysis.state`, when that state is `not_affected` or
+    /// `false_positive`. `None` means not excluded, whatever an older
+    /// mention once said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_vex: Option<String>,
+    /// Whether the newest built/running vulnerability document overall still
+    /// mentions this vulnerability. `false` never removes the item or its
+    /// awareness time.
+    #[serde(default)]
+    pub reported_now: bool,
+}
+
 /// The policy evaluator's compact view of a Dependencies report.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DependenciesFact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared_sbom_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built_sbom_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub open: BTreeMap<Severity, u32>,
     #[serde(default)]
@@ -370,5 +473,23 @@ mod tests {
         assert!(validate_document(no_state, AttachmentKind::Sbom)
             .unwrap_err()
             .contains("lifecycles"));
+    }
+
+    #[test]
+    fn reads_product_identity_only_when_version_and_commit_are_present() {
+        let built: Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/dependencies/build-sbom.cdx.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            product_identity(&built),
+            Some(ProductIdentity {
+                version: "0.1.0".into(),
+                git_sha: "0123456789abcdef0123456789abcdef01234567".into(),
+            })
+        );
+
+        let declared: Value = serde_json::from_slice(SBOM).unwrap();
+        assert_eq!(product_identity(&declared), None);
     }
 }

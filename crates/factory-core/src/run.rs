@@ -99,6 +99,9 @@ pub enum Trigger {
     Retry,
     Agent,
     Workflow,
+    /// Released automatically because every task named in `depends_on`
+    /// completed successfully.
+    Dependency,
     /// Started as one attempt of a bench run -- see `bench::BenchOrigin`,
     /// which the task itself carries.
     Bench,
@@ -112,6 +115,7 @@ impl Trigger {
             Self::Retry => "retry",
             Self::Agent => "agent",
             Self::Workflow => "workflow",
+            Self::Dependency => "dependency",
             Self::Bench => "bench",
         }
     }
@@ -205,6 +209,19 @@ impl FailKind {
             Self::CancelledWithParent => "cancelled_with_parent",
         }
     }
+
+    /// Whether a run that ended this way is a candidate for `task run
+    /// --continue` (#178 first slice): the daemon's own infrastructure gave
+    /// up on it -- an ack that never came, a runtime that ran out the clock,
+    /// or a session that vanished -- never a failure the agent itself chose
+    /// (`AgentFailed`, a cancel) or one the harness itself reported
+    /// (`TurnEnded`, `StopFailure`). `DispatchFailed` is a candidate too, but
+    /// only when a session had already come up -- callers check that
+    /// separately (`Run::last_session`), since a dispatch that never reached
+    /// an agent has no conversation to resume.
+    pub fn is_infrastructure(self) -> bool {
+        matches!(self, Self::AckTimeout | Self::RunTimeout | Self::SessionGone | Self::DispatchFailed)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,9 +254,64 @@ pub struct Run {
     pub runtime: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionRef>,
-    /// The secret the agent presents when reporting on this run.
+    /// The same value as `session`, from the moment it was first set, but
+    /// never cleared -- `session` itself is let go once the run ends
+    /// (`RunPatch::clear_session`), so this is the only way a later
+    /// `--continue` can still ask the runtime whether *that* session is
+    /// really gone (rule 1: never run two processes on one conversation), or
+    /// tell a `DispatchFailed` that never reached an agent apart from one
+    /// that did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_session: Option<SessionRef>,
+    /// The secret the agent presents when reporting on this run. Cleared the
+    /// moment the run ends (`RunPatch::clear_token`) -- see
+    /// `spent_token_sha256`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// `token_digest` of what `token` held just before it was cleared --
+    /// never the token itself, which is gone for good once `finish_run`
+    /// clears it. Kept only so a later `--continue`'s new run can carry the
+    /// digest forward in `superseded_token_sha256s`, which is the only thing
+    /// that ever reads this: a digest match grants nothing -- it only tells
+    /// `caller_for`/`check_run_token` that a rejected token *used to be*
+    /// this task's, so they can say why rather than refuse it as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_token_sha256: Option<String>,
+    /// `token_digest` of every token that used to be valid for this task's
+    /// conversation and no longer is: the run(s) `--continue` replaced. An
+    /// agent resumed after an infrastructure failure may still have an old
+    /// report command in its own history (`AGENTS.md` rule 2) -- `caller_for`
+    /// and `check_run_token` digest a rejected token and recognise it in
+    /// this list, refusing it with "a newer run ... exists" rather than the
+    /// generic "wrong token" -- the only use this list is ever put to; a
+    /// match here authorizes nothing. Chained forward across repeated
+    /// continues, so a second one still voids the first run's commands too.
+    /// Empty on every run that was not itself a continuation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_token_sha256s: Vec<String>,
+    /// Set when this run was dispatched by `factory task run --continue`:
+    /// the previous run's id, whether or not the continuation actually
+    /// managed to resume a session (see `resumed_session` for that).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued_from: Option<String>,
+    /// The harness's own conversation/session id this run actually resumed
+    /// -- set only once every fallback check passed and the agent was
+    /// launched with `Agent::resume_spec`'s args. `Some` here is what tells
+    /// `AgentContext::reporting_contract` and the prompt to say earlier
+    /// report commands are void; `continued_from.is_some()` alone is not
+    /// enough, since a `--continue` that fell back to fresh has nothing to
+    /// warn about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_session: Option<String>,
+    /// The task estimate as it stood when this attempt was dispatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_estimate: Option<crate::task::Estimate>,
+    /// The configured provider account selected for this attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_account: Option<String>,
+    /// The first-turn re-estimate, recorded once and never rewritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub re_estimate: Option<crate::usage::ReEstimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     /// The workflow route selected by this run's terminal `done` report.
@@ -314,6 +386,13 @@ pub struct Run {
     /// together with `turn_ended_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_end_reason: Option<String>,
+    /// The harness's own session id, from the newest `turn-ended` hook that
+    /// carried one -- Claude Code's `Stop`/`StopFailure` payload names its
+    /// own `session_id` (#178). Never cleared, unlike `turn_ended_at`: this
+    /// is `--continue`'s fallback source for which session to resume when
+    /// the previous run's usage snapshots never recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_ended_session_id: Option<String>,
     /// The steps this run must pass before `done` counts, fixed at dispatch
     /// from its task's control plan (`#118`) -- a catalogue edited while the
     /// run works does not change what it is held to. Empty for a run with
@@ -332,13 +411,33 @@ pub struct Run {
 }
 
 impl Run {
-    /// The view that leaves the daemon. The token is the one field a run's own
-    /// observers must not see -- it is what stops one agent closing another's.
+    /// The view that leaves the daemon. `token` is the field a run's own
+    /// observers must not see -- it is what stops one agent closing
+    /// another's. `spent_token_sha256`/`superseded_token_sha256s` grant
+    /// nothing on their own (a digest cannot be presented back as a token),
+    /// but redacted the same way regardless: what tokens a run used to
+    /// recognise is not a run's own observers' business either.
     pub fn redacted(&self) -> Run {
         let mut r = self.clone();
         r.token = None;
+        r.spent_token_sha256 = None;
+        r.superseded_token_sha256s = Vec::new();
         r
     }
+}
+
+/// SHA-256 of `token`, lowercase hex. What `Run::spent_token_sha256` and
+/// `Run::superseded_token_sha256s` store instead of the token itself:
+/// enough to recognise a rejected token as one that used to be valid for
+/// this task (`caller_for`, `check_run_token`), never enough to reconstruct
+/// or replay it -- a digest match authorizes nothing. `sha2` is already a
+/// `factory-core` dependency (`scenario::seed_from`), so this adds no new
+/// one.
+pub fn token_digest(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 /// What the engine hands the store. Everything the store owns -- the id, the
@@ -368,6 +467,12 @@ pub struct RunPatch {
     pub status: Option<RunStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_estimate: Option<crate::task::Estimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub re_estimate: Option<crate::usage::ReEstimate>,
     /// `None` means "leave alone" everywhere else here, so letting go of a
     /// session needs a field of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -383,6 +488,31 @@ pub struct RunPatch {
     /// A finished run has no more use for its token.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_token: bool,
+    /// See `Run::spent_token_sha256`. Set by `finish_run`, in the same patch
+    /// as `clear_token`, to `token_digest` of what `token` held a moment
+    /// before -- read back off the store rather than trusted from a caller,
+    /// since a patch has no other way to see the value it is about to clear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_token_sha256: Option<String>,
+    /// See `Run::superseded_token_sha256s`. Set once, at dispatch, on a run
+    /// created by `--continue`; never patched again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_token_sha256s: Vec<String>,
+    /// See `Run::continued_from`. Set once, at dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued_from: Option<String>,
+    /// See `Run::resumed_session`. Set once, at dispatch, only when a
+    /// continuation actually resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_session: Option<String>,
+    /// See `Run::last_session`. Set together with `session`, and with
+    /// nothing that ever clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_session: Option<SessionRef>,
+    /// See `Run::turn_ended_session_id`. Set from a `turn-ended` hook
+    /// payload that carried one; never cleared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_ended_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -469,6 +599,82 @@ mod tests {
             assert_eq!(json, serde_json::json!(kind.as_str()));
             assert_eq!(serde_json::from_value::<FailKind>(json).unwrap(), kind);
         }
+    }
+
+    #[test]
+    fn only_the_daemons_own_infrastructure_giving_up_is_a_continue_candidate() {
+        for kind in [FailKind::AckTimeout, FailKind::RunTimeout, FailKind::SessionGone, FailKind::DispatchFailed] {
+            assert!(kind.is_infrastructure(), "{kind:?}");
+        }
+        for kind in [
+            FailKind::BlockedTimeout,
+            FailKind::AgentFailed,
+            FailKind::TurnEnded,
+            FailKind::StopFailure,
+            FailKind::CancelledByPerson,
+            FailKind::CancelledByAgent,
+            FailKind::CancelledWithParent,
+        ] {
+            assert!(!kind.is_infrastructure(), "{kind:?}");
+        }
+    }
+
+    // -- #178: a former token is kept only as a digest ----------------------
+
+    #[test]
+    fn token_digest_is_deterministic_and_distinct_per_input() {
+        let a = token_digest("the-actual-secret");
+        let b = token_digest("the-actual-secret");
+        let c = token_digest("a-different-secret");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.len(), 64, "sha-256 as lowercase hex is 64 characters");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_ne!(a, "the-actual-secret", "a digest, never the token itself");
+    }
+
+    fn minimal_finished_run() -> Run {
+        let json = r#"{
+            "id": "r1", "task_id": "t1", "attempt": 1, "status": "failed",
+            "trigger": "manual", "agent": "shell", "runtime": "herdr",
+            "started_at": "2024-01-01T00:00:00Z", "ended_at": "2024-01-01T00:05:00Z"
+        }"#;
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn a_finished_runs_serialized_row_holds_no_plaintext_token_anywhere() {
+        let mut run = minimal_finished_run();
+        let secret = "sk-live-do-not-leak-this-token";
+        let digest = token_digest(secret);
+        // `token` itself is already `None` on a finished run (`clear_token`);
+        // what `finish_run` actually stores going forward is the digest.
+        run.token = None;
+        run.spent_token_sha256 = Some(digest.clone());
+        run.superseded_token_sha256s = vec![digest.clone()];
+
+        let serialized = serde_json::to_string(&run).unwrap();
+        assert!(!serialized.contains(secret), "the raw token must never be serialized: {serialized}");
+        assert!(serialized.contains(&digest), "sanity: the digest itself is present, so this is not a vacuous check");
+
+        // Not just the top-level JSON text -- no field, named or not, holds it.
+        let value = serde_json::to_value(&run).unwrap();
+        for (key, field) in value.as_object().unwrap() {
+            if let Some(s) = field.as_str() {
+                assert_ne!(s, secret, "field {key:?} must not hold the raw token");
+            }
+        }
+    }
+
+    #[test]
+    fn redacted_blanks_the_digest_fields_too() {
+        let mut run = minimal_finished_run();
+        let digest = token_digest("whatever");
+        run.spent_token_sha256 = Some(digest.clone());
+        run.superseded_token_sha256s = vec![digest];
+        let r = run.redacted();
+        assert!(r.spent_token_sha256.is_none());
+        assert!(r.superseded_token_sha256s.is_empty());
     }
 
     #[test]

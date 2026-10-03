@@ -151,7 +151,8 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         runtime,
         status: crate::task::TaskStatus::Pending,
         schedule: new.schedule,
-        estimate_seconds: new.estimate_seconds,
+        estimate_seconds: new.estimate.as_ref().map(|e| e.time.expected).or(new.estimate_seconds),
+        estimate: new.estimate.or_else(|| new.estimate_seconds.map(crate::task::Estimate::point)),
         result: None,
         routed_to: None,
         error: None,
@@ -172,6 +173,9 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         worktree: new.worktree.unwrap_or(true),
         knowledge_hints: new.knowledge_hints,
         workflow_origin: None,
+        parent_task_id: new.parent_task_id,
+        decomposition_part: new.decomposition_part,
+        depends_on: new.depends_on,
         bench_origin: None,
         retry: new.retry,
         pending_retry: None,
@@ -180,6 +184,7 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         intake: None,
         failure: None,
         closure: None,
+        slot_wait: None,
     }
 }
 

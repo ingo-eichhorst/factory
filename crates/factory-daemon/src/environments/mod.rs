@@ -292,6 +292,7 @@ impl Engine {
     /// environment was never finished; it is ended as failed, naming the
     /// one that took its place, rather than left running forever.
     pub(crate) async fn deploy_start(&self, caller: &Caller, mut req: DeployStart) -> Result<Deployment> {
+        let _edit = self.deployment_edit.lock().await;
         if !env::is_env_name(&req.environment) {
             return Err(FactoryError::BadRequest(format!(
                 "{:?} is not an environment name: lowercase letters, digits, `-` and `_`",
@@ -351,6 +352,7 @@ impl Engine {
     /// Record how a deployment ended. A success runs the environment's own
     /// checks first and is only recorded as one when they pass.
     pub(crate) async fn deploy_finish(&self, req: DeployFinish) -> Result<Deployment> {
+        let _edit = self.deployment_edit.lock().await;
         let Some(deployment) = self.environments.deployment(&req.id).await? else {
             return Err(FactoryError::BadRequest(format!("no deployment {}", req.id)));
         };
@@ -380,6 +382,9 @@ impl Engine {
                 finished.verification = Some(verification);
             }
         }
+        // Verification is part of the attempt; its time belongs in the
+        // duration and the instant the release became verified/running.
+        finished.at = Utc::now();
         self.environments.finished(&req.id, finished).await?;
         let ended = self
             .environments
@@ -432,9 +437,9 @@ impl Engine {
 
     /// Per environment, what the metrics read: its SLA figures and DORA
     /// keys, from the same report the tab draws.
-    pub(crate) async fn environment_cards(&self) -> Result<BTreeMap<String, env::EnvironmentCard>> {
+    pub(crate) async fn environment_cards(&self, scope: Option<&str>) -> Result<BTreeMap<String, env::EnvironmentCard>> {
         Ok(self
-            .environments_report(None)
+            .environments_report(scope.map(str::to_string))
             .await?
             .environments
             .into_iter()
@@ -785,6 +790,65 @@ mod tests {
         let report = engine.environments_report(Some("company".into())).await.unwrap();
         assert_eq!(report.releases.len(), 1);
         assert!(report.releases[0].running_on.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn environment_metrics_respect_the_requested_scope_subtree() {
+        let (source, root) = engine_with("  - name: prod\n");
+        let mut factory = source.factory_snapshot();
+        let mut sibling: factory_core::config::Scope =
+            serde_yaml_ng::from_str("id: other-id\nname: other\n").unwrap();
+        sibling.path = PathBuf::from("projects/other");
+        factory.config.scopes.push(sibling);
+        let engine = Arc::new(Engine::new(
+            factory, factory_plugins::Registry::with_builtins(), source.store.clone(),
+            PathBuf::from("factory"), Vec::new(),
+        ).with_environment_store(source.environments.clone()));
+        let now = Utc::now();
+        engine.environments.append_sample(Sample {
+            environment: "prod".into(), check: "api".into(), at: now,
+            ok: true, latency_ms: 1, detail: None,
+        }).await.unwrap();
+        let ids = ["availability.prod".parse().unwrap()];
+        let own = engine.metrics_for(&ids, now, Some("company"), None).await.unwrap();
+        assert_eq!(own.values[0].value, Some(1.0));
+        let sibling = engine.metrics_for(&ids, now, Some("other"), None).await.unwrap();
+        assert_eq!(sibling.values[0].value, None);
+        assert!(sibling.values[0].reason.as_ref().unwrap().contains("no environment"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn concurrent_starts_leave_one_running_attempt_and_finishes_are_single_use() {
+        let (engine, root) = engine_with("  - name: prod\n");
+        let (first, second) = tokio::join!(
+            engine.deploy_start(&Caller::Owner, start("prod", "first")),
+            engine.deploy_start(&Caller::Owner, start("prod", "second")),
+        );
+        first.unwrap();
+        second.unwrap();
+        let attempts = engine.environments.deployments().await.unwrap();
+        assert_eq!(attempts.iter().filter(|d| d.status == DeployStatus::Running).count(), 1);
+        assert_eq!(attempts.iter().filter(|d| d.status == DeployStatus::Failed).count(), 1);
+        let running = attempts.iter().find(|d| d.status == DeployStatus::Running).unwrap();
+        let (a, b) = tokio::join!(
+            engine.deploy_finish(finish(&running.id, DeployStatus::Failed)),
+            engine.deploy_finish(finish(&running.id, DeployStatus::Succeeded)),
+        );
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn deployment_duration_includes_verification() {
+        let (engine, root) = engine_with(
+            "  - name: prod\n    checks: [{ kind: command, command: 'sleep 1', name: alive }]\n",
+        );
+        let started = engine.deploy_start(&Caller::Owner, start("prod", "abc")).await.unwrap();
+        let ended = engine.deploy_finish(finish(&started.id, DeployStatus::Succeeded)).await.unwrap();
+        assert!(ended.finished_at.unwrap() - ended.started_at >= Duration::seconds(1));
+        assert!(ended.finished_at.unwrap() >= ended.verification.unwrap().at);
         std::fs::remove_dir_all(root).ok();
     }
 }

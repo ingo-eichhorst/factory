@@ -29,8 +29,9 @@ use crate::schedule;
 
 /// How far back the chart looks when nobody says.
 const DEFAULT_MINUTES: u32 = 12 * 60;
-/// A window wider than this is a different tool than a chart of today.
-const MAX_MINUTES: u32 = 30 * 24 * 60;
+/// The widest dashboard/metrics preset. The chart still defaults to today,
+/// but its authoritative interval unions also back the 90-day hour metrics.
+const MAX_MINUTES: u32 = 90 * 24 * 60;
 /// Nor is one narrower than this: a run is at least a pixel or two wide.
 const MIN_MINUTES: u32 = 5;
 /// How many firings of one schedule a window draws. An every-minute task
@@ -417,6 +418,13 @@ impl Engine {
             return Ok(());
         };
         self.check_run_token(&run, turn.token.as_deref(), task_id)?;
+        // `#178`: Claude Code's own session id, when the hook payload names
+        // one -- `--continue`'s fallback source for which session to resume,
+        // kept even though this particular turn end may settle into nothing.
+        if turn.session_id.is_some() {
+            self.patch_run(&run, RunPatch { turn_ended_session_id: turn.session_id.clone(), ..Default::default() })
+                .await;
+        }
         let action = hook_turn_ended_action(&turn, run.status);
         // A turn ended, so the usage so far is worth a reading (#117) --
         // taken off this request, which is the harness's own hook waiting
@@ -1246,7 +1254,15 @@ mod tests {
             worktree_branch: None,
             runtime: "herdr".into(),
             session: None,
+            last_session: None,
             token: None,
+            spent_token_sha256: None,
+            superseded_token_sha256s: Vec::new(),
+            continued_from: None,
+            resumed_session: None,
+            original_estimate: None,
+            provider_account: None,
+            re_estimate: None,
             result: None,
             routed_to: None,
             error: None,
@@ -1257,6 +1273,7 @@ mod tests {
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
+            turn_ended_session_id: None,
             required_steps: Vec::new(),
             usage: None,
             queued_at: None,
@@ -1704,6 +1721,7 @@ mod tests {
             error_details: None,
             last_message: None,
             token: None,
+            session_id: None,
         }
     }
 

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
-  CLOSED, columnFor, standing, taskActions, closeReason, closeBody, blockedByFailure, isSettled, failKindLabel,
+  CLOSED, columnFor, standing, taskActions, closeReason, closeBody, blockedByFailure, isSettled, failKindLabel, relationLabel,
 } from "../js/task-model.js";
 import { attemptState } from "../js/bench-model.js";
 import { cardNote, cardActions } from "../js/intake-model.js";
@@ -66,6 +66,21 @@ test("a scheduled task mid-retry stays in Scheduled and says it is retrying", ()
   assert.equal(standing({ status: "pending", failure: failure("run_timeout") }), null);
   // Retries exhausted: blocked, never a healthy-looking scheduled card.
   assert.equal(columnFor({ status: "blocked", schedule: { every: { seconds: 60 } }, failure: failure("run_timeout") }), "blocked");
+});
+
+test("a decomposition child waits in Scheduled and names its real parent relation", () => {
+  const child = {
+    status: "pending",
+    parent_task_id: "parent-123456",
+    decomposition_part: "surface",
+    depends_on: ["foundation-id"],
+  };
+  assert.equal(columnFor(child), "scheduled");
+  assert.deepEqual(standing(child), {
+    tone: "wait", text: "waiting for 1 prerequisite", detail: null,
+  });
+  const tasks = new Map([["parent-123456", { title: "Build the subsystem" }]]);
+  assert.equal(relationLabel(child, tasks), "part surface of Build the subsystem");
 });
 
 test("close works with no active run, reopen only on a closed task", () => {

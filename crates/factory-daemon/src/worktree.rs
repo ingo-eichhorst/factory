@@ -1,6 +1,7 @@
-//! A run's own git worktree: made before the agent starts, never inside the
-//! scope, and never cleaned up once it exists -- see `AGENTS.md` and the
-//! ticket this implements for why.
+//! A run's own git worktree: made before the agent starts and never inside
+//! the scope. Ordinary runs retain their worktrees for continuation; a
+//! decomposition workflow removes its child and integration worktrees only
+//! after the combined branch is safely handed off.
 //!
 //! Two separate questions live here, and they are answered two separate ways
 //! on purpose. Whether a scope *can* have a worktree at all is advisory: it
@@ -12,6 +13,25 @@
 
 use std::path::Path;
 use tokio::process::Command;
+
+async fn git_output(scope_path: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    Command::new("git")
+        .arg("-C")
+        .arg(scope_path)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("running git: {e}"))
+}
+
+fn git_error(action: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        format!("{action} failed with {}", output.status)
+    } else {
+        format!("{action} failed with {}: {stderr}", output.status)
+    }
+}
 
 /// The branch a task's own worktree runs on, derived from the task rather
 /// than the run: a person reading `git branch` sees what the work was, not
@@ -127,6 +147,82 @@ pub async fn create(scope_path: &Path, dir: &Path, branch: &str, base: Option<&s
     } else {
         stderr
     })
+}
+
+/// Refresh one remote base before an integration branch is cut.  The fetch
+/// is deliberately explicit: a decomposition must not quietly integrate an
+/// old local `main` when `origin/main` has moved.
+pub async fn fetch(scope_path: &Path, remote: &str, branch: &str) -> Result<(), String> {
+    let output = git_output(scope_path, &["fetch", remote, branch]).await?;
+    output
+        .status
+        .success()
+        .then_some(())
+        .ok_or_else(|| git_error("git fetch", &output))
+}
+
+/// A completed worker is mergeable only when every change is committed.
+/// Returning the porcelain text makes the rework feedback concrete.
+pub async fn dirty(dir: &Path) -> Result<Option<String>, String> {
+    let output = git_output(dir, &["status", "--porcelain"]).await?;
+    if !output.status.success() {
+        return Err(git_error("git status", &output));
+    }
+    let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!status.is_empty()).then_some(status))
+}
+
+/// Merge one worker branch into the single integration worktree.  A failed
+/// merge is always aborted before returning, so the next worker or rework
+/// round never inherits conflict state.
+pub async fn merge(integration_dir: &Path, branch: &str) -> Result<(), String> {
+    let output = git_output(integration_dir, &["merge", "--no-ff", "--no-edit", branch]).await?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let error = git_error("git merge", &output);
+    let _ = git_output(integration_dir, &["merge", "--abort"]).await;
+    Err(error)
+}
+
+/// Publish the integration branch after every merge and combined check has
+/// passed.  No force option exists here by design.
+pub async fn push(integration_dir: &Path, remote: &str, branch: &str) -> Result<(), String> {
+    let output = git_output(integration_dir, &["push", "-u", remote, branch]).await?;
+    output
+        .status
+        .success()
+        .then_some(())
+        .ok_or_else(|| git_error("git push", &output))
+}
+
+/// Whether `dir` is still one of `scope_path`'s registered worktrees --
+/// `git worktree list --porcelain`, read rather than assumed. `factory task
+/// run --continue` (`#178`) checks this before it will ever hand a resumed
+/// agent back a previous run's directory: a person (or anything else) that
+/// removed it by hand -- Factory itself never does -- must not have that
+/// worktree treated as still there. `false` on any git failure: a scope
+/// `git` cannot read is not one this can vouch for either.
+pub async fn is_registered(scope_path: &Path, dir: &Path) -> bool {
+    let target = match tokio::fs::canonicalize(dir).await {
+        Ok(p) => p,
+        // Gone entirely, or never existed -- either way, not registered.
+        Err(_) => return false,
+    };
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(scope_path)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .await;
+    let Ok(output) = output else { return false };
+    if !output.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .any(|path| std::fs::canonicalize(path).map(|p| p == target).unwrap_or(false))
 }
 
 /// Remove a worktree and the branch it was on, best-effort: a bench run's
@@ -288,6 +384,93 @@ mod tests {
         assert!(target.join(".git").exists());
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(target.parent().unwrap().parent().unwrap()).ok();
+    }
+
+    // -- #178: `--continue`'s "is this worktree still there" check ----------
+
+    #[tokio::test]
+    async fn a_freshly_made_worktree_is_registered() {
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        let target = std::env::temp_dir()
+            .join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()))
+            .join("worktrees")
+            .join("run-registered");
+        create(&dir, &target, "factory/registered", None).await.unwrap();
+
+        assert!(is_registered(&dir, &target).await);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(target.parent().unwrap().parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn a_worktree_removed_by_hand_is_not_registered() {
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        let target = std::env::temp_dir()
+            .join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()))
+            .join("worktrees")
+            .join("run-removed");
+        create(&dir, &target, "factory/removed", None).await.unwrap();
+        // A person deleting the directory outright, rather than going
+        // through `git worktree remove` -- the case `--continue` (#178) has
+        // to catch before it ever hands the directory back to a resumed
+        // agent.
+        std::fs::remove_dir_all(&target).unwrap();
+
+        assert!(!is_registered(&dir, &target).await);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(target.parent().unwrap().parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn a_directory_that_was_never_a_worktree_is_not_registered() {
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        // Exists, but was never `git worktree add`-ed.
+        let never = dir.join("never-a-worktree");
+        std::fs::create_dir_all(&never).unwrap();
+        assert!(!is_registered(&dir, &never).await);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_scopes_own_directory_is_itself_a_registered_worktree() {
+        // `git worktree list` names the primary checkout too, not only the
+        // ones `git worktree add` made -- worth pinning down since
+        // `resolve_continue` (#178) never actually asks this question (a
+        // previous run's `worktree_path` is always a dedicated directory
+        // under `worktrees_dir()`, never the scope itself), but a reader of
+        // `is_registered` should not have to rediscover this from git's
+        // manual.
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        assert!(is_registered(&dir, &dir).await);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_worktree_removed_the_proper_way_is_no_longer_registered() {
+        let dir = std::env::temp_dir().join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo_with_a_commit(&dir).await;
+        let target = std::env::temp_dir()
+            .join(format!("factory-wt-test-{}", uuid::Uuid::new_v4()))
+            .join("worktrees")
+            .join("run-clean-removed");
+        let branch = "factory/clean-removed";
+        create(&dir, &target, branch, None).await.unwrap();
+        remove(&dir, &target, branch).await.unwrap();
+
+        assert!(!is_registered(&dir, &target).await);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

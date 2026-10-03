@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { fmtUsd, fmtTokens, totalTokens, runUsageView, taskUsageLine } from "../js/usage-model.js";
+import { readFileSync } from "node:fs";
+import { estimateComparisonView, fmtDuration, fmtUsd, fmtTokens, totalTokens, runUsageView, taskUsageLine, costFigure, taskUsageMoved, newestRead } from "../js/usage-model.js";
+
+const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
+const tasks = readFileSync(new URL("../js/tasks.js", import.meta.url), "utf8");
 
 test("an unknown count is a question mark and a tiny cost is not free", () => {
   assert.equal(fmtTokens(null), "?");
@@ -47,4 +51,86 @@ test("a task's line says which runs are not in its sum", () => {
     "All 1 run: 10 tokens · ? (not in the sum: 1 without a cost)",
     "tokens but no measured cost is ?, not free"
   );
+});
+
+test("estimate comparisons keep ratio, range verdict, and unknown actual honest", () => {
+  assert.equal(fmtDuration(5400), "1.5h");
+  const outside = estimateComparisonView({ low: 60, expected: 120, high: 180, actual: 240, actual_over_expected: 2, within_range: false });
+  assert.equal(outside.tone, "outside");
+  assert.match(outside.label, /2\.00× expected/);
+  assert.equal(outside.percent, 100);
+  const unknown = estimateComparisonView({ low: 1, expected: 2, high: 3, actual: null, actual_over_expected: null, within_range: null }, "cost");
+  assert.equal(unknown.tone, "unknown");
+  assert.match(unknown.label, /actual unknown/);
+});
+
+test("run usage says when plan share was apportioned or unavailable", () => {
+  const base = {
+    state: "known", tokens: { input: 1, output: 1, cache_read: 0, cache_write: 0 }, cost_usd: 0.1,
+    elapsed_seconds: 80, active_seconds: 40, sessions: 1, notes: [],
+    plan_share: [{ provider_account: "claude-max", window_minutes: 300, used_percent: 1.25, attribution: "apportioned" }],
+  };
+  assert.match(runUsageView(base).lines.join(" "), /1\.25% of claude-max 5-hour · apportioned/);
+  assert.match(runUsageView({ ...base, plan_share: [], plan_share_unknown: "no baseline" }).lines.join(" "), /unknown — no baseline/);
+});
+
+test("a run turning terminal with its usage unchanged re-reads the task's usage", () => {
+  // The run-end reading is published while the run is still running; the
+  // terminal update that follows carries the same usage. Its comparison
+  // only becomes final at the second event, so that one must re-read too.
+  const usage = { state: "known", cost_usd: 0.3, as_of_point: "run_end" };
+  const reading = { id: "r1", status: "running", usage };
+  const terminal = { ...reading, status: "done", ended_at: "2026-09-26T12:00:00Z" };
+  assert.equal(taskUsageMoved(reading, terminal), true);
+  assert.equal(taskUsageMoved(terminal, { ...terminal }), false, "an identical echo does not");
+});
+
+test("a newly journaled re-estimate re-reads the task's usage", () => {
+  const run = { id: "r1", status: "running", usage: { state: "known" } };
+  const reEstimated = { ...run, re_estimate: { sample_count: 2, time: { low: 1, expected: 2, high: 3 } } };
+  assert.equal(taskUsageMoved(run, reEstimated), true);
+  assert.equal(taskUsageMoved(run, { ...run, original_estimate: { time: { low: 1, expected: 1, high: 1 } } }), true);
+  assert.equal(taskUsageMoved(null, run), true, "a new run is in the task's answer");
+  assert.equal(taskUsageMoved(run, { ...run, session: { handle: "w1:p2" } }), false, "anything else does not");
+});
+
+test("only the newest task-usage read may land", () => {
+  const reads = newestRead();
+  const first = reads.next();
+  const second = reads.next();
+  assert.equal(first(), false, "the earlier read resolving last is dropped");
+  assert.equal(second(), true);
+  assert.match(app, /taskUsageMoved\(i >= 0 \? state\.runs\[i\] : null, ev\.run\)/);
+  assert.match(tasks, /state\.open === open && current\(\)/);
+});
+
+test("costFigure: a row whose runs are all usage-unknown reads 'unknown', with no bar to draw -- never a measured-looking $0.00", () => {
+  const allUnknown = { key: "demo", runs: 4, runs_unknown: 4, runs_partial: 0, runs_cost_unknown: 0, cost_usd: 0.0, tokens: {} };
+  assert.deepEqual(costFigure(allUnknown), { text: "unknown", hasCost: false });
+});
+
+test("costFigure: no runs at all reads a bare dash, also with no bar", () => {
+  assert.deepEqual(costFigure({ runs: 0 }), { text: "—", hasCost: false });
+  assert.deepEqual(costFigure(null), { text: "—", hasCost: false });
+});
+
+test("costFigure: every run costed, none missing, reads the plain figure with no lower-bound prefix and a real bar", () => {
+  const full = { key: "demo", runs: 3, runs_unknown: 0, runs_partial: 0, runs_cost_unknown: 0, cost_usd: 9.5, tokens: {} };
+  assert.deepEqual(costFigure(full), { text: "$9.50", hasCost: true });
+});
+
+test("costFigure: some runs unmeasured, uncosted or partial reads a lower bound, prefixed ≥, still with a bar (it is a real, if partial, figure)", () => {
+  const partiallyUnmeasured = { key: "demo", runs: 4, runs_unknown: 1, runs_partial: 0, runs_cost_unknown: 0, cost_usd: 6.0, tokens: {} };
+  assert.deepEqual(costFigure(partiallyUnmeasured), { text: "≥ $6.00", hasCost: true });
+
+  const someUncosted = { key: "demo", runs: 4, runs_unknown: 0, runs_partial: 0, runs_cost_unknown: 2, cost_usd: 3.25, tokens: {} };
+  assert.deepEqual(costFigure(someUncosted), { text: "≥ $3.25", hasCost: true });
+
+  const somePartial = { key: "demo", runs: 2, runs_unknown: 0, runs_partial: 1, runs_cost_unknown: 0, cost_usd: 1.1, tokens: {} };
+  assert.deepEqual(costFigure(somePartial), { text: "≥ $1.10", hasCost: true });
+});
+
+test("costFigure: nothing costed but not every run is usage-unknown (all excluded some other way) reads ?, with no bar", () => {
+  const nothingCosted = { key: "demo", runs: 2, runs_unknown: 0, runs_partial: 0, runs_cost_unknown: 2, cost_usd: 0, tokens: { input: 10 } };
+  assert.deepEqual(costFigure(nothingCosted), { text: "?", hasCost: false });
 });

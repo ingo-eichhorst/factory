@@ -141,6 +141,9 @@ test("each action goes to its slice-2 route with the reason in the body", () => 
   assert.deepEqual(actionRequest("pause_schedule", row, { reason: "freeze" }), { path: "/api/tasks/t%201", method: "PATCH", body: { schedule_paused: true, reason: "freeze" } });
   assert.deepEqual(actionRequest("resume_schedule", row, {}).body, { schedule_paused: false });
   assert.deepEqual(actionRequest("answer", row, { text: "yes", reason: "asked" }), { path: "/api/runs/r1/answer", method: "POST", body: { text: "yes", reason: "asked" } });
+  assert.deepEqual(actionRequest("approve", row, { reason: "release owner checked it" }), { path: "/api/runs/r1/approve", method: "POST", body: { reason: "release owner checked it" } });
+  assert.deepEqual(actionRequest("reject", row, { reason: "missing evidence" }), { path: "/api/runs/r1/reject", method: "POST", body: { reason: "missing evidence" } });
+  assert.deepEqual(actionRequest("accept_rework", row), { path: "/api/runs/r1/rework", method: "POST", body: {} });
   assert.equal(actionRequest("nonsense", row, {}), null);
 });
 
@@ -148,6 +151,9 @@ test("an answer needs both its text and a reason before it can be confirmed; not
   assert.equal(actionReady("answer", { text: "yes", reason: "" }), false);
   assert.equal(actionReady("answer", { text: " ", reason: "why" }), false);
   assert.equal(actionReady("answer", { text: "yes", reason: "why" }), true);
+  assert.equal(actionReady("approve", { reason: "" }), false);
+  assert.equal(actionReady("reject", { reason: "concrete finding" }), true);
+  assert.equal(actionReady("accept_rework", {}), true);
   assert.equal(actionReady("cancel", {}), true);
 });
 

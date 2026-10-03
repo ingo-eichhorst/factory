@@ -11,9 +11,10 @@ use factory_core::dependencies::{AttachmentKind, DependenciesReport};
 use factory_core::event::Event;
 use factory_core::goals::{self as goals_core, Band, CycleStatus, KrRef};
 use factory_core::knowledge::FindingKind;
-use factory_core::metrics::MetricId;
+use factory_core::metrics::{MetricId, MetricsWindow};
 use factory_core::operations::{self as ops, HealthWindow, OperationsReport};
 use factory_core::policy::{self, ControlRef};
+use factory_core::reporting_clock::{self, ClockDeadlineKind, ClockItemRef, ClockMark};
 use factory_core::protocol::{
     GoalsReport, Payload, PolicyControlDetail, PolicyReport, Request, Response, ScenarioPromoteResult, ScenarioResult, ScenariosReport,
 };
@@ -27,8 +28,15 @@ use std::path::{Path, PathBuf};
 
 use client::Client;
 
+const BUILD_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("FACTORY_GIT_SHA"),
+    ")"
+);
+
 #[derive(Parser)]
-#[command(name = "factory", about = "Talk to a Factory daemon", version)]
+#[command(name = "factory", about = "Talk to a Factory daemon", version = BUILD_VERSION)]
 struct Cli {
     /// Instance root. Defaults to the nearest ancestor holding a .factory/.
     #[arg(long, global = true, env = "FACTORY_ROOT")]
@@ -154,6 +162,13 @@ enum Command {
     Metrics {
         /// e.g. `throughput_week`, `compliance.cra`, `bench.resolve_rate.eval-set-a`.
         ids: Vec<String>,
+        /// Only this scope and its descendants (instance-wide metrics say so
+        /// in their registry definition and ignore this selection).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Override run-backed metric intervals: day, 14d, or 90d.
+        #[arg(long)]
+        window: Option<MetricsWindow>,
     },
     /// The dashboard's resolved layout for a scope (`#159`): the nearest
     /// `dashboard:` block down its path, the instance root's own, or the
@@ -164,10 +179,11 @@ enum Command {
         scope: Option<String>,
     },
     /// What runs used and cost, summed per task, GitHub issue (`issue=<n>`
-    /// label), scope or agent (#117). Usage comes from the agent runtime;
-    /// a run it could not measure is counted as unknown, never as free.
+    /// label), scope, agent, provider or workflow (#117, #164). Usage comes
+    /// from the agent runtime; a run it could not measure is counted as
+    /// unknown, never as free.
     Cost {
-        /// task, issue, scope or agent.
+        /// task, issue, scope, agent, provider or workflow.
         #[arg(long, default_value = "task")]
         by: String,
         /// Runs started since this: `7d`, `12h`, `2026-09-01` or RFC 3339.
@@ -270,15 +286,36 @@ enum IntakeCmd {
         /// The scope it is thought to belong to; triage routes it.
         #[arg(long)]
         scope: Option<String>,
-        /// Where it came from: an issue URL, a mail id.
+        /// `email` or `chat`: relayed on somebody else's behalf (`#167`) --
+        /// open to any caller holding `intake.add`, recorded as relayed,
+        /// never trusted. Absent means an ordinary item from whoever is
+        /// asking.
+        #[arg(long, value_parser = ["email", "chat"])]
+        source: Option<String>,
+        /// Where it came from: an issue URL, a mail id -- and, with
+        /// `--source email|chat`, the provider's own message id, required.
         #[arg(long)]
         reference: Option<String>,
-        /// On whose behalf, when that is not you.
+        /// The system that relayed it -- `apple-mail`, `imessage`. Only
+        /// with `--source email|chat`.
+        #[arg(long)]
+        provider: Option<String>,
+        /// On whose behalf, when that is not you -- with `--source
+        /// email|chat` this is the sender's own address or handle, and is
+        /// required.
         #[arg(long)]
         requester: Option<String>,
+        /// RFC 3339: the provider's own receipt time. Absent means now;
+        /// refused if it is in the future. Only with `--source email|chat`.
+        #[arg(long)]
+        received_at: Option<String>,
         /// Repeatable: `--label area=infra`.
         #[arg(long = "label")]
         labels: Vec<String>,
+        /// Flag it as a possible security report right away -- the same as
+        /// `flag-security` straight after (`#170`).
+        #[arg(long)]
+        security: bool,
     },
     /// One item: its text, where it stands, its assessment and decision.
     Show { id: String },
@@ -296,7 +333,7 @@ enum IntakeCmd {
         #[arg(long)]
         file: PathBuf,
         /// Also apply what the rules give: ready releases, needs-info sends
-        /// it back.
+        /// it back, and a complete executable split expands into tasks.
         #[arg(long)]
         decide: bool,
     },
@@ -308,7 +345,7 @@ enum IntakeCmd {
         #[arg(value_parser = ["ready", "needs-info", "split", "wontfix"])]
         decision: String,
         /// split: the parts as a JSON array of `{id, title, instructions,
-        /// depends_on, acceptance}` (`-` for stdin). Absent takes the
+        /// depends_on, acceptance, owns, interface, estimate_seconds}` (`-` for stdin). Absent takes the
         /// assessment's proposal.
         #[arg(long)]
         file: Option<PathBuf>,
@@ -329,6 +366,13 @@ enum IntakeCmd {
         #[arg(long)]
         duplicate_of: Option<String>,
     },
+    /// Approve and post a decided GitHub item's triage comment and labels to
+    /// the issue it came from (`#171`). Factory never does this on its own;
+    /// this is the approval. Needs `intake.publish`, named exactly -- never
+    /// a wildcard, never `foreman` or `triager`. Refused for anything not
+    /// sourced from GitHub, for an item with no decision or no assessment,
+    /// and for one carrying a possible or confirmed security report.
+    Publish { id: String },
     /// Add information to an item -- the answer to a needs-info, which puts
     /// it back in the queue.
     Info {
@@ -340,6 +384,30 @@ enum IntakeCmd {
         /// With `--triage`: the agent to triage with.
         #[arg(long, requires = "triage")]
         agent: Option<String>,
+    },
+    /// Flag an item still in the gate as a possible security report
+    /// (`#170`) -- anyone who could assess the item may; it only adds
+    /// scrutiny. Refused once the item already carries a flag of any kind.
+    FlagSecurity {
+        id: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// A person confirms or dismisses a possible security report. Owner
+    /// only -- an agent may flag (above), never decide.
+    Security {
+        id: String,
+        #[arg(value_parser = ["confirm", "dismiss"])]
+        verdict: String,
+        /// Required to dismiss; optional to confirm.
+        #[arg(long)]
+        evidence: Option<String>,
+    },
+    /// Every confirmed security report -- the L4 fact `#157`'s reporting
+    /// clock will read.
+    SecurityReports {
+        #[arg(long)]
+        scope: Option<String>,
     },
 }
 
@@ -617,15 +685,24 @@ enum BackupCmd {
     List,
     /// Unpack a snapshot into a temporary directory and prove it would
     /// restore: its checksums, the database's integrity_check and every
-    /// authored-content loader. Exits non-zero when a check fails.
+    /// authored-content loader. Exits non-zero when a check fails. An
+    /// encrypted snapshot needs `--identity`, and decrypting it that way is
+    /// the owner's alone (`#152`).
     Verify {
         /// The snapshot's file name, as `list` shows it. The newest when
         /// left out.
         snapshot: Option<String>,
+        /// A file holding the one native age identity (`AGE-SECRET-KEY-1…`)
+        /// that decrypts this snapshot. Required for an encrypted one;
+        /// refused for a path inside this instance's own `.factory/`. Never
+        /// stored, logged or sent anywhere but read once by the daemon.
+        #[arg(long)]
+        identity: Option<PathBuf>,
     },
-    /// Verify a plaintext snapshot, then materialize it into a new instance
-    /// root. Owner-only. The destination must not exist or must be empty;
-    /// this never stops the current daemon or switches roots for you.
+    /// Verify a snapshot, then materialize it into a new instance root --
+    /// plaintext as before, or encrypted with `--identity` (`#152`).
+    /// Owner-only. The destination must not exist or must be empty; this
+    /// never stops the current daemon or switches roots for you.
     Restore {
         /// The snapshot's file name, as `list` shows it.
         snapshot: String,
@@ -633,6 +710,9 @@ enum BackupCmd {
         /// CLI before the request reaches the daemon.
         #[arg(long)]
         into: PathBuf,
+        /// See `verify --identity`.
+        #[arg(long)]
+        identity: Option<PathBuf>,
     },
 }
 
@@ -669,11 +749,33 @@ enum PolicyCmd {
         #[arg(long)]
         evidence: String,
         /// `30d`, `12w`, a bare date (`2027-01-01`), or a full RFC3339
-        /// timestamp.
+        /// timestamp. Defaults to `520w` (chosen since `Duration` has no
+        /// years) when `--clock-item` is given -- CRA evidence is kept far
+        /// longer than an ordinary attestation's expiry ever matters for --
+        /// and is otherwise required.
         #[arg(long)]
-        expires: String,
+        expires: Option<String>,
         #[arg(long)]
         note: Option<String>,
+        /// Also submit against a CRA Art. 14 reporting-clock item (`#157`,
+        /// phase 1): `finding:<scope>:<vulnerability>` or
+        /// `report:<task-id>`, from `factory policy clock`. Requires
+        /// `--deadline`.
+        #[arg(long = "clock-item", requires = "deadline")]
+        clock_item: Option<String>,
+        /// Which of `--clock-item`'s two deadlines this submits:
+        /// `early-warning` or `notification`. Requires `--clock-item`.
+        #[arg(long, requires = "clock_item")]
+        deadline: Option<String>,
+    },
+    /// The CRA Art. 14 reporting clock (`#157`, phase 1): every exploited L2
+    /// finding and confirmed L4 security report's 24-hour early-warning and
+    /// 72-hour notification deadlines. `--scope` narrows to that subtree,
+    /// the whole instance when absent -- the same rollup `status` itself
+    /// uses.
+    Clock {
+        #[arg(long)]
+        scope: Option<String>,
     },
     /// Withdraw a previously recorded attestation. Appends a new row; the
     /// one it names is never edited.
@@ -967,6 +1069,20 @@ enum RunCmd {
     /// The evidence a run's required steps left (`#118`): who ran each
     /// gate, on which commit, and what it found. Append-only.
     Attestations { id: String },
+    /// Pass a required person approval before the subject is dispatched.
+    Approve {
+        id: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Reject a required approval and keep the line stopped.
+    Reject {
+        id: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Accept the verifier's evidence-backed rework proposal.
+    Rework { id: String },
     /// One run's usage snapshots as the runtime answered them -- at
     /// dispatch, each turn end and the end -- the record behind the usage
     /// `run show` prints (#117).
@@ -1004,6 +1120,9 @@ enum TaskCmd {
         status: Option<StatusFilter>,
         #[arg(long)]
         scope: Option<String>,
+        /// Only direct children produced from this parent task.
+        #[arg(long)]
+        parent: Option<String>,
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -1032,6 +1151,18 @@ enum TaskCmd {
         /// Expected seconds one run will occupy its agent (advisory only).
         #[arg(long)]
         estimate: Option<u64>,
+        /// Low and high seconds for a range; `--estimate` is the expected value.
+        #[arg(long)]
+        estimate_low: Option<u64>,
+        #[arg(long)]
+        estimate_high: Option<u64>,
+        /// Low, expected and high API-equivalent dollar estimate.
+        #[arg(long)]
+        estimate_cost_low: Option<f64>,
+        #[arg(long)]
+        estimate_cost: Option<f64>,
+        #[arg(long)]
+        estimate_cost_high: Option<f64>,
         /// Seconds this task's agent has to acknowledge a run.
         #[arg(long)]
         ack_timeout: Option<u64>,
@@ -1097,6 +1228,16 @@ enum TaskCmd {
         /// Expected seconds one run will occupy its agent (advisory only).
         #[arg(long)]
         estimate: Option<u64>,
+        #[arg(long)]
+        estimate_low: Option<u64>,
+        #[arg(long)]
+        estimate_high: Option<u64>,
+        #[arg(long)]
+        estimate_cost_low: Option<f64>,
+        #[arg(long)]
+        estimate_cost: Option<f64>,
+        #[arg(long)]
+        estimate_cost_high: Option<f64>,
         /// Remove the task's duration estimate.
         #[arg(long)]
         no_estimate: bool,
@@ -1150,6 +1291,15 @@ enum TaskCmd {
         id: Option<String>,
         #[arg(long)]
         reason: Option<String>,
+        /// Resume the task's newest run's harness session (`#178`) instead
+        /// of starting fresh. Refused unless that run is terminal and ended
+        /// on an infrastructure failure (an ack timeout, a run timeout, a
+        /// session gone, or a dispatch failure after a session had already
+        /// come up); from there Factory falls back to a fresh session --
+        /// journaled with the reason -- for anything that stops the resume
+        /// itself from going through.
+        #[arg(long = "continue")]
+        continue_run: bool,
     },
     /// Stop a running task and close its session. Journaled with who
     /// asked, and why if you say.
@@ -1277,19 +1427,37 @@ async fn main() -> Result<()> {
         Command::Status => {
             let payload = client.send(Request::Status).await?;
             print(&payload, cli.json, |p| match p {
-                Payload::Status { status } => Some(format!(
-                    "{}  ({})\n  root        {}\n  version     {}\n  uptime      {}s\n  tasks       {} total, {} active\n  interfaces  {}\n  watching    {} subscriber(s)\n  socket      {}",
-                    status.instance,
-                    status.instance_id,
-                    status.root,
-                    status.version,
-                    status.uptime_seconds,
-                    status.tasks_total,
-                    status.tasks_active,
-                    status.interfaces.join(", "),
-                    status.subscribers,
-                    client.socket_path().display(),
-                )),
+                Payload::Status { status } => {
+                    let mut out = format!(
+                        "{}  ({})\n  root        {}\n  version     {}\n  uptime      {}s\n  tasks       {} total, {} active\n  interfaces  {}\n  watching    {} subscriber(s)\n  socket      {}",
+                        status.instance,
+                        status.instance_id,
+                        status.root,
+                        status.version,
+                        status.uptime_seconds,
+                        status.tasks_total,
+                        status.tasks_active,
+                        status.interfaces.join(", "),
+                        status.subscribers,
+                        client.socket_path().display(),
+                    );
+                    if !status.capacity.is_empty() {
+                        out.push_str("\n  capacity    ");
+                        let rows: Vec<String> = status
+                            .capacity
+                            .iter()
+                            .map(|c| {
+                                if c.waiting > 0 {
+                                    format!("{} {}/{}, {} waiting", c.agent, c.in_use, c.max, c.waiting)
+                                } else {
+                                    format!("{} {}/{}", c.agent, c.in_use, c.max)
+                                }
+                            })
+                            .collect();
+                        out.push_str(&rows.join("; "));
+                    }
+                    Some(out)
+                }
                 _ => None,
             })
         }
@@ -1445,8 +1613,9 @@ async fn main() -> Result<()> {
                 let payload = client.send(Request::BackupRun).await?;
                 print(&payload, cli.json, backup_run_text)
             }
-            BackupCmd::Verify { snapshot } => {
-                let payload = client.send(Request::BackupVerify { snapshot }).await?;
+            BackupCmd::Verify { snapshot, identity } => {
+                let identity = identity.as_deref().map(absolute);
+                let payload = client.send(Request::BackupVerify { snapshot, identity }).await?;
                 print(&payload, cli.json, backup_verify_text)?;
                 match payload {
                     Payload::BackupVerify { verification } if !verification.ok => {
@@ -1455,13 +1624,10 @@ async fn main() -> Result<()> {
                     _ => Ok(()),
                 }
             }
-            BackupCmd::Restore { snapshot, into } => {
-                let into = if into.is_absolute() {
-                    into
-                } else {
-                    std::env::current_dir()?.join(into)
-                };
-                let payload = client.send(Request::BackupRestore { snapshot, into }).await?;
+            BackupCmd::Restore { snapshot, into, identity } => {
+                let into = absolute(&into);
+                let identity = identity.as_deref().map(absolute);
+                let payload = client.send(Request::BackupRestore { snapshot, into, identity }).await?;
                 print(&payload, cli.json, backup_restore_text)
             }
         },
@@ -1765,10 +1931,10 @@ async fn main() -> Result<()> {
             policy_cmd(cli.json, &client, cmd).await
         }
 
-        Command::Metrics { ids } => {
+        Command::Metrics { ids, scope, window } => {
             let ids: std::result::Result<Vec<MetricId>, String> = ids.into_iter().map(|s| s.parse()).collect();
             let ids = ids.map_err(|e| anyhow!(e))?;
-            let payload = client.send(Request::Metrics { ids }).await?;
+            let payload = client.send(Request::Metrics { ids, scope, window }).await?;
             print(&payload, cli.json, |p| match p {
                 Payload::Metrics { values, series, registry } => Some(metrics_text(values, series, registry)),
                 _ => None,
@@ -1868,12 +2034,34 @@ async fn main() -> Result<()> {
             let cmd = match command {
                 None => IntakeCmd::List { scope },
                 Some(IntakeCmd::List { scope: s }) => IntakeCmd::List { scope: s.or(scope) },
-                Some(IntakeCmd::Add { scope: s, title, instructions, reference, requester, labels }) => {
-                    IntakeCmd::Add { scope: s.or(scope), title, instructions, reference, requester, labels }
-                }
+                Some(IntakeCmd::Add {
+                    scope: s,
+                    title,
+                    instructions,
+                    source,
+                    reference,
+                    provider,
+                    requester,
+                    received_at,
+                    labels,
+                    security,
+                }) => IntakeCmd::Add {
+                    scope: s.or(scope),
+                    title,
+                    instructions,
+                    source,
+                    reference,
+                    provider,
+                    requester,
+                    received_at,
+                    labels,
+                    security,
+                },
+                Some(IntakeCmd::SecurityReports { scope: s }) => IntakeCmd::SecurityReports { scope: s.or(scope) },
                 Some(_) if scope.is_some() => {
                     return Err(anyhow!(
-                        "--scope before the subcommand only applies to `list` and `add`; the others name an item"
+                        "--scope before the subcommand only applies to `list`, `add` and `security-reports`; \
+                         the others name an item"
                     ));
                 }
                 Some(other) => other,
@@ -1884,19 +2072,35 @@ async fn main() -> Result<()> {
 }
 
 async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
-    use factory_core::intake::{Decision, NewIntake, SourceKind, WontfixReason};
+    use factory_core::intake::{Decision, NewIntake, SecurityVerdict, SourceKind, WontfixReason};
     let payload = match cmd {
         IntakeCmd::List { scope } => client.send(Request::IntakeBoard { scope }).await?,
-        IntakeCmd::Add { title, instructions, scope, reference, requester, labels } => {
+        IntakeCmd::Add { title, instructions, scope, source, reference, provider, requester, received_at, labels, security } => {
+            let source = match source.as_deref() {
+                Some("email") => SourceKind::Email,
+                Some("chat") => SourceKind::Chat,
+                _ => SourceKind::Cli,
+            };
+            let received_at = match received_at {
+                Some(t) => Some(
+                    chrono::DateTime::parse_from_rfc3339(t.trim())
+                        .map(|t| t.with_timezone(&chrono::Utc))
+                        .map_err(|e| anyhow!("--received-at {t:?} is not RFC 3339: {e}"))?,
+                ),
+                None => None,
+            };
             client
                 .send(Request::IntakeAdd(NewIntake {
                     title,
                     instructions,
                     scope,
-                    source: Some(SourceKind::Cli),
+                    source: Some(source),
                     reference,
+                    provider,
                     requester,
+                    received_at,
                     labels: parse_labels(&labels)?,
+                    security,
                 }))
                 .await?
         }
@@ -1934,6 +2138,7 @@ async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
             };
             client.send(Request::IntakeDecide { id, decision }).await?
         }
+        IntakeCmd::Publish { id } => client.send(Request::IntakePublish { id }).await?,
         IntakeCmd::Info { id, text, triage, agent } => {
             let answered = client.send(Request::IntakeInfo { id: id.clone(), text }).await?;
             if triage {
@@ -1942,10 +2147,20 @@ async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {
                 answered
             }
         }
+        IntakeCmd::FlagSecurity { id, reason } => client.send(Request::IntakeFlagSecurity { id, reason }).await?,
+        IntakeCmd::Security { id, verdict, evidence } => {
+            let verdict = match verdict.as_str() {
+                "confirm" => SecurityVerdict::Confirm,
+                _ => SecurityVerdict::Dismiss,
+            };
+            client.send(Request::IntakeSecurity { id, verdict, evidence: evidence.unwrap_or_default() }).await?
+        }
+        IntakeCmd::SecurityReports { scope } => client.send(Request::IntakeSecurityReports { scope }).await?,
     };
     print(&payload, json, |p| match p {
         Payload::IntakeBoard { board } => Some(intake_board_text(board)),
         Payload::Task { task } => Some(intake_item_text(task)),
+        Payload::IntakeSecurityReports { reports } => Some(intake_security_reports_text(reports)),
         _ => None,
     })
 }
@@ -1970,6 +2185,10 @@ fn next_actions_text(id: &str, actions: &[factory_core::intake::NextAction], ind
     let mut out = String::new();
     for a in actions {
         let command = match a.action {
+            NextActionKind::CloseDuplicate => format!(
+                "factory intake decide {id} wontfix --reason duplicate --duplicate-of {} --evidence \"...\"",
+                a.reference.as_deref().unwrap_or("<ref>")
+            ),
             NextActionKind::Split => format!("factory intake decide {id} split [--file parts.json]"),
             NextActionKind::AddInfo => format!("factory intake info {id} \"...\" --triage"),
         };
@@ -1979,6 +2198,25 @@ fn next_actions_text(id: &str, actions: &[factory_core::intake::NextAction], ind
         }
     }
     out
+}
+
+/// `email/apple-mail (<abc@x>) relayed by the owner` -- what a card and
+/// `intake show` print for where an item came from (`#167`): the kind, its
+/// provider when there is one, the reference, and who relayed it when that
+/// was not the source itself.
+fn intake_source_text(source: &factory_core::intake::IntakeSource) -> String {
+    let mut text = source.kind.as_str().to_string();
+    if let Some(p) = &source.provider {
+        text.push('/');
+        text.push_str(p);
+    }
+    if let Some(r) = &source.reference {
+        text.push_str(&format!(" ({r})"));
+    }
+    if let Some(by) = &source.relayed_by {
+        text.push_str(&format!(" relayed by {by}"));
+    }
+    text
 }
 
 fn intake_card_line(c: &factory_core::intake::IntakeCard) -> String {
@@ -1994,16 +2232,32 @@ fn intake_card_line(c: &factory_core::intake::IntakeCard) -> String {
         ),
         None => ("-".into(), ".......".into()),
     };
+    // A possible or confirmed security report's own fast-lane mark
+    // (`#170`) -- `board()` already sorted it first; this is only the
+    // visible reason why.
+    let sec_mark = match c.security.as_ref().map(|f| f.state) {
+        Some(factory_core::intake::SecurityState::Possible) => "!P",
+        Some(factory_core::intake::SecurityState::Confirmed) => "!C",
+        _ => "  ",
+    };
     let mut line = format!(
-        "  {}  {:>7}  {}  {:<24} {} [{}] from {}",
+        "{sec_mark}{}  {:>7}  {}  {:<24} {} [{}] from {} ({})",
         c.id,
         duration(c.age_seconds.max(0) as u64),
         marks,
         verdict,
         c.title,
         c.scope,
-        c.requester
+        c.requester,
+        intake_source_text(&c.source),
     );
+    if let Some(f) = &c.security {
+        line.push_str(&format!(
+            "\n      security: {} ({})",
+            f.state.as_str(),
+            if f.reason.trim().is_empty() { "no reason given" } else { f.reason.trim() }
+        ));
+    }
     if c.stage == factory_core::intake::IntakeStage::Triaging && c.triage.is_none() {
         if let Some(t) = &c.triage_task {
             line.push_str(&format!("\n      triage run in task {t}"));
@@ -2051,29 +2305,115 @@ fn intake_board_text(board: &factory_core::intake::IntakeBoard) -> String {
         board.wontfix,
         board.axes.iter().map(|a| a.label.as_str()).collect::<Vec<_>>().join(", ")
     ));
+    let definitions = intake_definitions_text(&board.routes);
+    if !definitions.is_empty() {
+        out.push_str("\ndefinitions of ready (#169):\n");
+        out.push_str(&definitions);
+    }
+    out
+}
+
+/// Each route's effective definition of ready and its findings (`#169`),
+/// for `factory intake` / `factory intake list --scope`. Silent for a scope
+/// whose chain adds nothing and reads cleanly -- the common case, and
+/// exactly today's seven axes.
+fn intake_definitions_text(routes: &[factory_core::intake::RouteOptions]) -> String {
+    let mut out = String::new();
+    for r in routes {
+        let d = &r.definition;
+        let default = d.checks.is_empty()
+            && d.max_complexity == factory_core::ready::DEFAULT_MAX_COMPLEXITY
+            && d.observability_tolerance == factory_core::ready::Tolerance::default()
+            && d.unreadable.is_empty()
+            && r.findings.is_empty();
+        if default {
+            continue;
+        }
+        out.push_str(&format!("  scope `{}`\n", r.scope));
+        if !d.unreadable.is_empty() {
+            for line in &d.unreadable {
+                out.push_str(&format!("    ! {line}\n"));
+            }
+        }
+        for c in &d.checks {
+            let categories = if c.categories.is_empty() { "every category".to_string() } else { c.categories.join(", ") };
+            out.push_str(&format!("    check `{}` ({categories}) -- {}\n", c.id, c.pass_condition));
+        }
+        if d.max_complexity != factory_core::ready::DEFAULT_MAX_COMPLEXITY {
+            out.push_str(&format!("    max_complexity: {}\n", d.max_complexity));
+        }
+        if d.observability_tolerance != factory_core::ready::Tolerance::default() {
+            out.push_str(&format!("    observability_tolerance: {}\n", d.observability_tolerance.as_str()));
+        }
+        // `Unreadable` findings are left out here: `d.unreadable` above
+        // already said the same thing as the blocker sentence that gates
+        // every assessment for this scope, and printing both reads as the
+        // same fact twice.
+        for f in r.findings.iter().filter(|f| f.kind != factory_core::ready::FindingKind::Unreadable) {
+            out.push_str(&format!("    finding [{}] {:?}: {}\n", f.subject, f.kind, f.detail));
+        }
+    }
+    out
+}
+
+/// `factory intake security-reports` -- every confirmed security report,
+/// awareness time first (`#170`): the L4 fact `#157`'s reporting clock will
+/// read.
+fn intake_security_reports_text(reports: &[factory_core::intake::ConfirmedSecurityReport]) -> String {
+    if reports.is_empty() {
+        return "no confirmed security reports".into();
+    }
+    let mut out = String::new();
+    for r in reports {
+        out.push_str(&format!(
+            "  {}  {}  aware since {}  confirmed by {} at {}  from {}{}\n",
+            r.item,
+            r.scope,
+            r.awareness_at.to_rfc3339(),
+            r.confirmed_by,
+            r.confirmed_at.to_rfc3339(),
+            r.source.kind.as_str(),
+            r.source.reference.as_ref().map(|s| format!(" ({s})")).unwrap_or_default(),
+        ));
+    }
     out
 }
 
 fn intake_item_text(task: &Task) -> String {
     let Some(i) = &task.intake else { return detail(task) };
     let mut out = format!(
-        "{}\n  {}\n  status     {} ({})\n  scope      {}\n  from       {} via {}{}\n  received   {}\n",
+        "{}\n  {}\n  status     {} ({})\n  scope      {}\n  from       {} via {}\n  received   {}\n",
         task.id,
         task.title,
         task.status.as_str(),
         i.stage.as_str().replace('_', "-"),
         task.scope,
         i.requester,
-        i.source.kind.as_str(),
-        i.source.reference.as_ref().map(|r| format!(" ({r})")).unwrap_or_default(),
+        intake_source_text(&i.source),
         i.received_at.to_rfc3339(),
     );
+    if let Some(f) = &i.security {
+        out.push_str(&format!(
+            "  security   {} -- flagged by {} at {}: {}\n",
+            f.state.as_str(),
+            f.flagged_by,
+            f.flagged_at.to_rfc3339(),
+            if f.reason.trim().is_empty() { "no reason given" } else { f.reason.trim() },
+        ));
+        if let (Some(by), Some(at)) = (&f.decided_by, f.decided_at) {
+            out.push_str(&format!(
+                "             decided by {by} at {}{}\n",
+                at.to_rfc3339(),
+                f.evidence.as_ref().map(|e| format!(": {e}")).unwrap_or_default(),
+            ));
+        }
+    }
     if let Some(t) = &i.triage_task {
         out.push_str(&format!("  triage run task {t}\n"));
     }
     if let Some(t) = &i.triage {
         out.push_str(&format!(
-            "  assessed   by {} at {}: {}\n  category   {}\n  priority   {} (impact {}, urgency {})\n  estimate   {} (complexity {})\n  route      {}{}{}{}{}\n",
+            "  assessed   by {} at {}: {}\n  category   {}\n  priority   {} (impact {}, urgency {})\n  estimate   {} (complexity {}){}\n  route      {}{}{}{}{}\n",
             t.by,
             t.at.to_rfc3339(),
             t.verdict.as_str().replace('_', "-"),
@@ -2083,6 +2423,7 @@ fn intake_item_text(task: &Task) -> String {
             t.assessment.urgency.as_str(),
             t.estimate.map(|e| e.describe()).unwrap_or_else(|| "none".into()),
             t.assessment.complexity,
+            t.estimate_basis.as_ref().map(|b| format!("\n  basis      {}", b.describe())).unwrap_or_default(),
             t.assessment.routing.scope,
             t.assessment.routing.agent.as_ref().map(|a| format!(" as {a}")).unwrap_or_default(),
             t.assessment.routing.workflow.as_ref().map(|w| format!(", workflow {w}")).unwrap_or_default(),
@@ -2113,7 +2454,16 @@ fn intake_item_text(task: &Task) -> String {
             out.push_str(&format!("  summary    {}\n", t.assessment.summary));
         }
         if !t.assessment.split.is_empty() {
-            out.push_str(&format!("  proposed split into {} parts:\n", t.assessment.split.len()));
+            let executable = t
+                .assessment
+                .split
+                .iter()
+                .any(|p| !p.owns.is_empty() || p.estimate_seconds.is_some());
+            out.push_str(&format!(
+                "  {} into {} parts:\n",
+                if executable { "executable plan" } else { "proposed split" },
+                t.assessment.split.len()
+            ));
             for p in &t.assessment.split {
                 let after = if p.depends_on.is_empty() {
                     String::new()
@@ -2124,10 +2474,37 @@ fn intake_item_text(task: &Task) -> String {
             }
         }
     }
+    let candidates = factory_core::intake::candidates_with_verdicts(i);
+    if !candidates.is_empty() {
+        out.push_str("  possible duplicates:\n");
+        for c in &candidates {
+            let matched = match c.matched {
+                factory_core::intake::DuplicateMatch::Source => "source".to_string(),
+                factory_core::intake::DuplicateMatch::Text => format!("text {}%", c.score.unwrap_or(0)),
+            };
+            out.push_str(&format!(
+                "    {:<10} {:<12} {} ({}) [{matched}] {}\n",
+                c.verdict.as_str(),
+                c.kind.as_str(),
+                c.reference,
+                c.title,
+                c.evidence,
+            ));
+        }
+    }
     for q in &i.questions {
         out.push_str(&format!("  ? {q}\n"));
     }
-    let next = next_actions_text(&task.id, &factory_core::intake::next_actions(i), "  ");
+    // `show` fetches one task, not the board, so it has no per-scope
+    // definition of ready (`#169`) to hold this against; the seven built-in
+    // axes' own next actions still show correctly, and the scope-aware ones
+    // (`factory intake` / `factory intake list --scope`, which read
+    // `board.routes`) are authoritative for a scope's extra checks and caps.
+    let next = next_actions_text(
+        &task.id,
+        &factory_core::intake::next_actions(i, &factory_core::ready::ReadyDefinition::default()),
+        "  ",
+    );
     if !next.is_empty() {
         out.push_str("  what moves it:\n");
         out.push_str(&next);
@@ -2141,6 +2518,19 @@ fn intake_item_text(task: &Task) -> String {
             out.push_str(&format!(" into {}", d.parts.join(", ")));
         }
         out.push('\n');
+    }
+    if let Some(o) = &i.outbound {
+        out.push_str(&format!("  outbound   {}", o.state.as_str()));
+        if let Some(url) = &o.comment_url {
+            out.push_str(&format!(" -- {url}"));
+        }
+        out.push('\n');
+        if !o.labels_skipped.is_empty() {
+            out.push_str(&format!("             labels skipped (missing in the repository): {}\n", o.labels_skipped.join(", ")));
+        }
+        if let Some(error) = &o.last_error {
+            out.push_str(&format!("             error: {error}\n"));
+        }
     }
     if let Some(r) = &task.result {
         out.push_str(&format!("  result     {r}\n"));
@@ -2548,7 +2938,7 @@ DEPLOYMENTS
 /// `factory backup status`, for a person: the hero line, the facts under
 /// it, then every warning.
 fn backup_status_text(payload: &Payload) -> Option<String> {
-    use factory_core::backup::{AgeLevel, WarningLevel};
+    use factory_core::backup::{AgeLevel, RepositoryState, TimeMachineFact, WarningLevel};
     let Payload::Backup { report } = payload else { return None };
     let mut out = String::new();
     let level = match report.age {
@@ -2585,6 +2975,16 @@ fn backup_status_text(payload: &Payload) -> Option<String> {
             out.push_str(&format!("  next         {}\n", utc(next)));
         }
         out.push_str(&format!(
+            "  verify       {}\n",
+            config.verify_schedule.as_ref().map(|s| s.describe()).unwrap_or_else(|| "no drill scheduled".into())
+        ));
+        if let Some(next) = &report.next_verify {
+            out.push_str(&format!("  next drill   {}\n", utc(next)));
+        }
+        if let Some(reason) = &report.verify_skipped {
+            out.push_str(&format!("  drill skip   {reason}\n"));
+        }
+        out.push_str(&format!(
             "  keep         {} daily, {} weekly, {} monthly{}\n",
             config.keep.daily,
             config.keep.weekly,
@@ -2599,11 +2999,48 @@ fn backup_status_text(payload: &Payload) -> Option<String> {
                 None => "never".into(),
             }
         ));
-        out.push_str("  encrypted    no (v1 writes plaintext archives)\n");
+        out.push_str(&format!(
+            "  encrypted    {}\n",
+            match &config.encrypt_to {
+                Some(recipient) => format!("yes, to {recipient}"),
+                None => "no".into(),
+            }
+        ));
         if report.running {
             out.push_str("  running      a backup operation is in progress\n");
         }
     }
+    // `#155`: scope source code is backed up by pushing it, not by the
+    // snapshot above, so this reads whether or not one is even configured.
+    if !report.code.is_empty() {
+        out.push_str("\nCODE\n");
+        for repo in &report.code {
+            let scopes = repo.scopes.join(", ");
+            let remote = repo.remote_url.as_deref().unwrap_or("--");
+            let state = match &repo.state {
+                RepositoryState::Tracked { upstream, ahead, .. } if *ahead > 0 => {
+                    format!("{upstream}, {ahead} unpushed (as of last fetch)")
+                }
+                RepositoryState::Tracked { upstream, .. } => format!("{upstream}, up to date (as of last fetch)"),
+                RepositoryState::NoDirectory => "no such directory".into(),
+                RepositoryState::NotARepository => "not a git repository".into(),
+                RepositoryState::NoCommits => "no commits yet".into(),
+                RepositoryState::DetachedHead => "detached HEAD".into(),
+                RepositoryState::NoRemote => "no remote configured".into(),
+                RepositoryState::NoUpstream => "no upstream branch".into(),
+                RepositoryState::InspectionFailed { reason } => format!("unknown -- {reason}"),
+            };
+            out.push_str(&format!("  {scopes:<24} {remote:<44} {state}\n"));
+        }
+    }
+    out.push_str("\nTIME MACHINE  ");
+    out.push_str(&match &report.time_machine {
+        Some(TimeMachineFact::Configured { destinations }) => format!("configured -- {}\n", destinations.join(", ")),
+        Some(TimeMachineFact::NotConfigured) => "not configured\n".to_string(),
+        Some(TimeMachineFact::Unavailable { reason }) => format!("unknown -- {reason}\n"),
+        Some(TimeMachineFact::Unsupported) => "not supported on this platform\n".to_string(),
+        None => "unknown -- this daemon did not report it\n".to_string(),
+    });
     if !report.warnings.is_empty() {
         out.push_str("\nWARNINGS\n");
         for w in &report.warnings {
@@ -2626,17 +3063,18 @@ fn backup_list_text(payload: &Payload) -> Option<String> {
     if report.snapshots.is_empty() {
         return Some(format!("no snapshots in {}", config.destination.display()));
     }
-    let mut out = format!("{:<58} {:>10} {:>6}  {:<22} KEPT BY\n", "SNAPSHOT", "SIZE", "FILES", "VERIFIED");
+    let mut out = format!("{:<62} {:>10} {:>6} {:<3} {:<22} KEPT BY\n", "SNAPSHOT", "SIZE", "FILES", "ENC", "VERIFIED");
     for s in &report.snapshots {
         let verified = match &s.verified {
             Some(v) => format!("{} {}", if v.ok { "ok" } else { "FAILED" }, v.at.format("%Y-%m-%d %H:%M")),
             None => "--".into(),
         };
         out.push_str(&format!(
-            "{:<58} {:>10} {:>6}  {:<22} {}\n",
+            "{:<62} {:>10} {:>6} {:<3} {:<22} {}\n",
             s.name,
             bytes(s.size_bytes),
             s.files.map(|n| n.to_string()).unwrap_or_else(|| "--".into()),
+            if s.encrypted { "yes" } else { "" },
             verified,
             kept_by_text(&s.kept_by)
         ));
@@ -2880,7 +3318,7 @@ async fn dataset_cmd(json: bool, client: &Client, cmd: DatasetCmd) -> Result<()>
                 task_ids
             } else if scope.is_some() || status.is_some() {
                 let payload = client
-                    .send(Request::TaskList(TaskFilter { status, scope, limit: None }))
+                    .send(Request::TaskList(TaskFilter { status, scope, ..Default::default() }))
                     .await?;
                 match payload {
                     Payload::Tasks { tasks } => tasks.into_iter().map(|t| t.id).collect(),
@@ -3019,14 +3457,35 @@ async fn policy_cmd(json: bool, client: &Client, cmd: PolicyCmd) -> Result<()> {
             })
         }
 
-        PolicyCmd::Attest { control, scope, evidence, expires, note } => {
+        PolicyCmd::Attest { control, scope, evidence, expires, note, clock_item, deadline } => {
             let control: ControlRef = control.parse().map_err(|e: String| anyhow!(e))?;
+            let clock = match (clock_item, deadline) {
+                (Some(item), Some(deadline)) => {
+                    let item: ClockItemRef = item.parse().map_err(|e: String| anyhow!(e))?;
+                    let deadline: ClockDeadlineKind = deadline.parse().map_err(|e: String| anyhow!(e))?;
+                    Some(ClockMark { item, deadline })
+                }
+                _ => None,
+            };
+            let expires = match expires {
+                Some(e) => e,
+                None if clock.is_some() => "520w".to_string(),
+                None => return Err(anyhow!("--expires is required unless --clock-item is given")),
+            };
             let expires_at = policy::parse_expiry(&expires, chrono::Utc::now()).map_err(|e| anyhow!(e))?;
             let payload = client
-                .send(Request::PolicyAttest { control, scope, evidence, note, expires_at })
+                .send(Request::PolicyAttest { control, scope, evidence, note, expires_at, clock })
                 .await?;
             print(&payload, json, |p| match p {
                 Payload::PolicyAttestation { attestation } => Some(attestation_line(attestation)),
+                _ => None,
+            })
+        }
+
+        PolicyCmd::Clock { scope } => {
+            let payload = client.send(Request::PolicyClock { scope }).await?;
+            print(&payload, json, |p| match p {
+                Payload::PolicyClock { clock } => Some(policy_clock_text(clock)),
                 _ => None,
             })
         }
@@ -3245,6 +3704,42 @@ fn attestation_line(a: &factory_core::policy::Attestation) -> String {
         a.attested_at.to_rfc3339(),
         a.expires_at.to_rfc3339(),
     )
+}
+
+/// `factory policy clock [--scope]`: one block per item, its awareness time
+/// and whether the newest evidence still reports it, then either why it is
+/// excluded or its two deadlines and whatever submission met (or missed)
+/// each one.
+fn policy_clock_text(clock: &reporting_clock::ReportingClock) -> String {
+    if clock.items.is_empty() {
+        return "no reporting-clock items".to_string();
+    }
+    let mut out = String::new();
+    for item in &clock.items {
+        out.push_str(&format!(
+            "{}  scope={}  aware {}{}\n",
+            item.item,
+            item.scope,
+            item.awareness_at.to_rfc3339(),
+            if item.reported_now { "" } else { "  (not in the newest scan)" },
+        ));
+        if let Some(state) = &item.excluded {
+            out.push_str(&format!("  excluded: {state}\n"));
+            continue;
+        }
+        for deadline in &item.deadlines {
+            let submission = deadline
+                .submission
+                .as_ref()
+                .map(|s| format!("  ({} by {} at {})", s.attestation, s.by, s.at.to_rfc3339()))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "  {:<14} due {}  {}{submission}\n",
+                deadline.deadline, deadline.due_at.to_rfc3339(), deadline.state,
+            ));
+        }
+    }
+    out.trim_end().to_string()
 }
 
 // ================================================================== metrics
@@ -3900,6 +4395,9 @@ fn action_str(a: ops::Action) -> &'static str {
         ops::Action::SkipNext => "skip next",
         ops::Action::PauseSchedule => "pause schedule",
         ops::Action::ResumeSchedule => "resume schedule",
+        ops::Action::Approve => "approve",
+        ops::Action::Reject => "reject",
+        ops::Action::AcceptRework => "accept rework",
     }
 }
 
@@ -4379,6 +4877,39 @@ async fn run_cmd(json: bool, client: &Client, cmd: RunCmd) -> Result<()> {
                 _ => None,
             })
         }
+        RunCmd::Approve { id, reason } => {
+            let payload = client
+                .send(Request::RunApprove {
+                    id: id.clone(),
+                    reason,
+                })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Run { run } => Some(format!("approved {id}: {}", run.status.as_str())),
+                _ => None,
+            })
+        }
+        RunCmd::Reject { id, reason } => {
+            let payload = client
+                .send(Request::RunReject {
+                    id: id.clone(),
+                    reason,
+                })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Run { run } => Some(format!("rejected {id}: {}", run.status.as_str())),
+                _ => None,
+            })
+        }
+        RunCmd::Rework { id } => {
+            let payload = client.send(Request::RunRework { id: id.clone() }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Run { run } => {
+                    Some(format!("accepted rework for {id}: {}", run.status.as_str()))
+                }
+                _ => None,
+            })
+        }
         RunCmd::Usage { id } => {
             let payload = client.send(Request::RunUsage { id }).await?;
             print(&payload, json, |p| match p {
@@ -4430,6 +4961,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
         TaskCmd::List {
             status,
             scope,
+            parent,
             limit,
         } => {
             // `failed` and `closed` are not one stored status each, so the
@@ -4440,6 +4972,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 .send(Request::TaskList(TaskFilter {
                     status: status.and_then(StatusFilter::wire),
                     scope,
+                    parent_task_id: parent,
                     limit: if narrowed { None } else { limit },
                 }))
                 .await?;
@@ -4468,6 +5001,11 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             schedule,
             timezone,
             estimate,
+            estimate_low,
+            estimate_high,
+            estimate_cost_low,
+            estimate_cost,
+            estimate_cost_high,
             ack_timeout,
             timeout,
             blocked_timeout,
@@ -4484,6 +5022,14 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 .map(|text| parse_schedule(text, timezone.as_deref()))
                 .transpose()?;
             let retry = retry.as_deref().map(parse_retry).transpose()?;
+            let estimate_range = estimate_from_args(
+                estimate_low,
+                estimate,
+                estimate_high,
+                estimate_cost_low,
+                estimate_cost,
+                estimate_cost_high,
+            )?;
             // Absent means on -- so passing neither flag says the same thing
             // as passing `--worktree` does. `--no-worktree` is the only way
             // to mean off, and it wins if both are somehow given.
@@ -4501,8 +5047,12 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     scope,
                     agent,
                     runtime,
+                    parent_task_id: None,
+                    decomposition_part: None,
+                    depends_on: Vec::new(),
                     schedule,
-                    estimate_seconds: estimate,
+                    estimate_seconds: estimate_range.as_ref().map(|value| value.time.expected),
+                    estimate: estimate_range,
                     ack_timeout_seconds: ack_timeout,
                     timeout_seconds: timeout,
                     blocked_timeout_seconds: blocked_timeout,
@@ -4522,6 +5072,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     .send(Request::TaskRun {
                         id: created.id.clone(),
                         reason: None,
+                        continue_run: false,
                     })
                     .await?;
             }
@@ -4547,6 +5098,11 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             timezone,
             no_schedule,
             estimate,
+            estimate_low,
+            estimate_high,
+            estimate_cost_low,
+            estimate_cost,
+            estimate_cost_high,
             no_estimate,
             ack_timeout,
             timeout,
@@ -4564,6 +5120,14 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             default_category,
         } => {
             let retry = retry.as_deref().map(parse_retry).transpose()?;
+            let estimate_range = estimate_from_args(
+                estimate_low,
+                estimate,
+                estimate_high,
+                estimate_cost_low,
+                estimate_cost,
+                estimate_cost_high,
+            )?;
             let patch = TaskPatch {
                 title,
                 instructions,
@@ -4575,7 +5139,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     .map(|text| parse_schedule(text, timezone.as_deref()))
                     .transpose()?,
                 clear_schedule: no_schedule,
-                estimate_seconds: estimate,
+                estimate_seconds: estimate_range.as_ref().map(|value| value.time.expected),
+                estimate: estimate_range,
                 clear_estimate: no_estimate,
                 ack_timeout_seconds: ack_timeout,
                 timeout_seconds: timeout,
@@ -4641,10 +5206,14 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             })
         }
 
-        TaskCmd::Run { id, reason } => {
+        TaskCmd::Run { id, reason, continue_run } => {
             let id = need_id(id)?;
-            client.send(Request::TaskRun { id: id.clone(), reason }).await?;
-            println!("dispatching {id}");
+            client.send(Request::TaskRun { id: id.clone(), reason, continue_run }).await?;
+            if continue_run {
+                println!("continuing {id}");
+            } else {
+                println!("dispatching {id}");
+            }
             Ok(())
         }
 
@@ -4813,8 +5382,14 @@ fn dependencies_text(report: &DependenciesReport) -> String {
     let mut out = format!("{} dependencies\n", report.scope);
     if report.documents.is_empty() { out.push_str("  no scans\n"); }
     for document in &report.documents {
+        let identity = document
+            .sbom
+            .identity
+            .as_ref()
+            .map(|identity| format!(" v{} {}", identity.version, identity.git_sha))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "  {:<8} {}{}\n", document.state, document.sbom.attachment.attached_at,
+            "  {:<8} {}{}{}\n", document.state, document.sbom.attachment.attached_at, identity,
             if document.vulnerabilities.is_some() { " + vulnerabilities" } else { "" }
         ));
     }
@@ -4933,6 +5508,10 @@ fn turn_ended_from_hook(
         error_details: text("error_details"),
         last_message,
         token: token.filter(|t| !t.is_empty()),
+        // `#178`: Claude Code's Stop/StopFailure payload always names its
+        // own session -- kept on the run as `--continue`'s fallback source
+        // for which session to resume.
+        session_id: text("session_id"),
     }
 }
 
@@ -5056,6 +5635,44 @@ fn parse_retry(text: &str) -> Result<RetryPolicy> {
         .map_err(|_| anyhow!("retry's attempt count must be a number, as in `3x5m`"))?;
     let backoff_seconds = parse_duration_seconds(backoff.trim())?;
     Ok(RetryPolicy::Backoff { max_attempts, backoff_seconds })
+}
+
+fn estimate_from_args(
+    low: Option<u64>,
+    expected: Option<u64>,
+    high: Option<u64>,
+    cost_low: Option<f64>,
+    cost_expected: Option<f64>,
+    cost_high: Option<f64>,
+) -> Result<Option<factory_core::task::Estimate>> {
+    let any_time = low.is_some() || expected.is_some() || high.is_some();
+    let any_cost = cost_low.is_some() || cost_expected.is_some() || cost_high.is_some();
+    if any_cost && !any_time {
+        return Err(anyhow!("a cost estimate needs a time estimate too"));
+    }
+    if !any_time {
+        return Ok(None);
+    }
+    let expected = expected.ok_or_else(|| anyhow!("--estimate is required as the expected duration"))?;
+    let time = match (low, high) {
+        (None, None) => factory_core::task::TimeEstimateRange::point(expected),
+        (Some(low), Some(high)) => factory_core::task::TimeEstimateRange { low, expected, high },
+        _ => return Err(anyhow!("--estimate-low and --estimate-high must be given together")),
+    };
+    let cost = match (cost_low, cost_expected, cost_high) {
+        (None, None, None) => None,
+        (Some(low), Some(expected), Some(high)) => {
+            Some(factory_core::task::CostEstimateRange { low, expected, high })
+        }
+        _ => {
+            return Err(anyhow!(
+                "--estimate-cost-low, --estimate-cost and --estimate-cost-high must all be given together"
+            ))
+        }
+    };
+    let estimate = factory_core::task::Estimate { time, cost };
+    estimate.validate().map_err(anyhow::Error::msg)?;
+    Ok(Some(estimate))
 }
 
 /// What `--status` takes on `task list`: a stored status, or one of the two
@@ -5446,6 +6063,29 @@ fn run_detail(r: &Run) -> String {
     if let Some(session) = &r.session {
         s.push_str(&format!("  session    {} {}\n", session.runtime, session.handle));
     }
+    if let Some(provider) = &r.provider_account {
+        s.push_str(&format!("  provider   {provider}\n"));
+    }
+    if let Some(estimate) = &r.original_estimate {
+        s.push_str(&format!(
+            "  estimated  {}s / {}s / {}s",
+            estimate.time.low, estimate.time.expected, estimate.time.high
+        ));
+        if let Some(cost) = &estimate.cost {
+            s.push_str(&format!("; {} / {} / {}", fmt_usd(cost.low), fmt_usd(cost.expected), fmt_usd(cost.high)));
+        }
+        s.push('\n');
+    }
+    if let Some(estimate) = &r.re_estimate {
+        if let Some(time) = &estimate.time {
+            s.push_str(&format!(
+                "  re-estimate {}s / {}s / {}s ({} samples)\n",
+                time.low, time.expected, time.high, estimate.sample_count
+            ));
+        } else if let Some(reason) = &estimate.reason {
+            s.push_str(&format!("  re-estimate unavailable -- {reason}\n"));
+        }
+    }
     if let Some(since) = r.blocked_since {
         let source = r.blocked_source.map(|s| s.as_str()).unwrap_or("?");
         s.push_str(&format!("  blocked    since {} ({source})\n", since.to_rfc3339()));
@@ -5531,6 +6171,21 @@ fn usage_block(u: &factory_core::usage::RunUsage) -> String {
     if !u.models.is_empty() {
         s.push_str(&format!("\n  model      {}", u.models.join(", ")));
     }
+    if let Some(seconds) = u.elapsed_seconds {
+        s.push_str(&format!("\n  elapsed    {seconds:.1}s"));
+    }
+    if let Some(seconds) = u.active_seconds {
+        s.push_str(&format!("\n  active     {seconds:.1}s"));
+    }
+    for share in &u.plan_share {
+        s.push_str(&format!(
+            "\n  plan share {:.2}% of {}m {} ({:?})",
+            share.used_percent, share.window_minutes, share.provider_account, share.attribution
+        ));
+    }
+    if let Some(reason) = &u.plan_share_unknown {
+        s.push_str(&format!("\n  plan share unknown -- {reason}"));
+    }
     s.push_str(&format!(
         "\n  sessions   {} harness session{}",
         u.sessions,
@@ -5555,6 +6210,30 @@ fn task_usage_text(u: &factory_core::usage::TaskUsage) -> String {
             fmt_tokens(u.total.tokens.total()),
             sum_usd(&u.total),
             unknown_suffix(&u.total)
+        ));
+    }
+    // The task's figures are sums over its runs, estimates included: say
+    // so, or a retry's second estimate reads as the task's own.
+    let over = if u.runs.len() == 1 { String::new() } else { format!(" over {} runs", u.runs.len()) };
+    if let Some(comparison) = &u.time_comparison {
+        s.push_str(&format!(
+            "  time       {} actual / {}s expected{over} ({})\n",
+            comparison
+                .actual
+                .map(|seconds| format!("{seconds}s"))
+                .unwrap_or_else(|| "unknown".into()),
+            comparison.expected,
+            comparison
+                .actual_over_expected
+                .map(|ratio| format!("{ratio:.2}x"))
+                .unwrap_or_else(|| "unknown".into())
+        ));
+    }
+    if let Some(comparison) = &u.cost_comparison {
+        s.push_str(&format!(
+            "  cost       {} actual / {} expected{over}\n",
+            comparison.actual.map(fmt_usd).unwrap_or_else(|| "unknown".into()),
+            fmt_usd(comparison.expected)
         ));
     }
     for r in &u.runs {
@@ -5609,6 +6288,18 @@ fn unknown_suffix(row: &factory_core::usage::CostRow) -> String {
     }
 }
 
+/// `3/5 in range, 1.20x median` -- `#168`'s estimate vs actual for one
+/// group, or `-` when nothing in it carries an `original_estimate` at all.
+fn estimate_vs_actual(row: &factory_core::usage::CostRow) -> String {
+    if row.estimated_runs == 0 {
+        return "-".into();
+    }
+    match row.median_actual_over_expected {
+        Some(ratio) => format!("{}/{} in range, {ratio:.2}x median", row.within_range, row.estimated_runs),
+        None => format!("{}/{} in range", row.within_range, row.estimated_runs),
+    }
+}
+
 fn costs_text(r: &factory_core::usage::CostReport) -> String {
     let mut s = format!(
         "cost by {}, runs started {} to {}{}\n",
@@ -5623,18 +6314,19 @@ fn costs_text(r: &factory_core::usage::CostReport) -> String {
     }
     let key_width = r.rows.iter().map(|row| row.key.chars().count().min(40)).max().unwrap_or(3).max(5);
     s.push_str(&format!(
-        "{:<key_width$}  {:>5}  {:>7}  {:>8}  {:>9}  {}\n",
-        "GROUP", "RUNS", "UNKNOWN", "TOKENS", "COST", ""
+        "{:<key_width$}  {:>5}  {:>7}  {:>8}  {:>9}  {:<28}  {}\n",
+        "GROUP", "RUNS", "UNKNOWN", "TOKENS", "COST", "ESTIMATE", ""
     ));
     let line = |row: &factory_core::usage::CostRow| {
         let key: String = row.key.chars().take(40).collect();
         format!(
-            "{:<key_width$}  {:>5}  {:>7}  {:>8}  {:>9}  {}",
+            "{:<key_width$}  {:>5}  {:>7}  {:>8}  {:>9}  {:<28}  {}",
             key,
             row.runs,
             row.runs_unknown + row.runs_cost_unknown,
             if row.runs_unknown == row.runs { "?".to_string() } else { fmt_tokens(row.tokens.total()) },
             sum_usd(row),
+            estimate_vs_actual(row),
             row.label.as_deref().unwrap_or("")
         )
     };
@@ -5777,8 +6469,15 @@ fn detail(t: &Task) -> String {
         s.push_str(&line);
         s.push('\n');
     }
-    if let Some(v) = t.estimate_seconds {
-        s.push_str(&format!("  estimate   {v}s\n"));
+    if let Some(estimate) = t.effective_estimate() {
+        s.push_str(&format!(
+            "  estimate   {}s / {}s / {}s",
+            estimate.time.low, estimate.time.expected, estimate.time.high
+        ));
+        if let Some(cost) = estimate.cost {
+            s.push_str(&format!("; {} / {} / {}", fmt_usd(cost.low), fmt_usd(cost.expected), fmt_usd(cost.high)));
+        }
+        s.push('\n');
     }
     if t.worktree {
         s.push_str("  worktree   yes, a fresh one before each run\n");
@@ -5867,6 +6566,9 @@ fn describe_event(e: &Event) -> String {
         }
         Event::RolesChanged { scope, name } => {
             format!("role     {name} in {scope}  changed")
+        }
+        Event::DashboardChanged { scope } => {
+            format!("dashboard {scope}  changed")
         }
         Event::PolicyChanged { scope, control } => {
             format!("policy   {control} in {scope}  changed")
@@ -5960,10 +6662,27 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Backup {
-                command: Some(BackupCmd::Restore { snapshot, into })
+                command: Some(BackupCmd::Restore { snapshot, into, identity: None })
             } if snapshot.ends_with(".tar.zst") && into == PathBuf::from("/tmp/restored factory")
         ));
         assert!(Cli::try_parse_from(["factory", "backup", "restore", "snapshot"]).is_err());
+
+        let with_identity = Cli::try_parse_from([
+            "factory",
+            "backup",
+            "restore",
+            "factory-backup-demo-20260925T030000Z.tar.zst.age",
+            "--into",
+            "/tmp/restored",
+            "--identity",
+            "/tmp/key.txt",
+        ])
+        .unwrap();
+        assert!(matches!(
+            with_identity.command,
+            Command::Backup { command: Some(BackupCmd::Restore { identity: Some(path), .. }) }
+                if path == Path::new("/tmp/key.txt")
+        ));
 
         let payload = Payload::BackupRestore {
             restoration: factory_core::backup::Restoration {
@@ -5979,6 +6698,114 @@ mod tests {
         assert!(text.contains("Nothing was switched or started"), "{text}");
         assert!(text.contains("factory-daemon --root '/tmp/restored factory' run"), "{text}");
         assert!(text.contains("factory --root '/tmp/restored factory' status"), "{text}");
+    }
+
+    /// `#152`: `--identity` is optional on `backup verify`, and absent by
+    /// default so a plaintext snapshot's verify is unchanged.
+    #[test]
+    fn backup_verify_takes_an_optional_identity() {
+        let cli = Cli::try_parse_from(["factory", "backup", "verify"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Backup { command: Some(BackupCmd::Verify { snapshot: None, identity: None }) }
+        ));
+        let cli = Cli::try_parse_from(["factory", "backup", "verify", "snap.tar.zst.age", "--identity", "/tmp/key.txt"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Backup { command: Some(BackupCmd::Verify { snapshot: Some(s), identity: Some(path) }) }
+                if s == "snap.tar.zst.age" && path == Path::new("/tmp/key.txt")
+        ));
+    }
+
+    /// A minimal but complete `BackupReport` with one encrypted snapshot, for
+    /// `#152`'s status/list text.
+    fn encrypted_report() -> factory_core::backup::BackupReport {
+        use factory_core::backup::*;
+        let now = chrono::Utc::now();
+        BackupReport {
+            now,
+            config: Some(BackupConfig {
+                destination: PathBuf::from("/Volumes/Backup"),
+                schedule: None,
+                verify_schedule: None,
+                keep: Keep::default(),
+                include_logs: false,
+                encrypt_to: Some("age1exampleexampleexampleexampleexampleexampleexampleexample".into()),
+            }),
+            destination: Some(DestinationFacts {
+                path: "/Volumes/Backup".into(),
+                exists: true,
+                same_device: Some(false),
+                free_bytes: None,
+                total_bytes: None,
+            }),
+            age: AgeLevel::Fresh,
+            due_by: None,
+            next_run: None,
+            next_verify: None,
+            verify_skipped: None,
+            running: false,
+            last_verified: None,
+            last_failure: None,
+            warnings: vec![],
+            snapshots: vec![SnapshotRow {
+                name: "factory-backup-demo-20260925T030000Z.tar.zst.age".into(),
+                at: now,
+                size_bytes: 1024,
+                files: Some(3),
+                verified: None,
+                kept_by: vec![KeptBy::Newest],
+                encrypted: true,
+            }],
+            include: vec![],
+            exclude: vec![],
+            code: vec![],
+            time_machine: None,
+        }
+    }
+
+    #[test]
+    fn backup_status_names_the_configured_recipient_when_encrypted() {
+        let payload = Payload::Backup { report: Box::new(encrypted_report()) };
+        let text = backup_status_text(&payload).unwrap();
+        assert!(text.contains("encrypted    yes, to age1example"), "{text}");
+    }
+
+    /// `#156`: `factory backup status` prints the drill's own schedule, its
+    /// next slot and, when set, why it would currently skip -- right beside
+    /// the backup's own "next".
+    #[test]
+    fn backup_status_prints_the_next_drill_and_its_skip_reason_when_set() {
+        use factory_core::backup::BackupSchedule;
+        let mut report = encrypted_report();
+        report.config.as_mut().unwrap().verify_schedule =
+            Some(BackupSchedule { cron: "*/30 * * * *".into(), timezone: None });
+        report.next_verify = Some(report.now + chrono::Duration::minutes(10));
+        report.verify_skipped = Some("newest snapshot is encrypted; verify it with --identity".into());
+        let payload = Payload::Backup { report: Box::new(report) };
+        let text = backup_status_text(&payload).unwrap();
+        assert!(text.contains("verify       */30 * * * * (UTC)"), "{text}");
+        assert!(text.contains("next drill   "), "{text}");
+        assert!(text.contains("drill skip   newest snapshot is encrypted; verify it with --identity"), "{text}");
+    }
+
+    #[test]
+    fn backup_status_names_no_drill_scheduled_when_verify_schedule_is_unset() {
+        let payload = Payload::Backup { report: Box::new(encrypted_report()) };
+        let text = backup_status_text(&payload).unwrap();
+        assert!(text.contains("verify       no drill scheduled"), "{text}");
+        assert!(!text.contains("next drill"), "{text}");
+        assert!(!text.contains("drill skip"), "{text}");
+    }
+
+    #[test]
+    fn backup_list_marks_an_encrypted_snapshot() {
+        let payload = Payload::Backup { report: Box::new(encrypted_report()) };
+        let text = backup_list_text(&payload).unwrap();
+        assert!(text.contains("ENC"), "{text}");
+        let row = text.lines().find(|l| l.contains("tar.zst.age")).unwrap();
+        assert!(row.contains("yes"), "{row}");
     }
 
     #[test]
@@ -6099,6 +6926,36 @@ mod tests {
         assert_eq!(turn.last_message.as_deref(), Some("pong"));
         assert_eq!(turn.token.as_deref(), Some("tok"));
         assert!(turn.error.is_none());
+    }
+
+    /// `#178`: Claude Code's own session id, carried on the run as
+    /// `--continue`'s fallback source for which session to resume.
+    #[test]
+    fn a_live_stop_payload_carries_its_own_session_id() {
+        let turn = turn_ended_from_hook(HookEvent::Stop, &hook(LIVE_STOP), Some("tok".into()));
+        assert_eq!(turn.session_id.as_deref(), Some("93b16ca2-62a5-493a-ad7a-fd2d2d4df973"));
+    }
+
+    #[test]
+    fn a_payload_naming_no_session_leaves_it_unset() {
+        let turn = turn_ended_from_hook(HookEvent::Stop, &hook(LIVE_STOP_WITH_BACKGROUND), None);
+        assert!(turn.session_id.is_none());
+    }
+
+    /// `#178`: `factory task run --continue <id>` parses to `continue_run`.
+    #[test]
+    fn task_run_continue_flag_parses() {
+        let cli = Cli::try_parse_from(["factory", "task", "run", "t1", "--continue"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Task(TaskCmd::Run { id: Some(ref id), continue_run: true, .. }) if id == "t1"
+        ));
+    }
+
+    #[test]
+    fn task_run_without_the_flag_does_not_continue() {
+        let cli = Cli::try_parse_from(["factory", "task", "run", "t1"]).unwrap();
+        assert!(matches!(cli.command, Command::Task(TaskCmd::Run { continue_run: false, .. })));
     }
 
     #[test]
@@ -6225,6 +7082,30 @@ mod tests {
         assert!(matches!(vex.command, Command::Dependencies { ref args } if args == &["vex", "demo"]));
     }
 
+    #[test]
+    fn dependency_rows_show_the_product_version_and_commit_when_present() {
+        let report: DependenciesReport = serde_json::from_value(serde_json::json!({
+            "scope": "factory",
+            "documents": [{
+                "state": "built",
+                "sbom": {
+                    "attachment": {
+                        "id": "s1", "kind": "sbom", "scope": "factory", "run_id": "r1",
+                        "task_id": "t1", "attempt": 1, "attached_at": "2026-09-25T12:00:00Z",
+                        "filename": "build.cdx.json", "spec_version": "1.6", "states": ["built"]
+                    },
+                    "identity": { "version": "0.1.0", "git_sha": "0123456789abcdef" }
+                }
+            }],
+            "findings": [],
+            "services": []
+        }))
+        .unwrap();
+        let text = dependencies_text(&report);
+        assert!(text.contains("built"));
+        assert!(text.contains("v0.1.0 0123456789abcdef"));
+    }
+
     // -- --timezone ----------------------------------------------------------
 
     #[test]
@@ -6262,6 +7143,28 @@ mod tests {
     }
 
     #[test]
+    fn task_estimate_shorthand_and_ranges_parse_without_ambiguity() {
+        let point = estimate_from_args(None, Some(900), None, None, None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(point.time, factory_core::task::TimeEstimateRange::point(900));
+        let range = estimate_from_args(
+            Some(600),
+            Some(900),
+            Some(1800),
+            Some(1.0),
+            Some(2.0),
+            Some(4.0),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(range.time.low, 600);
+        assert_eq!(range.cost.unwrap().expected, 2.0);
+        assert!(estimate_from_args(Some(600), Some(900), None, None, None, None).is_err());
+        assert!(estimate_from_args(None, None, None, Some(1.0), Some(2.0), Some(3.0)).is_err());
+    }
+
+    #[test]
     fn infra_prints_unreadable_facts_as_dashes_and_lists_the_unassigned() {
         use factory_core::config::{ProviderKind, ProviderVia};
         use factory_core::protocol::*;
@@ -6293,6 +7196,9 @@ mod tests {
                     harness: "opencode".into(),
                     via: ProviderVia::Agent,
                 }],
+                windows: Vec::new(),
+                active_runs: Vec::new(),
+                usage_unknown: None,
             }],
             unassigned: vec![UnassignedAgent { scope: "demo".into(), agent: "helper".into(), harness: "codex".into() }],
             harnesses: vec![factory_core::harness::HarnessRow {
@@ -6377,6 +7283,111 @@ mod tests {
             Command::Intake { command: Some(IntakeCmd::Info { triage: true, agent: Some(_), .. }), .. }
         ));
         assert!(Cli::try_parse_from(["factory", "intake", "info", "abc", "x", "--agent", "codex"]).is_err());
+        match parse(&["intake", "publish", "abc"]).command {
+            Command::Intake { command: Some(IntakeCmd::Publish { id }), .. } => assert_eq!(id, "abc"),
+            _ => panic!("not a publish"),
+        }
+    }
+
+    #[test]
+    fn intake_parses_the_relay_flags_and_refuses_an_unknown_source() {
+        match parse(&[
+            "intake",
+            "add",
+            "Invoice question",
+            "--source",
+            "email",
+            "--provider",
+            "apple-mail",
+            "--reference",
+            "<abc@x>",
+            "--requester",
+            "a@b.c",
+            "--received-at",
+            "2026-09-26T08:00:00Z",
+        ])
+        .command
+        {
+            Command::Intake {
+                command:
+                    Some(IntakeCmd::Add {
+                        source: Some(source),
+                        provider: Some(provider),
+                        reference: Some(reference),
+                        requester: Some(requester),
+                        received_at: Some(received_at),
+                        ..
+                    }),
+                ..
+            } => {
+                assert_eq!(
+                    (source.as_str(), provider.as_str(), reference.as_str(), requester.as_str(), received_at.as_str()),
+                    ("email", "apple-mail", "<abc@x>", "a@b.c", "2026-09-26T08:00:00Z")
+                );
+            }
+            _ => panic!("not a relayed add"),
+        }
+        match parse(&["intake", "add", "A chat request", "--source", "chat"]).command {
+            Command::Intake { command: Some(IntakeCmd::Add { source: Some(s), .. }), .. } => assert_eq!(s, "chat"),
+            _ => panic!("not a chat add"),
+        }
+        assert!(
+            Cli::try_parse_from(["factory", "intake", "add", "x", "--source", "github"]).is_err(),
+            "github is never a caller-chosen source"
+        );
+    }
+
+    #[test]
+    fn intake_parses_the_security_fast_lane_subcommands() {
+        match parse(&["intake", "add", "Possible RCE", "--scope", "web", "--security"]).command {
+            Command::Intake { command: Some(IntakeCmd::Add { security: true, .. }), .. } => {}
+            _ => panic!("expected --security to parse"),
+        }
+        match parse(&["intake", "add", "Ordinary bug", "--scope", "web"]).command {
+            Command::Intake { command: Some(IntakeCmd::Add { security: false, .. }), .. } => {}
+            _ => panic!("--security absent should default to false"),
+        }
+        match parse(&["intake", "flag-security", "abc", "--reason", "looks like an injection"]).command {
+            Command::Intake { command: Some(IntakeCmd::FlagSecurity { id, reason }), .. } => {
+                assert_eq!((id.as_str(), reason.as_str()), ("abc", "looks like an injection"));
+            }
+            _ => panic!("not a flag-security"),
+        }
+        match parse(&["intake", "security", "abc", "confirm"]).command {
+            Command::Intake { command: Some(IntakeCmd::Security { id, verdict, evidence: None }), .. } => {
+                assert_eq!((id.as_str(), verdict.as_str()), ("abc", "confirm"));
+            }
+            _ => panic!("not a confirm"),
+        }
+        match parse(&["intake", "security", "abc", "dismiss", "--evidence", "false positive"]).command {
+            Command::Intake { command: Some(IntakeCmd::Security { id, verdict, evidence: Some(e) }), .. } => {
+                assert_eq!((id.as_str(), verdict.as_str(), e.as_str()), ("abc", "dismiss", "false positive"));
+            }
+            _ => panic!("not a dismiss"),
+        }
+        assert!(
+            Cli::try_parse_from(["factory", "intake", "security", "abc", "maybe"]).is_err(),
+            "only confirm or dismiss"
+        );
+        match parse(&["intake", "security-reports"]).command {
+            Command::Intake { command: Some(IntakeCmd::SecurityReports { scope: None }), .. } => {}
+            _ => panic!("not a security-reports"),
+        }
+        match parse(&["intake", "security-reports", "--scope", "web"]).command {
+            Command::Intake { command: Some(IntakeCmd::SecurityReports { scope: Some(s) }), .. } => {
+                assert_eq!(s, "web");
+            }
+            _ => panic!("not a scoped security-reports"),
+        }
+        // `--scope` before the subcommand is left for the run loop's own
+        // merge to fold in (the same as `list` and `add`) -- parsing alone
+        // leaves it on the outer `Command::Intake`.
+        match parse(&["intake", "--scope", "web", "security-reports"]).command {
+            Command::Intake { scope: Some(outer), command: Some(IntakeCmd::SecurityReports { scope: None }) } => {
+                assert_eq!(outer, "web");
+            }
+            _ => panic!("not a pre-subcommand scope waiting to be merged"),
+        }
     }
 
     #[test]
@@ -6398,6 +7409,31 @@ mod tests {
             _ => panic!("summary"),
         }
         assert!(Cli::try_parse_from(["factory", "stats", "--window", "9d"]).is_err());
+    }
+
+    #[test]
+    fn metrics_takes_scope_and_dashboard_window_presets() {
+        match parse(&[
+            "metrics",
+            "agent_hours",
+            "--scope",
+            "demo",
+            "--window",
+            "14d",
+        ])
+        .command
+        {
+            Command::Metrics {
+                ids,
+                scope: Some(scope),
+                window: Some(MetricsWindow::FourteenDays),
+            } => {
+                assert_eq!(ids, vec!["agent_hours"]);
+                assert_eq!(scope, "demo");
+            }
+            _ => panic!("metrics flags"),
+        }
+        assert!(Cli::try_parse_from(["factory", "metrics", "--window", "7d"]).is_err());
     }
 
     #[test]
@@ -6451,6 +7487,10 @@ mod tests {
         assert!("nonsense".parse::<StatusFilter>().is_err());
         assert_eq!(StatusFilter::Failed.wire(), Some(TaskStatus::Blocked));
         assert_eq!(StatusFilter::Closed.wire(), None);
+        match parse(&["task", "list", "--parent", "parent-id"]).command {
+            Command::Task(TaskCmd::List { parent: Some(parent), .. }) => assert_eq!(parent, "parent-id"),
+            _ => panic!("task list --parent"),
+        }
     }
 
     #[test]
@@ -6513,5 +7553,106 @@ mod tests {
         assert!(text.contains("issue=117"), "{text}");
         assert!(!text.contains("$0.00"), "a group with nothing measured is ?, not free: {text}");
         assert!(text.contains("1 of 1 runs have no measured cost"), "{text}");
+    }
+
+    #[test]
+    fn the_cost_table_shows_estimate_vs_actual_per_group_when_there_is_one() {
+        use factory_core::usage::{CostGroupBy, CostReport, CostRow};
+        let mut row = CostRow::new("scope=web", None);
+        row.runs = 5;
+        row.estimated_runs = 5;
+        row.within_range = 4;
+        row.median_actual_over_expected = Some(1.2);
+        let mut nothing = CostRow::new("scope=demo", None);
+        nothing.runs = 1;
+        let report = CostReport {
+            group_by: CostGroupBy::Scope,
+            from: chrono::Utc::now() - chrono::Duration::days(30),
+            to: chrono::Utc::now(),
+            scope: None,
+            rows: vec![row, nothing],
+            total: CostRow::new("total", None),
+        };
+        let text = costs_text(&report);
+        assert!(text.contains("4/5 in range, 1.20x median"), "{text}");
+        assert!(text.contains("scope=demo"), "{text}");
+        // A group with nothing estimated says so plainly, not "0/0".
+        let demo_line = text.lines().find(|l| l.contains("scope=demo")).unwrap();
+        assert!(demo_line.contains(" - "), "{demo_line}");
+    }
+
+    #[test]
+    fn intake_definitions_text_is_silent_for_a_scope_with_nothing_declared() {
+        let plain = factory_core::intake::RouteOptions { scope: "demo".into(), ..Default::default() };
+        assert_eq!(intake_definitions_text(&[plain]), "");
+    }
+
+    #[test]
+    fn intake_definitions_text_names_the_scope_its_extra_checks_limits_and_findings() {
+        use factory_core::ready::{AppliedCheck, Finding, FindingKind, Origin, ReadyDefinition, Tolerance};
+        let route = factory_core::intake::RouteOptions {
+            scope: "security-team".into(),
+            definition: ReadyDefinition {
+                scope: "security-team".into(),
+                checks: vec![AppliedCheck {
+                    id: "threat-model".into(),
+                    pass_condition: "names a threat model".into(),
+                    categories: vec!["security-report".into()],
+                    declared_at: Origin { scope: "security-team".into(), file: "security".into() },
+                }],
+                max_complexity: 6,
+                observability_tolerance: Tolerance::Low,
+                unreadable: vec![],
+            },
+            findings: vec![Finding {
+                kind: FindingKind::Loosening,
+                subject: "security-team".into(),
+                detail: "max_complexity 8 loosens the inherited 6".into(),
+            }],
+            ..Default::default()
+        };
+        let text = intake_definitions_text(&[route]);
+        assert!(text.contains("scope `security-team`"), "{text}");
+        assert!(text.contains("threat-model") && text.contains("security-report"), "{text}");
+        assert!(text.contains("max_complexity: 6"), "{text}");
+        assert!(text.contains("observability_tolerance: low"), "{text}");
+        assert!(text.contains("loosens the inherited 6"), "{text}");
+    }
+
+    #[test]
+    fn intake_definitions_text_shows_an_unreadable_definition_even_with_nothing_else_declared() {
+        let route = factory_core::intake::RouteOptions {
+            scope: "demo".into(),
+            definition: factory_core::ready::ReadyDefinition {
+                scope: "demo".into(),
+                unreadable: vec!["definition of ready for demo could not be read: ...".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = intake_definitions_text(&[route]);
+        assert!(text.contains("could not be read"), "{text}");
+    }
+
+    #[test]
+    fn intake_definitions_text_never_says_unreadable_twice() {
+        use factory_core::ready::{Finding, FindingKind, ReadyDefinition};
+        let route = factory_core::intake::RouteOptions {
+            scope: "demo".into(),
+            definition: ReadyDefinition {
+                scope: "demo".into(),
+                unreadable: vec!["definition of ready for demo could not be read: security binds \"security\", but no security.yaml file exists".into()],
+                ..Default::default()
+            },
+            findings: vec![Finding {
+                kind: FindingKind::Unreadable,
+                subject: "demo".into(),
+                detail: "binds \"security\", but no security.yaml file exists".into(),
+            }],
+            ..Default::default()
+        };
+        let text = intake_definitions_text(&[route]);
+        assert_eq!(text.matches("could not be read").count(), 1, "{text}");
+        assert!(!text.contains("finding ["), "an Unreadable finding restates the blocker sentence -- left out: {text}");
     }
 }

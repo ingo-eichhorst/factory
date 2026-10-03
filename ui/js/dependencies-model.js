@@ -4,6 +4,16 @@
 const STATUS_ORDER = { open: 0, assessed: 1, stale: 2, resolved: 3 };
 const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3, unknown: 4 };
 
+/// Factory's running state belongs to L1 Doctor. Other scopes keep all three
+/// lifecycle states on their product page.
+export function visibleDocuments(documents, scope) {
+  return (documents || []).filter((document) => scope !== "factory" || document.state !== "running");
+}
+
+export function visibleFindings(findings, scope) {
+  return (findings || []).filter((finding) => scope !== "factory" || finding.state !== "running");
+}
+
 export function shapeFindings(findings) {
   return [...(findings || [])].sort((a, b) =>
     (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9) ||

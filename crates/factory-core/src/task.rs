@@ -2,6 +2,59 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeEstimateRange {
+    pub low: u64,
+    pub expected: u64,
+    pub high: u64,
+}
+
+impl TimeEstimateRange {
+    pub fn point(seconds: u64) -> Self { Self { low: seconds, expected: seconds, high: seconds } }
+    pub fn validate(self) -> std::result::Result<(), String> {
+        if self.low == 0 { return Err("a task estimate must be at least one second".into()); }
+        if self.low > self.expected || self.expected > self.high {
+            return Err("estimate time must be ordered low <= expected <= high".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CostEstimateRange {
+    pub low: f64,
+    pub expected: f64,
+    pub high: f64,
+}
+
+impl CostEstimateRange {
+    pub fn validate(self) -> std::result::Result<(), String> {
+        if !self.low.is_finite() || !self.expected.is_finite() || !self.high.is_finite() {
+            return Err("estimate cost values must be finite".into());
+        }
+        if self.low < 0.0 || self.low > self.expected || self.expected > self.high {
+            return Err("estimate cost must be ordered 0 <= low <= expected <= high".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Estimate {
+    pub time: TimeEstimateRange,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<CostEstimateRange>,
+}
+
+impl Estimate {
+    pub fn point(seconds: u64) -> Self { Self { time: TimeEstimateRange::point(seconds), cost: None } }
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        self.time.validate()?;
+        if let Some(cost) = self.cost { cost.validate()?; }
+        Ok(())
+    }
+}
+
 /// Where a task is in its life. The agent moves it through `Running` ->
 /// `Done`/`Failed`/`Blocked` by calling back; nothing infers completion from a
 /// terminal's appearance.
@@ -336,6 +389,38 @@ pub struct TaskFailure {
     pub at: DateTime<Utc>,
 }
 
+/// A dispatch held before any run row existed because its agent, or its
+/// scope, already had `max_sessions` sessions in use (`#179`). Distinct from
+/// `TaskFailure`: the task needs no person, only a slot, so it stays
+/// `Pending` rather than `Blocked` -- see `Task::fires`, which skips a task
+/// carrying this so a schedule's next slot does not try (and re-hold) it
+/// again on every tick while it waits.
+///
+/// Set by `start_run_due` the moment a dispatch is first held, and cleared
+/// the moment a run is finally created for it (`TaskStore::create_run`'s own
+/// mirror, the same place `failure` and `routed_to` are cleared for a new
+/// attempt) -- or the task is cancelled, closed, deleted, or moved to a
+/// different agent or scope, none of which leave the original wait still
+/// meaningful.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotWait {
+    /// The agent name the limit was declared on -- the bare adapter name for
+    /// a task with no declaration, held only by its scope's own cap.
+    pub agent: String,
+    pub scope: String,
+    pub trigger: crate::run::Trigger,
+    /// When this attempt actually became due -- carried straight onto the
+    /// eventual run's own `queued_at`/`scheduled_for` once a slot opens, so
+    /// the queue wait it reports is the whole wait, not just the moment the
+    /// slot happened to open.
+    pub queued_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_for: Option<DateTime<Utc>>,
+    /// When the hold itself began. Kept apart from `queued_at`, which can be
+    /// earlier still for a retry or a slot `dispatchable_from` moved back.
+    pub since: DateTime<Utc>,
+}
+
 /// The identity of a live agent session, as the runtime adapter that created it
 /// understands it. The daemon treats `handle` as opaque.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,6 +452,8 @@ pub struct Task {
     /// never stops a run or changes its status (`timeout_seconds` does that).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<Estimate>,
     /// The most recent run's outcome, mirrored so a list does not have to read
     /// every run. `Run` is where it actually lives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,6 +511,18 @@ pub struct Task {
     /// parsing labels or titles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_origin: Option<WorkflowOrigin>,
+    /// The larger task this task was decomposed from. Unlike the matching
+    /// labels used by older intake splits, this is executable task data: it
+    /// survives adapters that do not preserve labels and can be followed by
+    /// schedulers and UIs without parsing prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    /// Stable id of this part within its parent's decomposition plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decomposition_part: Option<String>,
+    /// Tasks that must finish successfully before this task may run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
     /// The bench attempt that created this task, when there is one. Follows
     /// `workflow_origin`'s own shape and reason for existing: `#[serde(default)]`
     /// reads a task written before this field existed as `None`, and a task
@@ -473,9 +572,18 @@ pub struct Task {
     /// closed it on purpose -- see `TaskClosure`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closure: Option<TaskClosure>,
+    /// A dispatch held on a declared `max_sessions` limit (`#179`) -- see
+    /// `SlotWait`. Absent on every task written before this existed, which
+    /// reads as not waiting, exactly what those tasks were doing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_wait: Option<SlotWait>,
 }
 
 impl Task {
+    pub fn effective_estimate(&self) -> Option<Estimate> {
+        self.estimate.clone().or_else(|| self.estimate_seconds.map(Estimate::point))
+    }
+
     /// `Blocked` because its newest run failed, rather than because an
     /// agent is waiting on a question (`#122`). No run is active: there is
     /// nobody to answer, only a failure to look at, run again, or close.
@@ -495,9 +603,12 @@ impl Task {
 
     /// Whether its schedule may fire it: pending, or blocked by a failure,
     /// which a later success clears (`#122`). Never a closed task, and
-    /// never one blocked on a question -- that one has a run.
+    /// never one blocked on a question -- that one has a run. Never one
+    /// already waiting for a capacity slot either (`#179`): it is already
+    /// claimed, and firing it again would only re-hold it and reset nothing
+    /// -- the wait it is already in is what will eventually dispatch it.
     pub fn fires(&self) -> bool {
-        self.status == TaskStatus::Pending || self.blocked_by_failure()
+        self.slot_wait.is_none() && (self.status == TaskStatus::Pending || self.blocked_by_failure())
     }
 
     /// Did it end in failure? Blocked by one, or a legacy `Failed` row.
@@ -526,6 +637,19 @@ pub struct WorkflowOrigin {
     pub workflow_id: String,
     pub workflow_run_id: String,
     pub node_id: String,
+    /// Workspace constraints owned by the workflow.  A decomposition uses
+    /// this to branch every worker from the integration branch as it stood
+    /// when that worker became runnable; ordinary workflows leave it empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkflowWorkspace>,
+}
+
+/// The part of a workflow workspace a task runner needs to know.  The
+/// workflow engine owns and advances the ref; the regular run/worktree path
+/// merely provisions the task's branch from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowWorkspace {
+    pub base_ref: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -540,9 +664,17 @@ pub struct NewTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decomposition_part: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<Estimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ack_timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -585,6 +717,8 @@ pub struct TaskPatch {
     pub schedule: Option<Schedule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<Estimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -682,6 +816,14 @@ pub struct TaskPatch {
     pub closure: Option<TaskClosure>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_closure: bool,
+    /// A dispatch held on `max_sessions` (`#179`) -- set the moment it is
+    /// first held, cleared everywhere `failure` is (a new run, a cancel, a
+    /// close, a delete) plus a change of agent or scope, which invalidate
+    /// the wait's own target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_wait: Option<SlotWait>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_slot_wait: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -690,6 +832,9 @@ pub struct TaskFilter {
     pub status: Option<TaskStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Direct decomposition children of this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -792,6 +937,13 @@ pub struct TurnEnded {
     /// The run's token, checked exactly as `TaskReport::token` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// The harness's own session id, when the hook payload names one --
+    /// Claude Code's `Stop`/`StopFailure` always does. Recorded on the run
+    /// (`Run::turn_ended_session_id`) as `--continue`'s (#178) fallback
+    /// source for which session to resume, used only when the previous
+    /// run's usage snapshots never saw one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -864,6 +1016,33 @@ mod tests {
         assert!(!task.schedule_paused, "an old row predates pausing, so its schedule is running");
     }
 
+    fn pending_task() -> Task {
+        let json = r#"{
+            "id": "t1", "title": "a task", "instructions": "", "scope": "demo",
+            "agent": "shell", "runtime": "herdr", "status": "pending",
+            "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z"
+        }"#;
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// `#179`: a task already waiting for a capacity slot fires no more,
+    /// however its status reads -- the wait, not the schedule, decides when
+    /// it dispatches next.
+    #[test]
+    fn a_task_waiting_for_a_slot_does_not_fire() {
+        let mut task = pending_task();
+        assert!(task.fires(), "an ordinary pending task fires");
+        task.slot_wait = Some(SlotWait {
+            agent: "codex".into(),
+            scope: "demo".into(),
+            trigger: crate::run::Trigger::Schedule,
+            queued_at: "2024-01-01T00:00:00Z".parse().unwrap(),
+            scheduled_for: None,
+            since: "2024-01-01T00:00:00Z".parse().unwrap(),
+        });
+        assert!(!task.fires(), "already claimed by the wait it is in");
+    }
+
     /// `RetryPolicy::None` has to round-trip as the bare string `retry: none`
     /// -- the exact spelling the issue this exists for asks for, and what
     /// `factory-cli`'s own `parse_retry` accepts.
@@ -884,5 +1063,22 @@ mod tests {
         let clear: TaskPatch = serde_json::from_str(r#"{"clear_estimate":true}"#).unwrap();
         assert_eq!(clear.estimate_seconds, None);
         assert!(clear.clear_estimate);
+    }
+
+    #[test]
+    fn estimate_ranges_validate_order_and_old_point_estimates_remain_effective() {
+        let estimate = Estimate {
+            time: TimeEstimateRange { low: 600, expected: 900, high: 1800 },
+            cost: Some(CostEstimateRange { low: 1.0, expected: 2.0, high: 4.0 }),
+        };
+        assert!(estimate.validate().is_ok());
+        assert!(Estimate { time: TimeEstimateRange { low: 901, expected: 900, high: 1800 }, cost: None }.validate().is_err());
+        assert!(Estimate { time: TimeEstimateRange::point(900), cost: Some(CostEstimateRange { low: 2.0, expected: 1.0, high: 3.0 }) }.validate().is_err());
+        let task: Task = serde_json::from_str(r#"{
+            "id":"t", "title":"old", "instructions":"", "scope":"demo",
+            "agent":"builder", "runtime":"herdr", "status":"pending", "estimate_seconds":900,
+            "created_at":"2026-01-01T00:00:00Z", "updated_at":"2026-01-01T00:00:00Z"
+        }"#).unwrap();
+        assert_eq!(task.effective_estimate(), Some(Estimate::point(900)));
     }
 }

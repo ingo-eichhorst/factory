@@ -14,6 +14,7 @@ use factory_core::environments::{CheckDecl, CheckKind, Sample};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// How much of a body is kept for an `http` check's `body` match.
 const BODY_LIMIT: usize = 64 * 1024;
@@ -122,17 +123,27 @@ async fn bounded(program: PathBuf, args: Vec<String>, dir: Option<&Path>, timeou
     }
     #[cfg(unix)]
     cmd.process_group(0);
-    let child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", program.display()))?;
+    let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", program.display()))?;
     let pid = child.id();
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) => Ok(Output {
-            success: out.status.success(),
-            status: match out.status.code() {
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let collect = async {
+        let (status, stdout, stderr) = tokio::try_join!(
+            child.wait(),
+            drain_capped(stdout, BODY_LIMIT + 16),
+            drain_capped(stderr, 4096),
+        )?;
+        Ok::<_, std::io::Error>((status, stdout, stderr))
+    };
+    match tokio::time::timeout(timeout, collect).await {
+        Ok(Ok((status, stdout, stderr))) => Ok(Output {
+            success: status.success(),
+            status: match status.code() {
                 Some(code) => format!("exit {code}"),
                 None => "killed by a signal".into(),
             },
-            stdout: String::from_utf8_lossy(&out.stdout[..out.stdout.len().min(BODY_LIMIT + 16)]).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr[..out.stderr.len().min(4096)]).into_owned(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
         }),
         Ok(Err(e)) => Err(format!("{}: {e}", program.display())),
         Err(_) => {
@@ -146,6 +157,35 @@ async fn bounded(program: PathBuf, args: Vec<String>, dir: Option<&Path>, timeou
             #[cfg(not(unix))]
             let _ = pid;
             Err(format!("timed out after {}s", timeout.as_secs()))
+        }
+    }
+}
+
+/// Keep draining after the cap so a noisy check cannot block on a full
+/// pipe, while retaining only bounded memory even before its timeout.
+async fn drain_capped(mut reader: impl AsyncRead + Unpin, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut kept = Vec::new();
+    let mut tail = Vec::new();
+    let mut total = 0;
+    let prefix_limit = limit.saturating_sub(16);
+    let mut chunk = [0; 8192];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            if total > limit {
+                kept.truncate(prefix_limit);
+                kept.extend_from_slice(&tail);
+            }
+            return Ok(kept);
+        }
+        total += read;
+        let take = read.min(limit.saturating_sub(kept.len()));
+        kept.extend_from_slice(&chunk[..take]);
+        // curl writes the HTTP status at the end of stdout. Retain that
+        // suffix as well as the body prefix when the response is large.
+        tail.extend_from_slice(&chunk[..read]);
+        if tail.len() > 16 {
+            tail.drain(..tail.len() - 16);
         }
     }
 }
@@ -187,6 +227,41 @@ mod tests {
         assert!(!hung.ok);
         assert_eq!(hung.detail.as_deref(), Some("timed out after 1s"));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn noisy_output_is_drained_without_retaining_it_all() {
+        let output = bounded(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".into(), "head -c 1048576 /dev/zero; head -c 1048576 /dev/zero >&2".into()],
+            None,
+            Duration::from_secs(5),
+        ).await.unwrap();
+        assert!(output.success);
+        assert_eq!(output.stdout.len(), BODY_LIMIT + 16);
+        assert_eq!(output.stderr.len(), 4096);
+    }
+
+    #[tokio::test]
+    async fn bounded_output_retains_the_status_suffix_after_a_large_body() {
+        let output = bounded(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".into(), "head -c 1048576 /dev/zero; printf '\\n200'".into()],
+            None,
+            Duration::from_secs(5),
+        ).await.unwrap();
+        assert!(output.stdout.ends_with("\n200"));
+        assert_eq!(output.stdout.len(), BODY_LIMIT + 16);
+    }
+
+    #[tokio::test]
+    async fn a_continuously_noisy_check_still_times_out() {
+        let sample = run(
+            "e", None, &std::env::temp_dir(),
+            &check("{ kind: command, command: 'yes noise', timeout: 1s }"),
+        ).await;
+        assert!(!sample.ok);
+        assert_eq!(sample.detail.as_deref(), Some("timed out after 1s"));
     }
 
     #[tokio::test]

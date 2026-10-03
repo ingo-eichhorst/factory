@@ -22,6 +22,7 @@ import {
   ageBadge,
   backupFailure,
   checkRows,
+  codeRows,
   destinationLevel,
   destinationText,
   fmtAgo,
@@ -32,7 +33,11 @@ import {
   keepText,
   keptByText,
   lastVerifiedText,
+  nextDrillLevel,
+  nextDrillText,
+  rowVerifyState,
   scheduleText,
+  timeMachineText,
   verifiedCell,
 } from "./backup-model.js";
 
@@ -87,8 +92,11 @@ function hero(report) {
         ${fact("Where it is", destinationText(dest), destinationLevel(dest))}
         ${fact("Schedule", scheduleText(config), config.schedule ? null : "warn")}
         ${fact("Next backup", report.next_run ? `${fmtIn(report.now, report.next_run)} · ${fmtWhen(report.next_run)}` : "only when somebody runs one")}
+        ${fact("Next drill", nextDrillText(report), nextDrillLevel(report))}
         ${fact("Last verified", lastVerifiedText(report), report.last_verified ? (report.last_verified.ok ? "ok" : "bad") : "warn")}
-        ${fact("Encrypted", "no -- v1 writes plaintext archives; keep the destination private")}
+        ${fact("Encrypted", config.encrypt_to
+          ? `encrypted to ${config.encrypt_to}`
+          : "no -- writes plaintext archives; keep the destination private")}
         ${fact("Retention", keepText(config))}
         ${fact("Logs", config.include_logs ? "included" : "not included")}
       </dl>`
@@ -117,6 +125,25 @@ function warningStrip(warnings) {
   </ul>`;
 }
 
+/// `#155`: source code is backed up by pushing it, not by a snapshot, so
+/// this reads `report.code`/`report.time_machine` regardless of whether
+/// `report.config` is set -- unlike every other section on the page.
+function codeSection(report) {
+  const rows = codeRows(report);
+  const tm = timeMachineText(report);
+  const body = rows.length
+    ? rows.map(r => `<tr>
+        <td>${esc(r.scope)}</td>
+        <td class="bk-path mono">${r.remote === MISSING ? `<span class="infra-missing">${MISSING}</span>` : esc(r.remote)}</td>
+        <td class="bk-${r.level}">${esc(r.text)}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="3" class="bk-none">no registered scope resolves to a repository</td></tr>`;
+  return `<section class="bk-section"><h3>Code <span class="sub">pushed to a remote is the backup; this only reads what git already knows</span></h3>
+    <div class="bk-scroll"><table><thead><tr><th>Scope</th><th>Remote</th><th>State</th></tr></thead><tbody>${body}</tbody></table></div>
+    <dl class="infra-facts">${fact("Time Machine", tm.text, tm.level)}</dl>
+  </section>`;
+}
+
 function history(report) {
   const rows = report.snapshots || [];
   if (!report.config) return "";
@@ -126,13 +153,16 @@ function history(report) {
   const can = actions(report);
   const body = rows.map(s => {
     const v = verifiedCell(s.verified);
+    const verify = rowVerifyState(s);
+    const disabled = !can.run || !verify.enabled;
     return `<tr>
-      <td><div class="title bk-nowrap">${esc(fmtWhen(s.at))}</div><div class="sub mono bk-name">${esc(s.name)}</div></td>
+      <td><div class="title bk-nowrap">${esc(fmtWhen(s.at))}</div><div class="sub mono bk-name">${esc(s.name)}
+        ${s.encrypted ? `<span class="tag bk-enc" title="encrypted">encrypted</span>` : ""}</div></td>
       <td class="bk-nowrap">${esc(fmtBytes(s.size_bytes))}</td>
       <td>${typeof s.files === "number" ? s.files : `<span class="infra-missing" title="taken before this daemon's history began">${MISSING}</span>`}</td>
       <td class="bk-${v.level} bk-nowrap">${esc(v.text)}</td>
       <td>${esc(keptByText(s.kept_by))}</td>
-      <td><button class="btn" data-verify="${esc(s.name)}" ${can.run ? "" : "disabled"}>Verify</button></td>
+      <td><button class="btn" data-verify="${esc(s.name)}" ${disabled ? "disabled" : ""} title="${esc(verify.title)}">Verify</button></td>
     </tr>`;
   }).join("");
   return `<section class="bk-section"><h3>History <span class="sub">newest first · ${rows.length} in the destination</span></h3>
@@ -181,7 +211,7 @@ export function renderBackup() {
     return;
   }
   page.hidden = false;
-  page.innerHTML = [hero(report), warningStrip(report.warnings), history(report), contents(report)].join("");
+  page.innerHTML = [hero(report), warningStrip(report.warnings), codeSection(report), history(report), contents(report)].join("");
   for (const b of page.querySelectorAll("[data-verify]")) {
     b.onclick = () => confirmVerify(b.dataset.verify);
   }
