@@ -645,6 +645,9 @@ pub fn refuse_bad_openshell(scope: &Scope, agent: &ScopeAgent) -> Result<()> {
             "an openshell: block but sandbox: {}; set sandbox: openshell or remove the block",
             other.as_str()
         )),
+        (_, Some(_)) if agent.lifetime != Lifetime::Task => refuse(
+            "sandbox: openshell for a standing agent; this version supports only lifetime: task and will not start a standing harness on the host instead".to_string(),
+        ),
         (_, Some(block)) => match block.problems().first() {
             Some(problem) => refuse(format!("an openshell: block that {problem}")),
             None => Ok(()),
@@ -3225,6 +3228,17 @@ mod tests {
             "name: a\nagents:\n  - harness: claude-code\n    sandbox: openshell\n    openshell:\n      image: img\n      polcy: {}\n",
         );
         assert!(typo.unwrap_err().to_string().contains("polcy"));
+    }
+
+    #[test]
+    fn openshell_standing_agents_are_refused_rather_than_started_on_the_host() {
+        for lifetime in ["permanent", "temporary"] {
+            let c = config_with(&format!(
+                "scopes:\n  - name: demo\n    path: projects/demo\n    agents:\n      - name: boxed\n        harness: claude-code\n        lifetime: {lifetime}\n        sandbox: openshell\n        openshell:\n          image: img\n          policy: {{}}\n"
+            ));
+            let error = c.validate().unwrap_err().to_string();
+            assert!(error.contains("only lifetime: task") && error.contains("projects/demo"), "{error}");
+        }
     }
 
     #[test]

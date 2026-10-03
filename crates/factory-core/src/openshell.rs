@@ -404,6 +404,18 @@ pub fn plan(input: &PlanInput<'_>) -> Result<Plan> {
     // The working directory, then its `.git`.
     let mut uploads = Vec::new();
     if cfg.upload == Transfer::Workdir {
+        let cwd = input.cwd.canonicalize()
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("resolving the working directory: {e}")))?;
+        // A harness that needs no guide has not made this directory yet.
+        // Resolve its existing ancestor without requiring it to exist.
+        let guides = input.guides_dir.ancestors().find_map(|ancestor| {
+            ancestor.canonicalize().ok().map(|resolved| resolved.join(input.guides_dir.strip_prefix(ancestor).unwrap()))
+        }).ok_or_else(|| FactoryError::BadRequest("the guide directory has no resolvable ancestor".into()))?;
+        if guides.starts_with(&cwd) {
+            return Err(FactoryError::BadRequest(
+                "OpenShell workdir upload would include daemon-owned runtime state; use a scope below the instance root, or openshell.upload: none".into(),
+            ));
+        }
         let dot_git = input.cwd.join(".git");
         if dot_git.is_file() {
             return Err(FactoryError::BadRequest(format!(
@@ -445,7 +457,17 @@ pub fn plan(input: &PlanInput<'_>) -> Result<Plan> {
     let mut stage_files = Vec::new();
     for host in &referenced {
         let rel = host.strip_prefix(&guides).map_err(|_| FactoryError::BadRequest(format!("{} is not under {guides}", host.display())))?;
-        let contents = std::fs::read_to_string(host)
+        if rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return Err(FactoryError::BadRequest(format!("{} is not a confined guide-file path", host.display())));
+        }
+        let root = input.guides_dir.canonicalize()
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("resolving the guides directory: {e}")))?;
+        let resolved = host.canonicalize()
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("resolving {}: {e}", host.display())))?;
+        if !resolved.starts_with(&root) || !resolved.is_file() {
+            return Err(FactoryError::BadRequest(format!("{} does not resolve to a file inside the guides directory", host.display())));
+        }
+        let contents = std::fs::read_to_string(&resolved)
             .map_err(|e| FactoryError::Other(anyhow::anyhow!("reading {} to carry it into the sandbox: {e}", host.display())))?;
         stage_files.push((stage_dir.join(rel), map(&contents), 0o644));
     }
@@ -968,5 +990,32 @@ policy:
     fn paths_are_found_inside_quotes_and_flags() {
         let found = host_paths_under("a '/g/x.sh' and --f=/g/y.json /other/z /g/", "/g");
         assert_eq!(found, vec![PathBuf::from("/g/x.sh"), PathBuf::from("/g/y.json")]);
+    }
+
+    #[test]
+    fn a_prompt_cannot_stage_host_files_by_traversing_out_of_guides() {
+        let f = fixture(None);
+        let outside = f.guides.parent().unwrap().join("host-secret.txt");
+        std::fs::write(&outside, "private host data").unwrap();
+        let prompt = format!("read {}/../host-secret.txt", f.guides.display());
+        assert!(plan_for(&f, &claude_launch(&f), &prompt, &config()).is_err());
+    }
+
+    #[test]
+    fn a_guide_symlink_cannot_stage_a_host_file_outside_guides() {
+        let f = fixture(None);
+        let outside = f.guides.parent().unwrap().join("host-secret.txt");
+        std::fs::write(&outside, "private host data").unwrap();
+        std::os::unix::fs::symlink(&outside, f.guides.join("linked-secret.txt")).unwrap();
+        let prompt = format!("read {}/linked-secret.txt", f.guides.display());
+        assert!(plan_for(&f, &claude_launch(&f), &prompt, &config()).is_err());
+    }
+
+    #[test]
+    fn uploading_a_workdir_that_contains_instance_runtime_state_is_refused() {
+        let mut f = fixture(None);
+        f.cwd = f.guides.parent().unwrap().to_path_buf();
+        let error = plan_for(&f, &claude_launch(&f), "go", &config()).unwrap_err().to_string();
+        assert!(error.contains("daemon-owned runtime state"), "{error}");
     }
 }

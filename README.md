@@ -488,16 +488,23 @@ session:
    multi-line prompt would submit at its first newline. The run is still
    visible in its pane, and `factory task output` still reads it.
 
-When the run ends -- done, failed, blocked, cancelled -- `close_session`
+When the run ends -- done, failed, cancelled -- `close_session`
 closes the pane, and then, in the background so the run's own status is
 written first, optionally downloads the working tree back into the run's
 directory (never `.git`), optionally fast-forwards the host checkout to its
 upstream (`git fetch`, then `git merge --ff-only @{u}`, never forced; a
 refusal is journaled with git's reason), and deletes the sandbox. Each step
-is a `sandbox` entry on the run's journal. On start
-the daemon lists the sandboxes labelled with its instance id and deletes any
-whose run is no longer active, so a sandbox never outlives its run for longer
-than a restart.
+is a `sandbox` entry on the run's journal. Before creation the daemon saves
+an owner-only cleanup record outside the uploaded files. On start it lists
+this instance's sandboxes at both current and previously used gateways;
+inactive runs with records finish restoration and deletion, even if their
+agent declaration was removed. An unreachable gateway retains the record
+for a later restart. Active runs and other instances are left alone.
+
+A blocked run is not terminal in Factory: its session waits for an answer
+or verification repair, so its sandbox remains until it resumes or is
+cancelled/times out. Immediate sandbox removal on blocking, with preserved
+conversation and answerability, is still a lifecycle follow-up in #218.
 
 **The three host-shaped problems**, and what this does about each:
 
@@ -532,10 +539,32 @@ than a restart.
   its `.git` is a pointer into a repository the sandbox never receives --
   with the way out in the reason: run the task with `--no-worktree`.
 
+The image recipe pins its NVIDIA base by digest and verifies the official
+herdr/jq release asset SHA-256 values. Downloads and redirects must use HTTPS;
+both image modes target Linux arm64, matching the cross-built CLI. To change
+`HERDR_VERSION` or `JQ_VERSION`, supply its independently verified
+`HERDR_SHA256` or `JQ_SHA256` too. `BASE_IMAGE` may override the pinned default.
+
+Guide staging refuses parent-directory traversal and symlinks that resolve
+outside the instance's guide directory. Download restoration uses relative
+directory handles and refuses host symlink traversal, multiply-linked files
+and special files; it never replaces nested repositories' `.git` either.
+Failed-create cleanup verifies the exact instance and run labels before
+deleting a sandbox, so a name collision cannot remove another run's sandbox.
+An upload whose working directory contains the instance's guide/runtime
+directory is refused: use a child scope, or `upload: none`, rather than
+copying daemon-owned databases and run files into a sandbox.
+If restoration fails, the run's downloaded output is retained under its
+instance-root OpenShell state directory, marked `recovery`, and the location
+is journaled. Sandbox deletion is still attempted. Reconciliation verifies
+instance/run labels, does not erase recovery payloads, and retains state when
+the gateway cannot delete a sandbox.
+
 Only the `claude-code` and `shell` harnesses are carried in this version:
 each harness takes its first prompt differently, and those two are the ones
 proven inside a sandbox. Any other is refused at dispatch rather than guessed
-at.
+at. OpenShell requires `lifetime: task`; permanent and temporary standing
+agents are refused at load, since their separate launch path is not sandboxed.
 
 **Host setup, once.** The prerequisites are the CLI with a gateway and a
 runtime, the image, the provider profiles, and the providers:

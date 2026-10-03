@@ -4492,6 +4492,14 @@ impl Engine {
             .in_run(run_id),
         )
         .await;
+        let teardown = crate::openshell::Teardown::of(&plan, cwd, config.fast_forward);
+        crate::openshell::Pending {
+            instance: factory.config.instance.id.clone(),
+            run: run_id.to_string(),
+            task: task.id.clone(),
+            base: plan.base.clone(),
+            teardown: teardown.clone(),
+        }.save().map_err(|e| FactoryError::BadRequest(format!("could not persist OpenShell cleanup record: {e}")))?;
         Box::pin(crate::openshell::prepare(&plan, &config.providers)).await?;
         self.entry(
             &task.id,
@@ -4509,15 +4517,14 @@ impl Engine {
             })),
         )
         .await;
-        let teardown = crate::openshell::Teardown::of(&plan, cwd, config.fast_forward);
         Ok((plan, teardown))
     }
 
     /// On start: delete every OpenShell sandbox this instance made whose run
     /// is no longer active -- one a crash, a lost session or a failed delete
     /// left behind (`#218`). A sandbox that outlives its run is a leak. Only
-    /// asked when some agent declares `sandbox: openshell`, so an instance
-    /// that never uses it never runs the CLI.
+    /// asked for current declarations and persisted cleanup records, so
+    /// removing or changing a declaration cannot strand an older sandbox.
     pub async fn reconcile_openshell(&self) {
         let factory = self.factory_snapshot();
         let mut configs: Vec<factory_core::openshell::OpenshellConfig> = Vec::new();
@@ -4530,7 +4537,14 @@ impl Engine {
                 }
             }
         }
-        if configs.is_empty() {
+        let pending = match crate::openshell::pending(&factory.factory_dir().join("openshell"), &factory.config.instance.id) {
+            Ok(pending) => pending,
+            Err(e) => {
+                tracing::warn!("openshell reconcile: could not read cleanup records: {e}");
+                Vec::new()
+            }
+        };
+        if configs.is_empty() && pending.is_empty() {
             return;
         }
         let active: std::collections::BTreeSet<String> = match self.store.active_runs().await {
@@ -4540,7 +4554,7 @@ impl Engine {
                 return;
             }
         };
-        let mut seen = std::collections::BTreeSet::new();
+        let mut bases: std::collections::BTreeSet<Vec<String>> = pending.iter().map(|record| record.base.clone()).collect();
         for config in configs {
             let Ok(cli) = crate::openshell::resolve_cli(config.cli.as_deref()) else { continue };
             let mut base = vec![cli];
@@ -4548,9 +4562,9 @@ impl Engine {
                 base.push("-g".into());
                 base.push(gateway.clone());
             }
-            if !seen.insert(base.clone()) {
-                continue;
-            }
+            bases.insert(base);
+        }
+        for base in bases {
             let ours = match crate::openshell::list_ours(&base, &factory.config.instance.id).await {
                 Ok(ours) => ours,
                 Err(e) => {
@@ -4558,15 +4572,37 @@ impl Engine {
                     continue;
                 }
             };
+            // A successful authoritative list also settles a create that
+            // never reached the gateway, or a delete completed just before
+            // the previous daemon exited. Recovery output is never erased.
+            for record in pending.iter().filter(|record| record.base == base && !active.contains(&record.run)) {
+                if !ours.iter().any(|(name, run)| name == &record.teardown.sandbox && run == &record.run)
+                    && !record.teardown.state_dir.join("recovery").exists() {
+                    let _ = std::fs::remove_dir_all(&record.teardown.state_dir);
+                }
+            }
             for (name, run_id) in ours {
                 if active.contains(&run_id) {
                     continue;
                 }
+                let Some(_claim) = crate::openshell::Claim::take(&name) else { continue };
+                if let Some(record) = pending.iter().find(|record| record.base == base && record.run == run_id
+                    && record.teardown.sandbox == name && !record.teardown.state_dir.join("recovery").exists()) {
+                    for note in Box::pin(crate::openshell::finish(&record.teardown)).await {
+                        self.entry(&record.task, TaskEntry::new("daemon", "sandbox", note).in_run(&record.run)).await;
+                    }
+                    continue;
+                }
                 match crate::openshell::delete(&base, &name).await {
-                    Ok(()) => tracing::info!(sandbox = %name, run = %run_id, "deleted an OpenShell sandbox its run left behind"),
+                    Ok(()) => {
+                        tracing::info!(sandbox = %name, run = %run_id, "deleted an OpenShell sandbox its run left behind");
+                        let state = factory.factory_dir().join("openshell").join(&run_id);
+                        if !state.join("recovery").exists() {
+                            let _ = std::fs::remove_dir_all(state);
+                        }
+                    }
                     Err(e) => tracing::warn!(sandbox = %name, "openshell reconcile: {e}"),
                 }
-                let _ = std::fs::remove_dir_all(factory.factory_dir().join("openshell").join(&run_id));
             }
         }
     }
@@ -8892,6 +8928,68 @@ mod tests {
             assert!(!prompt.contains(&scope_dir.display().to_string()), "{prompt}");
             std::fs::remove_dir_all(&scope_dir).ok();
             std::fs::remove_dir_all(&tools).ok();
+        }
+
+        #[tokio::test]
+        async fn restart_restores_and_deletes_an_orphan_even_after_its_declaration_is_removed() {
+            let scope_dir = temp_dir("openshell-restart");
+            let tools = temp_dir("openshell-restart-cli");
+            let cli = fake_cli(&tools);
+            let (engine, _) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_task(&engine).await;
+            let factory = engine.factory_snapshot();
+            let run = uuid::Uuid::new_v4().to_string();
+            let sandbox = format!("factory-{}", &run[..8]);
+            let state = factory.factory_dir().join("openshell").join(&run);
+            let download_dir = state.join("download");
+            let base = vec![cli.display().to_string()];
+            let teardown = crate::openshell::Teardown {
+                sandbox: sandbox.clone(), state_dir: state.clone(), cwd: scope_dir.clone(),
+                download: Some(vec![base[0].clone(), "sandbox".into(), "download".into(), sandbox.clone(), "/sandbox/work/demo".into(), download_dir.display().to_string()]),
+                download_dir, fast_forward: false,
+                delete: vec![base[0].clone(), "sandbox".into(), "delete".into(), sandbox.clone()],
+            };
+            crate::openshell::Pending { instance: factory.config.instance.id.clone(), run: run.clone(), task: task.id.clone(), base, teardown }.save().unwrap();
+            let listed = serde_json::json!({"sandboxes":[{"name":sandbox,"labels":{"factory.instance":factory.config.instance.id,"factory.run":run}}]});
+            std::fs::write(&cli, format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$1 $2\" in\n'sandbox list') echo '{}' ;;\n'sandbox download') mkdir -p \"$5\" && echo restored > \"$5/result.txt\" ;;\nesac\n",
+                tools.join("calls").display(), listed
+            )).unwrap();
+            engine.factory.write().unwrap().config.scopes[0].agents.retain(|agent| agent.openshell.is_none());
+            engine.reconcile_openshell().await;
+            assert_eq!(std::fs::read_to_string(scope_dir.join("result.txt")).unwrap(), "restored\n");
+            assert!(!state.exists());
+            let calls = std::fs::read_to_string(tools.join("calls")).unwrap();
+            assert!(calls.contains(&format!("sandbox delete {sandbox}")), "{calls}");
+            assert!(engine.store.run_entries(&run, 20).await.unwrap().iter().any(|entry| entry.message.contains("deleted sandbox")));
+            std::fs::remove_dir_all(scope_dir).ok();
+            std::fs::remove_dir_all(tools).ok();
+        }
+
+        #[tokio::test]
+        async fn restart_keeps_active_sandboxes_even_when_their_declaration_is_removed() {
+            let scope_dir = temp_dir("openshell-active");
+            let tools = temp_dir("openshell-active-cli");
+            let cli = fake_cli(&tools);
+            let (engine, _) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_task(&engine).await;
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            let factory = engine.factory_snapshot();
+            let state = factory.factory_dir().join("openshell").join(&run.id);
+            assert!(state.join("pending.json").exists(), "saved before create, not just in session metadata");
+            let sandbox = format!("factory-{}", &run.id[..8]);
+            let listed = serde_json::json!({"sandboxes":[{"name":sandbox,"labels":{"factory.instance":factory.config.instance.id,"factory.run":run.id}}]});
+            std::fs::write(&cli, format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$1 $2\" in\n'sandbox list') echo '{}' ;;\nesac\n",
+                tools.join("calls").display(), listed
+            )).unwrap();
+            engine.factory.write().unwrap().config.scopes[0].agents.retain(|agent| agent.openshell.is_none());
+            engine.reconcile_openshell().await;
+            assert!(state.join("pending.json").exists());
+            let calls = std::fs::read_to_string(tools.join("calls")).unwrap();
+            assert!(!calls.contains("sandbox delete"), "{calls}");
+            std::fs::remove_dir_all(scope_dir).ok();
+            std::fs::remove_dir_all(tools).ok();
         }
 
         #[tokio::test]

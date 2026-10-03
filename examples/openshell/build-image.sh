@@ -22,9 +22,11 @@
 # Claude Code home that has finished onboarding and trusts /sandbox/work.
 #
 # Environment:
-#   BASE_IMAGE      default ghcr.io/nvidia/openshell-community/sandboxes/base:latest
+#   BASE_IMAGE      default: the pinned community-base digest below
 #   HERDR_VERSION   default v0.9.3      (herdrdev/herdr release tag)
 #   JQ_VERSION      default jq-1.8.2    (jqlang/jq release tag)
+#   HERDR_SHA256 / JQ_SHA256   required with non-default versions; otherwise
+#                   the official release asset digests below are checked
 #   GIT_USER_NAME / GIT_USER_EMAIL   the commit identity inside the sandbox;
 #                   default: this host's `git config user.name/user.email`
 #   IMAGE_TAG       default factory-agent:latest            (docker mode)
@@ -34,9 +36,19 @@ set -eu
 mode=${1:-auto}
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
-base=${BASE_IMAGE:-ghcr.io/nvidia/openshell-community/sandboxes/base:latest}
+base=${BASE_IMAGE:-ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:aeef1c63f00e2913ea002ccb3aaf925f338b5c5d70e63576f0d95c16a138044e}
 herdr_version=${HERDR_VERSION:-v0.9.3}
 jq_version=${JQ_VERSION:-jq-1.8.2}
+if [ "$herdr_version" = v0.9.3 ]; then
+  herdr_sha256=${HERDR_SHA256:-4de7aa3e25678812e92960de64f7c2aaa1bca1f0f80a3c5e559837e231e1f5c0}
+else
+  herdr_sha256=${HERDR_SHA256:?HERDR_SHA256 is required for a custom HERDR_VERSION}
+fi
+if [ "$jq_version" = jq-1.8.2 ]; then
+  jq_sha256=${JQ_SHA256:-8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309}
+else
+  jq_sha256=${JQ_SHA256:?JQ_SHA256 is required for a custom JQ_VERSION}
+fi
 git_name=${GIT_USER_NAME:-$(git config --global user.name || true)}
 git_email=${GIT_USER_EMAIL:-$(git config --global user.email || true)}
 tag=${IMAGE_TAG:-factory-agent:latest}
@@ -64,10 +76,16 @@ CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
 cp "$work/target/aarch64-unknown-linux-musl/release/factory" "$stage/usr/local/bin/factory"
 
 echo "==> herdr $herdr_version and $jq_version (Linux aarch64)"
-curl -fsSL -o "$stage/usr/local/bin/herdr" \
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -o "$stage/usr/local/bin/herdr" \
   "https://github.com/herdrdev/herdr/releases/download/$herdr_version/herdr-linux-aarch64"
-curl -fsSL -o "$stage/usr/local/bin/jq" \
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -o "$stage/usr/local/bin/jq" \
   "https://github.com/jqlang/jq/releases/download/$jq_version/jq-linux-arm64"
+verify_digest() {
+  actual=$(shasum -a 256 "$1" | cut -d ' ' -f 1)
+  [ "$actual" = "$2" ] || { echo "SHA-256 mismatch for $1" >&2; exit 1; }
+}
+verify_digest "$stage/usr/local/bin/herdr" "$herdr_sha256"
+verify_digest "$stage/usr/local/bin/jq" "$jq_sha256"
 chmod 0755 "$stage/usr/local/bin/factory" "$stage/usr/local/bin/herdr" "$stage/usr/local/bin/jq"
 
 cp "$here/managed-settings.json" "$stage/etc/claude-code/managed-settings.json"
@@ -80,7 +98,7 @@ cp "$here/claude.json" "$stage/sandbox/.claude.json"
 
 if [ "$mode" = docker ]; then
   echo "==> docker build -t $tag"
-  docker build --build-arg "BASE_IMAGE=$base" -t "$tag" -f "$here/Dockerfile" "$stage"
+  docker build --platform linux/arm64 --build-arg "BASE_IMAGE=$base" -t "$tag" -f "$here/Dockerfile" "$stage"
   echo "built $tag -- set openshell.image: $tag"
   exit 0
 fi

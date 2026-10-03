@@ -17,7 +17,7 @@ export function visibleSandboxes(rows, contains = inScope) {
 /// it. `openshell` is enforced -- the run starts inside the sandbox or not at
 /// all (#218); `docker` and `srt` are still only what a declaration says.
 export function sandboxTag(row) {
-  if (!row || !row.sandbox || row.sandbox === "none") return "";
+  if (!row?.sandbox || row.sandbox === "none") return "";
   return row.enforced
     ? ` <span class="tag ok">enforced</span>`
     : ` <span class="tag warn">declared, not enforced</span>`;
