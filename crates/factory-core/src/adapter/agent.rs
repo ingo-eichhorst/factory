@@ -417,15 +417,16 @@ impl AgentContext {
         } else {
             ""
         };
-        // `#178`: this run picked an earlier, infrastructure-failed run's
-        // conversation back up. Whatever `factory task report` command sits
+        // `#178`/`#180`: this run picked an earlier run's conversation back
+        // up, either after infrastructure failed or for integration rework.
+        // Whatever `factory task report` command sits
         // earlier in this same history belonged to that run, which is over
         // -- reporting with it now gets refused (`Engine::check_run_token`,
         // `Engine::caller_for`) with exactly the reason this sentence gives,
         // so the agent hears it before it happens rather than only after.
         let resumed_note = if binding.resumed_session.is_some() {
             "\n\nThis run picked up an earlier session of this same task, after that \
-             run ended on an infrastructure failure. Any `factory task report` command \
+             run ended. Any `factory task report` command \
              you see earlier in this conversation's history belonged to that run and is \
              void now -- a newer run exists. Use only the commands above, which carry \
              this run's own token."
@@ -476,6 +477,27 @@ impl AgentContext {
                 name = self.agent_name,
                 scope = self.scope,
             )),
+        }
+
+        if let Some(binding) = self.task.as_ref().filter(|binding| {
+            binding.task.parent_task_id.is_some()
+                && binding
+                    .task
+                    .workflow_origin
+                    .as_ref()
+                    .and_then(|origin| origin.workspace.as_ref())
+                    .is_some()
+        }) {
+            let base = &binding
+                .task
+                .workflow_origin
+                .as_ref()
+                .and_then(|origin| origin.workspace.as_ref())
+                .expect("filtered above")
+                .base_ref;
+            out.push_str(&format!(
+                "This is one internal part of a decomposed task. Your worktree was based on the integration branch `{base}`. Commit every intended change to your own branch before reporting done. Do not push it or open a pull request: Factory's single-writer integrator merges child branches, tests their combined result, and opens the one pull request to main for a person to review.\n\n"
+            ));
         }
 
         match &self.role {
@@ -939,7 +961,7 @@ pub struct ResumeSpec {
 mod tests {
     use super::*;
     use crate::role::Roles;
-    use crate::task::{Task, TaskStatus};
+    use crate::task::{Task, TaskStatus, WorkflowOrigin, WorkflowWorkspace};
     use std::collections::BTreeSet;
 
     fn task() -> Task {
@@ -1322,6 +1344,33 @@ mod tests {
         let running = with_task(base(Some(worker()))).factory_guide();
         assert!(running.contains("working task t1"));
         assert!(!running.contains("a standing agent"));
+    }
+
+    #[test]
+    fn a_decomposition_child_is_told_the_single_writer_handoff_contract() {
+        let mut ctx = with_task(base(Some(worker())));
+        let task = &mut ctx.task.as_mut().unwrap().task;
+        task.parent_task_id = Some("parent".into());
+        task.workflow_origin = Some(WorkflowOrigin {
+            workflow_id: "workflow".into(),
+            workflow_run_id: "run".into(),
+            node_id: "child".into(),
+            workspace: Some(WorkflowWorkspace {
+                base_ref: "factory/issue-180".into(),
+            }),
+        });
+
+        let guide = ctx.factory_guide();
+        assert!(
+            guide.contains("based on the integration branch `factory/issue-180`"),
+            "{guide}"
+        );
+        assert!(guide.contains("Commit every intended change"), "{guide}");
+        assert!(
+            guide.contains("Do not push it or open a pull request"),
+            "{guide}"
+        );
+        assert!(guide.contains("one pull request to main"), "{guide}");
     }
 
     #[test]

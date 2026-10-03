@@ -48,6 +48,7 @@ import {
   setInputField,
   supersededTasks,
   validate,
+  workflowNodeKindLabel,
   workflowRouteTail,
 } from "./workflow-model.js";
 
@@ -316,9 +317,7 @@ function renderCanvas() {
       style="left:${node.position.x}px;top:${node.position.y}px">
       ${roots.has(node.id) ? `<span class="wf-start">START</span>` : ""}
       <span class="wf-port-in" aria-hidden="true"></span>
-      <span class="workflow-node-kind">${node.kind === "gate"
-        ? `GATE${node.gate && node.gate.locked ? " 🔒" : ""}${node.gate && node.gate.required_by && node.gate.required_by.length ? ` · required by ${esc(node.gate.required_by.join(", "))}` : ""}`
-        : "TASK"}</span>
+      <span class="workflow-node-kind">${esc(workflowNodeKindLabel(node))}</span>
       <strong>${esc(node.task.title || "Untitled task")}</strong>
       <span class="wf-line">${esc(node.task.scope || "")} · ${esc(node.task.agent || "default agent")}</span>
       ${exitsOf(node).length ? `<span class="wf-line wf-rework-line" title="${esc(reworkSentence(graph.nodes, node))}">${esc(reworkBadge(graph.nodes, node))}</span>` : ""}

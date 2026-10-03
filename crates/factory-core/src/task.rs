@@ -637,6 +637,19 @@ pub struct WorkflowOrigin {
     pub workflow_id: String,
     pub workflow_run_id: String,
     pub node_id: String,
+    /// Workspace constraints owned by the workflow.  A decomposition uses
+    /// this to branch every worker from the integration branch as it stood
+    /// when that worker became runnable; ordinary workflows leave it empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkflowWorkspace>,
+}
+
+/// The part of a workflow workspace a task runner needs to know.  The
+/// workflow engine owns and advances the ref; the regular run/worktree path
+/// merely provisions the task's branch from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowWorkspace {
+    pub base_ref: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

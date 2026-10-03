@@ -1396,6 +1396,7 @@ mod tests {
             workflow_id: definition.id.clone(),
             workflow_run_id: "wfrun-1".into(),
             node_id: "n1".into(),
+            workspace: None,
         };
         let wf_task = engine
             .create_workflow_task(
