@@ -443,6 +443,21 @@ fn scan_findings(scan: &Scan, status_override: Option<FindingStatus>) -> Vec<Dep
                 .find(|version| version.get("status").and_then(Value::as_str) == Some("unaffected"))
                 .and_then(|version| version.get("version").and_then(Value::as_str))
                 .map(str::to_string);
+            let reachability = component_property(vulnerability, "factory:reachability", reference);
+            let analysis_detail = [
+                analysis
+                    .and_then(|a| a.get("detail"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string),
+                component_property(vulnerability, "factory:reachability-detail", reference),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n");
+            let analysis_scan = (reachability.is_some() || !analysis_detail.is_empty())
+                .then(|| summary(document));
             out.push(DependencyFinding {
                 id: id.to_string(),
                 state: scan.state,
@@ -472,12 +487,51 @@ fn scan_findings(scan: &Scan, status_override: Option<FindingStatus>) -> Vec<Dep
                     .map(str::to_string)
                     .collect(),
                 kev: property_bool(vulnerability, "factory:kev"),
+                reachability,
+                analysis_detail: (!analysis_detail.is_empty()).then_some(analysis_detail),
+                analysis_scan,
                 euvd: property_bool(vulnerability, "factory:euvd"),
                 epss: property(vulnerability, "factory:epss").and_then(|v| v.parse().ok()),
             });
         }
     }
     out
+}
+
+/// A scalar is a vulnerability-wide claim. A JSON object binds claims to
+/// exact affects refs; missing/malformed entries are unknown, not inherited.
+fn component_property(vulnerability: &Value, name: &str, reference: &str) -> Option<String> {
+    let claims: BTreeSet<String> = vulnerability
+        .get("properties")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|p| p.get("name").and_then(Value::as_str) == Some(name))
+        .filter_map(|p| p.get("value").and_then(Value::as_str))
+        .filter_map(|raw| {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return None;
+            }
+            if raw.starts_with('{') {
+                let claims: BTreeMap<String, String> = serde_json::from_str(raw).ok()?;
+                claims
+                    .get(reference)
+                    .filter(|value| !value.trim().is_empty())
+                    .cloned()
+            } else {
+                Some(raw.to_string())
+            }
+        })
+        .collect();
+    match claims.len() {
+        0 => None,
+        1 => claims.into_iter().next(),
+        _ => Some(format!(
+            "conflicting claims: {}",
+            claims.into_iter().collect::<Vec<_>>().join(" | ")
+        )),
+    }
 }
 
 fn component_label_from_affected(component: &AffectedComponent) -> String {
@@ -933,6 +987,159 @@ fn merge_vex(root: &Path, scope: &str) -> Result<String> {
 mod tests {
     use super::*;
     use factory_core::config::{DependenciesConfig, Scope};
+
+    #[test]
+    fn reachability_is_display_only_and_keeps_its_immutable_source_when_resolved() {
+        let sbom =
+            include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
+        let mut vulns: Value = serde_json::from_slice(include_bytes!(
+            "../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json"
+        ))
+        .unwrap();
+        vulns["vulnerabilities"][0]["analysis"] =
+            serde_json::json!({"detail":"call path <entry> → library; not a VEX decision"});
+        vulns["vulnerabilities"][0]["properties"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"name":"factory:reachability", "value":"unreachable"}));
+        let bytes = serde_json::to_vec(&vulns).unwrap();
+        let mut docs = vec![
+            stored(
+                AttachmentKind::Sbom,
+                sbom,
+                "2026-10-01T10:00:00Z",
+                "s1",
+                "r1",
+            ),
+            stored(
+                AttachmentKind::Vulnerabilities,
+                &bytes,
+                "2026-10-01T10:01:00Z",
+                "v1",
+                "r1",
+            ),
+        ];
+        let now = "2026-10-01T12:00:00Z".parse().unwrap();
+        let report = build_report(&scope(None), &docs, &[], now);
+        let finding = &report.findings[0];
+        assert_eq!(finding.status, FindingStatus::Open);
+        assert_eq!(finding.reachability.as_deref(), Some("unreachable"));
+        assert!(finding
+            .analysis_detail
+            .as_deref()
+            .unwrap()
+            .contains("call path"));
+        assert_eq!(finding.vex_state, None);
+        assert_eq!(finding.analysis_scan.as_ref().unwrap().attachment.id, "v1");
+        assert_eq!(
+            exploited("demo", &docs).len(),
+            1,
+            "reachability cannot exclude exploited findings from the clock"
+        );
+        assert_eq!(fact(&report).exploited_open, 1);
+        let stale = build_report(&scope(Some("1h".parse().unwrap())), &docs, &[], now);
+        assert_eq!(stale.findings[0].status, FindingStatus::Stale);
+        assert_eq!(stale.findings[0].reachability, finding.reachability);
+        assert_eq!(stale.findings[0].analysis_scan, finding.analysis_scan);
+        docs.push(stored(
+            AttachmentKind::Sbom,
+            sbom,
+            "2026-10-01T11:00:00Z",
+            "s2",
+            "r2",
+        ));
+        docs.push(stored(
+            AttachmentKind::Vulnerabilities,
+            br#"{"bomFormat":"CycloneDX","specVersion":"1.6","vulnerabilities":[]}"#,
+            "2026-10-01T11:01:00Z",
+            "v2",
+            "r2",
+        ));
+        let resolved = build_report(&scope(None), &docs, &[], now);
+        assert_eq!(resolved.findings[0].status, FindingStatus::Resolved);
+        assert_eq!(resolved.findings[0].scan.attachment.id, "v2");
+        assert_eq!(
+            resolved.findings[0]
+                .analysis_scan
+                .as_ref()
+                .unwrap()
+                .attachment
+                .id,
+            "v1"
+        );
+        assert_eq!(resolved.findings[0].reachability, finding.reachability);
+    }
+
+    #[test]
+    fn reachability_properties_bind_exact_components_and_prose_is_not_classified() {
+        let sbom =
+            include_bytes!("../../factory-core/tests/fixtures/dependencies/declared-sbom.cdx.json");
+        let mut vuln: Value = serde_json::from_slice(include_bytes!(
+            "../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json"
+        ))
+        .unwrap();
+        vuln["vulnerabilities"][0]["affects"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"ref":"pkg:cargo/another-lib@1"}));
+        vuln["vulnerabilities"][0]["analysis"] =
+            serde_json::json!({"state":"exploitable", "detail":"unreachable prose is not a claim"});
+        vuln["vulnerabilities"][0]["properties"].as_array_mut().unwrap().push(serde_json::json!({"name":"factory:reachability", "value":r#"{"pkg:cargo/demo-lib@1.2.3":"reachable"}"#}));
+        let bytes = serde_json::to_vec(&vuln).unwrap();
+        let docs = vec![
+            stored(AttachmentKind::Sbom, sbom, "2026-10-01T10:00:00Z", "s", "r"),
+            stored(
+                AttachmentKind::Vulnerabilities,
+                &bytes,
+                "2026-10-01T10:01:00Z",
+                "v",
+                "r",
+            ),
+        ];
+        let report = build_report(
+            &scope(None),
+            &docs,
+            &[],
+            "2026-10-01T12:00:00Z".parse().unwrap(),
+        );
+        let first = report
+            .findings
+            .iter()
+            .find(|f| f.affected.name == "demo-lib")
+            .unwrap();
+        let second = report
+            .findings
+            .iter()
+            .find(|f| f.affected.bom_ref == "pkg:cargo/another-lib@1")
+            .unwrap();
+        assert_eq!(first.reachability.as_deref(), Some("reachable"));
+        assert_eq!(second.reachability, None);
+        assert_eq!(
+            second.analysis_detail.as_deref(),
+            Some("unreachable prose is not a claim")
+        );
+        assert_eq!(first.vex_state.as_deref(), Some("exploitable"));
+        assert_eq!(first.status, FindingStatus::Assessed);
+        assert_eq!(
+            component_property(
+                &vuln["vulnerabilities"][0],
+                "factory:reachability",
+                "wrong-ref"
+            ),
+            None
+        );
+        let malformed =
+            serde_json::json!({"properties":[{"name":"factory:reachability","value":"{broken"}]});
+        assert_eq!(
+            component_property(&malformed, "factory:reachability", "ref"),
+            None
+        );
+        let conflicting = serde_json::json!({"properties":[{"name":"factory:reachability","value":"reachable"},{"name":"factory:reachability","value":"unreachable"}]});
+        assert_eq!(
+            component_property(&conflicting, "factory:reachability", "ref").as_deref(),
+            Some("conflicting claims: reachable | unreachable")
+        );
+    }
 
     fn stored(kind: AttachmentKind, json: &[u8], at: &str, id: &str, run: &str) -> StoredDocument {
         let validated = validate_document(json, kind).unwrap();
