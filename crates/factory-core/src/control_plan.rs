@@ -19,13 +19,9 @@
 //! store and no process. Running a gate, storing an attestation and
 //! settling a run are `factory-daemon`'s job.
 //!
-//! ## What v1 enforces
-//!
-//! Only `gate` steps: a shell command run by the daemon in the run's own
-//! worktree, exit 0 = pass. `review` and `approval` steps parse, resolve and
-//! show in the plan (and in `factory workflow lint`) marked not enforced --
-//! they need a functionary other than the daemon, which is v2. Nothing is
-//! dropped silently: a plan that names one says so.
+//! Gate, independent review and person approval steps are enforced. Gates
+//! run in the daemon; review and approval carry a functionary frozen into
+//! the run snapshot so a later roster edit cannot change who was required.
 
 use crate::policy::Applied;
 use chrono::{DateTime, Utc};
@@ -97,10 +93,10 @@ impl StepKind {
         }
     }
 
-    /// Whether v1 can produce this step's evidence at all. `review` and
-    /// `approval` are v2 (`#118`'s phases).
+    /// Every control-plan step is enforced. The kind decides which
+    /// coordinator produces its evidence.
     pub fn enforced(self) -> bool {
-        matches!(self, Self::Gate)
+        true
     }
 
     pub fn as_str(self) -> &'static str {
@@ -228,8 +224,7 @@ pub struct PlanStep {
     /// `<framework>/<control>` for a policy control, `quality/<attribute>`
     /// for a quality attribute.
     pub required_by: Vec<String>,
-    /// `false` for a step v1 cannot produce evidence for (`review`,
-    /// `approval`) -- shown, never injected, never judged.
+    /// Kept on the wire for v1 snapshots. New plans enforce every kind.
     pub enforced: bool,
 }
 
@@ -322,12 +317,6 @@ pub fn resolve(scope: &str, category: &str, policy: &[Applied], quality: &[(Stri
             plan.findings.push(format!(
                 "{source} requires gate step {} with no command; every {category} run here will block on it",
                 req.step
-            ));
-        }
-        if !kind.enforced() {
-            plan.findings.push(format!(
-                "{source} requires a {} step; v1 shows it but cannot enforce it yet",
-                kind.as_str()
             ));
         }
         let mut step = PlanStep {
@@ -437,6 +426,14 @@ pub struct RequiredStep {
     pub timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_by: Vec<String>,
+    /// The declaration that selected the functionary (`independent` or
+    /// `person`). Additive so v1 snapshots still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// The concrete agent/person identity frozen at dispatch. Approval uses
+    /// `owner`; an unbound independent review stays `None` and blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
     /// The gate node this step is, in the workflow run's snapshot -- or in
     /// the implicit one-node definition a standalone task is planned as.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -474,6 +471,12 @@ pub struct StepAttestation {
     /// Who produced the evidence -- [`GATE_ACTOR`] for a gate.
     pub actor: String,
     pub verdict: AttestationVerdict,
+    /// Review findings or a person's decision reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<String>,
+    /// Rework round this evidence belongs to. Zero is the first pass.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub round: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -491,6 +494,10 @@ pub struct StepAttestation {
     pub commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dirty: Option<bool>,
+    /// SHA-256 over the exact tracked diff and untracked file contents that
+    /// this evidence judged. Additive so older attestations remain readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     pub at: DateTime<Utc>,
@@ -539,13 +546,20 @@ pub fn judge(
         };
         let newest = attestations
             .iter()
-            .filter(|a| a.step == step.step && a.at >= since && a.actor != executing_agent)
+            .filter(|a| {
+                a.step == step.step
+                    && (step.kind != StepKind::Gate || a.at >= since)
+                    && a.actor != executing_agent
+                    && step.actor.as_deref().is_none_or(|actor| actor == a.actor)
+            })
             .max_by_key(|a| a.at);
         match newest {
             None => {
                 out.passed = false;
-                let why = if step.command.is_none() {
+                let why = if step.kind == StepKind::Gate && step.command.is_none() {
                     " -- no gate command is declared for it"
+                } else if step.kind == StepKind::Review && step.actor.is_none() {
+                    " -- no independent agent is declared in this scope"
                 } else {
                     ""
                 };
@@ -563,6 +577,10 @@ pub fn judge(
         }
     }
     out
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[cfg(test)]
@@ -690,14 +708,14 @@ mod tests {
     }
 
     #[test]
-    fn review_and_approval_are_in_the_plan_but_not_enforced_in_v1() {
+    fn review_and_approval_are_enforced_without_a_gate_command() {
         let mut review = req("review", &["feature"], None);
         review.by = Some("independent".into());
         let plan = resolve("demo", "feature", &[applied("f", "x", vec![review])], &[]);
         assert_eq!(plan.steps.len(), 1);
-        assert!(!plan.steps[0].enforced);
-        assert_eq!(plan.enforced().count(), 0);
-        assert!(plan.findings.iter().any(|f| f.contains("cannot enforce")), "{:?}", plan.findings);
+        assert!(plan.steps[0].enforced);
+        assert_eq!(plan.enforced().count(), 1);
+        assert!(plan.findings.is_empty(), "{:?}", plan.findings);
     }
 
     #[test]
@@ -724,6 +742,8 @@ mod tests {
             command: Some("true".into()),
             timeout_seconds: None,
             required_by: vec!["cra/x".into()],
+            by: None,
+            actor: None,
             node_id: None,
         }
     }
@@ -739,6 +759,8 @@ mod tests {
             kind: StepKind::Gate,
             actor: actor.into(),
             verdict,
+            findings: None,
+            round: 0,
             required_by: vec![],
             command: Some("true".into()),
             exit_code: Some(if verdict == AttestationVerdict::Pass { 0 } else { 1 }),
@@ -746,9 +768,35 @@ mod tests {
             dir: "/tmp".into(),
             commit: None,
             dirty: None,
+            worktree_digest: None,
             node_id: None,
             at,
         }
+    }
+
+    #[test]
+    fn v1_steps_and_attestations_load_with_empty_v2_functionary_fields() {
+        let mut step = serde_json::to_value(required("tests")).unwrap();
+        step.as_object_mut().unwrap().remove("by");
+        step.as_object_mut().unwrap().remove("actor");
+        let step: RequiredStep = serde_json::from_value(step).unwrap();
+        assert_eq!(step.by, None);
+        assert_eq!(step.actor, None);
+
+        let mut evidence = serde_json::to_value(attest(
+            "tests",
+            AttestationVerdict::Pass,
+            GATE_ACTOR,
+            Utc::now(),
+        ))
+        .unwrap();
+        evidence.as_object_mut().unwrap().remove("findings");
+        evidence.as_object_mut().unwrap().remove("round");
+        evidence.as_object_mut().unwrap().remove("worktree_digest");
+        let evidence: StepAttestation = serde_json::from_value(evidence).unwrap();
+        assert_eq!(evidence.findings, None);
+        assert_eq!(evidence.round, 0);
+        assert_eq!(evidence.worktree_digest, None);
     }
 
     #[test]
@@ -799,10 +847,15 @@ mod tests {
     }
 
     #[test]
-    fn an_unenforced_step_is_never_judged() {
+    fn a_review_is_judged_and_must_come_from_its_frozen_functionary() {
         let t0 = Utc::now();
         let mut review = required("review");
         review.kind = StepKind::Review;
-        assert!(judge(&[review], &[], "a", t0).passed);
+        review.actor = Some("checker".into());
+        assert!(!judge(&[review.clone()], &[], "maker", t0).passed);
+        let wrong = vec![attest("review", AttestationVerdict::Pass, "other", t0)];
+        assert!(!judge(&[review.clone()], &wrong, "maker", t0).passed);
+        let right = vec![attest("review", AttestationVerdict::Pass, "checker", t0)];
+        assert!(judge(&[review], &right, "maker", t0).passed);
     }
 }

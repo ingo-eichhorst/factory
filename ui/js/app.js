@@ -759,6 +759,9 @@ function onEvent(ev) {
       || ev.type === "task_deleted")) {
     reloadPolicy();
   }
+  if (state.tab === "policy" && ["workflow_created", "workflow_updated", "workflow_deleted"].includes(ev.type)) {
+    reloadPolicy();
+  }
   // A check-in recorded against a manual key result -- see `Event::GoalsChanged`.
   // Reload whenever the tab is open: `reloadGoals` also refreshes the key
   // result detail modal, if one happens to be open on the checked-in key

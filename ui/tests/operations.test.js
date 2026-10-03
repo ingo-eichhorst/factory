@@ -167,6 +167,24 @@ test("the Inbox lists the attention queue, every scope, with the reason inline",
   state.scope = null;
 });
 
+test("the Inbox exposes approval decisions and evidence-backed rework", async () => {
+  const el = stubPage(["inbox"]);
+  const decisions = {
+    ...REPORT,
+    attention: [
+      { ...REPORT.attention[0], actions: ["approve", "reject"] },
+      { ...REPORT.attention[1], actions: ["accept_rework"] },
+    ],
+  };
+  globalThis.fetch = answering(decisions, []);
+  await loadInbox();
+  assert.match(el.inbox.innerHTML, /class="btn inbox-action"/, "decisions use the shared button styling");
+  assert.match(el.inbox.innerHTML, /data-action="approve"[^>]*>Approve/);
+  assert.match(el.inbox.innerHTML, /data-action="reject"[^>]*>Reject/);
+  assert.match(el.inbox.innerHTML, /data-action="accept_rework"[^>]*>Accept rework/);
+  assert.match(dashboard, /window\.prompt\(`\$\{ACTION_LABELS\[action\]\} reason:`\)/, "approval and rejection capture evidence");
+});
+
 test("the Inbox says when there is nothing, and when it could not ask", async () => {
   const el = stubPage(["inbox"]);
   globalThis.fetch = answering({ ...REPORT, attention: [] }, []);
@@ -209,11 +227,14 @@ test("the Inbox also lists the reporting clock's overdue and due-soon deadlines 
   };
   globalThis.fetch = async (path) => {
     if (path === "/api/policy/clock") return { status: 200, statusText: "OK", json: async () => ({ status: "ok", data: { kind: "policy_clock", clock } }) };
-    return { status: 200, statusText: "OK", json: async () => ({ status: "ok", data: { kind: "operations", report: { ...REPORT, attention: [] } } }) };
+    return { status: 200, statusText: "OK", json: async () => ({ status: "ok", data: { kind: "operations", report: { ...REPORT, attention: [
+      { ...REPORT.attention[0], actions: ["approve", "reject"] },
+      { ...REPORT.attention[1], actions: ["accept_rework"] },
+    ] } } }) };
   };
   await loadInbox();
   const html = el.inbox.innerHTML;
-  assert.equal((html.match(/class="inbox-item"/g) || []).length, 2, "the met deadline is not a to-do");
+  assert.equal((html.match(/class="inbox-item"/g) || []).length, 4, "two clock rows coexist with two decisions; the met deadline is not a to-do");
   // The overdue report leads (a fault outranks a warning), named by its
   // task's own title, not its bare id.
   assert.match(html, /Checkout crashes on coupon<\/b> — 72h notification, overdue/);
@@ -221,6 +242,9 @@ test("the Inbox also lists the reporting clock's overdue and due-soon deadlines 
   // The due-soon finding names the vulnerability, since it has no task.
   assert.match(html, /CVE-2026-1234<\/b> — 24h early warning, due soon/);
   assert.match(html, /due in/);
+  assert.match(html, /data-action="approve"/);
+  assert.match(html, /data-action="reject"/);
+  assert.match(html, /data-action="accept_rework"/);
   state.tasks = new Map();
 });
 

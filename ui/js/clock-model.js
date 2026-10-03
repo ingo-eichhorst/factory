@@ -186,38 +186,45 @@ export const DUE_SOON_SECONDS = 6 * 3600;
 /// opens instead, e.g. Dependencies). `titleOf(taskId)` reads a report's
 /// own title (`state.tasks` is a report's task); kept a callback so this
 /// file never touches `state` itself.
+function inboxClockRow(item, deadline, now, titleOf, hrefOf) {
+  // Positive once the deadline has passed; `state` alone still decides
+  // overdue vs. due -- this is only used for the displayed magnitude and
+  // for the presentation's due-soon window.
+  const deltaS = (Date.parse(now) - Date.parse(deadline.dueAt)) / 1000;
+  const overdue = deadline.state === "overdue";
+  const dueSoon = deadline.state === "due" && deltaS >= -DUE_SOON_SECONDS;
+  if (!overdue && !dueSoon) return null;
+  const isReport = item.kind === "report";
+  return {
+    key: `clock:${item.key}:${deadline.deadline}`,
+    title: isReport ? titleOf(item.ref.item) : item.ref.vulnerability,
+    label: `${deadline.label}, ${overdue ? "overdue" : "due soon"}`,
+    reason: deadline.text,
+    tone: overdue ? "fault" : "wait",
+    age: Math.abs(deltaS),
+    scope: item.scope,
+    task_id: isReport ? item.ref.item : null,
+    href: isReport ? null : hrefOf(item.scope),
+  };
+}
+
+function compareInboxClockRows(a, b) {
+  // Overdue first (a fault always outranks a warning) -- the longest
+  // overdue, then the soonest due, within each.
+  if (a.tone !== b.tone) return a.tone === "fault" ? -1 : 1;
+  return a.tone === "fault" ? b.age - a.age : a.age - b.age;
+}
+
 export function inboxClockRows(clock, elapsedS, titleOf, hrefOf) {
   if (!clock) return [];
   const now = nowFromClock(clock, elapsedS);
   const rows = [];
   for (const item of clockRows(clock, now)) {
     if (item.excluded) continue;
-    for (const d of item.deadlines) {
-      // Positive once the deadline has passed; `state` alone still decides
-      // overdue vs. due -- this is only ever used for the magnitude shown
-      // and for how wide the due-soon window is.
-      const deltaS = (Date.parse(now) - Date.parse(d.dueAt)) / 1000;
-      const overdue = d.state === "overdue";
-      const dueSoon = d.state === "due" && deltaS >= -DUE_SOON_SECONDS;
-      if (!overdue && !dueSoon) continue;
-      const isReport = item.kind === "report";
-      rows.push({
-        key: `clock:${item.key}:${d.deadline}`,
-        title: isReport ? titleOf(item.ref.item) : item.ref.vulnerability,
-        label: `${d.label}, ${overdue ? "overdue" : "due soon"}`,
-        reason: d.text,
-        tone: overdue ? "fault" : "wait",
-        age: Math.abs(deltaS),
-        scope: item.scope,
-        task_id: isReport ? item.ref.item : null,
-        href: isReport ? null : hrefOf(item.scope),
-      });
+    for (const deadline of item.deadlines) {
+      const row = inboxClockRow(item, deadline, now, titleOf, hrefOf);
+      if (row) rows.push(row);
     }
   }
-  // Overdue first (a fault always outranks a warning) -- the longest
-  // overdue, then the soonest due, within each.
-  return rows.sort((a, b) => {
-    if (a.tone !== b.tone) return a.tone === "fault" ? -1 : 1;
-    return a.tone === "fault" ? b.age - a.age : a.age - b.age;
-  });
+  return rows.sort(compareInboxClockRows);
 }

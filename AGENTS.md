@@ -121,6 +121,10 @@ done`. A branch left only in a run's worktree is work nobody reviews, and the
 worktree is not where anyone looks for it. If the checks cannot be made green,
 open it as a draft and say what fails. Merging is the step that waits for a
 person -- never merge, approve or enable auto-merge on your own pull request.
+That prohibition is about the pull request to `main`: Factory's single-writer
+integrator may locally merge child task branches into a dedicated, non-`main`
+integration branch so it can test their combined result and open that one PR.
+Those internal merges are coordination, not permission to merge the final PR.
 Whoever writes a task says so too, and never writes "do not push".
 `.agents/skills/implement-github-issue` is the whole procedure for an issue.
 

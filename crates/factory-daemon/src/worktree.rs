@@ -1,6 +1,7 @@
-//! A run's own git worktree: made before the agent starts, never inside the
-//! scope, and never cleaned up once it exists -- see `AGENTS.md` and the
-//! ticket this implements for why.
+//! A run's own git worktree: made before the agent starts and never inside
+//! the scope. Ordinary runs retain their worktrees for continuation; a
+//! decomposition workflow removes its child and integration worktrees only
+//! after the combined branch is safely handed off.
 //!
 //! Two separate questions live here, and they are answered two separate ways
 //! on purpose. Whether a scope *can* have a worktree at all is advisory: it
@@ -12,6 +13,25 @@
 
 use std::path::Path;
 use tokio::process::Command;
+
+async fn git_output(scope_path: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    Command::new("git")
+        .arg("-C")
+        .arg(scope_path)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("running git: {e}"))
+}
+
+fn git_error(action: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        format!("{action} failed with {}", output.status)
+    } else {
+        format!("{action} failed with {}: {stderr}", output.status)
+    }
+}
 
 /// The branch a task's own worktree runs on, derived from the task rather
 /// than the run: a person reading `git branch` sees what the work was, not
@@ -127,6 +147,53 @@ pub async fn create(scope_path: &Path, dir: &Path, branch: &str, base: Option<&s
     } else {
         stderr
     })
+}
+
+/// Refresh one remote base before an integration branch is cut.  The fetch
+/// is deliberately explicit: a decomposition must not quietly integrate an
+/// old local `main` when `origin/main` has moved.
+pub async fn fetch(scope_path: &Path, remote: &str, branch: &str) -> Result<(), String> {
+    let output = git_output(scope_path, &["fetch", remote, branch]).await?;
+    output
+        .status
+        .success()
+        .then_some(())
+        .ok_or_else(|| git_error("git fetch", &output))
+}
+
+/// A completed worker is mergeable only when every change is committed.
+/// Returning the porcelain text makes the rework feedback concrete.
+pub async fn dirty(dir: &Path) -> Result<Option<String>, String> {
+    let output = git_output(dir, &["status", "--porcelain"]).await?;
+    if !output.status.success() {
+        return Err(git_error("git status", &output));
+    }
+    let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!status.is_empty()).then_some(status))
+}
+
+/// Merge one worker branch into the single integration worktree.  A failed
+/// merge is always aborted before returning, so the next worker or rework
+/// round never inherits conflict state.
+pub async fn merge(integration_dir: &Path, branch: &str) -> Result<(), String> {
+    let output = git_output(integration_dir, &["merge", "--no-ff", "--no-edit", branch]).await?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let error = git_error("git merge", &output);
+    let _ = git_output(integration_dir, &["merge", "--abort"]).await;
+    Err(error)
+}
+
+/// Publish the integration branch after every merge and combined check has
+/// passed.  No force option exists here by design.
+pub async fn push(integration_dir: &Path, remote: &str, branch: &str) -> Result<(), String> {
+    let output = git_output(integration_dir, &["push", "-u", remote, branch]).await?;
+    output
+        .status
+        .success()
+        .then_some(())
+        .ok_or_else(|| git_error("git push", &output))
 }
 
 /// Whether `dir` is still one of `scope_path`'s registered worktrees --

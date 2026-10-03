@@ -3379,6 +3379,8 @@ mod tests {
             timeout_seconds: None,
             required_by: Vec::new(),
             node_id: None,
+            actor: None,
+            by: None,
         }];
         let run = engine
             .store
@@ -3418,6 +3420,9 @@ mod tests {
             dirty: None,
             node_id: None,
             at: ended_at,
+            findings: None,
+            round: 0,
+            worktree_digest: None,
         };
         engine
             .policies

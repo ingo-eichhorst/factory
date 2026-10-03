@@ -175,8 +175,8 @@ impl Agent for HarnessAgent {
                 prompt.push_str("\n\n---\n\n");
             }
             prompt.push_str(&format!(
-                "Factory is continuing this task (\"{title}\", {id}): the previous run of it \
-                 ended on an infrastructure failure, and this session ({session_id}) picks the \
+                "Factory is continuing this task (\"{title}\", {id}): the previous run ended, \
+                 and this session ({session_id}) picks the \
                  same conversation back up in the same working directory. You are the same \
                  agent -- carry on from where you left off rather than starting over.\n\
                  \n\
@@ -190,6 +190,10 @@ impl Agent for HarnessAgent {
                     ctx.reporting_contract()
                 },
             ));
+            if !binding.upstream.is_empty() {
+                prompt.push_str("\n\n");
+                prompt.push_str(&upstream_section(&binding.upstream));
+            }
             return Ok(prompt);
         }
         let instructions = if task.instructions.trim().is_empty() {
@@ -523,6 +527,9 @@ mod tests {
             worktree: true,
             knowledge_hints: false,
             workflow_origin: None,
+            parent_task_id: None,
+            decomposition_part: None,
+            depends_on: Vec::new(),
             bench_origin: None,
             retry: None,
             pending_retry: None,

@@ -122,7 +122,7 @@ export function ancestors(edges, id) {
 /// A missing `kind` is a task, as the server's serde default has it.
 export function reworkTargets(nodes, edges, id) {
   const before = ancestors(edges, id);
-  return nodes.filter(node => before.has(node.id) && node.kind !== "gate");
+  return nodes.filter(node => before.has(node.id) && !["gate", "review", "approval"].includes(node.kind));
 }
 
 /// The dashed curve a node's `rework` draws back to its target: from the

@@ -48,6 +48,7 @@ import {
   setInputField,
   supersededTasks,
   validate,
+  workflowNodeKindLabel,
   workflowRouteTail,
 } from "./workflow-model.js";
 
@@ -311,14 +312,12 @@ function renderCanvas() {
       }).join("");
 
   $("workflow-nodes").innerHTML = graph.nodes.map(node => `
-    <div class="workflow-node" data-node="${esc(node.id)}" tabindex="0" role="group"
+    <div class="workflow-node wf-k-${esc(node.kind || "task")}" data-node="${esc(node.id)}" tabindex="0" role="group"
       aria-label="${esc(node.task.title || "Untitled task")}${roots.has(node.id) ? ", start node" : ""}${exitsOf(node).length ? `, ${esc(reworkSentence(graph.nodes, node))}` : ""}"
       style="left:${node.position.x}px;top:${node.position.y}px">
       ${roots.has(node.id) ? `<span class="wf-start">START</span>` : ""}
       <span class="wf-port-in" aria-hidden="true"></span>
-      <span class="workflow-node-kind">${node.kind === "gate"
-        ? `GATE${node.gate && node.gate.locked ? " 🔒" : ""}${node.gate && node.gate.required_by && node.gate.required_by.length ? ` · required by ${esc(node.gate.required_by.join(", "))}` : ""}`
-        : "TASK"}</span>
+      <span class="workflow-node-kind">${esc(workflowNodeKindLabel(node))}</span>
       <strong>${esc(node.task.title || "Untitled task")}</strong>
       <span class="wf-line">${esc(node.task.scope || "")} · ${esc(node.task.agent || "default agent")}</span>
       ${exitsOf(node).length ? `<span class="wf-line wf-rework-line" title="${esc(reworkSentence(graph.nodes, node))}">${esc(reworkBadge(graph.nodes, node))}</span>` : ""}
@@ -341,17 +340,21 @@ function renderCanvas() {
 /// open-task button's visibility, the run-status chip and the run panel.
 /// Called after every structural render and on every `workflow_run_updated`
 /// -- it never rebuilds an element, so it never steals focus or a caret.
-function paintStatuses() {
-  if (!current) return;
-  const graph = activeGraph();
+export function paintStatuses(options = {}) {
+  if (!current && !options.graph) return;
+  const graph = options.graph || activeGraph();
+  const nodeRoot = options.nodeRoot || $("workflow-nodes");
+  const executionFor = options.executionFor || runNode;
+  const selected = Object.hasOwn(options, "selectedNode") ? options.selectedNode : selectedNode;
+  const connecting = Object.hasOwn(options, "connectFrom") ? options.connectFrom : connectFrom;
   for (const node of graph.nodes) {
-    const el = $("workflow-nodes")?.querySelector(`[data-node="${CSS.escape(node.id)}"]`);
+    const el = nodeRoot?.querySelector(`[data-node="${CSS.escape(node.id)}"]`);
     if (!el) continue;
-    const execution = runNode(node.id);
+    const execution = executionFor(node.id);
     const status = execution?.status || "unstarted";
-    el.className = `workflow-node ${nodeStatusClass(status)}`;
-    if (selectedNode === node.id) el.classList.add("selected");
-    if (connectFrom === node.id) el.classList.add("wf-connecting");
+    el.className = `workflow-node wf-k-${node.kind || "task"} ${nodeStatusClass(status)}`;
+    if (selected === node.id) el.classList.add("selected");
+    if (connecting === node.id) el.classList.add("wf-connecting");
     const badge = el.querySelector('[data-role="badge"]');
     if (badge) {
       badge.className = `wf-badge ${nodeStatusClass(status)}`;
@@ -366,6 +369,7 @@ function paintStatuses() {
     }
     paintRound(el, execution, graph.nodes);
   }
+  if (options.nodesOnly) return;
   for (const edge of graph.edges) {
     const from = graph.nodes.find(node => node.id === edge.from);
     const status = from ? (runNode(from.id)?.status || "unstarted") : "unstarted";
@@ -694,7 +698,7 @@ function renderNodeUses() {
 /// rather than silently reading as "none": the model still carries it, and
 /// `reworkProblems` says what is wrong with it.
 function renderReworkField(node, graph, readOnly) {
-  const gate = node.kind === "gate";
+  const gate = ["gate", "review", "approval"].includes(node.kind);
   const exits = exitsOf(node);
   const targets = graph.nodes.filter(item => item.id !== node.id);
   $("workflow-node-exits-list").innerHTML = exits.length ? exits.map((exit, index) => {
@@ -770,7 +774,7 @@ function editExitList(index, action) {
 function addExit() {
   if (mode === "run") return;
   const node = current.nodes.find(item => item.id === selectedNode);
-  if (!node || node.kind === "gate") return;
+  if (!node || ["gate", "review", "approval"].includes(node.kind)) return;
   node.exits = exitsOf(node).map(exit => ({ ...exit })); delete node.rework;
   const target = current.edges.find(edge => edge.from === node.id)?.to
     || reworkTargets(current.nodes, current.edges, node.id)[0]?.id
@@ -808,7 +812,7 @@ function renderRunPanel() {
   const inputs = runInputs(currentRun);
   $("workflow-run-meta").innerHTML = `<dl>
       <dt>Run</dt><dd>${esc(currentRun.id)}</dd>
-      <dt>Status</dt><dd>${esc(currentRun.status)}</dd>
+      <dt>Status</dt><dd><span class="wf-badge ${nodeStatusClass(currentRun.status)}">${esc(currentRun.status)}</span></dd>
       <dt>Revision</dt><dd>${esc(currentRun.revision)}</dd>
       ${currentRun.failure_node_id ? `<dt>Failed node</dt><dd>${esc(failedTitle || currentRun.failure_node_id)}</dd>` : ""}
       ${currentRun.error ? `<dt>Error</dt><dd>${esc(currentRun.error)}</dd>` : ""}
@@ -953,7 +957,8 @@ async function loadRuns(selectRunId) {
 function renderRunsList() {
   $("workflow-runs").innerHTML = runs.length ? runs.map(run => `
     <button type="button" class="wf-run-item${currentRun?.id === run.id ? " on" : ""}" data-run="${esc(run.id)}">
-      ${esc(run.status)} · r${esc(run.revision)}<span class="sub">${esc(new Date(run.created_at).toLocaleString())}</span>
+      <span class="wf-badge ${nodeStatusClass(run.status)}">${esc(run.status)}</span> · r${esc(run.revision)}
+      <span class="sub">${esc(new Date(run.created_at).toLocaleString())}</span>
     </button>`).join("") : `<div class="empty">No runs yet.</div>`;
   for (const button of $("workflow-runs").querySelectorAll("[data-run]")) {
     button.onclick = () => selectRun(button.dataset.run);

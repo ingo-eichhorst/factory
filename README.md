@@ -1613,6 +1613,51 @@ route to a scope and, optionally, a workflow. `factory_core::intake` is pure
 owns the transitions: receive, triage, assess, decide (`ready`, `needs-info`,
 `split`, or `wontfix` with a verified reason).
 
+**GitHub receipt and decomposition (`#180`).** A scope whose `git` is a
+GitHub remote polls open issues carrying the explicit `factory:intake` label.
+Title, body and comments are copied into one Intake item. While that item is
+still in Intake, later edits synchronize; a changed issue in `needs-info`
+returns to Received for triage. Once released, Factory is canonical and the
+GitHub issue is only an outbound mirror. The source keeps repository, issue
+number and GitHub's stable external id as well as the public URL, so a renamed
+repository does not create a second item; older URL-only rows are upgraded on
+their next poll.
+
+The daemon first probes one fixed labelled-issues REST URL with its ETag.
+`304 Not Modified` ends that repository's poll without the heavier
+comment-rich read; a changed ETag triggers the full synchronization. This is
+deliberately polling rather than a webhook: a local daemon needs no public
+endpoint.
+
+An assessment may include two to eight `split` parts. The original shape is
+still a proposal for the manual `intake decide <id> split` fallback. A plan
+whose parts also provide `owns`, `interface`, and `estimate_seconds` is
+executable: `intake assess --decide` validates standalone instructions and
+acceptance, an acyclic graph, estimates, and disjoint ownership between
+parallel parts. A valid automatic plan starts one generated workflow run,
+without another approval stop. Its `expand` node materializes ordinary child
+tasks carrying real `parent_task_id`, `decomposition_part`, and task-id
+`depends_on` fields; labels are only a compatibility mirror. Root tasks start
+immediately. Successors appear scheduled and are dispatched only after their
+prerequisites have completed and been merged; their prompts receive each
+prerequisite's result as upstream output. The normal L3 session limit still
+bounds dispatch. A failed or missing prerequisite never silently releases a
+child. Automatic plans are one level deep, leave `routing.workflow` empty,
+and do not create GitHub child issues.
+
+For a GitHub item, Factory fetches `origin/main` once and creates
+`factory/issue-<number>`. Each runnable child branches from that integration
+ref as it then stands. The workflow's single-writer integrator merges clean,
+committed child branches in dependency order; a conflict returns only that
+child with concrete rework feedback. After all merges, every part's acceptance
+command runs again in the combined worktree. A failed combined check likewise
+returns its owning part, up to the expand node's rework limit. On success the
+integrator pushes without force and opens one PR to `main`, whose body lists
+the internal parts and closes the source issue. Factory never merges, approves
+or enables auto-merge on that PR. It records the PR before removing child and
+integration worktrees and merged local branches, so no unpushed result is
+discarded.
+
 **Per-scope definitions of ready (`#169`).** The seven axes are fixed —
 compiled in, never removed — but a scope can add its own checks on top of
 them, and tighten two of the built-in rules, the same add-or-tighten,
@@ -1843,7 +1888,7 @@ person, or a role given the standing permission, has to ask for it.
   `needs_info` -> `needs-info`, `wontfix` -> `wontfix` (plus `duplicate` or
   `invalid` for those two wontfix reasons); areas are added as given;
   `remove` is always the other two state labels, so the three stay mutually
-  exclusive on the issue. `needs-triage` is never touched -- the poller keys
+  exclusive on the issue. `factory:intake` is never touched -- the poller keys
   on it, and removing it is a person's own decision.
 - **Stored state.** `Intake.outbound: Option<Box<OutboundRecord>>`
   (`awaiting_approval` | `published` | `failed`, the comment id and URL, the
@@ -2359,6 +2404,29 @@ parents said — the acceptance bar is that literal command. Either way, each
 parent's result is tail-truncated to a byte budget first, so one noisy
 upstream step can't blow up every prompt downstream of it.
 
+### Dynamic expansion and integration (#180)
+
+An `expand` node is a daemon-owned fan-out boundary. It does not run an
+agent: its immutable `expand.children` list identifies the task nodes produced
+from an Intake decomposition. The generated graph carries the parts' declared
+dependencies, so independent roots may run together while a dependent child
+waits until its predecessors have reached the integration branch. The web
+canvas labels the node `EXPAND` and shows its child count in Design and Run
+views.
+
+`expand.join.tolerate` is the number of failed independent children the join
+may accept; zero is the default `all_succeeded` behavior used by integrated
+code plans. `expand.cancel` is `terminate` by default, which cancels running
+children with their parent, or `abandon`, which leaves already-dispatched
+children alone. Integration-backed expands also carry a bounded
+`max_rework_rounds`: merge conflicts and acceptance failures return the
+responsible child with the same task identity and a new run. A resumable
+harness continues its session; other runtimes start a fresh run from the
+current integration ref. All of this state—the base ref, merge ledger, checks,
+PR URL and cleanup—is stored on the workflow run, so restart reconciliation
+continues rather than opening a second PR or losing which branches were
+accepted.
+
 ### Inputs and ordered exits (#140, #149)
 
 A workflow can be told what to work on, and a review step can send work back.
@@ -2442,7 +2510,8 @@ security scan, tests -- but nothing obliged a run to go through those steps or
 to prove it had (`#118`). Now a control, or a quality attribute, can say which
 steps a **category** of work must pass, and the line enforces it: a run that
 owes a step is only `done` once the step has left evidence, produced by the
-daemon rather than by the agent that did the work.
+daemon, an independent agent, or a person rather than by the agent that did
+the work.
 
 ```yaml
 # .factory/policies/house.yaml -- a control's `requires:`
@@ -2450,6 +2519,8 @@ daemon rather than by the agent that did the work.
   title: Changes are tested
   requires:
     - { applies_to: [feature, bugfix], step: tests, gate: "cargo test --workspace" }
+    - { applies_to: [feature, bugfix], step: review, by: independent }
+    - { applies_to: [release], step: approval, by: person }
     - { applies_to: [release], step: sbom, gate: "make sbom", before: publish }
     - { applies_to: ["*"], step: lint, gate: "cargo clippy -- -D warnings", timeout_seconds: 900 }
 ```
@@ -2471,9 +2542,10 @@ The same `requires:` list goes on an attribute of a quality profile
   shortens. The one way a requirement leaves the plan is an `n/a` with a
   rationale on its control, and the plan lists that as a waiver.
 - **Injection at dispatch.** When a workflow run starts, each task node's plan
-  is merged into the run's immutable snapshot as **locked `gate` nodes**,
-  chained after that node in the plan's `before:`/`after:` order; whatever
-  followed the node now follows its last gate. Gates go after *every* task
+  is merged into the run's immutable snapshot as locked control nodes.
+  `approval` is a prerequisite before the task launches; deterministic `gate`
+  nodes and then `review` nodes follow the task in plan order; whatever
+  followed the node now follows its last control. Gates go after *every* task
   node, not only the last ones, because every node works in a worktree of its
   own. An authored gate node for the same step satisfies the requirement
   instead. A standalone task is planned as an implicit one-node workflow
@@ -2505,25 +2577,38 @@ The same `requires:` list goes on an attribute of a quality profile
   category, which steps a run would get injected and which authored gates
   already satisfy one, waivers, findings (a gate step with no command -- it
   can never pass, so every such run blocks), and ordering violations (a
-  `before: publish` whose `publish` node can start with no scan before it).
+  `before: publish` whose `publish` node can start with no scan before it), and
+  any review for which the scope has no independent functionary. The Policy
+  tab shows the same injected placement and functionary gaps for stored
+  workflows.
 
 ```sh
 factory workflow lint <workflow-id>                 # what a run of it gets
 factory workflow lint --task <task-id>              # a task, as its one-node workflow
 factory workflow lint --scope demo --category release
 factory run attestations <run-id>                   # the evidence a run carries
+factory run approve <run-id> --reason "release owner checked it"
+factory run reject <run-id> --reason "missing release evidence"
+factory run rework <run-id>                         # accept the verifier's proposal
 ```
 
-The same over HTTP: `GET /api/workflow-lint?workflow=|task=|scope=&category=`
-and `GET /api/runs/{id}/attestations`. Attestations live in the append-only
-`run_attestations` table next to `policy_attestations`.
+The same over HTTP: `GET /api/workflow-lint?workflow=|task=|scope=&category=`,
+`GET /api/runs/{id}/attestations`, and `POST /api/runs/{id}/{approve,reject,rework}`.
+Attestations live in the append-only `run_attestations` table next to
+`policy_attestations`.
 
-**Not in v1.** `review` and `approval` steps parse and show in the plan and in
-`lint`, marked not enforced -- they need a functionary other than the daemon
-(another agent, a person), which is v2 along with a rework task proposed on a
-failed gate and a canvas that draws injected nodes distinctly (the Workflows
-canvas only labels them `GATE 🔒` today). The `attested` policy check and the
-conformance metrics are v3.
+An approval holds the run before an agent session starts. A review is assigned
+to the first declared concrete task agent in stable scope order whose name is
+not the subject executor; that choice is frozen in the run snapshot. The
+reviewer reports plain `done` to pass or `done --send-to <subject-node>` with
+concrete findings to reject. A failed gate or rejected review blocks with an
+evidence-backed rework proposal. Accepting it uses the workflow's bounded
+send-back path, or a same-task retry for standalone work, for at most five
+rounds before a person must resolve it. Gate, Review, and Approval are distinct
+locked cards on the Workflows canvas, and approval/rejection/rework decisions
+are available in the Inbox. The `attested` policy check, conformance metrics,
+and Goals/Scenarios wiring (#158 phase 1) use these enforced controls too;
+release provenance remains a later phase of #158.
 
 ## How a task actually runs
 

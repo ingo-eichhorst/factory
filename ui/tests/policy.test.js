@@ -40,6 +40,13 @@ test("a task carrying a policy= label appearing or changing status reloads the t
   );
 });
 
+test("workflow edits refresh the Policy enforcement preview", () => {
+  assert.match(
+    wiring,
+    /state\.tab === "policy" && \["workflow_created", "workflow_updated", "workflow_deleted"\]\.includes\(ev\.type\)/,
+  );
+});
+
 test("a link with a level segment and an old bare link both land on the Policy page", () => {
   setRouter({ pages: ["dashboard", "policy", "roles"], redirects: {} });
 
@@ -66,6 +73,8 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
     "policy-no-na": { hidden: false },
     "policy-findings": { innerHTML: "" },
     "policy-no-findings": { hidden: false },
+    "policy-workflow-enforcement": { innerHTML: "" },
+    "policy-no-workflow-enforcement": { hidden: false },
   };
   globalThis.document = { ...bare, getElementById: (id) => elements[id] || null };
 
@@ -121,6 +130,14 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
             ],
             not_applicable: [{ control: "cra/annex-i-2-4", scope: "demo", rationale: "covered at the root" }],
             findings: [{ kind: "unknown_control", subject: "demo", detail: "names a control nothing defines" }],
+            workflow_enforcement: [{
+              workflow: "wf-1", name: "release", scope: "demo", node: "publish",
+              step: "review", kind: "review", required_by: ["cra/security-testing"],
+            }],
+            workflow_findings: [{
+              workflow: "wf-1", name: "release", scope: "demo",
+              detail: "review publish.review has no independent functionary",
+            }],
             catalogues: [{ framework: "cra", title: "Cyber Resilience Act", kind: "regulation", controls: 5 }],
           },
         },
@@ -155,6 +172,9 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
   );
   assert.match(elements["policy-na"].innerHTML, /covered at the root/);
   assert.match(elements["policy-findings"].innerHTML, /names a control nothing defines/);
+  assert.match(elements["policy-workflow-enforcement"].innerHTML, /review <b>review<\/b> on publish/);
+  assert.match(elements["policy-workflow-enforcement"].innerHTML, /no independent functionary/);
+  assert.match(elements["policy-workflow-enforcement"].innerHTML, /required by cra\/security-testing/);
   assert.equal(elements["policy-no-gaps"].hidden, true, "one open row on screen -> the 'nothing open' empty state is hidden");
   assert.equal(elements["policy-export"].href, "/api/policy/export?scope=demo", "the Export link tracks the selected scope");
 

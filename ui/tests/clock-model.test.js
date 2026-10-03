@@ -195,6 +195,22 @@ test("inboxClockRows degrades to [] with no clock", () => {
   assert.deepEqual(inboxClockRows(undefined, 0, () => "", () => ""), []);
 });
 
+test("the due-soon boundary includes exactly six hours and advances from the server clock", () => {
+  const clock = {
+    now: "2026-09-24T12:00:00Z",
+    items: [
+      findingItem("at-boundary", "2026-09-24T18:00:00Z", "due"),
+      findingItem("outside", "2026-09-24T18:00:01Z", "due"),
+      findingItem("met-late", "2026-09-24T10:00:00Z", "late"),
+    ],
+  };
+  const rows = elapsed => inboxClockRows(clock, elapsed, id => id, scope => scope);
+  assert.deepEqual(rows(0).map(row => row.title), ["at-boundary"]);
+  assert.deepEqual(rows(1).map(row => row.title), ["at-boundary", "outside"]);
+  assert.equal(rows(7 * 3600)[0].label, "24h early warning, due soon",
+    "elapsed browser time must not reinterpret the daemon's due state as overdue");
+});
+
 test("DUE_SOON_SECONDS is six hours, the window a due (not yet overdue) deadline has to fall inside to show up", () => {
   assert.equal(DUE_SOON_SECONDS, 6 * 3600);
 });
