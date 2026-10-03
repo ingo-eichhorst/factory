@@ -40,6 +40,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/clock-model.js                                          the CRA Art. 14 reporting clock's pure shaping, shared by Intake, the Inbox and L6 Policy (#157/#170 phase 2)
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
+    examples/openshell       `sandbox: openshell` (#218): the image recipe, provider profiles, the awesome-herdr block
 
 `README.md` explains the architecture and the plugin protocol. Read it before
 changing an adapter trait -- those five traits are the whole point of the shape.

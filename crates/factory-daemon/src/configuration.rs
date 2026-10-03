@@ -656,6 +656,7 @@ impl Engine {
             .config
             .infrastructure
             .refuse_unknown_provider(&from_file, &agent)?;
+        factory_core::config::refuse_bad_openshell(&from_file, &agent)?;
         if agent.lifetime == Lifetime::Task && agent.autostart.is_some() {
             return Err(bad("a task agent cannot set autostart"));
         }
@@ -1558,6 +1559,7 @@ mod tests {
             autostart: Some(false),
             args: vec!["--model".into(), "local model".into()],
             sandbox: Sandbox::None,
+            openshell: None,
             provider: None,
             max_sessions: None,
         }

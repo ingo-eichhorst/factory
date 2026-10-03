@@ -87,7 +87,7 @@ scope:
     - name: reviewer
       harness: claude-code
       lifetime: task          # not standing: offered for tasks in this scope
-      sandbox: docker         # declared, not yet enforced -- see below
+      sandbox: docker         # declared only; openshell is the enforced one -- see Sandboxes
     - name: codex
       harness: codex
       max_sessions: 3         # at most 3 sessions of this agent at once (#179)
@@ -107,18 +107,16 @@ longer declares is **closed** rather than left for somebody to find next week.
 `lifetime` may also sit inside the singular `agent:` block, which is how
 instances written before standing agents existed already spell it.
 
-`sandbox` says where an agent's runs should execute: `none` (the default),
-`docker`, or `srt`. **Nothing enforces it yet.** It is read, stored, and shown
-on the L2 Environment page, and an agent declaring `docker` starts exactly the
-way one declaring `none` does. The field exists ahead of the machinery so the
-gap between what a run needs to reach and what it can reach is written down
-somewhere rather than assumed, and so the UI has something true to display.
-Enforcing it means solving three host-shaped things a container breaks — the
-control socket, the `factory` callback binary, and the run's git worktree,
-whose `.git` is a pointer file into the scope's repository — which is why
-`srt` ([anthropic-experimental/sandbox-runtime][srt]), which wraps the same
-process on the same host, is the likelier one to arrive first.
+`sandbox` says where an agent's runs execute: `none` (the default),
+`openshell`, `docker`, or `srt`. **`openshell` is enforced** (`#218`): every
+task run of such an agent starts inside its own [NVIDIA OpenShell][openshell]
+sandbox, under the policy its `openshell:` block declares, or does not start
+at all -- see [Sandboxes](#sandboxes). `docker` and `srt`
+([anthropic-experimental/sandbox-runtime][srt]) are still **declared only**:
+read, stored and shown on the L2 Environment page, but an agent declaring one
+starts exactly the way one declaring `none` does.
 
+[openshell]: https://github.com/NVIDIA/OpenShell
 [srt]: https://github.com/anthropic-experimental/sandbox-runtime
 
 **`max_sessions` is enforced (`#179`).** An agent declaring it may have at
@@ -415,6 +413,193 @@ Stopping a standing agent or ending a task run closes only its own tab, never
 the scope's workspace — the workspace is shared by everything else running in
 that scope. Workspaces made by earlier versions of Factory (labelled
 `factory: …`, one per session) are not migrated; close them by hand.
+
+## Sandboxes
+
+`sandbox: openshell` (`#218`) is the one sandbox Factory enforces. Without it
+every agent runs as the owner, with the owner's whole filesystem, keychain and
+network. With it, a task run's harness runs inside an [OpenShell][openshell]
+sandbox: Landlock and seccomp confine the filesystem and processes, every
+outbound connection is checked against a declarative network policy, and
+credentials reach the agent only as placeholders that the sandbox's proxy
+resolves for the endpoints a provider profile allows. On macOS the workload is
+a Linux VM -- Docker Desktop, or the libkrun MicroVM driver on
+Hypervisor.framework.
+
+```yaml
+# projects/awesome-herdr/.factory/config.yaml
+scope:
+  agent:
+    name: awesome-herdr-curator
+    harness: claude-code
+    sandbox: openshell
+    openshell:
+      image: /Users/you/.local/share/factory/openshell/factory-agent-rootfs.tar.gz
+      providers: [factory-claude, factory-github]   # by name; created once on the host
+      upload: workdir        # the run's directory -> /sandbox/work/<its name> (default)
+      download: none         # or `workdir`: copy the tree back, never .git
+      fast_forward: true     # afterwards, git merge --ff-only @{u} on the host checkout
+      # factory_bin: /usr/local/bin/factory   (default: the image's Linux CLI)
+      # callback: http://host.openshell.internal:8787   (default: derived from the http bind)
+      # gateway: openshell   (default: the CLI's active gateway)
+      # cli: /opt/homebrew/bin/openshell       (default: PATH, then Homebrew, then /usr/local)
+      policy:                # OpenShell's sandbox policy, verbatim
+        filesystem_policy: { ... }
+        network_policies: { ... }
+```
+
+`examples/openshell/awesome-herdr.config.yaml` is the whole block for the
+awesome-herdr curator's weekly audit, policy included; a test loads it, so it
+stays one this build accepts.
+
+The block is refused at load, naming the scope's path, when it is present
+without `sandbox: openshell` or the other way round, when it misspells a key,
+names no image or no policy, or gives a policy that is not version 1. It
+holds no secret: providers are named, and their credentials live in
+OpenShell's credential store.
+
+**What a run does.** At dispatch, after the run row exists and before any
+session:
+
+1. **Preflight** -- the `openshell` CLI runs, `openshell status` says the
+   gateway is connected, and `openshell provider get` finds every named
+   provider. Each failure fails the run with that reason. Nothing ever falls
+   back to starting the harness on the host.
+2. **Create** `factory-<run>` with `--from <image> --policy <file>
+   --provider ... --label factory.instance=... --label factory.run=...
+   --no-auto-providers --detach`. The policy file is the block's policy with
+   `version: 1` and a `factory_callback` rule added -- the image's `factory`
+   may reach the daemon's http port on `host.openshell.internal` -- unless the
+   policy names a rule of that name itself. A policy the gateway will not
+   activate fails the run with OpenShell's own reason, and the sandbox is
+   deleted.
+3. **Upload** the run's directory to `/sandbox/work/<name>` (git's ignore
+   rules applied, as OpenShell does), its `.git` directory separately (the
+   filtered upload leaves it out), and `/sandbox/.factory-run`: the guide, the
+   hook settings, the prompt, the launcher, and an env file with the run's
+   token. The token is never on a command line, where it would sit in the
+   host's process table, and the host copy of the env file is removed once
+   it is uploaded.
+4. **Launch.** The herdr pane runs one short line, `sh '<state>/pane.sh'`,
+   whose one command is `openshell sandbox exec --tty` of the in-sandbox
+   launcher: it sources the env file and starts `claude` with the same
+   arguments as on the host (guide, hook settings, declared args), with the
+   prompt as its first message -- typed into a TUI through a pty, a
+   multi-line prompt would submit at its first newline. The run is still
+   visible in its pane, and `factory task output` still reads it.
+
+When the run ends -- done, failed, blocked, cancelled -- `close_session`
+closes the pane, and then, in the background so the run's own status is
+written first, optionally downloads the working tree back into the run's
+directory (never `.git`), optionally fast-forwards the host checkout to its
+upstream (`git fetch`, then `git merge --ff-only @{u}`, never forced; a
+refusal is journaled with git's reason), and deletes the sandbox. Each step
+is a `sandbox` entry on the run's journal. On start
+the daemon lists the sandboxes labelled with its instance id and deletes any
+whose run is no longer active, so a sandbox never outlives its run for longer
+than a restart.
+
+**The three host-shaped problems**, and what this does about each:
+
+- **The callback.** `.factory/factory.sock` does not exist inside a Linux VM.
+  The run gets `FACTORY_URL` instead of `FACTORY_SOCKET` --
+  `http://host.openshell.internal:<port>`, which OpenShell maps to the gateway
+  host's loopback, for a daemon bound to loopback or every address; the bound
+  address itself for one bound to a single other address, such as a LAN IP
+  (a loopback http interface, when there are several) -- and `factory` sends
+  the same request envelope, token
+  included, to the http interface's `POST /api/rpc` -- the same
+  `Engine::handle` the socket reaches, so roles and grants apply exactly as
+  they do there. `factory task report` and the `Stop`/`StopFailure` hooks'
+  `factory task turn-ended` both work over it. `--url` does the same by hand.
+  The daemon has to serve the http interface (it does by default).
+- **The binaries.** The image carries its own Linux `factory` and `herdr`.
+  `examples/openshell/build-image.sh` builds it: Factory's CLI cross-compiled
+  to static aarch64 Linux with `rust-lld` (no Linux toolchain), herdr's and
+  jq's Linux releases, Claude Code's managed settings with the allow rules an
+  unattended run needs (`git push`, `gh pr create`, `gh pr merge`), a git
+  config using `gh` for GitHub credentials, and a Claude Code home that has
+  finished onboarding and trusts `/sandbox/work`. `docker` mode tags an image
+  (`examples/openshell/Dockerfile`); `rootfs` mode needs no container engine
+  -- `crane export` flattens the base and bsdtar lays the overlay on top --
+  and writes a rootfs tar the MicroVM driver takes as `image:`. Rebuild it
+  whenever Factory's CLI changes.
+- **The working directory.** OpenShell has no bind mounts. The tree goes in
+  by upload; work comes back through git's remote, with `fast_forward`
+  leaving the host checkout level with what was published, or, for output
+  that is not a repository, through `download: workdir`, which never copies
+  `.git` back over a live repository. A run in a git worktree is refused --
+  its `.git` is a pointer into a repository the sandbox never receives --
+  with the way out in the reason: run the task with `--no-worktree`.
+
+Only the `claude-code` and `shell` harnesses are carried in this version:
+each harness takes its first prompt differently, and those two are the ones
+proven inside a sandbox. Any other is refused at dispatch rather than guessed
+at.
+
+**Host setup, once.** The prerequisites are the CLI with a gateway and a
+runtime, the image, the provider profiles, and the providers:
+
+```sh
+# 1. CLI + gateway (Homebrew formula; MicroVM driver needs e2fsprogs)
+curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION=v0.1.2 sh
+brew install e2fsprogs crane
+cat > /opt/homebrew/var/openshell/gateway.toml <<'TOML'
+[openshell]
+version = 2
+[openshell.gateway]
+compute_driver = "vm"            # Docker Desktop not required
+[openshell.drivers.vm]
+driver_dir = "/opt/homebrew/opt/openshell/libexec"
+state_dir = "/opt/homebrew/var/openshell/vm-state"
+allow_driver_config = true       # a rootfs tar image is staged through driver config
+TOML
+brew services restart openshell
+openshell status                                   # Status: Connected
+
+# 2. The image (rebuild when Factory's CLI changes)
+examples/openshell/build-image.sh rootfs           # or: build-image.sh docker
+
+# 3. Provider profiles
+openshell profile import -f examples/openshell/claude-code-oauth.yaml
+openshell profile import -f examples/openshell/github-publish.yaml
+
+# 4. Providers -- credentials go into OpenShell's store, never Factory's config
+claude setup-token                                 # a browser login: a human step
+CLAUDE_CODE_OAUTH_TOKEN=<that token> openshell provider create --name factory-claude --type claude-code-oauth --from-existing
+GITHUB_TOKEN=<fine-grained token> openshell provider create --name factory-github --type github-publish --from-existing
+```
+
+On a subscription, Claude Code's OAuth token from `claude setup-token` is the
+credential (`examples/openshell/claude-code-oauth.yaml` places it as a bearer
+token on `api.anthropic.com` only); NVIDIA's own `claude-code` profile is the
+API-key path. `examples/openshell/github-publish.yaml` is NVIDIA's `github`
+profile plus the two GraphQL mutations `gh pr create` and `gh pr merge` send
+(`createPullRequest`, `mergePullRequest`): OpenShell 0.1.2 judges a GraphQL
+request by the provider's own `/graphql` endpoint, and a policy rule for the
+same path does not widen it, while REST and git rules in the policy do
+compose with the profile. GraphQL cannot be scoped to a repository -- the
+repository is an id in the request body -- so give the provider a
+fine-grained token limited to the one repository (contents and pull
+requests: write) rather than `gh auth token`'s broad one; the policy then
+scopes pushes and REST writes to that repository on top. Warm the image once (`openshell sandbox create --from
+<image> --policy <file> --detach`, then delete it) -- a first pull counts
+against the run's acknowledgement timeout.
+
+**When a connection is denied.** The policy is default-deny, so a host the
+run needs and the policy omits shows up as `action=deny` in the sandbox's
+log, with the binary OpenShell identified and the rule it checked:
+
+```sh
+openshell logs factory-<run> --since 30m --source sandbox | grep -i denied
+openshell rule get factory-<run> --status pending   # the policy advisor's drafted rule
+openshell policy get factory-<run> --full           # what is actually enforced
+```
+
+Fix it in the scope's `openshell.policy` (the next run picks it up), or, for
+the run in flight, `openshell rule approve factory-<run> --chunk-id <id>`. A
+`credential_endpoint_mismatch` means the policy let the request out but the
+provider's profile does not bind its credential to that endpoint.
 
 ## Secrets
 
@@ -819,7 +1004,10 @@ controls actually name one:
   nobody wrote it down.
 - **`sandbox`** — satisfied when every agent `Scope::agents_with` names for
   the scope has a sandbox other than `none` (`ScopeAgent.sandbox`). Same
-  empty-scope and same-foreman rule as `roles`.
+  empty-scope and same-foreman rule as `roles`. The evidence says how many of
+  those are enforced and names any declared but not enforced (`docker`,
+  `srt`), from `AgentFact.sandbox_enforced` (`#218`), so a satisfied control
+  never reads as more than it is.
 - **`secrets { absent: [location...] }`** — satisfied when none of the named
   locations is present, read from the same inventory the L2 Secrets tab
   itself reports (`Engine::credential_inventory`): presence only, never a
@@ -2796,7 +2984,9 @@ release provenance remains a later phase of #158.
    contract — the exact commands the agent is to run. The guide never repeats
    those; it just says where to find them. The same values are in the
    session's environment as `FACTORY_TASK_ID`, `FACTORY_TASK_TOKEN`,
-   `FACTORY_SOCKET`, and `FACTORY_BIN`.
+   `FACTORY_SOCKET`, and `FACTORY_BIN` -- or, for a run inside an OpenShell
+   sandbox, `FACTORY_URL` in place of `FACTORY_SOCKET` (see
+   [Sandboxes](#sandboxes)).
 4. The agent runs `factory task report <id> --status running …`, then finishes
    with `done`, `failed`, or `blocked`. The report lands on whichever run of
    that task is in progress; the token says it is that run's agent speaking.
@@ -3896,3 +4086,4 @@ Below bounds, crate splitting and strict command ladder are still ahead.
     ui/js/{doctor,doctor-model}.js                               the L1 Doctor dependency view and its pure shaping logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
+    examples/openshell       `sandbox: openshell` (#218): the image recipe, provider profiles, the awesome-herdr block

@@ -283,6 +283,7 @@ mod tests {
             cwd: "/tmp/somewhere".into(),
             factory_bin: "/usr/local/bin/factory".into(),
             socket: "/tmp/factory.sock".into(),
+            callback_url: None,
             guides_dir: "/tmp/factory-guides".into(),
             task: None,
             identity_token: Some("identity".into()),

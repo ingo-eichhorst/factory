@@ -54,9 +54,12 @@ export function agentTags(a) {
   if (a.is_default) tags.push(`<span class="tag">default</span>`);
   // The form on this page sets a sandbox, so this page has to show it, or an
   // agent declaring one is indistinguishable from an agent declaring none.
-  // `warn`, because a declaration nothing enforces yet is worth a second look
-  // -- L2's Sandboxes tab says the same thing at greater length.
-  if (a.sandbox && a.sandbox !== "none") tags.push(`<span class="tag warn">${esc(a.sandbox)}</span>`);
+  // `warn` for a declaration nothing enforces (docker, srt), worth a second
+  // look; `ok` for openshell, which dispatch enforces (#218). L2's Sandboxes
+  // tab says the same thing at greater length.
+  if (a.sandbox && a.sandbox !== "none") {
+    tags.push(`<span class="tag ${a.sandbox === "openshell" ? "ok" : "warn"}">${esc(a.sandbox)}</span>`);
+  }
   if (a.source && a.source !== "builtin" && a.source !== "missing") tags.push(`<span class="tag plug">plugin</span>`);
   if (!a.declared) tags.push(`<span class="tag">undeclared</span>`);
   return tags.join(" ");
@@ -209,7 +212,7 @@ export function openAgentCreate(scope) {
         <div><label for="na-role">Role</label>
           <select id="na-role">${roles}</select></div>
       </div>
-      <label for="na-sandbox">Sandbox <span class="sub" style="text-transform:none">(declared only -- nothing enforces this yet)</span></label>
+      <label for="na-sandbox">Sandbox <span class="sub" style="text-transform:none">(docker and srt are declared only; openshell is enforced and set in the scope's config file)</span></label>
       <select id="na-sandbox">
         <option value="none" selected>none</option>
         <option value="docker">docker</option>

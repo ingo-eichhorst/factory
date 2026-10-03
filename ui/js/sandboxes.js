@@ -13,15 +13,24 @@ export function visibleSandboxes(rows, contains = inScope) {
   return (rows || []).filter(row => contains(row.scope));
 }
 
+/// The tag beside a row's sandbox value: what dispatch actually does with
+/// it. `openshell` is enforced -- the run starts inside the sandbox or not at
+/// all (#218); `docker` and `srt` are still only what a declaration says.
+export function sandboxTag(row) {
+  if (!row || !row.sandbox || row.sandbox === "none") return "";
+  return row.enforced
+    ? ` <span class="tag ok">enforced</span>`
+    : ` <span class="tag warn">declared, not enforced</span>`;
+}
+
 function sandboxRow(row) {
-  const declared = row.sandbox !== "none";
   return `<tr>
     <td><div class="title">${esc(row.scope)}</div><div class="sub">${esc(row.scope_path)}</div></td>
     <td>${esc(row.runtime)}</td>
     <td>${esc(row.agent)}</td>
     <td>${esc(row.harness)}</td>
     <td>${esc(row.lifetime)}</td>
-    <td>${esc(row.sandbox)}${declared ? ` <span class="tag warn">declared, not enforced</span>` : ""}</td>
+    <td>${esc(row.sandbox)}${sandboxTag(row)}</td>
     <td>${row.worktree_capable ? "yes" : "no"}</td>
   </tr>`;
 }
@@ -32,8 +41,9 @@ export function renderSandboxes() {
     // True whether or not the fetch worked, so an error goes in an element of
     // its own beside it rather than over the top of it.
     note.textContent =
-      "Today every row is this Mac, this folder, no limits. A sandbox value below says what an agent's declaration " +
-      "claims -- none of it is enforced yet, so “docker” and “srt” change nothing about how the agent actually starts.";
+      "A row with no sandbox runs on this Mac, in this folder, with no limits. “openshell” is enforced: each task run " +
+      "starts inside its own NVIDIA OpenShell sandbox under the policy the scope's config declares, and fails rather than " +
+      "start on the host. “docker” and “srt” are still declared only -- they change nothing about how the agent starts.";
   }
   const failed = $("sandboxes-error");
   if (failed) {

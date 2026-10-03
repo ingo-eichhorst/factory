@@ -555,6 +555,7 @@ mod tests {
             cwd: PathBuf::from("/tmp/somewhere"),
             factory_bin: PathBuf::from("/usr/local/bin/factory"),
             socket: PathBuf::from("/tmp/factory.sock"),
+            callback_url: None,
             guides_dir: fresh_guides_dir(),
             task: Some(TaskBinding {
                 task: sample_task(),

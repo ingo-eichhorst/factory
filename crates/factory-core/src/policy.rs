@@ -1666,8 +1666,26 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                 }
                 Some(agents) => {
                     let missing: Vec<&str> = agents.iter().filter(|a| !a.has_sandbox).map(|a| a.name.as_str()).collect();
+                    // Declared is what this check has always asked for; the
+                    // evidence says which of those declarations dispatch
+                    // actually enforces (`#218`), so nobody reads a
+                    // declared-only `docker` as a running sandbox.
+                    let declared_only: Vec<&str> = agents
+                        .iter()
+                        .filter(|a| a.has_sandbox && !a.sandbox_enforced)
+                        .map(|a| a.name.as_str())
+                        .collect();
+                    let enforced = agents.iter().filter(|a| a.sandbox_enforced).count();
                     if missing.is_empty() {
-                        satisfied.push(format!("sandbox: every agent declares one ({} checked)", agents.len()));
+                        let mut line = format!(
+                            "sandbox: every agent declares one ({} checked, {enforced} enforced",
+                            agents.len()
+                        );
+                        if !declared_only.is_empty() {
+                            line.push_str(&format!("; declared but not enforced: {}", declared_only.join(", ")));
+                        }
+                        line.push(')');
+                        satisfied.push(line);
                     } else {
                         open.push(format!("sandbox: no sandbox declared for {}", missing.join(", ")));
                     }
@@ -2749,6 +2767,7 @@ mod tests {
             role: role.to_string(),
             grants: Some(grants.iter().copied().collect()),
             has_sandbox: true,
+            sandbox_enforced: false,
         }
     }
 
@@ -2827,6 +2846,7 @@ mod tests {
                 role: "vanished".to_string(),
                 grants: None,
                 has_sandbox: true,
+                sandbox_enforced: false,
             }]),
             ..Default::default()
         };
@@ -2863,7 +2883,7 @@ mod tests {
         let evidence = Evidence {
             agents: Some(vec![
                 agent("worker", "worker", &[]),
-                AgentFact { name: "foreman".to_string(), role: "foreman".to_string(), grants: Some(BTreeSet::new()), has_sandbox: false },
+                AgentFact { name: "foreman".to_string(), role: "foreman".to_string(), grants: Some(BTreeSet::new()), has_sandbox: false, sandbox_enforced: false },
             ]),
             ..Default::default()
         };
@@ -2881,6 +2901,24 @@ mod tests {
         };
         let statuses = evaluate(&applied, &evidence, Utc::now());
         assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+    }
+
+    /// `#218`: the evidence tells a declared-only sandbox from an enforced
+    /// one, so a satisfied control never reads as more than it is.
+    #[test]
+    fn sandbox_evidence_says_which_declarations_are_enforced() {
+        let applied = vec![applied_control("a", vec![Check::Sandbox], Vec::new())];
+        let mut boxed = agent("curator", "worker", &[]);
+        boxed.sandbox_enforced = true;
+        let evidence = Evidence {
+            agents: Some(vec![boxed, agent("builder", "worker", &[])]),
+            ..Default::default()
+        };
+        let statuses = evaluate(&applied, &evidence, Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Satisfied);
+        let reasons = statuses[0].status.reasons().join(" | ");
+        assert!(reasons.contains("2 checked, 1 enforced"), "{reasons}");
+        assert!(reasons.contains("declared but not enforced: builder"), "{reasons}");
     }
 
     // -- evaluate: secrets ----------------------------------------------------

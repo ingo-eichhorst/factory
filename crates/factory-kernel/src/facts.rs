@@ -344,7 +344,14 @@ pub struct AgentFact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Missing means an unresolved role, not a role with no grants.
     pub grants: Option<BTreeSet<Grant>>,
+    /// The agent declares a sandbox other than `none`.
     pub has_sandbox: bool,
+    /// And dispatch actually puts its runs inside it (`#218`: only
+    /// `openshell` today). Declared-only sandboxes (`docker`, `srt`) are
+    /// `has_sandbox` without this. Absent in evidence written before it
+    /// existed, which reads as not enforced -- what it was.
+    #[serde(default)]
+    pub sandbox_enforced: bool,
 }
 
 impl Fact for TaskFact {

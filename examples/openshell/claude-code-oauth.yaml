@@ -1,0 +1,41 @@
+# OpenShell provider profile for Claude Code on a Claude subscription.
+#
+# NVIDIA's own `claude-code` profile places ANTHROPIC_API_KEY as the
+# `x-api-key` header, which a subscription does not have. Claude Code also
+# accepts a long-lived subscription token in CLAUDE_CODE_OAUTH_TOKEN and sends
+# it as `Authorization: Bearer`; this profile binds that token to
+# api.anthropic.com and nothing else, and lets only the image's claude binary
+# reach it. The agent sees a placeholder; the sandbox proxy swaps in the real
+# value on its way to api.anthropic.com.
+#
+# Import once per gateway, then create the provider from a token made with
+# `claude setup-token` (a browser login -- a human step):
+#
+#   openshell profile lint   -f examples/openshell/claude-code-oauth.yaml
+#   openshell profile import -f examples/openshell/claude-code-oauth.yaml
+#   CLAUDE_CODE_OAUTH_TOKEN=<token from claude setup-token> \
+#     openshell provider create --name factory-claude --type claude-code-oauth --from-existing
+#
+# Never put the token in Factory's config, a task, or a commit.
+
+id: claude-code-oauth
+display_name: Claude Code (subscription token)
+description: Claude Code CLI authenticated with a `claude setup-token` OAuth token
+category: agent
+inference_capable: true
+credentials:
+  - name: oauth_token
+    description: Long-lived Claude subscription token from `claude setup-token`
+    env_vars: [CLAUDE_CODE_OAUTH_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+discovery:
+  credentials: [oauth_token]
+endpoints:
+  - host: api.anthropic.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries: [/usr/local/bin/claude]
