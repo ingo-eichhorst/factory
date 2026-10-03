@@ -317,9 +317,9 @@ function rerender(route) {
   if (state.tab === "inbox") { renderInbox(); return; }
   // The daemon narrows the report to the selected subtree (`operations.js`'s
   // header), so a rail change refetches.
-  if (state.tab === "line") { loadOperations(); return; }
+  if (state.tab === "line") { loadOperations().catch(error => console.warn("Line refresh failed", error)); return; }
   // And the environments report (`#185`), narrowed the same way.
-  if (state.tab === "environments") { refreshEnvironments(); return; }
+  if (state.tab === "environments") { refreshEnvironments().catch(error => console.warn("Operations refresh failed", error)); return; }
   // So does the intake board: the daemon narrows it to the subtree.
   if (state.tab === "intake") { loadIntake(); return; }
   // Everything already in the tail is still there; a scope change only
@@ -533,7 +533,7 @@ function startInfrastructure() {
 
 function startEnvironments() {
   stopAgentPoll();
-  refreshEnvironments();
+  refreshEnvironments().catch(error => console.warn("Operations refresh failed", error));
   state.agentPoll = setInterval(refreshEnvironments, 30000);
 }
 
@@ -785,7 +785,7 @@ function onEvent(ev) {
   // A backup taken (by a person or the schedule), failed or verified.
   if (isBackupEvent(ev) && state.tab === "backup") refreshBackup();
   // A deployment began or ended, or an environment's status changed.
-  if (isEnvironmentsEvent(ev) && state.tab === "environments") refreshEnvironments();
+  if (isEnvironmentsEvent(ev) && state.tab === "environments") refreshEnvironments().catch(error => console.warn("Operations refresh failed", error));
   if (state.tab === "doctor" && (ev.type === "task_entry" || ev.type === "run_updated")) refreshDoctor();
   // A scenario's own policy delta and goal-scenario probabilities are read
   // off the same live evidence and check-ins those two events already name;
@@ -843,7 +843,7 @@ function scheduleOpsRefresh() {
   opsTimer = setTimeout(() => {
     opsTimer = null;
     if (document.hidden) return;
-    if (state.tab === "line") loadOperations();
+    if (state.tab === "line") loadOperations().catch(error => console.warn("Line refresh failed", error));
     else if (state.tab === "inbox") loadInbox();
   }, OPS_REFRESH_MS);
 }

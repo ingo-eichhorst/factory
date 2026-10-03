@@ -53,8 +53,8 @@ test("#185: L1 gains an Operations tab between Infrastructure and Backup, and it
   assert.match(app, /infra: \["infrastructure", "doctor", "environments", "backup"\]/);
   assert.match(app, /environments: \{ onShow: startEnvironments, onHide: stopAgentPoll \}/);
   assert.match(app, /state\.agentPoll = setInterval\(refreshEnvironments, 30000\)/);
-  assert.match(app, /if \(isEnvironmentsEvent\(ev\) && state\.tab === "environments"\) refreshEnvironments\(\);/);
-  assert.match(app, /if \(state\.tab === "environments"\) \{ refreshEnvironments\(\); return; \}/, "a rail change refetches");
+  assert.match(app, /if \(isEnvironmentsEvent\(ev\) && state\.tab === "environments"\) refreshEnvironments\(\)\.catch\(/);
+  assert.match(app, /if \(state\.tab === "environments"\) \{ refreshEnvironments\(\)\.catch\([\s\S]*?return; \}/, "a rail change refetches");
   assert.match(served, /"js\/environments\.js"/);
   assert.match(served, /"js\/environments-model\.js"/);
   assert.match(view, /\/api\/environments/);
