@@ -78,6 +78,12 @@ pub enum Event {
         scope: String,
         name: String,
     },
+    /// One scope's own dashboard layout was saved or reset (`#160`). Every
+    /// scope below it may now resolve a different one, the same reach
+    /// `RolesChanged` carries for a role layer.
+    DashboardChanged {
+        scope: String,
+    },
     /// An attestation was recorded or withdrawn for one control at one
     /// scope. Published on both `Request::PolicyAttest` and
     /// `Request::PolicyWithdraw`, like `RolesChanged` on a role write.
@@ -161,6 +167,7 @@ impl Event {
             | Event::AgentConfigured { .. }
             | Event::AgentDeleted { .. }
             | Event::RolesChanged { .. }
+            | Event::DashboardChanged { .. }
             | Event::PolicyChanged { .. }
             | Event::GoalsChanged { .. }
             | Event::QualityChanged { .. }

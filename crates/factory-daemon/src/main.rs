@@ -9,9 +9,12 @@ mod configuration;
 mod costs;
 mod datasets;
 mod dependencies;
+mod doctor;
 mod discovery;
 mod engine;
 mod goals;
+mod github_intake;
+mod github_outbound;
 mod harness_health;
 mod host;
 mod intake;
@@ -50,8 +53,15 @@ use std::sync::Arc;
 use engine::Engine;
 use interfaces::{HttpInterface, SocketInterface};
 
+const BUILD_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("FACTORY_GIT_SHA"),
+    ")"
+);
+
 #[derive(Parser)]
-#[command(name = "factory-daemon", about = "The Factory daemon", version)]
+#[command(name = "factory-daemon", about = "The Factory daemon", version = BUILD_VERSION)]
 struct Cli {
     /// Instance root. Defaults to the nearest ancestor holding a .factory/.
     #[arg(long, global = true, env = "FACTORY_ROOT")]
@@ -149,9 +159,12 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         runtime: None,
         git: None,
         task_store: None,
+        max_sessions: None,
         roles: Default::default(),
+        dashboard: None,
         policies: Default::default(),
         quality: Default::default(),
+        intake: Default::default(),
         dependencies: Default::default(),
     };
     let config = Config {
@@ -164,6 +177,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         scope: root_is_scope.then(|| first_scope.clone()),
         scopes: Vec::new(),
         roles: Default::default(),
+        dashboard: None,
         policies: Default::default(),
         quality: Default::default(),
         infrastructure: Default::default(),
@@ -207,7 +221,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let discovery_started = std::time::Instant::now();
     discovery::apply(&mut factory)?;
     factory.config.validate()?;
-    backup::validate_schedule(&factory)?;
+    backup::validate_config(&factory)?;
     tracing::info!(
         instance = %factory.config.instance.name,
         root = %factory.root.display(),
@@ -356,10 +370,16 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // `#118`'s verifier, and the runs a restart caught mid-verification.
     engine.spawn_verifier();
     engine.recover_verifications().await;
+    // `#179`'s admission queue: a run ending wakes whatever is waiting on
+    // its (scope, agent) right away, rather than only on the next tick.
+    engine.spawn_capacity_release_worker();
     // The same, for bench runs still `running` when the daemon last stopped.
     engine.recover_bench_runs().await;
 
     let sched = tokio::spawn(scheduler::run(engine.clone(), shutdown_rx.clone()));
+    // GitHub receipt is independent of dispatch: network or authentication
+    // trouble must never hold up the scheduler.
+    let github_intake = tokio::spawn(github_intake::run(engine.clone(), shutdown_rx.clone()));
     // Its own loop rather than a slot in the scheduler's: a backup can take
     // minutes, and nothing the scheduler fires should wait behind one.
     let backups = tokio::spawn(backup::run(engine.clone(), shutdown_rx.clone()));
@@ -399,6 +419,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
         }
     }
     sched.abort();
+    github_intake.abort();
     backups.abort();
     engine.registry.shutdown().await;
     Ok(())

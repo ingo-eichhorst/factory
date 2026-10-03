@@ -1,11 +1,11 @@
 //! What an agent is allowed to do, and where.
 //!
-//! A role is a name and a list of grants. Two are built in -- `worker` and
-//! `foreman` -- and an instance may name as many more as its way of working
-//! needs, in the same vocabulary the daemon checks against, so the config and
-//! the check cannot drift into different words.
+//! A role is a name and a list of grants. Three are built in -- `worker`,
+//! `foreman` and `triager` -- and an instance may name as many more as its
+//! way of working needs, in the same vocabulary the daemon checks against, so
+//! the config and the check cannot drift into different words.
 //!
-//! Roles are written in layers: the two built in, the instance root's
+//! Roles are written in layers: the three built in, the instance root's
 //! `roles:`, then each scope's `scope.roles` from the top of the tree down to
 //! the scope itself. The nearest definition wins, and it wins whole -- a
 //! definition that merged grants with the one it replaced could only ever
@@ -30,6 +30,9 @@ impl Role {
     pub const WORKER: &'static str = "worker";
     /// Runs a scope: creates the work in it and hands it out.
     pub const FOREMAN: &'static str = "foreman";
+    /// Coordinates the intake gate: receives, triages, assesses and decides.
+    /// Runs nothing itself (`#172`).
+    pub const TRIAGER: &'static str = "triager";
 
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
@@ -41,6 +44,10 @@ impl Role {
 
     pub fn foreman() -> Self {
         Self::new(Self::FOREMAN)
+    }
+
+    pub fn triager() -> Self {
+        Self::new(Self::TRIAGER)
     }
 
     pub fn as_str(&self) -> &str {
@@ -156,10 +163,46 @@ pub enum Grant {
     /// whole instance's state, not one project's.
     #[serde(rename = "backup.run")]
     BackupRun,
+    /// Hand something in through the intake gate (`#172`). Reach decides
+    /// which scope it may land in, exactly as `task.create` did for it
+    /// before this grant existed.
+    #[serde(rename = "intake.add")]
+    IntakeAdd,
+    /// Answer a needs-info on an item still in intake.
+    #[serde(rename = "intake.info")]
+    IntakeInfo,
+    /// Start the triage node on an item: a run of its own that answers with
+    /// an assessment.
+    #[serde(rename = "intake.triage")]
+    IntakeTriage,
+    /// Record an assessment on an item, and optionally decide it in the same
+    /// call.
+    #[serde(rename = "intake.assess")]
+    IntakeAssess,
+    /// Decide an item: release it (ready), send it back (needs-info), split
+    /// it, or close it (wontfix).
+    #[serde(rename = "intake.decide")]
+    IntakeDecide,
+    /// Publish a decided GitHub item's triage comment and labels to the
+    /// issue it came from (`#171`). The one outward-effect grant intake
+    /// has: it is never in `foreman` or `triager`, and never in a wildcard
+    /// (`*`, `intake.*`) -- see [`Grant::expand`] -- so a role gets it only
+    /// by naming it. The owner always passes; publishing *is* the approval.
+    #[serde(rename = "intake.publish")]
+    IntakePublish,
+    /// Save or reset one scope's own dashboard layout (`#160`, phase 5 of
+    /// `#150`). An ordinary grant, unlike the role-layer writes it otherwise
+    /// resembles: a layout cannot widen what an agent may do the way a role
+    /// definition could, so it needs no `Needs::Owner` carve-out and no
+    /// exclusion from a wildcard -- `foreman` gets it through `Grant::ALL`,
+    /// `worker` and `triager` do not, the same as every other grant they
+    /// leave out.
+    #[serde(rename = "dashboard.edit")]
+    DashboardEdit,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 25] = [
+    pub const ALL: [Grant; 32] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -185,6 +228,13 @@ impl Grant {
         Grant::PolicyAttest,
         Grant::GoalsCheckIn,
         Grant::BackupRun,
+        Grant::IntakeAdd,
+        Grant::IntakeInfo,
+        Grant::IntakeTriage,
+        Grant::IntakeAssess,
+        Grant::IntakeDecide,
+        Grant::IntakePublish,
+        Grant::DashboardEdit,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -214,6 +264,13 @@ impl Grant {
             Self::PolicyAttest => "policy.attest",
             Self::GoalsCheckIn => "goals.checkin",
             Self::BackupRun => "backup.run",
+            Self::IntakeAdd => "intake.add",
+            Self::IntakeInfo => "intake.info",
+            Self::IntakeTriage => "intake.triage",
+            Self::IntakeAssess => "intake.assess",
+            Self::IntakeDecide => "intake.decide",
+            Self::IntakePublish => "intake.publish",
+            Self::DashboardEdit => "dashboard.edit",
         }
     }
 
@@ -245,6 +302,13 @@ impl Grant {
             Self::PolicyAttest => "record and withdraw policy attestations",
             Self::GoalsCheckIn => "record check-ins against manual key results",
             Self::BackupRun => "take or verify a backup of the instance",
+            Self::IntakeAdd => "hand something in through the intake gate",
+            Self::IntakeInfo => "answer a needs-info on an intake item",
+            Self::IntakeTriage => "start a triage run on an intake item",
+            Self::IntakeAssess => "record an assessment on an intake item",
+            Self::IntakeDecide => "release, send back, split or close an intake item",
+            Self::IntakePublish => "publish a decided GitHub item's triage comment and labels to its issue",
+            Self::DashboardEdit => "save or reset a scope's dashboard layout",
         }
     }
 
@@ -276,7 +340,23 @@ impl Grant {
             Self::PolicyAttest => "Policy",
             Self::GoalsCheckIn => "Goals",
             Self::BackupRun => "Backup",
+            Self::IntakeAdd
+            | Self::IntakeInfo
+            | Self::IntakeTriage
+            | Self::IntakeAssess
+            | Self::IntakeDecide
+            | Self::IntakePublish => "Intake",
+            Self::DashboardEdit => "Dashboard",
         }
+    }
+
+    /// Left out of wildcard expansion (`expand`'s `*` and `prefix.*`
+    /// branches): an outward effect a role must be given by its exact name,
+    /// never swept in by a wildcard written before the grant existed or
+    /// written broad on purpose. `intake.publish` is the only one today
+    /// (`#171`).
+    fn wildcard_excluded(self) -> bool {
+        matches!(self, Self::IntakePublish)
     }
 
     /// One written grant, which may be a wildcard: `task.*`, `agent.*`, `*`.
@@ -284,12 +364,12 @@ impl Grant {
     /// that quietly grants less is the failure nobody notices.
     pub fn expand(written: &str) -> Result<Vec<Grant>> {
         let matched: Vec<Grant> = match written.trim() {
-            "*" => Self::ALL.to_vec(),
+            "*" => Self::ALL.into_iter().filter(|g| !g.wildcard_excluded()).collect(),
             prefixed if prefixed.ends_with(".*") => {
                 let prefix = &prefixed[..prefixed.len() - 1];
                 Self::ALL
                     .into_iter()
-                    .filter(|g| g.as_str().starts_with(prefix))
+                    .filter(|g| g.as_str().starts_with(prefix) && !g.wildcard_excluded())
                     .collect()
             }
             exact => Self::ALL
@@ -367,7 +447,7 @@ impl RoleDef {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RoleOrigin {
-    /// Ships with Factory: `worker` and `foreman`.
+    /// Ships with Factory: `worker`, `foreman` and `triager`.
     #[default]
     Builtin,
     /// The instance root's top-level `roles:`.
@@ -396,8 +476,8 @@ pub struct RoleEntry {
     pub overrides: Option<RoleOrigin>,
 }
 
-/// Every role in effect somewhere: the two built in, plus whatever the layers
-/// above that place named.
+/// Every role in effect somewhere: the three built in, plus whatever the
+/// layers above that place named.
 #[derive(Debug, Clone)]
 pub struct Roles(BTreeMap<String, RoleEntry>);
 
@@ -408,21 +488,64 @@ impl Default for Roles {
 }
 
 impl Roles {
-    /// The two that ship, written in the same vocabulary as any other, so what
-    /// a worker may do can be read rather than inferred from a match arm.
+    /// The three that ship, written in the same vocabulary as any other, so
+    /// what a worker may do can be read rather than inferred from a match arm.
     pub fn presets() -> Self {
         let worker = RoleDef {
             name: Role::worker(),
             describe: "reads the board, and works the tasks assigned to it".into(),
-            grants: [Grant::TaskEdit, Grant::TaskReport, Grant::TaskAttach, Grant::RunInput]
-                .into_iter()
-                .collect(),
+            // `Grant::IntakeAssess` and `Grant::IntakeDecide` are what
+            // `Grant::TaskEdit` used to give it for intake, before `#172`
+            // gave intake its own vocabulary -- worker's behaviour is
+            // otherwise unchanged.
+            grants: [
+                Grant::TaskEdit,
+                Grant::TaskReport,
+                Grant::TaskAttach,
+                Grant::RunInput,
+                Grant::IntakeAssess,
+                Grant::IntakeDecide,
+            ]
+            .into_iter()
+            .collect(),
             reach: Reach::Own,
         };
         let foreman = RoleDef {
             name: Role::foreman(),
             describe: "runs a scope: creates the work in it and hands it out".into(),
-            grants: Grant::ALL.into_iter().collect(),
+            // Every grant but `intake.publish` (`#171`): an outward GitHub
+            // effect is not something running a scope implies, so foreman
+            // is written out explicitly rather than reusing `Grant::ALL`.
+            grants: Grant::ALL
+                .into_iter()
+                .filter(|g| *g != Grant::IntakePublish)
+                .collect(),
+            reach: Reach::Scope,
+        };
+        // Coordinates the intake gate and executes nothing (`#172`): it holds
+        // exactly the five intake grants, named rather than `intake.*`, so
+        // that a sixth one added later needs a deliberate line here rather
+        // than falling into the preset by default -- `intake.publish` is
+        // that sixth one (`#171`), deliberately left out: coordinating
+        // triage is not the standing permission to post outside Factory.
+        // No `task.report` -- with
+        // `reach: scope` that would let it report on any task in its scope,
+        // because the grant check in `authorize` precedes the run-token
+        // fallback that would otherwise narrow it to its own triage run.
+        let triager = RoleDef {
+            name: Role::triager(),
+            describe: "triages the intake gate: receives, triages, assesses and decides intake \
+                       items, and runs nothing else"
+                .into(),
+            grants: [
+                Grant::IntakeAdd,
+                Grant::IntakeInfo,
+                Grant::IntakeTriage,
+                Grant::IntakeAssess,
+                Grant::IntakeDecide,
+            ]
+            .into_iter()
+            .collect(),
             reach: Reach::Scope,
         };
         let builtin = |def: RoleDef| RoleEntry {
@@ -433,6 +556,7 @@ impl Roles {
         Self(BTreeMap::from([
             (Role::WORKER.to_string(), builtin(worker)),
             (Role::FOREMAN.to_string(), builtin(foreman)),
+            (Role::TRIAGER.to_string(), builtin(triager)),
         ]))
     }
 
@@ -523,12 +647,57 @@ mod tests {
         assert!(worker.allows(Grant::TaskAttach));
         assert!(!worker.allows(Grant::TaskCreate));
         assert!(!worker.allows(Grant::AgentStart));
+        // What `task.edit` used to give it for intake, before `#172`.
+        assert!(worker.allows(Grant::IntakeAssess));
+        assert!(worker.allows(Grant::IntakeDecide));
+        assert!(!worker.allows(Grant::IntakeAdd), "worker never had task.create, so never intake.add either");
+        assert!(!worker.allows(Grant::IntakeTriage));
+        assert!(!worker.allows(Grant::IntakeInfo));
+        assert!(!worker.allows(Grant::IntakePublish));
+        assert!(!worker.allows(Grant::DashboardEdit));
 
         let foreman = roles.get(&Role::foreman()).unwrap();
         assert_eq!(foreman.reach, Reach::Scope);
         for grant in Grant::ALL {
+            if grant == Grant::IntakePublish {
+                assert!(!foreman.allows(grant), "foreman must not get an outward GitHub effect for free (#171)");
+                continue;
+            }
             assert!(foreman.allows(grant), "a foreman may {}", grant.as_str());
         }
+        // An ordinary grant, unlike the role-layer writes it resembles: it
+        // rides in on `Grant::ALL` the same as `agent.configure` does (#160).
+        assert!(foreman.allows(Grant::DashboardEdit));
+
+        let triager = roles.get(&Role::triager()).unwrap();
+        assert_eq!(triager.reach, Reach::Scope);
+        assert!(!triager.allows(Grant::IntakePublish), "coordinating triage is not the standing permission to publish");
+        for grant in [
+            Grant::IntakeAdd,
+            Grant::IntakeInfo,
+            Grant::IntakeTriage,
+            Grant::IntakeAssess,
+            Grant::IntakeDecide,
+        ] {
+            assert!(triager.allows(grant), "a triager may {}", grant.as_str());
+        }
+        // Coordinates and never executes.
+        assert!(!triager.allows(Grant::TaskCreate));
+        assert!(!triager.allows(Grant::TaskEdit));
+        assert!(!triager.allows(Grant::TaskRun));
+        assert!(!triager.allows(Grant::TaskClose));
+        assert!(!triager.allows(Grant::TaskReport));
+        assert!(!triager.allows(Grant::AgentStart));
+        assert!(!triager.allows(Grant::AgentConfigure));
+        assert!(!triager.allows(Grant::WorkflowRun));
+        assert!(!triager.allows(Grant::DashboardEdit));
+    }
+
+    #[test]
+    fn presets_are_exactly_worker_foreman_and_triager() {
+        let mut names = Roles::presets().names();
+        names.sort();
+        assert_eq!(names, vec!["foreman", "triager", "worker"]);
     }
 
     #[test]
@@ -539,7 +708,10 @@ mod tests {
 
     #[test]
     fn a_wildcard_names_every_grant_under_it() {
-        assert_eq!(Grant::expand("*").unwrap().len(), Grant::ALL.len());
+        // `*` names every grant but the one or more excluded from wildcard
+        // expansion (`intake.publish`, `#171`) -- see
+        // `intake_publish_is_excluded_from_wildcard_expansion`.
+        assert_eq!(Grant::expand("*").unwrap().len(), Grant::ALL.len() - 1);
         let tasks = Grant::expand("task.*").unwrap();
         assert!(tasks.contains(&Grant::TaskCreate));
         assert!(!tasks.contains(&Grant::AgentStart));
@@ -571,7 +743,7 @@ mod tests {
         let reviewer = roles.get(&Role::new("reviewer")).unwrap();
         assert!(reviewer.allows(Grant::TaskReport));
         assert!(!reviewer.allows(Grant::TaskEdit));
-        assert_eq!(roles.names(), vec!["foreman", "reviewer", "worker"]);
+        assert_eq!(roles.names(), vec!["foreman", "reviewer", "triager", "worker"]);
     }
 
     #[test]
@@ -622,7 +794,7 @@ mod tests {
 
     #[test]
     fn a_preset_cannot_be_redefined_by_a_scope_either() {
-        for name in [Role::WORKER, Role::FOREMAN] {
+        for name in [Role::WORKER, Role::FOREMAN, Role::TRIAGER] {
             let written = BTreeMap::from([(name.to_string(), spec("wider", &["*"], Reach::Scope))]);
             let e = Roles::presets()
                 .layered(RoleOrigin::Scope { scope: "projects/demo".into() }, &written)
@@ -637,7 +809,7 @@ mod tests {
     fn every_grant_belongs_to_a_group_a_person_reads() {
         for grant in Grant::ALL {
             assert!(
-                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals", "Backup"]
+                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals", "Backup", "Intake", "Dashboard"]
                     .contains(&grant.group()),
                 "{} has no group",
                 grant.as_str()
@@ -651,25 +823,101 @@ mod tests {
         assert_eq!(Grant::PolicyAttest.group(), "Policy");
         assert_eq!(Grant::GoalsCheckIn.group(), "Goals");
         assert_eq!(Grant::BackupRun.group(), "Backup");
+        assert_eq!(Grant::DashboardEdit.group(), "Dashboard");
+        for grant in [
+            Grant::IntakeAdd,
+            Grant::IntakeInfo,
+            Grant::IntakeTriage,
+            Grant::IntakeAssess,
+            Grant::IntakeDecide,
+            Grant::IntakePublish,
+        ] {
+            assert_eq!(grant.group(), "Intake");
+        }
     }
 
     #[test]
-    fn dataset_edit_bench_run_policy_attest_and_goals_checkin_are_appended_at_the_end_and_a_wildcard_still_catches_them() {
+    fn dataset_edit_through_intake_publish_are_appended_at_the_end_and_a_wildcard_still_catches_most_of_them() {
         // The task's own instructions: these land at the end of the enum
         // and of `Grant::ALL`, in the order each was added, so a parallel
         // track appending its own grant there too merges without a real
         // conflict.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::DatasetEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::BenchRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::PolicyAttest);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::GoalsCheckIn);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::BackupRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 12], Grant::DatasetEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::BenchRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::PolicyAttest);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::GoalsCheckIn);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::BackupRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::IntakeAdd);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakeInfo);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakeTriage);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::IntakeAssess);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::IntakeDecide);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::IntakePublish);
+        // `#160`: the same seam, one grant later -- `dashboard.edit` lands at
+        // the end too, so a parallel track adding its own grant after this
+        // one merges without a real conflict either.
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::DashboardEdit);
         let all = Grant::expand("*").unwrap();
         assert!(all.contains(&Grant::DatasetEdit));
         assert!(all.contains(&Grant::BenchRun));
         assert!(all.contains(&Grant::PolicyAttest));
         assert!(all.contains(&Grant::GoalsCheckIn));
         assert!(all.contains(&Grant::BackupRun));
+        assert!(all.contains(&Grant::IntakeAdd));
+        assert!(all.contains(&Grant::IntakeInfo));
+        assert!(all.contains(&Grant::IntakeTriage));
+        assert!(all.contains(&Grant::IntakeAssess));
+        assert!(all.contains(&Grant::IntakeDecide));
+        assert!(all.contains(&Grant::DashboardEdit), "an ordinary grant, not excluded from `*`");
+        // The one exception: see `intake_publish_is_excluded_from_wildcard_expansion`.
+        assert!(!all.contains(&Grant::IntakePublish));
+    }
+
+    #[test]
+    fn dashboard_edit_is_an_ordinary_grant_named_by_a_wildcard() {
+        assert!(Grant::expand("*").unwrap().contains(&Grant::DashboardEdit));
+        assert_eq!(Grant::expand("dashboard.*").unwrap(), vec![Grant::DashboardEdit]);
+        assert_eq!(Grant::expand("dashboard.edit").unwrap(), vec![Grant::DashboardEdit]);
+    }
+
+    #[test]
+    fn task_star_does_not_expand_to_any_intake_grant() {
+        let tasks = Grant::expand("task.*").unwrap();
+        for grant in [
+            Grant::IntakeAdd,
+            Grant::IntakeInfo,
+            Grant::IntakeTriage,
+            Grant::IntakeAssess,
+            Grant::IntakeDecide,
+            Grant::IntakePublish,
+        ] {
+            assert!(!tasks.contains(&grant), "task.* must not grant {}", grant.as_str());
+        }
+    }
+
+    #[test]
+    fn intake_star_expands_to_all_five_intake_grants() {
+        let intake = Grant::expand("intake.*").unwrap();
+        assert_eq!(intake.len(), 5);
+        for grant in [
+            Grant::IntakeAdd,
+            Grant::IntakeInfo,
+            Grant::IntakeTriage,
+            Grant::IntakeAssess,
+            Grant::IntakeDecide,
+        ] {
+            assert!(intake.contains(&grant), "intake.* must grant {}", grant.as_str());
+        }
+        // `intake.publish` is the sixth intake grant and the one excluded
+        // from `intake.*` -- named exactly, or not at all (`#171`).
+        assert!(!intake.contains(&Grant::IntakePublish));
+    }
+
+    #[test]
+    fn intake_publish_is_excluded_from_wildcard_expansion_but_grantable_by_name() {
+        assert!(!Grant::expand("*").unwrap().contains(&Grant::IntakePublish));
+        assert!(!Grant::expand("intake.*").unwrap().contains(&Grant::IntakePublish));
+        assert_eq!(Grant::expand("intake.publish").unwrap(), vec![Grant::IntakePublish]);
     }
 
     #[test]

@@ -9,7 +9,9 @@ pub mod bench;
 pub mod benchmark;
 pub mod building;
 pub mod config;
+pub mod conformance;
 pub mod control_plan;
+pub mod dashboard;
 pub mod dataset;
 pub mod dependencies;
 pub mod error;
@@ -25,6 +27,8 @@ pub mod policy;
 pub mod policy_export;
 pub mod protocol;
 pub mod quality;
+pub mod ready;
+pub mod reporting_clock;
 pub mod role;
 pub mod run;
 pub mod scenario;
@@ -40,8 +44,8 @@ pub use role::{Grant, Reach, Role, RoleDef, RoleSpec, Roles};
 pub use event::{Event, EventBus};
 pub use run::{BlockSource, FailKind, NewRun, Run, RunPatch, RunStatus, Trigger};
 pub use task::{
-    NewTask, PendingRetry, RetryPolicy, Schedule, SessionRef, Task, TaskEntry, TaskFilter, TaskPatch,
-    TaskReport, TaskStatus, WorkflowOrigin,
+    CostEstimateRange, Estimate, NewTask, PendingRetry, RetryPolicy, Schedule, SessionRef, Task,
+    TaskEntry, TaskFilter, TaskPatch, TaskReport, TaskStatus, TimeEstimateRange, WorkflowOrigin,
 };
 pub use workflow::{
     CanvasPoint, WorkflowDefinition, WorkflowDraft, WorkflowEdge, WorkflowNode, WorkflowNodeKind,

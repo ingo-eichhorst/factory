@@ -297,11 +297,21 @@ async fn evaluate_baseline_over_scopes(
         per_scope_applied.push((t, applied));
     }
 
-    let (gates, daemon_fact, credential_rows) = engine.dataset_level_facts(&per_scope_applied).await?;
+    let (gates, daemon_fact, credential_rows, backup_fact) = engine.dataset_level_facts(&per_scope_applied).await?;
     let mut statuses_by_scope = BTreeMap::new();
     for (t, applied) in &per_scope_applied {
         let evidence = engine
-            .evidence_for_scope(snapshot, t, applied, tags, all_attestations, &gates, daemon_fact, &credential_rows)
+            .evidence_for_scope(
+                snapshot,
+                t,
+                applied,
+                tags,
+                all_attestations,
+                &gates,
+                daemon_fact,
+                &credential_rows,
+                backup_fact.clone(),
+            )
             .await?;
         findings.extend(policy::evidence_findings(&evidence, &t.name));
         let statuses = policy::evaluate(applied, &evidence, now);
@@ -341,11 +351,21 @@ async fn evaluate_scenario_over_scopes(
         per_scope_applied.push((t, applied));
     }
 
-    let (gates, daemon_fact, credential_rows) = engine.dataset_level_facts(&per_scope_applied).await?;
+    let (gates, daemon_fact, credential_rows, backup_fact) = engine.dataset_level_facts(&per_scope_applied).await?;
     let mut statuses_by_scope = BTreeMap::new();
     for (t, applied) in &per_scope_applied {
         let evidence = engine
-            .evidence_for_scope(snapshot, t, applied, tags, all_attestations, &gates, daemon_fact, &credential_rows)
+            .evidence_for_scope(
+                snapshot,
+                t,
+                applied,
+                tags,
+                all_attestations,
+                &gates,
+                daemon_fact,
+                &credential_rows,
+                backup_fact.clone(),
+            )
             .await?;
         policy_findings.extend(policy::evidence_findings(&evidence, &t.name));
         let statuses = policy::evaluate(applied, &evidence, now);
@@ -726,9 +746,19 @@ impl Engine {
 
         let all_attestations = self.policies.all().await?;
         let per_scope_applied = vec![(&scope_obj, scenario_applied.clone())];
-        let (gates, daemon_fact, credential_rows) = self.dataset_level_facts(&per_scope_applied).await?;
+        let (gates, daemon_fact, credential_rows, backup_fact) = self.dataset_level_facts(&per_scope_applied).await?;
         let evidence = self
-            .evidence_for_scope(&snapshot, &scope_obj, &scenario_applied, &tags, &all_attestations, &gates, daemon_fact, &credential_rows)
+            .evidence_for_scope(
+                &snapshot,
+                &scope_obj,
+                &scenario_applied,
+                &tags,
+                &all_attestations,
+                &gates,
+                daemon_fact,
+                &credential_rows,
+                backup_fact,
+            )
             .await?;
 
         let baseline_statuses = policy::evaluate(&baseline_applied, &evidence, now);
@@ -995,6 +1025,7 @@ mod tests {
             scope: None,
             scopes: Vec::new(),
             roles: Default::default(),
+            dashboard: None,
             policies: PolicyDeclaration { frameworks: vec!["cra".to_string()], ..Default::default() },
             quality: Default::default(),
             infrastructure: Default::default(),
@@ -1347,5 +1378,275 @@ mod tests {
         overrides.insert("capacity_factor".to_string(), "banana".to_string());
         let err = engine.scenario_whatif(None, overrides).await.unwrap_err();
         assert!(err.to_string().contains("capacity_factor"), "{err}");
+    }
+
+    // -- #156: backup metrics as signposts ---------------------------------
+    //
+    // `backup_age_hours`/`backup_verified_age_days` (`#154`) are registry
+    // metrics like any other -- no scenario code changed to support them.
+    // These are lock tests proving the wiring holds: a scenario naming one
+    // loads with no `UnknownMetric` finding, and `evaluate_signpost` (tested
+    // on its own in `factory_core::scenario`) reads a real value through it.
+
+    /// A throwaway instance with `infrastructure.backup` configured and one
+    /// scenario, `backup-watch`, whose only signpost is
+    /// `{ metric: backup_age_hours, above: 30 }`.
+    fn backup_signpost_test_engine(destination: &str) -> Arc<Engine> {
+        let base = std::env::temp_dir().join(format!("factory-scenarios-backup-signpost-{}", uuid::Uuid::new_v4()));
+        let root = base.join("instance");
+        std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
+        std::fs::write(root.join(".factory/config.yaml"), "version: 1\ninstance:\n  id: test\n  name: test\n").unwrap();
+        std::fs::write(root.join(".factory/knowledge/page.md"), "# A page\n").unwrap();
+        std::fs::create_dir_all(root.join(".factory/scenarios")).unwrap();
+        std::fs::write(
+            root.join(".factory/scenarios/backup-watch.yaml"),
+            "name: backup-watch\ntitle: Backup age\nsignposts:\n  - { metric: backup_age_hours, above: 30 }\n",
+        )
+        .unwrap();
+        let database = root.join(".factory/factory.sqlite");
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
+        let mut company: Scope = serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let destination = base.join(destination);
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: serde_yaml_ng::from_str(&format!(
+                "backup:\n  destination: {}\n  keep: {{ daily: 7 }}\n",
+                destination.display()
+            ))
+            .unwrap(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
+            .with_backup_store(crate::backup::BackupStore::open(&database).unwrap());
+        Arc::new(engine)
+    }
+
+    #[tokio::test]
+    async fn a_signpost_on_backup_age_hours_loads_with_no_unknown_metric_finding_and_is_quiet_for_a_fresh_backup() {
+        let engine = backup_signpost_test_engine("destination");
+        engine.backup_run(factory_core::backup::BackupTrigger::Manual, "owner".into()).await.unwrap();
+
+        let report = engine.scenarios_report(None).await.unwrap();
+        assert!(
+            !report.findings.iter().any(|f| f.kind == scenario::FindingKind::UnknownMetric),
+            "{:?}",
+            report.findings
+        );
+        let result = find(&report, "backup-watch");
+        let sp = result.signposts.iter().find(|s| s.metric.as_str() == "backup_age_hours").unwrap();
+        assert_eq!(sp.state, scenario::SignpostState::Quiet, "{sp:?}");
+        assert!(!report.triggered.iter().any(|t| t.scenario == "backup-watch"), "{:?}", report.triggered);
+    }
+
+    #[tokio::test]
+    async fn a_signpost_on_backup_age_hours_triggers_once_the_newest_snapshot_is_old_enough() {
+        let engine = backup_signpost_test_engine("destination");
+        let snapshot = engine.backup_run(factory_core::backup::BackupTrigger::Manual, "owner".into()).await.unwrap();
+
+        // `list_archives` reads a snapshot's age off its file name, never
+        // its mtime, so renaming it back 31 hours -- past the signpost's
+        // `above: 30` -- is enough, the same way `#152`'s own
+        // `retention_prunes_across_a_mixed_plaintext_and_encrypted_history`
+        // fixture plants an aged archive.
+        let old_name = factory_core::backup::archive_name("test", snapshot.at - chrono::Duration::hours(31), false);
+        let destination = snapshot.path.rsplit_once('/').unwrap().0.to_string();
+        std::fs::rename(&snapshot.path, format!("{destination}/{old_name}")).unwrap();
+
+        let report = engine.scenarios_report(None).await.unwrap();
+        let result = find(&report, "backup-watch");
+        let sp = result.signposts.iter().find(|s| s.metric.as_str() == "backup_age_hours").unwrap();
+        assert_eq!(sp.state, scenario::SignpostState::Triggered, "{sp:?}");
+        assert!(report.triggered.iter().any(|t| t.scenario == "backup-watch"), "{:?}", report.triggered);
+
+        let live = engine.triggered_signposts(chrono::Utc::now()).await.unwrap();
+        assert!(live.iter().any(|t| t.scenario == "backup-watch"), "{live:?}");
+    }
+
+    // -- #158: gate_fail_rate as a signpost ----------------------------------
+    //
+    // `gate_fail_rate` is a registry metric like any other -- no scenario
+    // code changed to support it. A lock test proving the wiring holds, the
+    // same shape the backup signpost tests above use.
+
+    /// A one-scope instance with one scenario, `gate-watch`, whose only
+    /// signpost is `{ metric: gate_fail_rate, above: 0.5 }`.
+    fn gate_fail_rate_signpost_test_engine() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!(
+            "factory-scenarios-gate-signpost-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join(".factory/scenarios")).unwrap();
+        std::fs::write(
+            root.join(".factory/scenarios/gate-watch.yaml"),
+            "name: gate-watch\ntitle: Gate failures\nsignposts:\n  - { metric: gate_fail_rate, above: 0.5 }\n",
+        )
+        .unwrap();
+        let mut company: Scope =
+            serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let config = Config {
+            version: 1,
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(
+            factory,
+            Registry::with_builtins(),
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_signpost_on_gate_fail_rate_is_quiet_with_no_runs_and_triggers_once_a_gate_fails() {
+        use factory_core::adapter::store::task_from_new;
+        use factory_core::control_plan::{
+            AttestationVerdict, RequiredStep, StepAttestation, StepKind, GATE_ACTOR,
+        };
+        use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
+        use factory_core::task::NewTask;
+
+        let engine = gate_fail_rate_signpost_test_engine();
+
+        // No runs at all yet: `gate_fail_rate` has no value, so the
+        // signpost reads `no_data`, never `triggered`.
+        let report = engine.scenarios_report(None).await.unwrap();
+        let result = find(&report, "gate-watch");
+        let sp = result
+            .signposts
+            .iter()
+            .find(|s| s.metric.as_str() == "gate_fail_rate")
+            .unwrap();
+        assert_eq!(sp.state, scenario::SignpostState::NoData, "{sp:?}");
+        assert!(
+            !report.triggered.iter().any(|t| t.scenario == "gate-watch"),
+            "{:?}",
+            report.triggered
+        );
+
+        // One held run whose gate failed: `gate_fail_rate` is 1.0.
+        let task = engine
+            .store
+            .create(&task_from_new(
+                NewTask {
+                    title: "t".into(),
+                    category: Some("feature".into()),
+                    ..Default::default()
+                },
+                "company".into(),
+                "worker".into(),
+                "shell".into(),
+            ))
+            .await
+            .unwrap();
+        let run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "worker".into(),
+                adapter: "shell".into(),
+                runtime: "shell".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        let required = vec![RequiredStep {
+            step: "tests".into(),
+            kind: StepKind::Gate,
+            command: Some("true".into()),
+            timeout_seconds: None,
+            required_by: Vec::new(),
+            node_id: None,
+            actor: None,
+            by: None,
+        }];
+        let now = chrono::Utc::now();
+        let run = engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(now),
+                    required_steps: Some(required),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        engine
+            .policies
+            .append_step_attestation(&StepAttestation {
+                id: uuid::Uuid::new_v4().to_string(),
+                run_id: run.id.clone(),
+                task_id: task.id.clone(),
+                scope: "company".into(),
+                category: "feature".into(),
+                step: "tests".into(),
+                kind: StepKind::Gate,
+                actor: GATE_ACTOR.to_string(),
+                verdict: AttestationVerdict::Fail,
+                required_by: Vec::new(),
+                command: Some("true".into()),
+                exit_code: Some(1),
+                output: None,
+                dir: "/tmp".into(),
+                commit: None,
+                dirty: None,
+                node_id: None,
+                at: now,
+                findings: None,
+                round: 0,
+                worktree_digest: None,
+            })
+            .await
+            .unwrap();
+
+        let report = engine.scenarios_report(None).await.unwrap();
+        let result = find(&report, "gate-watch");
+        let sp = result
+            .signposts
+            .iter()
+            .find(|s| s.metric.as_str() == "gate_fail_rate")
+            .unwrap();
+        assert_eq!(sp.state, scenario::SignpostState::Triggered, "{sp:?}");
+        assert!(
+            report.triggered.iter().any(|t| t.scenario == "gate-watch"),
+            "{:?}",
+            report.triggered
+        );
+
+        let live = engine
+            .triggered_signposts(chrono::Utc::now())
+            .await
+            .unwrap();
+        assert!(live.iter().any(|t| t.scenario == "gate-watch"), "{live:?}");
     }
 }

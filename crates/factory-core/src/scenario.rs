@@ -907,20 +907,8 @@ pub fn seed_from(parts: &[&str]) -> u64 {
     u64::from_le_bytes(digest[0..8].try_into().unwrap())
 }
 
-/// Nearest-rank percentile over an already-sorted, non-empty slice:
-/// `index = round(p * (len - 1))`, clamped into range. Monotone in `p` --
-/// `p * (len - 1)` is monotone in `p`, and rounding preserves monotonicity
-/// -- which is what keeps p10 <= p50 <= p90 a guarantee rather than a
-/// coincidence of the data (pinned directly by a test below).
-pub(crate) fn nearest_rank(len: usize, p: f64) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    ((p * (len - 1) as f64).round() as usize).min(len - 1)
-}
-
 fn percentile_f64(sorted: &[f64], p: f64) -> f64 {
-    sorted[nearest_rank(sorted.len(), p)]
+    sorted[factory_kernel::nearest_rank(sorted.len(), p)]
 }
 
 /// Same idea, over completion weeks sorted ascending with every `None`
@@ -934,7 +922,7 @@ fn percentile_week(raw: &[Option<u32>], p: f64) -> Option<u32> {
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     });
-    sorted[nearest_rank(sorted.len(), p)]
+    sorted[factory_kernel::nearest_rank(sorted.len(), p)]
 }
 
 /// p10/p50/p90 of some quantity -- never a single number, the issue's own

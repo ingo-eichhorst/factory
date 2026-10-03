@@ -68,8 +68,9 @@
 
 use crate::dataset::is_slug;
 use crate::metrics::{self, MetricError, MetricId, MetricValue};
-use crate::policy::{self, Applied, Check, ControlRef, Duration, Evidence, EvidenceRef, Kind, StatusKind};
+use crate::policy::{self, Applied, Check, ControlRef, Evidence, EvidenceRef, Kind, StatusKind};
 use chrono::{DateTime, Utc};
+use factory_kernel::Duration;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1038,11 +1039,14 @@ fn merge_measure(have: &mut Measure, new: &Measure, cx: &Context, findings: &mut
     }
 }
 
-/// The freshness window of the three check kinds that have one -- the same
-/// set `policy::Check::own_max_age` (private to that module) reads.
+/// The freshness window of the check kinds that have one -- the same set
+/// `policy::Check::own_max_age` (private to that module) reads. `attested`'s
+/// own field is a required `Duration`, never `Option`, but it still counts:
+/// wrapped in `Some` here the same as every other kind's.
 fn check_max_age(check: &Check) -> Option<Duration> {
     match check {
         Check::Task { max_age, .. } | Check::Workflow { max_age, .. } | Check::Gate { max_age, .. } => *max_age,
+        Check::Attested { max_age, .. } => Some(*max_age),
         _ => None,
     }
 }
@@ -1051,12 +1055,26 @@ fn set_check_max_age(check: &mut Check, to: Duration) {
     if let Check::Task { max_age, .. } | Check::Workflow { max_age, .. } | Check::Gate { max_age, .. } = check {
         *max_age = Some(to);
     }
+    if let Check::Attested { max_age, .. } = check {
+        *max_age = to;
+    }
 }
 
+/// `check` with its own `max_age` zeroed out, so `merge_measure` can tell
+/// whether two check measures are "the same check, maybe a different
+/// window" from "a different check entirely" by plain equality.
+/// `attested`'s own field is a required `Duration`, not `Option`, so it
+/// cannot join the `Task`/`Workflow`/`Gate` pattern above (`None` has
+/// nowhere to go); zeroing it to `Duration::from_hours(0)` is the same
+/// "ignore this field for the comparison" move, just spelled for a
+/// non-optional field.
 fn without_max_age(check: &Check) -> Check {
     let mut c = check.clone();
     if let Check::Task { max_age, .. } | Check::Workflow { max_age, .. } | Check::Gate { max_age, .. } = &mut c {
         *max_age = None;
+    }
+    if let Check::Attested { max_age, .. } = &mut c {
+        *max_age = Duration::from_hours(0);
     }
     c
 }
@@ -1428,6 +1446,7 @@ pub fn gathered(check: &Check, evidence: &Evidence) -> bool {
         Check::Secrets { absent } => absent.iter().all(|n| evidence.secrets.contains_key(n)),
         Check::Daemon { .. } => evidence.daemon.is_some(),
         Check::Dependencies { .. } => evidence.dependencies.is_some(),
+        Check::Attested { .. } => evidence.attested.is_some(),
     }
 }
 
@@ -1667,6 +1686,7 @@ mod tests {
         \x20     - id: up\n        kind: usage\n        response: the daemon answers\n\
         \x20       measure: { metric: first_pass_yield, above: 0.8, max_age: 7d }\n\
         \x20     - id: gate\n        measure: { check: task, task: quality-gate, max_age: 7d }\n\
+        \x20     - id: attested-gate\n        measure: { check: attested, category: feature, step: tests, max_age: 7d }\n\
         \x20     - id: draft\n        stimulus: something happens\n";
 
     fn chained(child: &str) -> (QualityTree, Vec<Finding>) {
@@ -1756,6 +1776,42 @@ mod tests {
         assert_eq!(
             scenario(&tree, "reliability.availability", "gate").measure,
             Some(Measure::Check(Check::Task { task: "quality-gate".into(), max_age: Some("7d".parse().unwrap()) }))
+        );
+    }
+
+    /// `#158`: `attested`'s own `max_age` is a required `Duration`, not
+    /// `Option` -- unlike `task`/`workflow`/`gate`, so `without_max_age`
+    /// cannot fold it into their shared `None` pattern. This is the
+    /// regression `check_max_age`/`set_check_max_age`/`without_max_age`
+    /// each need their own `Attested` arm for: without one, a child
+    /// profile that only shortens an inherited `attested` measure's
+    /// `max_age` would read as `measures by ... instead of the inherited
+    /// ...` (`ConflictingOverride`), a different check entirely, rather
+    /// than the tighten it actually is.
+    #[test]
+    fn an_attested_check_measures_max_age_may_only_shrink() {
+        let tighter = "attributes:\n  - id: reliability.availability\n    importance: M\n    difficulty: M\n    scenarios:\n\
+             \x20     - { id: attested-gate, measure: { check: attested, category: feature, step: tests, max_age: 2d } }\n";
+        let (tree, findings) = chained(tighter);
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(
+            scenario(&tree, "reliability.availability", "attested-gate").measure,
+            Some(Measure::Check(Check::Attested {
+                category: "feature".into(),
+                step: "tests".into(),
+                max_age: "2d".parse().unwrap()
+            }))
+        );
+
+        let (tree, findings) = chained(&tighter.replace("2d", "2w"));
+        assert_eq!(kinds(&findings), vec![FindingKind::Loosening]);
+        assert_eq!(
+            scenario(&tree, "reliability.availability", "attested-gate").measure,
+            Some(Measure::Check(Check::Attested {
+                category: "feature".into(),
+                step: "tests".into(),
+                max_age: "7d".parse().unwrap()
+            }))
         );
     }
 

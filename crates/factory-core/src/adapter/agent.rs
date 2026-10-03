@@ -44,6 +44,13 @@ pub struct TaskBinding {
     /// run that used the scope directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// Set only when this run is `factory task run --continue` (#178) having
+    /// actually resumed the harness's own conversation -- mirrors
+    /// `Run::resumed_session`. Tells `reporting_contract`/`prompt` to say
+    /// earlier report commands, if any linger in the resumed history, are
+    /// void, and names the session being picked back up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_session: Option<String>,
     /// This task's direct parents in a workflow, each with the output it
     /// finished with -- empty for a root node or a task outside any
     /// workflow. Computed once, at dispatch (`Engine::dispatch`), from that
@@ -410,7 +417,23 @@ impl AgentContext {
         } else {
             ""
         };
-        contract + explicit_note + &verification
+        // `#178`/`#180`: this run picked an earlier run's conversation back
+        // up, either after infrastructure failed or for integration rework.
+        // Whatever `factory task report` command sits
+        // earlier in this same history belonged to that run, which is over
+        // -- reporting with it now gets refused (`Engine::check_run_token`,
+        // `Engine::caller_for`) with exactly the reason this sentence gives,
+        // so the agent hears it before it happens rather than only after.
+        let resumed_note = if binding.resumed_session.is_some() {
+            "\n\nThis run picked up an earlier session of this same task, after that \
+             run ended. Any `factory task report` command \
+             you see earlier in this conversation's history belonged to that run and is \
+             void now -- a newer run exists. Use only the commands above, which carry \
+             this run's own token."
+        } else {
+            ""
+        };
+        contract + explicit_note + resumed_note + &verification
     }
 
     /// A short, adapter-neutral guide to Factory itself: what it is, who this
@@ -454,6 +477,27 @@ impl AgentContext {
                 name = self.agent_name,
                 scope = self.scope,
             )),
+        }
+
+        if let Some(binding) = self.task.as_ref().filter(|binding| {
+            binding.task.parent_task_id.is_some()
+                && binding
+                    .task
+                    .workflow_origin
+                    .as_ref()
+                    .and_then(|origin| origin.workspace.as_ref())
+                    .is_some()
+        }) {
+            let base = &binding
+                .task
+                .workflow_origin
+                .as_ref()
+                .and_then(|origin| origin.workspace.as_ref())
+                .expect("filtered above")
+                .base_ref;
+            out.push_str(&format!(
+                "This is one internal part of a decomposed task. Your worktree was based on the integration branch `{base}`. Commit every intended change to your own branch before reporting done. Do not push it or open a pull request: Factory's single-writer integrator merges child branches, tests their combined result, and opens the one pull request to main for a person to review.\n\n"
+            ));
         }
 
         match &self.role {
@@ -593,17 +637,10 @@ impl AgentContext {
                 Grant::TaskCreate => format!(
                     "task.create -> {bin} task create \"<title>\" -i \"<instructions>\" --scope {scope} --agent <agent>; \
                      that creates it and nothing more -- it is not dispatched until `task run <id>` \
-                     (or `task create --run`, which does both) or its schedule fires; \
-                     or, for work that is not yet clear, tested or known to be ours, hand it in through the \
-                     intake gate instead: {bin} intake add \"<title>\" -i \"<what is asked>\" --scope {scope} \
-                     (it is triaged before it can run; {bin} intake info <id> \"...\" answers a needs-info)"
+                     (or `task create --run`, which does both) or its schedule fires"
                 ),
                 Grant::TaskEdit => {
-                    format!(
-                        "task.edit -> {bin} task edit <id> ... (see --help for every field); triaging an \
-                         intake item is an edit too: {bin} intake assess <id> --file <assessment.json> \
-                         [--decide], {bin} intake decide <id> ready|needs-info|wontfix"
-                    )
+                    format!("task.edit -> {bin} task edit <id> ... (see --help for every field)")
                 }
                 Grant::TaskDelete => format!("task.delete -> {bin} task delete <id>"),
                 Grant::TaskRun => format!("task.run -> {bin} task run <id>"),
@@ -671,6 +708,40 @@ impl AgentContext {
                 Grant::BackupRun => format!(
                     "backup.run -> {bin} backup run; {bin} backup verify [<snapshot>]; a backup is of the whole instance, not scoped to {scope}"
                 ),
+                Grant::IntakeAdd => format!(
+                    "intake.add -> {bin} intake add \"<title>\" -i \"<what is asked>\" --scope {scope}; \
+                     for work that is not yet clear, tested or known to be ours -- it is triaged before \
+                     it can run. Relaying an email or chat request on somebody else's behalf (#167): \
+                     add --source email|chat --provider <name> --reference <message-id> --requester <who> \
+                     [--received-at <RFC3339>] -- the daemon records who relayed it, never what you claim"
+                ),
+                Grant::IntakeInfo => format!(
+                    "intake.info -> {bin} intake info <id> \"...\"; answers a needs-info and puts the \
+                     item back in the queue"
+                ),
+                Grant::IntakeTriage => format!(
+                    "intake.triage -> {bin} intake triage <id> [--agent <agent>]; starts a triage run \
+                     that assesses the item and submits it"
+                ),
+                Grant::IntakeAssess => format!(
+                    "intake.assess -> {bin} intake assess <id> --file <assessment.json> [--decide]; also \
+                     {bin} intake flag-security <id> --reason \"...\" to flag a possible security report -- \
+                     confirming or dismissing one is the owner's alone, never yours"
+                ),
+                Grant::IntakeDecide => format!(
+                    "intake.decide -> {bin} intake decide <id> ready|needs-info|split|wontfix [--run] \
+                     (--run also needs task.run)"
+                ),
+                Grant::IntakePublish => format!(
+                    "intake.publish -> {bin} intake publish <id>; posts the decided triage comment and \
+                     applies the labels to the GitHub issue it came from -- only once you approve it; \
+                     Factory never posts on its own"
+                ),
+                Grant::DashboardEdit => {
+                    "dashboard.edit -> save or reset the dashboard layout for a scope; today that is the \
+                     web UI's Dashboard > Customise, or PUT/DELETE /api/dashboard?scope=, not this CLI"
+                        .to_string()
+                }
             });
         }
         lines
@@ -864,13 +935,36 @@ pub trait Agent: Send + Sync {
     fn health_probe(&self) -> Option<crate::harness::HealthProbe> {
         None
     }
+
+    /// How to pick a harness's own conversation back up by its session id
+    /// (`#178`, `factory task run --continue`), declared the same way as
+    /// `health_probe` -- never run, only asked. `None`, the default and what
+    /// a plugin gets (the out-of-process protocol has no wire for this), means
+    /// this harness never resumes: `--continue` falls back to a fresh session
+    /// and journals why. Only the built-in `HarnessAgent` overrides it, and
+    /// only for `claude-code` and `codex`.
+    fn resume_spec(&self, session_id: &str) -> Option<ResumeSpec> {
+        let _ = session_id;
+        None
+    }
+}
+
+/// What `Agent::resume_spec` hands back: the extra arguments that make the
+/// harness's own CLI pick up an existing conversation instead of starting a
+/// new one. Prepended to `LaunchSpec::args`, ahead of anything
+/// `append_declared_args` adds -- a subcommand like codex's `resume <id>`
+/// has to come first; a flag like claude's `--resume <id>` does not care,
+/// but prepending is correct either way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeSpec {
+    pub args: Vec<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::role::Roles;
-    use crate::task::{Task, TaskStatus};
+    use crate::task::{Task, TaskStatus, WorkflowOrigin, WorkflowWorkspace};
     use std::collections::BTreeSet;
 
     fn task() -> Task {
@@ -885,6 +979,7 @@ mod tests {
             status: TaskStatus::Dispatching,
             schedule: None,
             estimate_seconds: None,
+            estimate: None,
             result: None,
             routed_to: None,
             error: None,
@@ -900,6 +995,9 @@ mod tests {
             last_run_at: None,
             next_run_at: None,
             workflow_origin: None,
+            parent_task_id: None,
+            decomposition_part: None,
+            depends_on: Vec::new(),
             bench_origin: None,
             retry: None,
             pending_retry: None,
@@ -908,6 +1006,7 @@ mod tests {
             intake: None,
             failure: None,
             closure: None,
+            slot_wait: None,
         }
     }
 
@@ -935,6 +1034,7 @@ mod tests {
             attempt: 1,
             token: "tok".into(),
             worktree_branch: None,
+            resumed_session: None,
             upstream: Vec::new(),
             knowledge: None,
             required_steps: Vec::new(),
@@ -950,6 +1050,10 @@ mod tests {
 
     fn foreman() -> RoleDef {
         Roles::presets().get(&crate::role::Role::foreman()).unwrap().clone()
+    }
+
+    fn triager() -> RoleDef {
+        Roles::presets().get(&crate::role::Role::triager()).unwrap().clone()
     }
 
     fn custom(grants: &[Grant], reach: Reach) -> RoleDef {
@@ -971,12 +1075,50 @@ mod tests {
     }
 
     #[test]
+    fn a_worker_is_told_it_can_assess_and_decide_intake_items() {
+        // What `task.edit` used to say for it, before `#172` gave intake its
+        // own grants.
+        let guide = base(Some(worker())).factory_guide();
+        assert!(guide.contains("intake.assess"), "{guide}");
+        assert!(guide.contains("intake.decide"), "{guide}");
+        assert!(!guide.contains("intake.add"), "a worker never had task.create, so never intake.add: {guide}");
+        assert!(!guide.contains("intake.triage"), "{guide}");
+    }
+
+    #[test]
     fn a_foreman_is_told_it_can_create_edit_and_assign_tasks_in_its_scope() {
         let guide = base(Some(foreman())).factory_guide();
         for grant in ["task.create", "task.edit", "task.delete", "task.run", "task.cancel", "agent.start"] {
             assert!(guide.contains(grant), "a foreman has {grant}: {guide}");
         }
         assert!(guide.contains("everything in your scope"));
+        // Every grant but the one outward GitHub effect (`#171`) -- a scope's
+        // day-to-day running is not the standing permission to post outside
+        // Factory.
+        assert!(!guide.contains("intake.publish"), "{guide}");
+    }
+
+    #[test]
+    fn a_triager_is_told_the_intake_commands_and_never_to_create_or_edit_a_task() {
+        let guide = base(Some(triager())).factory_guide();
+        for grant in ["intake.add", "intake.info", "intake.triage", "intake.assess", "intake.decide"] {
+            assert!(guide.contains(grant), "a triager has {grant}: {guide}");
+        }
+        assert!(!guide.contains("task.create ->"), "{guide}");
+        assert!(!guide.contains("task.edit ->"), "{guide}");
+        assert!(!guide.contains("task.report ->"), "the triager coordinates; it never reports a run: {guide}");
+        assert!(!guide.contains("agent.start"), "{guide}");
+        assert!(guide.contains("everything in your scope"));
+        assert!(!guide.contains("intake.publish"), "coordinating triage is not publishing (#171): {guide}");
+    }
+
+    #[test]
+    fn a_role_holding_intake_publish_is_told_the_command_and_a_worker_is_not() {
+        let guide = base(Some(custom(&[Grant::IntakePublish], Reach::Scope))).factory_guide();
+        assert!(guide.contains("intake.publish -> "), "{guide}");
+        assert!(guide.contains("factory intake publish"), "{guide}");
+        let worker_guide = base(Some(worker())).factory_guide();
+        assert!(!worker_guide.contains("intake.publish"), "{worker_guide}");
     }
 
     #[test]
@@ -1205,6 +1347,33 @@ mod tests {
         let running = with_task(base(Some(worker()))).factory_guide();
         assert!(running.contains("working task t1"));
         assert!(!running.contains("a standing agent"));
+    }
+
+    #[test]
+    fn a_decomposition_child_is_told_the_single_writer_handoff_contract() {
+        let mut ctx = with_task(base(Some(worker())));
+        let task = &mut ctx.task.as_mut().unwrap().task;
+        task.parent_task_id = Some("parent".into());
+        task.workflow_origin = Some(WorkflowOrigin {
+            workflow_id: "workflow".into(),
+            workflow_run_id: "run".into(),
+            node_id: "child".into(),
+            workspace: Some(WorkflowWorkspace {
+                base_ref: "factory/issue-180".into(),
+            }),
+        });
+
+        let guide = ctx.factory_guide();
+        assert!(
+            guide.contains("based on the integration branch `factory/issue-180`"),
+            "{guide}"
+        );
+        assert!(guide.contains("Commit every intended change"), "{guide}");
+        assert!(
+            guide.contains("Do not push it or open a pull request"),
+            "{guide}"
+        );
+        assert!(guide.contains("one pull request to main"), "{guide}");
     }
 
     #[test]

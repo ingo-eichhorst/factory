@@ -325,6 +325,10 @@ fn provision() -> Daemon {
         herdr_bin,
     };
     daemon.spawn();
+    // The browser loads the roster immediately. Exercise the real axum
+    // request stack too, not only workflow endpoints on a test thread.
+    expect_ok(&format!("{}/api/agents", daemon.base_url()),
+        &get(&format!("{}/api/agents", daemon.base_url())));
     daemon
 }
 

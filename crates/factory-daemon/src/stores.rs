@@ -328,6 +328,7 @@ mod tests {
             status: TaskStatus::Pending,
             schedule: None,
             estimate_seconds: None,
+            estimate: None,
             result: None,
             routed_to: None,
             error: None,
@@ -343,6 +344,9 @@ mod tests {
             worktree: false,
             knowledge_hints: false,
             workflow_origin: None,
+            parent_task_id: None,
+            decomposition_part: None,
+            depends_on: Vec::new(),
             bench_origin: None,
             retry: None,
             pending_retry: None,
@@ -351,6 +355,7 @@ mod tests {
             intake: None,
             failure: None,
             closure: None,
+            slot_wait: None,
         }
     }
 

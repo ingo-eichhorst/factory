@@ -36,14 +36,19 @@
 //!   [`SIGNPOST_TTL`] while the scenario files are unchanged; a failure
 //!   is never kept.
 //!
-//! ## Capacity is unknown, and says so
+//! ## Capacity, where it is declared (`#179`)
 //!
-//! Nothing in Factory limits how many sessions a scope may hold. The
-//! `max_sessions` key older configs carry is read and thrown away
-//! (`config.rs`, "It has no effect now"), so there is no number to hold the
-//! sessions in use against. [`OperationsInput::capacity`] stays empty and
-//! every `Flow::sessions_max` is absent -- unknown, not a limit of zero --
-//! rather than showing a figure that nothing enforces.
+//! A scope's own `max_sessions`, when it declares one, is what
+//! [`Flow::sessions_max`] shows -- an agent's own cap is enforced at
+//! dispatch (`Engine::capacity_for`) but is not summed into a scope figure
+//! here, since two agents' caps do not add into one meaningful ceiling.
+//! [`OperationsInput::capacity`] is filled from every scope's own
+//! `max_sessions` (`Scope::max_sessions`, root included); a scope that
+//! declares none leaves it absent -- still unknown, not a limit of zero.
+//! `Flow::sessions_in_use` counts the same way admission does: a run
+//! `Dispatching` or holding a session, never a session-less approval hold
+//! (`#184`). A task waiting on either cap shows up in `queue_depth` as an
+//! ordinary `Stage::Queued` item, aged from `Task.slot_wait.since`.
 //!
 //! ## Actions
 //!
@@ -286,6 +291,18 @@ impl Engine {
             Vec::new()
         };
 
+        // Every scope's own `max_sessions` (`#179`), root included --
+        // discovery already folds the root's own `scope:` block into
+        // `config.scopes` (`discovery::apply`), so this alone is every
+        // scope, the same list `reconcile_agents` walks. A scope that
+        // declares none is simply absent, not zero.
+        let capacity: BTreeMap<String, u32> = snapshot
+            .config
+            .scopes
+            .iter()
+            .filter_map(|s| s.max_sessions.map(|m| (s.name.clone(), m)))
+            .collect();
+
         let input = OperationsInput {
             now,
             tasks: &tasks,
@@ -294,7 +311,7 @@ impl Engine {
             scope,
             detail,
             window,
-            capacity: BTreeMap::new(),
+            capacity,
             block_reasons,
             last_progress,
             skipped,
@@ -487,6 +504,11 @@ impl Engine {
                     status: Some(reason.status()),
                     closure: Some(closure),
                     clear_pending_retry: task.pending_retry.is_some(),
+                    // A closed task waits for nothing (`#179`) -- this is
+                    // also how a task only ever waiting for a slot, never
+                    // dispatched, is dropped from the line: there is no run
+                    // for `TaskCancel` to act on, but closing needs none.
+                    clear_slot_wait: task.slot_wait.is_some(),
                     ..Default::default()
                 },
             )
@@ -771,6 +793,7 @@ mod tests {
                 scope("other-id", "other", root.join("projects/other")),
             ],
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             infrastructure: Default::default(),
@@ -1272,7 +1295,9 @@ mod tests {
         assert_eq!(data_str(e, "reason"), Some("stop the line"));
         assert!(e.message.contains("by the owner: stop the line"), "{}", e.message);
 
-        let response = engine.handle_request(Request::TaskRun { id: task.id.clone(), reason: Some("try again".into()) }).await;
+        let response = engine
+            .handle_request(Request::TaskRun { id: task.id.clone(), reason: Some("try again".into()), continue_run: false })
+            .await;
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
         let entries = engine.store.entries(&task.id, 50).await.unwrap();
         assert_eq!(data_str(entry_of(&entries, "run_requested"), "reason"), Some("try again"));

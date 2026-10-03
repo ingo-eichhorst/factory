@@ -374,9 +374,11 @@ export function flowBars(flow, inScope) {
 }
 
 /// Sessions in use against capacity. `sessions_max` is absent, never zero,
-/// while `max_sessions` has no effect (config.rs), so capacity reads
-/// "unknown" -- a utilisation figure over an invented ceiling would be the
-/// vanity number the ticket forbids.
+/// when the scope declares no `max_sessions` of its own (`#179`) -- an
+/// agent's own cap is enforced but is not summed into one scope figure, so
+/// a scope with only agent caps still reads "unknown" here, correctly:
+/// there is no single ceiling for the scope as a whole to show a percentage
+/// against.
 export function capacityText(f) {
   if (f.sessions_max === undefined || f.sessions_max === null) return `${f.sessions_in_use} in use · capacity unknown`;
   const pct = f.sessions_max ? Math.round((f.sessions_in_use / f.sessions_max) * 100) : 0;

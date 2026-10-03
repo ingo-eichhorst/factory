@@ -121,9 +121,24 @@ const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../../ui/js/dependencies-model.js"),
     ),
     (
+        "js/dependency-finding.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/dependency-finding.js"),
+    ),
+    (
         "js/dependencies.js",
         "text/javascript; charset=utf-8",
         include_str!("../../../ui/js/dependencies.js"),
+    ),
+    (
+        "js/doctor-model.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/doctor-model.js"),
+    ),
+    (
+        "js/doctor.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/doctor.js"),
     ),
     (
         "js/benchmarks.js",
@@ -224,6 +239,21 @@ const ASSETS: &[(&str, &str, &str)] = &[
         "js/dashboard.js",
         "text/javascript; charset=utf-8",
         include_str!("../../../ui/js/dashboard.js"),
+    ),
+    (
+        "js/dashboard-model.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/dashboard-model.js"),
+    ),
+    (
+        "js/dashboard-tiles-model.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/dashboard-tiles-model.js"),
+    ),
+    (
+        "js/dashboard-editor-model.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/dashboard-editor-model.js"),
     ),
     (
         "js/activity.js",

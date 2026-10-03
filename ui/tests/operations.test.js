@@ -169,6 +169,7 @@ test("the Inbox exposes approval decisions and evidence-backed rework", async ()
   };
   globalThis.fetch = answering(decisions, []);
   await loadInbox();
+  assert.match(el.inbox.innerHTML, /class="btn inbox-action"/, "decisions use the shared button styling");
   assert.match(el.inbox.innerHTML, /data-action="approve"[^>]*>Approve/);
   assert.match(el.inbox.innerHTML, /data-action="reject"[^>]*>Reject/);
   assert.match(el.inbox.innerHTML, /data-action="accept_rework"[^>]*>Accept rework/);

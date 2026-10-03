@@ -381,6 +381,10 @@ test("formatUnitValue reads each unit's own shape, and a bare em dash for null",
   assert.equal(formatUnitValue(3.4, "count"), "3.4");
   assert.equal(formatUnitValue(89, "seconds"), "1m");
   assert.equal(formatUnitValue(5400, "seconds"), "1.5h");
+  assert.equal(formatUnitValue(12.34, "hours"), "12.3h");
+  assert.equal(formatUnitValue(0, "hours"), "0.0h");
+  assert.equal(formatUnitValue(12.34, "days"), "12.3d");
+  assert.equal(formatUnitValue(0, "days"), "0.0d");
   assert.equal(formatUnitValue(7, null), "7");
   assert.equal(formatUnitValue(null, "ratio"), "—");
   assert.equal(formatUnitValue(undefined, "ratio"), "—");

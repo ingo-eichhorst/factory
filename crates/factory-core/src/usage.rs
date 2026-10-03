@@ -101,8 +101,7 @@ pub struct SubagentUsage {
 }
 
 /// One subscription rate-limit window, as the provider reports it. Stored
-/// with every snapshot for the plan-share work of #117's v2; nothing in v1
-/// computes with it.
+/// with every snapshot and allocated across the runs active between readings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RateLimitWindow {
     #[serde(default)]
@@ -264,6 +263,19 @@ pub struct RunUsage {
     pub tokens: TokenCounts,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plan_share: Vec<PlanShare>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_share_unknown: Option<String>,
+    /// Provider-window intervals that could not be attributed. Kept beside
+    /// any known shares so a later successful interval cannot make an
+    /// earlier gap disappear.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plan_share_unknowns: Vec<PlanShareUnknown>,
     /// Every price table behind `cost_usd`. More than one only when the
     /// sessions in the run were priced differently.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -295,6 +307,11 @@ impl RunUsage {
             partial: false,
             tokens: TokenCounts::default(),
             cost_usd: None,
+            elapsed_seconds: None,
+            active_seconds: None,
+            plan_share: Vec::new(),
+            plan_share_unknown: None,
+            plan_share_unknowns: Vec::new(),
             pricing_sources: Vec::new(),
             models: Vec::new(),
             sessions: 0,
@@ -308,6 +325,108 @@ impl RunUsage {
 
     pub fn is_known(&self) -> bool {
         self.state == UsageState::Known
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanShareAttribution {
+    Direct,
+    Apportioned,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanShare {
+    pub provider_account: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_type: Option<String>,
+    pub window_minutes: u32,
+    pub resets_at: String,
+    pub used_percent: f64,
+    pub attribution: PlanShareAttribution,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution_quality: Option<String>,
+    pub as_of: DateTime<Utc>,
+}
+
+/// Evidence that one provider-window interval could not be allocated.
+/// Window identity and bounds are optional only for failures that prevented
+/// Factory from learning them (for example, a missing provider binding).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanShareUnknown {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<DateTime<Utc>>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReEstimate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<crate::task::TimeEstimateRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_seconds: Option<crate::task::TimeEstimateRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<crate::task::CostEstimateRange>,
+    pub sample_count: u32,
+    pub scope: String,
+    pub agent: String,
+    pub category: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_wall_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_active_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EstimateComparison<T> {
+    pub low: T,
+    pub expected: T,
+    pub high: T,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual: Option<T>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_over_expected: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub within_range: Option<bool>,
+}
+
+impl EstimateComparison<u64> {
+    pub fn new(low: u64, expected: u64, high: u64, actual: Option<u64>) -> Self {
+        Self {
+            low,
+            expected,
+            high,
+            actual,
+            actual_over_expected: actual.filter(|_| expected > 0).map(|v| v as f64 / expected as f64),
+            within_range: actual.map(|v| v >= low && v <= high),
+        }
+    }
+}
+
+impl EstimateComparison<f64> {
+    pub fn new(low: f64, expected: f64, high: f64, actual: Option<f64>) -> Self {
+        Self {
+            low,
+            expected,
+            high,
+            actual,
+            actual_over_expected: actual.filter(|_| expected > 0.0).map(|v| v / expected),
+            within_range: actual.map(|v| v >= low && v <= high),
+        }
     }
 }
 
@@ -382,6 +501,21 @@ fn reason_for(unavailable: Option<&BTreeMap<String, String>>, path: &str) -> Str
 /// A field unknown for any one contributor makes that field's total
 /// unknown.
 pub fn run_usage(snapshots: &[UsageSnapshot]) -> RunUsage {
+    run_usage_with_prior(snapshots, None)
+}
+
+/// Like [`run_usage`], but for a run that may have resumed another's session
+/// (`#178`, `factory task run --continue`): `prior` names the session id
+/// being resumed and carries the *previous* run's own `RunEnd` reading for
+/// it. When this run's own `Dispatch` snapshot never saw that session --
+/// the ordinary case, since the runtime is asked for a baseline the moment
+/// the new session comes up, before the resumed harness has reported back in
+/// -- that reading is spliced into the baseline in its place, so growth is
+/// measured from where the previous run left off rather than credited whole
+/// to this one (the same rule [`run_usage`] already applies to any session
+/// genuinely born after the baseline, which this deliberately does not
+/// touch). `None` behaves exactly like `run_usage`.
+pub fn run_usage_with_prior(snapshots: &[UsageSnapshot], prior: Option<(&str, &HarnessUsage)>) -> RunUsage {
     let count = snapshots.len() as u32;
     if snapshots.is_empty() {
         return RunUsage::unknown("no usage was recorded for this run", 0);
@@ -397,9 +531,21 @@ pub fn run_usage(snapshots: &[UsageSnapshot]) -> RunUsage {
         return RunUsage::unknown("no baseline was taken when this run was dispatched", count);
     };
     let base = &snapshots[base_at];
-    let Some(baseline) = &base.usage else {
+    let Some(base_usage) = &base.usage else {
         let why = base.unknown.as_deref().unwrap_or("the runtime did not answer");
         return RunUsage::unknown(format!("no baseline at dispatch: {why}"), count);
+    };
+    // Splice the resumed session's prior ending in as though the baseline
+    // had seen it -- only when it did not, since a runtime quick enough to
+    // already report the resumed session at dispatch has the truer number.
+    let mut spliced;
+    let baseline = match prior {
+        Some((session_id, prior_usage)) if !base_usage.sessions.iter().any(|s| s.session_id == session_id) => {
+            spliced = base_usage.clone();
+            spliced.sessions.push(prior_usage.clone());
+            &spliced
+        }
+        _ => base_usage,
     };
     let later = &snapshots[base_at + 1..];
     let Some(latest_snap) = later.iter().rev().find(|s| s.usage.is_some()) else {
@@ -483,6 +629,43 @@ pub fn run_usage(snapshots: &[UsageSnapshot]) -> RunUsage {
         }
     }
 
+    let baseline_sessions: BTreeMap<&str, &HarnessUsage> = baseline
+        .sessions
+        .iter()
+        .map(|session| (session.session_id.as_str(), session))
+        .collect();
+    let mut elapsed = Some(0.0);
+    let mut active = Some(0.0);
+    for session in &latest.sessions {
+        let prior = baseline_sessions.get(session.session_id.as_str()).copied();
+        match delta_f64(session.elapsed_seconds, prior.map(|s| s.elapsed_seconds)) {
+            Ok(Some(delta)) => elapsed = elapsed.map(|sum| sum + delta),
+            Ok(None) => {
+                if elapsed.is_some() {
+                    notes.push(format!("elapsed time is unknown for session {}", session.session_id));
+                }
+                elapsed = None;
+            }
+            Err(why) => {
+                notes.push(format!("elapsed time of session {} {why}", session.session_id));
+                elapsed = None;
+            }
+        }
+        match delta_f64(session.active_seconds, prior.map(|s| s.active_seconds)) {
+            Ok(Some(delta)) => active = active.map(|sum| sum + delta),
+            Ok(None) => {
+                if active.is_some() {
+                    notes.push(format!("active time is unknown for session {}", session.session_id));
+                }
+                active = None;
+            }
+            Err(why) => {
+                notes.push(format!("active time of session {} {why}", session.session_id));
+                active = None;
+            }
+        }
+    }
+
     let mut pricing: BTreeSet<String> = BTreeSet::new();
     let mut models: BTreeSet<String> = BTreeSet::new();
     for s in &latest.sessions {
@@ -505,6 +688,11 @@ pub fn run_usage(snapshots: &[UsageSnapshot]) -> RunUsage {
         partial,
         tokens: TokenCounts::from_fields(tokens),
         cost_usd: cost,
+        elapsed_seconds: elapsed,
+        active_seconds: active,
+        plan_share: Vec::new(),
+        plan_share_unknown: None,
+        plan_share_unknowns: Vec::new(),
         pricing_sources: pricing.into_iter().collect(),
         models: models.into_iter().collect(),
         sessions: now.len() as u32,
@@ -514,6 +702,386 @@ pub fn run_usage(snapshots: &[UsageSnapshot]) -> RunUsage {
         snapshots: count,
         notes,
     }
+}
+
+/// The session id `factory task run --continue` (#178) should resume: from
+/// `snapshots` (a previous run's own), the harness session named by the
+/// *newest* snapshot that saw one whose `adapter` matches. Older snapshots
+/// are never consulted even if a newer one is unknown -- an unanswered
+/// reading says nothing either way, so this looks further back only when the
+/// newer snapshot's `usage` is missing entirely, never when it simply lacks
+/// a session on this adapter (rule 6: never "latest session in this
+/// directory", only what this task's own adapter was actually seen running
+/// as).
+pub fn newest_session_id_for_adapter(snapshots: &[UsageSnapshot], adapter: &str) -> Option<String> {
+    let mut ordered: Vec<&UsageSnapshot> = snapshots.iter().collect();
+    ordered.sort_by_key(|s| s.at);
+    ordered.iter().rev().find_map(|snapshot| {
+        snapshot
+            .usage
+            .as_ref()?
+            .sessions
+            .iter()
+            .find(|s| s.adapter.as_deref() == Some(adapter))
+            .map(|s| s.session_id.clone())
+    })
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlanShareAllocation {
+    pub shares: BTreeMap<String, Vec<PlanShare>>,
+    pub unknown: BTreeMap<String, Vec<PlanShareUnknown>>,
+    /// Every provider-window interval that was looked at, whatever became
+    /// of it -- what the L1 provider card reads its attribution from, so the
+    /// badge describes the interval the reading closed rather than who is
+    /// running when the page is opened.
+    pub intervals: Vec<PlanShareInterval>,
+}
+
+/// One interval between two consecutive observations of one provider
+/// window, across every run bound to the account.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanShareInterval {
+    pub provider_account: String,
+    pub window_minutes: u32,
+    pub resets_at: String,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    /// Percentage points the window moved over the interval.
+    pub delta: f64,
+    /// `Direct` or `Apportioned` when a positive delta was allocated;
+    /// `None` when there was nothing to allocate or it could not be.
+    pub attribution: Option<PlanShareAttribution>,
+    /// The runs the delta was allocated to.
+    pub consumers: Vec<String>,
+    /// Why the delta was not allocated, when it was not.
+    pub unknown: Option<String>,
+}
+
+impl PlanShareAllocation {
+    fn record_unknown(&mut self, run_id: &str, unknown: PlanShareUnknown) {
+        self.unknown.entry(run_id.to_string()).or_default().push(unknown);
+    }
+}
+
+#[derive(Clone)]
+struct WindowObservation {
+    run_id: String,
+    account: String,
+    provider: Option<String>,
+    plan_type: Option<String>,
+    quality: Option<String>,
+    minutes: u32,
+    resets_at: String,
+    used: f64,
+    at: DateTime<Utc>,
+}
+
+/// One point per sample time. Two runs reading the same account in the
+/// same instant -- `sampled_at` is often whole seconds -- are one
+/// observation, not an interval of zero length: pairing them would drop the
+/// growth up to the second or, if they disagree, charge it twice. Equal
+/// readings collapse silently. Readings that disagree say so on every run
+/// that took one, and the highest stands for the instant, since a window's
+/// use only grows until it resets. `PROVIDER_WINDOW_TIE` is the same rule
+/// for the L1 provider card.
+fn merge_simultaneous(mut points: Vec<WindowObservation>, result: &mut PlanShareAllocation) -> Vec<WindowObservation> {
+    points.sort_by(|a, b| {
+        a.at.cmp(&b.at)
+            .then_with(|| a.used.total_cmp(&b.used))
+            .then_with(|| a.run_id.cmp(&b.run_id))
+    });
+    let mut merged: Vec<WindowObservation> = Vec::with_capacity(points.len());
+    let mut start = 0;
+    while start < points.len() {
+        let end = start + points[start..].iter().take_while(|p| p.at == points[start].at).count();
+        let tied = &points[start..end];
+        let highest = tied.last().expect("a group holds its first point").clone();
+        if tied.iter().any(|p| (p.used - highest.used).abs() > f64::EPSILON) {
+            for point in tied {
+                result.record_unknown(&point.run_id, PlanShareUnknown {
+                    provider_account: Some(point.account.clone()), window_minutes: Some(point.minutes),
+                    resets_at: Some(point.resets_at.clone()), from: Some(point.at), to: Some(point.at),
+                    reason: PROVIDER_WINDOW_TIE.into(),
+                });
+            }
+        }
+        merged.push(highest);
+        start = end;
+    }
+    merged
+}
+
+/// Why a run's reading was set aside in favour of another run's taken at
+/// the same instant.
+pub const PROVIDER_WINDOW_TIE: &str =
+    "readings of this provider window sampled at the same instant disagree; the highest stands for it";
+
+/// When the runtime says it took this reading -- the contract's
+/// `sampled_at` -- falling back to when Factory asked for it. A provider
+/// window and the token counts beside it are ordered and attributed by
+/// this, never by the request time alone: a cached or delayed answer
+/// describes the moment it was sampled. `UsageSnapshot::at` still orders
+/// a run's own snapshots (`run_usage`).
+pub fn observed_at(snapshot: &UsageSnapshot) -> DateTime<Utc> {
+    snapshot.usage.as_ref().and_then(|usage| usage.sampled_at).unwrap_or(snapshot.at)
+}
+
+fn cumulative_tokens(usage: &SessionUsage) -> Option<u64> {
+    usage.sessions.iter().try_fold(0u64, |sum, session| {
+        let parent = session.tokens.total()?;
+        let children = session
+            .subagents
+            .iter()
+            .try_fold(0u64, |subtotal, child| child.tokens.total().map(|n| subtotal + n))?;
+        Some(sum + parent + children)
+    })
+}
+
+fn token_increment(snapshots: &[UsageSnapshot], from: DateTime<Utc>, to: DateTime<Utc>) -> Option<u64> {
+    let before = snapshots
+        .iter()
+        // A weight is honest only when its readings cover this provider
+        // observation interval exactly. Reusing an older reading would also
+        // charge tokens consumed before `from` to this interval.
+        .filter(|s| observed_at(s) == from)
+        .max_by_key(|s| s.at)
+        // A run that began inside an account observation interval has no
+        // reading at `from`. Its dispatch snapshot is the aligned baseline
+        // for the part of the interval in which it existed, provided it also
+        // has a reading at the interval end.
+        .or_else(|| {
+            snapshots
+                .iter()
+                .filter(|s| s.point == SnapshotPoint::Dispatch && observed_at(s) > from && observed_at(s) <= to)
+                .min_by_key(|s| observed_at(s))
+        })
+        .and_then(|s| s.usage.as_ref())
+        .and_then(cumulative_tokens)?;
+    let after = snapshots
+        .iter()
+        .filter(|s| observed_at(s) == to)
+        .max_by_key(|s| s.at)
+        .and_then(|s| s.usage.as_ref())
+        .and_then(cumulative_tokens)?;
+    after.checked_sub(before)
+}
+
+/// Allocate each positive observed provider-window increment among runs that
+/// were active in the interval, weighted by their measured token increment.
+/// Missing identity, baselines, or weights remains explicitly unknown.
+/// Intervals are bounded by each reading's [`observed_at`].
+pub fn allocate_plan_share(
+    runs: &[crate::run::Run],
+    snapshots: &BTreeMap<String, Vec<UsageSnapshot>>,
+) -> PlanShareAllocation {
+    let mut result = PlanShareAllocation::default();
+    let by_id: BTreeMap<&str, &crate::run::Run> = runs.iter().map(|r| (r.id.as_str(), r)).collect();
+    let mut resolved = BTreeSet::new();
+    let mut observations: BTreeMap<(String, u32, String), Vec<WindowObservation>> = BTreeMap::new();
+
+    for run in runs {
+        let Some(account) = run.provider_account.as_ref() else {
+            result.record_unknown(&run.id, PlanShareUnknown {
+                provider_account: None, window_minutes: None, resets_at: None,
+                from: None, to: None, reason: "run has no provider-account binding".into(),
+            });
+            continue;
+        };
+        for snapshot in snapshots.get(&run.id).into_iter().flatten() {
+            let Some(usage) = &snapshot.usage else { continue };
+            let sampled = observed_at(snapshot);
+            for session in &usage.sessions {
+                let Some(rate) = &session.rate_limit else { continue };
+                for window in &rate.windows {
+                    let (Some(minutes), Some(reset), Some(used)) =
+                        (window.window_minutes, window.resets_at.clone(), window.used_percent)
+                    else {
+                        result.record_unknown(&run.id, PlanShareUnknown {
+                            provider_account: Some(account.clone()), window_minutes: window.window_minutes,
+                            resets_at: window.resets_at.clone(), from: None, to: Some(sampled),
+                            reason: "rate-limit window identity or usage is missing".into(),
+                        });
+                        continue;
+                    };
+                    if !used.is_finite() {
+                        result.record_unknown(&run.id, PlanShareUnknown {
+                            provider_account: Some(account.clone()), window_minutes: Some(minutes),
+                            resets_at: Some(reset), from: None, to: Some(sampled),
+                            reason: "rate-limit usage is not finite".into(),
+                        });
+                        continue;
+                    }
+                    observations
+                        .entry((account.clone(), minutes, reset.clone()))
+                        .or_default()
+                        .push(WindowObservation {
+                            run_id: run.id.clone(),
+                            account: account.clone(),
+                            provider: rate.provider.clone(),
+                            plan_type: rate.plan_type.clone(),
+                            quality: rate.attribution_quality.clone(),
+                            minutes,
+                            resets_at: reset,
+                            used,
+                            at: sampled,
+                        });
+                }
+            }
+        }
+    }
+
+    for ((_account, _minutes, _reset), points) in observations {
+        let points = merge_simultaneous(points, &mut result);
+        if points.len() < 2 {
+            for point in points {
+                result.record_unknown(&point.run_id, PlanShareUnknown {
+                    provider_account: Some(point.account), window_minutes: Some(point.minutes),
+                    resets_at: Some(point.resets_at), from: None, to: Some(point.at),
+                    reason: "no earlier observation for this provider window".into(),
+                });
+            }
+            continue;
+        }
+        for pair in points.windows(2) {
+            let from = &pair[0];
+            let to = &pair[1];
+            let delta = to.used - from.used;
+            let interval = |attribution, consumers, unknown: Option<&str>| PlanShareInterval {
+                provider_account: to.account.clone(),
+                window_minutes: to.minutes,
+                resets_at: to.resets_at.clone(),
+                from: from.at,
+                to: to.at,
+                delta,
+                attribution,
+                consumers,
+                unknown: unknown.map(str::to_string),
+            };
+            if delta < 0.0 {
+                let reason = "provider-window usage went backwards";
+                result.intervals.push(interval(None, Vec::new(), Some(reason)));
+                result.record_unknown(&to.run_id, PlanShareUnknown {
+                    provider_account: Some(to.account.clone()), window_minutes: Some(to.minutes),
+                    resets_at: Some(to.resets_at.clone()), from: Some(from.at), to: Some(to.at),
+                    reason: reason.into(),
+                });
+                continue;
+            }
+            if to.at <= from.at {
+                continue;
+            }
+            let candidates: Vec<&crate::run::Run> = runs
+                .iter()
+                .filter(|run| {
+                    run.provider_account.as_deref() == Some(to.account.as_str())
+                        && run.started_at < to.at
+                        && run.ended_at.map_or(true, |ended| ended > from.at)
+                })
+                .collect();
+            if delta <= f64::EPSILON {
+                // Two valid provider observations prove that every active
+                // consumer's share of this interval is zero. There is no
+                // positive share to emit, but this is measured evidence, not
+                // a missing baseline that should fall through to the generic
+                // unknown below.
+                result.intervals.push(interval(None, Vec::new(), None));
+                resolved.extend(candidates.into_iter().map(|candidate| candidate.id.clone()));
+                continue;
+            }
+            if candidates.is_empty() {
+                let reason = "no run was active during the provider-window increment";
+                result.intervals.push(interval(None, Vec::new(), Some(reason)));
+                result.record_unknown(&to.run_id, PlanShareUnknown {
+                    provider_account: Some(to.account.clone()), window_minutes: Some(to.minutes),
+                    resets_at: Some(to.resets_at.clone()), from: Some(from.at), to: Some(to.at),
+                    reason: reason.into(),
+                });
+                continue;
+            }
+            let mut weighted = Vec::with_capacity(candidates.len());
+            let mut missing = false;
+            for candidate in &candidates {
+                let weight = snapshots
+                    .get(&candidate.id)
+                    .and_then(|s| token_increment(s, from.at, to.at));
+                match weight {
+                    Some(0) => {}
+                    Some(weight) => weighted.push((*candidate, weight)),
+                    None => missing = true,
+                }
+            }
+            if missing || weighted.is_empty() {
+                let reason = if missing {
+                    "one or more active runs have no measured token increment for provider-window attribution"
+                } else {
+                    "provider-window usage increased with no positive measured token increment"
+                };
+                result.intervals.push(interval(None, Vec::new(), Some(reason)));
+                for candidate in &candidates {
+                    result.record_unknown(&candidate.id, PlanShareUnknown {
+                        provider_account: Some(to.account.clone()), window_minutes: Some(to.minutes),
+                        resets_at: Some(to.resets_at.clone()), from: Some(from.at), to: Some(to.at),
+                        reason: reason.into(),
+                    });
+                }
+                continue;
+            }
+            let total: u64 = weighted.iter().map(|(_, weight)| *weight).sum();
+            let attribution = if weighted.len() == 1 {
+                PlanShareAttribution::Direct
+            } else {
+                PlanShareAttribution::Apportioned
+            };
+            result.intervals.push(interval(
+                Some(attribution),
+                weighted.iter().map(|(candidate, _)| candidate.id.clone()).collect(),
+                None,
+            ));
+            for (candidate, weight) in weighted {
+                let share = delta * weight as f64 / total as f64;
+                let list = result.shares.entry(candidate.id.clone()).or_default();
+                if let Some(existing) = list.iter_mut().find(|share| {
+                    share.provider_account == to.account
+                        && share.window_minutes == to.minutes
+                        && share.resets_at == to.resets_at
+                }) {
+                    existing.used_percent += share;
+                    existing.as_of = existing.as_of.max(to.at);
+                    if attribution == PlanShareAttribution::Apportioned {
+                        existing.attribution = attribution;
+                    }
+                } else {
+                    list.push(PlanShare {
+                        provider_account: to.account.clone(),
+                        provider: to.provider.clone(),
+                        plan_type: to.plan_type.clone(),
+                        window_minutes: to.minutes,
+                        resets_at: to.resets_at.clone(),
+                        used_percent: share,
+                        attribution,
+                        attribution_quality: to.quality.clone(),
+                        as_of: to.at,
+                    });
+                }
+            }
+            resolved.extend(candidates.into_iter().map(|candidate| candidate.id.clone()));
+        }
+    }
+
+    for run in by_id.values() {
+        if run.provider_account.is_some()
+            && !result.shares.contains_key(&run.id)
+            && !result.unknown.contains_key(&run.id)
+            && !resolved.contains(&run.id)
+        {
+            result.record_unknown(&run.id, PlanShareUnknown {
+                provider_account: run.provider_account.clone(), window_minutes: None, resets_at: None,
+                from: None, to: None, reason: "provider-window share could not be attributed".into(),
+            });
+        }
+    }
+    result
 }
 
 // -- rolling up ---------------------------------------------------------------
@@ -530,6 +1098,10 @@ pub enum CostGroupBy {
     /// The agent that ran it, within its scope -- `scope/agent`, since an
     /// agent's name is only unique inside one.
     Agent,
+    /// The configured provider account snapshotted on the run.
+    Provider,
+    /// The task's `workflow_origin.workflow_id`, when it has one (#164).
+    Workflow,
 }
 
 impl CostGroupBy {
@@ -539,6 +1111,8 @@ impl CostGroupBy {
             Self::Issue => "issue",
             Self::Scope => "scope",
             Self::Agent => "agent",
+            Self::Provider => "provider",
+            Self::Workflow => "workflow",
         }
     }
 }
@@ -551,7 +1125,11 @@ impl std::str::FromStr for CostGroupBy {
             "issue" => Self::Issue,
             "scope" => Self::Scope,
             "agent" => Self::Agent,
-            other => return Err(format!("cannot group costs by {other:?}: use task, issue, scope or agent")),
+            "provider" => Self::Provider,
+            "workflow" => Self::Workflow,
+            other => return Err(format!(
+                "cannot group costs by {other:?}: use task, issue, scope, agent, provider or workflow"
+            )),
         })
     }
 }
@@ -594,6 +1172,24 @@ pub struct CostRow {
     pub runs_cost_unknown: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pricing_sources: Vec<String>,
+    /// Runs with an `original_estimate` at all -- `#168`'s estimate-vs-actual,
+    /// alongside the usage sums above rather than replacing them. A run with
+    /// no estimate is in neither this nor `within_range`: it has no range to
+    /// have missed. `#[serde(default)]`: absent on every report from before
+    /// this existed.
+    #[serde(default)]
+    pub estimated_runs: u32,
+    /// Of `estimated_runs`, how many are terminal with a wall time inside
+    /// their own `[low, high]`. A run still going is counted in
+    /// `estimated_runs` but not here -- it has no actual yet to compare.
+    #[serde(default)]
+    pub within_range: u32,
+    /// The nearest-rank median, over `estimated_runs`' own terminal ones, of
+    /// actual wall seconds over the estimate's `expected` -- 1.0 is exactly
+    /// on the mark, over 1.0 ran long. `None` with nothing to take a median
+    /// of, never 0 or 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub median_actual_over_expected: Option<f64>,
 }
 
 impl CostRow {
@@ -634,10 +1230,42 @@ impl CostRow {
         }
     }
 
+    /// Count one run's estimate-vs-actual (`#168`). `estimate` is the run's
+    /// own `original_estimate`; `terminal_wall_seconds` is its wall time
+    /// only when the run is terminal (`None` for one still going, which has
+    /// no actual yet). A run with no estimate touches neither counter --
+    /// see the fields' own doc comments for why.
+    pub fn add_estimate(&mut self, estimate: Option<&crate::task::Estimate>, terminal_wall_seconds: Option<u64>) {
+        let Some(estimate) = estimate else { return };
+        self.estimated_runs += 1;
+        if let Some(wall) = terminal_wall_seconds {
+            if wall >= estimate.time.low && wall <= estimate.time.high {
+                self.within_range += 1;
+            }
+        }
+    }
+
     /// Runs whose cost is fully in `cost_usd`.
     pub fn runs_costed(&self) -> u32 {
         self.runs - self.runs_unknown - self.runs_cost_unknown
     }
+}
+
+/// What `Engine::spend` reads (#164): runs that started in `[from, to)`
+/// (`from` defaults to thirty days before `to`, `to` to now), narrowed to
+/// `scope`'s own subtree when given, summed per `group_by`. Plain serde
+/// data -- the same shape whether it comes off the wire (`Request::Costs`)
+/// or is built in-process (`cost_week`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpendQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub group_by: CostGroupBy,
 }
 
 /// `factory cost`'s and `GET /api/costs`' answer.
@@ -672,6 +1300,22 @@ impl CostReport {
 pub struct TaskUsage {
     pub task_id: String,
     pub total: CostRow,
+    /// Every run's snapshotted original estimate, summed range by range --
+    /// what `time_comparison` and `cost_comparison` compare the summed
+    /// actuals with. `None` when a run has none; `cost` is `None` when a run
+    /// has no cost range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_estimate: Option<crate::task::Estimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_wall_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_active_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_comparison: Option<EstimateComparison<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_comparison: Option<EstimateComparison<f64>>,
     /// Newest first, like `task.runs`.
     pub runs: Vec<RunUsageEntry>,
 }
@@ -683,6 +1327,14 @@ pub struct RunUsageEntry {
     pub status: crate::run::RunStatus,
     /// Wall-clock seconds from start to end (or to now, while running).
     pub wall_seconds: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_estimate: Option<crate::task::Estimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub re_estimate: Option<ReEstimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_comparison: Option<EstimateComparison<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_comparison: Option<EstimateComparison<f64>>,
     pub usage: RunUsage,
 }
 
@@ -705,8 +1357,8 @@ fn measured(run: &crate::run::Run) -> Option<&RunUsage> {
     run.usage.as_ref().filter(|u| u.is_known() && !u.partial)
 }
 
-/// `tokens_per_run` and `unit_cost` over the runs that ended in
-/// `(to - days, to]`. `None` for any other id.
+/// `tokens_per_run`, `unit_cost` and `estimate_accuracy` (`#168`) over the
+/// runs that ended in `(to - days, to]`. `None` for any other id.
 ///
 /// * `tokens_per_run`: the mean of every token type summed, over finished
 ///   runs whose usage was fully measured.
@@ -714,10 +1366,18 @@ fn measured(run: &crate::run::Run) -> Option<&RunUsage> {
 ///   included, since scrap is part of what a finished unit costs -- over
 ///   how many of them ended `done`. Only runs with a measured cost are in
 ///   either side of the division.
+/// * `estimate_accuracy`: over finished runs that carry an
+///   `original_estimate` -- the estimate the run was dispatched with,
+///   whatever ended it -- the share whose terminal wall time
+///   (`ended_at - started_at`) fell within `[time.low, time.high]`. A run
+///   with no `original_estimate` (every run from before `#117`, or one
+///   whose task had none) is left out of the denominator, never scored as a
+///   miss.
 ///
-/// Runs whose usage is unknown are left out of both, never counted as
-/// zero; with none left there is no value, and the reason says how many
-/// finished runs there were.
+/// Runs whose usage is unknown are left out of the first two, never counted
+/// as zero; with none left there is no value, and the reason says how many
+/// finished runs there were. `estimate_accuracy` follows the same rule for
+/// runs with no estimate to compare against.
 pub fn usage_metric(id: &str, runs: &[crate::run::Run], to: DateTime<Utc>, days: i64) -> Option<UsageFigure> {
     let from = to - chrono::Duration::days(days);
     let finished: Vec<&crate::run::Run> = runs
@@ -770,6 +1430,26 @@ pub fn usage_metric(id: &str, runs: &[crate::run::Run], to: DateTime<Utc>, days:
             let rs: Vec<&crate::run::Run> = costed.iter().map(|(r, _)| *r).collect();
             Some(UsageFigure {
                 value: Some(spent / done as f64),
+                reason: None,
+                as_of: newest(&rs),
+            })
+        }
+        "estimate_accuracy" => {
+            let estimated: Vec<(&crate::run::Run, bool)> = finished
+                .iter()
+                .filter_map(|r| {
+                    let estimate = r.original_estimate.as_ref()?;
+                    let wall = (r.ended_at.unwrap_or(r.started_at) - r.started_at).num_seconds().max(0) as u64;
+                    Some((*r, wall >= estimate.time.low && wall <= estimate.time.high))
+                })
+                .collect();
+            if estimated.is_empty() {
+                return Some(none("an original estimate"));
+            }
+            let hits = estimated.iter().filter(|(_, within_range)| *within_range).count();
+            let rs: Vec<&crate::run::Run> = estimated.iter().map(|(r, _)| *r).collect();
+            Some(UsageFigure {
+                value: Some(hits as f64 / estimated.len() as f64),
                 reason: None,
                 as_of: newest(&rs),
             })
@@ -888,6 +1568,8 @@ mod tests {
         assert_eq!(u.pricing_sources, vec!["litellm@2026-09-01".to_string()]);
         assert_eq!(u.models, vec!["claude-opus-5".to_string()]);
         assert_eq!(u.sessions, 2);
+        assert_eq!(u.elapsed_seconds, Some(1800.0));
+        assert_eq!(u.active_seconds, None);
         assert_eq!(u.as_of_point, Some(SnapshotPoint::RunEnd));
     }
 
@@ -914,6 +1596,61 @@ mod tests {
         assert_eq!(u.tokens.input, Some(30));
         assert_eq!(u.tokens.total(), Some(37));
         assert_eq!(u.cost_usd, Some(0.3));
+    }
+
+    // -- #178: a resumed session's baseline can fall back to the previous
+    // run's own `RunEnd` reading -----------------------------------------
+
+    #[test]
+    fn a_resumed_session_missing_from_the_dispatch_baseline_is_measured_from_the_prior_run_end() {
+        let snaps = vec![
+            snap(SnapshotPoint::Dispatch, 0, Some(usage(vec![]))),
+            snap(SnapshotPoint::RunEnd, 9, Some(usage(vec![session("a", Some(30), 7, Some(0.3))]))),
+        ];
+        // Without a prior, `run_usage` treats "a" as born in this run --
+        // the whole reading is credited to it (same as the test above).
+        let fresh = run_usage(&snaps);
+        assert_eq!(fresh.tokens.input, Some(30));
+
+        // With the previous run's own `RunEnd` reading for "a" as the
+        // prior, only the growth since then is this run's.
+        let prior = session("a", Some(10), 5, Some(0.1));
+        let resumed = run_usage_with_prior(&snaps, Some(("a", &prior)));
+        assert_eq!(resumed.tokens.input, Some(20));
+        assert_eq!(resumed.tokens.output, Some(2));
+        assert_eq!(resumed.tokens.total(), Some(22));
+        assert!((resumed.cost_usd.unwrap() - 0.2).abs() < 1e-9, "{:?}", resumed.cost_usd);
+    }
+
+    #[test]
+    fn a_dispatch_snapshot_that_already_saw_the_resumed_session_keeps_its_own_baseline() {
+        let snaps = vec![
+            snap(SnapshotPoint::Dispatch, 0, Some(usage(vec![session("a", Some(5), 1, Some(0.05))]))),
+            snap(SnapshotPoint::RunEnd, 9, Some(usage(vec![session("a", Some(30), 7, Some(0.3))]))),
+        ];
+        // Wildly different from the real baseline -- proof it is ignored
+        // once the run's own `Dispatch` snapshot already answered for "a".
+        let prior = session("a", Some(1000), 1000, Some(1000.0));
+        let u = run_usage_with_prior(&snaps, Some(("a", &prior)));
+        assert_eq!(u.tokens.input, Some(25), "30 - 5, the run's own baseline, not 30 - 1000");
+    }
+
+    #[test]
+    fn newest_session_id_for_adapter_matches_by_adapter_and_prefers_the_newest_snapshot() {
+        let mut old_codex = session("old-codex", Some(1), 1, None);
+        old_codex.adapter = Some("codex".into());
+        let mut claude = session("the-claude-one", Some(1), 1, None);
+        claude.adapter = Some("claude-code".into());
+        let mut new_codex = session("new-codex", Some(1), 1, None);
+        new_codex.adapter = Some("codex".into());
+        let snaps = vec![
+            snap(SnapshotPoint::Dispatch, 0, Some(usage(vec![old_codex]))),
+            snap(SnapshotPoint::TurnEnded, 5, Some(usage(vec![claude]))),
+            snap(SnapshotPoint::RunEnd, 9, Some(usage(vec![new_codex]))),
+        ];
+        assert_eq!(newest_session_id_for_adapter(&snaps, "codex"), Some("new-codex".into()));
+        assert_eq!(newest_session_id_for_adapter(&snaps, "claude-code"), Some("the-claude-one".into()));
+        assert_eq!(newest_session_id_for_adapter(&snaps, "pi"), None, "never seen running as pi");
     }
 
     #[test]
@@ -998,6 +1735,21 @@ mod tests {
         assert_eq!(row.tokens.input, 10);
     }
 
+    #[test]
+    fn add_estimate_counts_only_runs_with_one_and_only_terminal_ones_can_be_within_range() {
+        let estimate = |low: u64, high: u64| crate::task::Estimate {
+            time: crate::task::TimeEstimateRange { low, expected: (low + high) / 2, high },
+            cost: None,
+        };
+        let mut row = CostRow::new("t1", None);
+        row.add_estimate(Some(&estimate(0, 100)), Some(50)); // within
+        row.add_estimate(Some(&estimate(0, 10)), Some(50)); // outside
+        row.add_estimate(Some(&estimate(0, 100)), None); // still running: counted, not scored
+        row.add_estimate(None, Some(50)); // no estimate at all: not counted either way
+        assert_eq!(row.estimated_runs, 3);
+        assert_eq!(row.within_range, 1);
+    }
+
     fn finished_run(id: &str, status: crate::run::RunStatus, ended_min: i64, usage: Option<RunUsage>) -> crate::run::Run {
         let mut run: crate::run::Run = serde_json::from_value(serde_json::json!({
             "id": id, "task_id": "t", "attempt": 1, "status": status.as_str(), "trigger": "manual",
@@ -1045,12 +1797,423 @@ mod tests {
         assert!(empty.reason.unwrap().contains("no run finished"));
     }
 
+    /// `finished_run`'s own run, given an `original_estimate` -- `#168`'s
+    /// `estimate_accuracy` reads it straight off the run, never the task.
+    fn estimated(run: crate::run::Run, low: u64, high: u64) -> crate::run::Run {
+        let mut run = run;
+        run.original_estimate =
+            Some(crate::task::Estimate { time: crate::task::TimeEstimateRange { low, expected: (low + high) / 2, high }, cost: None });
+        run
+    }
+
+    #[test]
+    fn estimate_accuracy_is_the_share_of_estimated_runs_inside_their_own_range() {
+        use crate::run::RunStatus::{Done, Failed};
+        // Every `finished_run` here has a 10-minute (600s) wall time.
+        let runs = vec![
+            estimated(finished_run("a", Done, 0, None), 0, 700), // within
+            estimated(finished_run("b", Done, 1, None), 0, 100), // outside -- too slow
+            // A failed run still counts: it ended, and the estimate was for
+            // wall time, not success.
+            estimated(finished_run("c", Failed, 2, None), 500, 700), // within
+            finished_run("d", Done, 3, None),                        // no estimate at all -- excluded
+        ];
+        let figure = usage_metric("estimate_accuracy", &runs, at(10), 28).unwrap();
+        assert_eq!(figure.value, Some(2.0 / 3.0));
+        assert_eq!(figure.as_of, Some(at(2)), "the newest estimated run behind the value, not run d");
+    }
+
+    #[test]
+    fn estimate_accuracy_with_no_estimated_runs_is_unavailable_not_zero() {
+        let runs = vec![finished_run("a", crate::run::RunStatus::Done, 0, None)];
+        let figure = usage_metric("estimate_accuracy", &runs, at(10), 28).unwrap();
+        assert_eq!(figure.value, None);
+        assert!(figure.reason.as_deref().unwrap_or_default().contains("an original estimate"));
+
+        let empty = usage_metric("estimate_accuracy", &[], at(10), 28).unwrap();
+        assert!(empty.reason.unwrap().contains("no run finished"));
+    }
+
     #[test]
     fn group_by_round_trips() {
-        for g in [CostGroupBy::Task, CostGroupBy::Issue, CostGroupBy::Scope, CostGroupBy::Agent] {
+        for g in [
+            CostGroupBy::Task,
+            CostGroupBy::Issue,
+            CostGroupBy::Scope,
+            CostGroupBy::Agent,
+            CostGroupBy::Provider,
+            CostGroupBy::Workflow,
+        ] {
             assert_eq!(g.as_str().parse::<CostGroupBy>().unwrap(), g);
             assert_eq!(serde_json::to_value(g).unwrap(), serde_json::json!(g.as_str()));
         }
-        assert!("provider".parse::<CostGroupBy>().is_err());
+        assert!("bogus".parse::<CostGroupBy>().is_err());
+    }
+
+    #[test]
+    fn a_cost_row_from_before_168_still_deserialises_with_nothing_estimated() {
+        let json = serde_json::json!({
+            "key": "t1", "runs": 2, "runs_unknown": 0, "runs_partial": 0,
+            "tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+            "runs_tokens_incomplete": 0, "cost_usd": 1.5, "runs_cost_unknown": 0,
+        });
+        let row: CostRow = serde_json::from_value(json).unwrap();
+        assert_eq!(row.estimated_runs, 0);
+        assert_eq!(row.within_range, 0);
+        assert_eq!(row.median_actual_over_expected, None);
+    }
+
+    fn plan_run(id: &str, ended: Option<i64>, provider: Option<&str>) -> crate::run::Run {
+        let mut run: crate::run::Run = serde_json::from_value(serde_json::json!({
+            "id": id, "task_id": id, "attempt": 1, "status": if ended.is_some() { "done" } else { "running" },
+            "trigger": "manual", "agent": "builder", "runtime": "herdr", "started_at": at(-1),
+            "ended_at": ended.map(at)
+        }))
+        .unwrap();
+        run.provider_account = provider.map(str::to_string);
+        run
+    }
+
+    fn plan_snapshot(
+        run: &str,
+        minute: i64,
+        tokens: u64,
+        window: Option<(u32, &str, f64)>,
+    ) -> UsageSnapshot {
+        let rate_limit = window.map(|(window_minutes, resets_at, used_percent)| RateLimit {
+            provider: Some("anthropic".into()),
+            plan_type: Some("max".into()),
+            attribution_quality: Some("confirmed".into()),
+            windows: vec![RateLimitWindow {
+                window_minutes: Some(window_minutes),
+                used_percent: Some(used_percent),
+                resets_at: Some(resets_at.into()),
+            }],
+        });
+        UsageSnapshot {
+            run_id: run.into(),
+            task_id: run.into(),
+            point: if minute == 0 { SnapshotPoint::Dispatch } else { SnapshotPoint::TurnEnded },
+            at: at(minute),
+            runtime: "herdr".into(),
+            usage: Some(SessionUsage {
+                schema: USAGE_SCHEMA,
+                handle: None,
+                sampled_at: Some(at(minute)),
+                sessions: vec![HarnessUsage {
+                    session_id: run.into(),
+                    adapter: Some("claude-code".into()),
+                    model: None,
+                    tokens: TokenCounts {
+                        input: Some(tokens),
+                        output: Some(0),
+                        cache_read: Some(0),
+                        cache_write: Some(0),
+                    },
+                    cost: UsageCost::default(),
+                    elapsed_seconds: None,
+                    active_seconds: None,
+                    subagents: Vec::new(),
+                    rate_limit,
+                    unavailable: BTreeMap::new(),
+                }],
+            }),
+            unknown: None,
+        }
+    }
+
+    #[test]
+    fn overlapping_runs_split_positive_window_growth_by_tokens_and_keep_resets_apart() {
+        let runs = vec![plan_run("r1", None, Some("claude-max")), plan_run("r2", Some(10), Some("claude-max"))];
+        let snapshots = BTreeMap::from([
+            (
+                "r1".into(),
+                vec![
+                    plan_snapshot("r1", 0, 0, Some((300, "reset-a", 10.0))),
+                    plan_snapshot("r1", 10, 100, Some((300, "reset-a", 14.0))),
+                    plan_snapshot("r1", 11, 100, Some((10_080, "reset-b", 20.0))),
+                    plan_snapshot("r1", 20, 200, Some((10_080, "reset-b", 21.0))),
+                ],
+            ),
+            (
+                "r2".into(),
+                vec![plan_snapshot("r2", 0, 0, None), plan_snapshot("r2", 10, 300, None)],
+            ),
+        ]);
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        let r1 = &allocation.shares["r1"];
+        let r2 = &allocation.shares["r2"];
+        assert!((r1.iter().find(|share| share.resets_at == "reset-a").unwrap().used_percent - 1.0).abs() < 1e-9);
+        assert!((r2[0].used_percent - 3.0).abs() < 1e-9);
+        assert_eq!(r2[0].attribution, PlanShareAttribution::Apportioned);
+        let reset = r1.iter().find(|share| share.resets_at == "reset-b").unwrap();
+        assert!((reset.used_percent - 1.0).abs() < 1e-9);
+        assert_eq!(reset.attribution, PlanShareAttribution::Direct);
+    }
+
+    #[test]
+    fn measured_zero_consumers_do_not_discard_positive_allocation() {
+        let mut newly_started = plan_run("new", None, Some("claude-max"));
+        newly_started.started_at = at(5);
+        let mut new_baseline = plan_snapshot("new", 5, 0, None);
+        new_baseline.point = SnapshotPoint::Dispatch;
+        let runs = vec![
+            plan_run("consumer", None, Some("claude-max")),
+            plan_run("idle", None, Some("claude-max")),
+            newly_started,
+        ];
+        let snapshots = BTreeMap::from([
+            ("consumer".into(), vec![
+                plan_snapshot("consumer", 0, 0, Some((300, "reset-a", 10.0))),
+                plan_snapshot("consumer", 10, 100, Some((300, "reset-a", 14.0))),
+            ]),
+            ("idle".into(), vec![plan_snapshot("idle", 0, 0, None), plan_snapshot("idle", 10, 0, None)]),
+            ("new".into(), vec![new_baseline, plan_snapshot("new", 10, 0, None)]),
+        ]);
+
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        let shares = &allocation.shares["consumer"];
+        assert_eq!(shares.len(), 1);
+        assert!((shares[0].used_percent - 4.0).abs() < 1e-9);
+        assert_eq!(shares[0].attribution, PlanShareAttribution::Direct);
+        assert!(!allocation.unknown.contains_key("consumer"));
+        assert!(!allocation.unknown.contains_key("idle"));
+        assert!(!allocation.unknown.contains_key("new"));
+        let allocated: f64 = allocation.shares.values().flatten().map(|share| share.used_percent).sum();
+        assert!((allocated - 4.0).abs() < 1e-9, "the observed provider delta is preserved");
+    }
+
+    #[test]
+    fn staggered_candidate_readings_never_weight_a_later_provider_interval() {
+        let runs = vec![
+            plan_run("observer", None, Some("claude-max")),
+            plan_run("staggered", None, Some("claude-max")),
+        ];
+        let snapshots = BTreeMap::from([
+            ("observer".into(), vec![
+                plan_snapshot("observer", 5, 0, Some((300, "reset-a", 10.0))),
+                plan_snapshot("observer", 10, 50, Some((300, "reset-a", 14.0))),
+            ]),
+            ("staggered".into(), vec![
+                plan_snapshot("staggered", 0, 0, None),
+                // These tokens were consumed before the provider interval
+                // began at t5. The t10 reading must not make them a weight
+                // for the t5--t10 provider delta.
+                plan_snapshot("staggered", 4, 100, None),
+                plan_snapshot("staggered", 10, 100, None),
+            ]),
+        ]);
+
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        assert!(allocation.shares.is_empty(), "unaligned token growth is never allocated");
+        for run in ["observer", "staggered"] {
+            let gap = &allocation.unknown[run][0];
+            assert_eq!(gap.from, Some(at(5)));
+            assert_eq!(gap.to, Some(at(10)));
+            assert!(gap.reason.contains("no measured token increment"));
+        }
+    }
+
+    #[test]
+    fn a_measured_zero_provider_delta_resolves_active_consumers() {
+        let run = plan_run("idle", None, Some("claude-max"));
+        let snapshots = BTreeMap::from([("idle".into(), vec![
+            plan_snapshot("idle", 0, 0, Some((300, "reset-a", 10.0))),
+            plan_snapshot("idle", 10, 100, Some((300, "reset-a", 10.0))),
+        ])]);
+
+        let allocation = allocate_plan_share(&[run], &snapshots);
+        assert!(allocation.shares.is_empty(), "zero provider growth invents no share");
+        assert!(allocation.unknown.is_empty(), "two equal readings are measured zero evidence");
+
+        let missing = allocate_plan_share(
+            &[plan_run("missing", None, Some("claude-max"))],
+            &BTreeMap::from([("missing".into(), vec![
+                plan_snapshot("missing", 10, 100, Some((300, "reset-a", 10.0))),
+            ])]),
+        );
+        assert!(missing.unknown["missing"][0].reason.contains("no earlier observation"));
+    }
+
+    #[test]
+    fn plan_share_keeps_missing_bindings_and_all_zero_weights_unknown() {
+        let runs = vec![plan_run("unbound", None, None), plan_run("zero", None, Some("claude-max"))];
+        let snapshots = BTreeMap::from([(
+            "zero".into(),
+            vec![
+                plan_snapshot("zero", 0, 0, Some((300, "reset-a", 1.0))),
+                plan_snapshot("zero", 10, 0, Some((300, "reset-a", 2.0))),
+            ],
+        )]);
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        assert!(allocation.unknown["unbound"].iter().any(|gap| gap.reason.contains("binding")));
+        assert!(allocation.unknown["zero"].iter().any(|gap| gap.reason.contains("token increment")));
+        assert!(allocation.shares.is_empty());
+    }
+
+    #[test]
+    fn a_later_successful_interval_does_not_erase_an_earlier_gap() {
+        let runs = vec![
+            plan_run("consumer", None, Some("claude-max")),
+            plan_run("missing", Some(10), Some("claude-max")),
+        ];
+        let snapshots = BTreeMap::from([("consumer".into(), vec![
+            plan_snapshot("consumer", 0, 0, Some((300, "reset-a", 10.0))),
+            plan_snapshot("consumer", 10, 100, Some((300, "reset-a", 12.0))),
+            plan_snapshot("consumer", 20, 200, Some((300, "reset-a", 14.0))),
+        ])]);
+
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        assert!((allocation.shares["consumer"][0].used_percent - 2.0).abs() < 1e-9);
+        let gaps = &allocation.unknown["consumer"];
+        assert_eq!(gaps.len(), 1, "the first interval remains unresolved");
+        assert_eq!(gaps[0].from, Some(at(0)));
+        assert_eq!(gaps[0].to, Some(at(10)));
+        assert_eq!(gaps[0].window_minutes, Some(300));
+    }
+
+    /// `plan_snapshot`, asked for at `requested` but sampled by the
+    /// runtime at `sampled`.
+    fn sampled_snapshot(
+        run: &str,
+        requested: i64,
+        sampled: i64,
+        tokens: u64,
+        window: Option<(u32, &str, f64)>,
+    ) -> UsageSnapshot {
+        let mut snapshot = plan_snapshot(run, sampled, tokens, window);
+        snapshot.at = at(requested);
+        snapshot
+    }
+
+    #[test]
+    fn a_delayed_answer_is_attributed_over_its_sample_interval_not_its_request_interval() {
+        // The observer's runtime was asked at t5 and t10 but sampled at t2
+        // and t6. `late` started at t7 -- inside the request interval, after
+        // the sample interval -- so none of the t2..t6 growth is its.
+        let mut late = plan_run("late", None, Some("claude-max"));
+        late.started_at = at(7);
+        let mut late_baseline = plan_snapshot("late", 7, 0, None);
+        late_baseline.point = SnapshotPoint::Dispatch;
+        let runs = vec![plan_run("observer", None, Some("claude-max")), late];
+        let snapshots = BTreeMap::from([
+            ("observer".into(), vec![
+                sampled_snapshot("observer", 5, 2, 0, Some((300, "reset-a", 10.0))),
+                sampled_snapshot("observer", 10, 6, 100, Some((300, "reset-a", 14.0))),
+            ]),
+            ("late".into(), vec![late_baseline, plan_snapshot("late", 10, 50, None)]),
+        ]);
+
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        let share = &allocation.shares["observer"][0];
+        assert!((share.used_percent - 4.0).abs() < 1e-9, "{share:?}");
+        assert_eq!(share.attribution, PlanShareAttribution::Direct);
+        assert_eq!(share.as_of, at(6), "as of the sample, not the request");
+        assert!(!allocation.shares.contains_key("late"));
+        assert_eq!(allocation.intervals.len(), 1);
+        let interval = &allocation.intervals[0];
+        assert_eq!((interval.from, interval.to), (at(2), at(6)));
+        assert_eq!(interval.consumers, vec!["observer".to_string()]);
+        assert_eq!(interval.attribution, Some(PlanShareAttribution::Direct));
+    }
+
+    #[test]
+    fn a_cached_answer_served_twice_is_one_observation_not_an_interval() {
+        // Asked at t5 and t10, the runtime answered both times with the
+        // reading it sampled at t2: there is no second observation to take
+        // a difference from, so nothing is allocated and the gap is named.
+        let runs = vec![plan_run("cached", None, Some("claude-max"))];
+        let snapshots = BTreeMap::from([("cached".into(), vec![
+            sampled_snapshot("cached", 5, 2, 0, Some((300, "reset-a", 10.0))),
+            sampled_snapshot("cached", 10, 2, 0, Some((300, "reset-a", 10.0))),
+        ])]);
+
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        assert!(allocation.shares.is_empty());
+        assert!(allocation.intervals.is_empty());
+        assert_eq!(allocation.unknown["cached"].len(), 1);
+        assert!(allocation.unknown["cached"][0].reason.contains("no earlier observation"));
+    }
+
+    fn allocated(allocation: &PlanShareAllocation) -> f64 {
+        allocation.shares.values().flatten().map(|share| share.used_percent).sum()
+    }
+
+    #[test]
+    fn two_runs_sampling_the_window_in_one_instant_are_one_observation() {
+        // a@0 10%, a@5 12%, b@5 12%: the two t5 readings agree, so the
+        // 2-point growth is allocated once and nothing is dropped.
+        let runs = vec![plan_run("a", None, Some("claude-max")), plan_run("b", None, Some("claude-max"))];
+        let snapshots = BTreeMap::from([
+            ("a".into(), vec![
+                plan_snapshot("a", 0, 0, Some((300, "reset-a", 10.0))),
+                plan_snapshot("a", 5, 100, Some((300, "reset-a", 12.0))),
+            ]),
+            ("b".into(), vec![
+                plan_snapshot("b", 0, 0, None),
+                plan_snapshot("b", 5, 100, Some((300, "reset-a", 12.0))),
+            ]),
+        ]);
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        assert!((allocated(&allocation) - 2.0).abs() < 1e-9, "{allocation:?}");
+        assert_eq!(allocation.intervals.len(), 1);
+        assert_eq!(allocation.intervals[0].attribution, Some(PlanShareAttribution::Apportioned));
+        assert!(allocation.unknown.is_empty(), "agreeing readings are no gap: {:?}", allocation.unknown);
+    }
+
+    #[test]
+    fn simultaneous_readings_that_disagree_are_named_and_never_drop_or_double_growth() {
+        // a@0 10, then a@5 13 and b@5 12 in the same instant, then a@10 15.
+        // Paired naively the t5 tie either drops growth or charges 1 point
+        // twice. The highest stands for t5: 3 then 2, 5 in all.
+        let runs = vec![plan_run("a", None, Some("claude-max")), plan_run("b", None, Some("claude-max"))];
+        let snapshots = BTreeMap::from([
+            ("a".into(), vec![
+                plan_snapshot("a", 0, 0, Some((300, "reset-a", 10.0))),
+                plan_snapshot("a", 5, 100, Some((300, "reset-a", 13.0))),
+                plan_snapshot("a", 10, 200, Some((300, "reset-a", 15.0))),
+            ]),
+            ("b".into(), vec![
+                plan_snapshot("b", 0, 0, None),
+                plan_snapshot("b", 5, 0, Some((300, "reset-a", 12.0))),
+                plan_snapshot("b", 10, 0, None),
+            ]),
+        ]);
+        let allocation = allocate_plan_share(&runs, &snapshots);
+        assert!((allocated(&allocation) - 5.0).abs() < 1e-9, "the observed 10 -> 15, no more: {allocation:?}");
+        let deltas: Vec<f64> = allocation.intervals.iter().map(|interval| interval.delta).collect();
+        assert_eq!(deltas, vec![3.0, 2.0]);
+        for run in ["a", "b"] {
+            let gap = allocation.unknown[run].iter().find(|gap| gap.reason == PROVIDER_WINDOW_TIE).expect(run);
+            assert_eq!((gap.from, gap.to), (Some(at(5)), Some(at(5))));
+        }
+    }
+
+    #[test]
+    fn with_no_sample_time_the_request_time_stands_in() {
+        let mut snapshot = plan_snapshot("r", 3, 0, None);
+        snapshot.usage.as_mut().unwrap().sampled_at = None;
+        assert_eq!(observed_at(&snapshot), at(3));
+        let delayed = sampled_snapshot("r", 9, 4, 0, None);
+        assert_eq!(observed_at(&delayed), at(4));
+    }
+
+    #[test]
+    fn a_known_window_is_kept_beside_an_unknown_window() {
+        let run = plan_run("consumer", None, Some("claude-max"));
+        let mut first = plan_snapshot("consumer", 0, 0, Some((10_080, "weekly", 20.0)));
+        first.usage.as_mut().unwrap().sessions[0].rate_limit.as_mut().unwrap().windows.push(RateLimitWindow {
+            window_minutes: Some(300), used_percent: Some(10.0), resets_at: Some("five-hour".into()),
+        });
+        let snapshots = BTreeMap::from([("consumer".into(), vec![
+            first,
+            plan_snapshot("consumer", 10, 100, Some((10_080, "weekly", 21.0))),
+        ])]);
+
+        let allocation = allocate_plan_share(&[run], &snapshots);
+        assert_eq!(allocation.shares["consumer"][0].window_minutes, 10_080);
+        assert!((allocation.shares["consumer"][0].used_percent - 1.0).abs() < 1e-9);
+        assert_eq!(allocation.unknown["consumer"][0].window_minutes, Some(300));
+        assert!(allocation.unknown["consumer"][0].reason.contains("no earlier observation"));
     }
 }

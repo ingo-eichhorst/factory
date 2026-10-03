@@ -15,7 +15,9 @@ import { MISSING, fmtBytes } from "./infra-model.js";
 export { MISSING, fmtBytes };
 
 /// What the root config needs for the page to have anything to show.
-/// Mirrors the issue's own example, less `encrypt_to`, which v1 refuses.
+/// Mirrors the issue's own example, less `encrypt_to`: it stays optional
+/// and off by default, and the hero explains it once a backup is
+/// configured, so the quickstart snippet stays minimal (see the README).
 export const CONFIG_SNIPPET = `# root .factory/config.yaml
 infrastructure:
   backup:
@@ -119,6 +121,26 @@ export function scheduleText(config) {
   return `${s.cron} (${s.timezone || "UTC"})`;
 }
 
+/// `#156`: the verification drill's own next slot, next to the backup's
+/// own "Next backup". `report.verify_skipped` is a plain fact from the
+/// daemon (the newest snapshot is currently encrypted, say) -- never
+/// recomputed here, only appended.
+export function nextDrillText(report) {
+  const config = report && report.config;
+  if (!config || !config.verify_schedule) return "no drill scheduled";
+  const base = report.next_verify ? `${fmtIn(report.now, report.next_verify)} · ${fmtWhen(report.next_verify)}` : "no drill scheduled";
+  return report.verify_skipped ? `${base} (skipped: ${report.verify_skipped})` : base;
+}
+
+/// The level the "Next drill" fact is drawn at: a warning when there is
+/// none configured, or when the one that is would currently be skipped.
+export function nextDrillLevel(report) {
+  const config = report && report.config;
+  if (!config || !config.verify_schedule) return "warn";
+  if (report.verify_skipped) return "warn";
+  return null;
+}
+
 export function keepText(config) {
   const k = config && config.keep;
   if (!k) return MISSING;
@@ -141,6 +163,22 @@ export function verifiedCell(verified) {
     : { level: "bad", text: `FAILED ${fmtWhen(verified.at)}` };
 }
 
+/// The CLI a person needs to verify or restore an encrypted snapshot by
+/// name (`#152`) -- the same hint the daemon's own refusal names.
+export function identityHint(name) {
+  return `encrypted: run \`factory backup verify ${name} --identity <file>\``;
+}
+
+/// Whether a history row's Verify button may be clicked, and why not when it
+/// may not: an encrypted snapshot decrypts only with an identity the CLI
+/// supplies, never this page (`#152`).
+export function rowVerifyState(snapshot) {
+  if (snapshot && snapshot.encrypted) {
+    return { enabled: false, title: identityHint(snapshot.name) };
+  }
+  return { enabled: true, title: "" };
+}
+
 /// The hero's "last verified" line.
 export function lastVerifiedText(report) {
   const v = report && report.last_verified;
@@ -157,15 +195,23 @@ export function includeCount(row) {
 }
 
 /// What the two buttons may do right now, and why not when they may not.
+/// The hero's Verify targets the newest snapshot, so an encrypted newest
+/// (`#152`) disables it with the CLI hint, the same as its row would be.
 export function actions(report) {
   if (!report || !report.config) {
     return { run: false, verify: false, why: "configure infrastructure.backup first" };
   }
   if (report.running) {
-    return { run: false, verify: false, why: "a backup or verification is running" };
+    return { run: false, verify: false, why: "a backup operation is running" };
   }
-  const any = Array.isArray(report.snapshots) && report.snapshots.length > 0;
-  return { run: true, verify: any, why: any ? "" : "there is no snapshot to verify yet" };
+  const newest = Array.isArray(report.snapshots) ? report.snapshots[0] : null;
+  if (!newest) {
+    return { run: true, verify: false, why: "there is no snapshot to verify yet" };
+  }
+  if (newest.encrypted) {
+    return { run: true, verify: false, why: identityHint(newest.name) };
+  }
+  return { run: true, verify: true, why: "" };
 }
 
 /// A verification's steps, each with the colour its status is drawn in.
@@ -190,4 +236,80 @@ export function backupFailure(error) {
 /// The events that change what the page shows.
 export function isBackupEvent(ev) {
   return !!ev && typeof ev.type === "string" && ev.type.startsWith("backup_");
+}
+
+// -------------------------------------------------------------------- #155
+//
+// Scope source code is backed up by pushing it, not by this snapshot, so
+// these read `report.code`/`report.time_machine` whether or not a backup is
+// even configured -- and never claim more than the daemon actually asked
+// `git`/`tmutil` for. A state this page does not recognise (an older or a
+// newer daemon) reads as unknown, the same as `inspection_failed`: never
+// drawn as a problem, never drawn as fine.
+
+/// One row per scope named in a `RepositoryFact` -- two scopes sharing a
+/// repository share the same state and remote, but the table reads by
+/// scope, the way `factory backup status` does.
+export function codeRows(report) {
+  const facts = (report && report.code) || [];
+  const rows = [];
+  for (const f of facts) {
+    const cell = codeCell(f);
+    const scopes = Array.isArray(f.scopes) && f.scopes.length ? f.scopes : [MISSING];
+    for (const scope of scopes) {
+      rows.push({ scope, remote: (f.remote_url) || MISSING, ...cell });
+    }
+  }
+  return rows;
+}
+
+/// The state cell for one repository fact: level (`ok`/`warn`/`none`) and
+/// the words a person reads it as. `ahead` is always "as of last fetch" --
+/// this never fetches, so it never claims to know what a fetch would find.
+function codeCell(fact) {
+  const state = (fact && fact.state) || {};
+  switch (state.state) {
+    case "tracked": {
+      const ahead = state.ahead || 0;
+      return ahead > 0
+        ? { level: "warn", text: `${ahead} unpushed (as of last fetch)` }
+        : { level: "ok", text: "up to date (as of last fetch)" };
+    }
+    case "no_remote":
+      return { level: "warn", text: "no remote configured" };
+    case "no_upstream":
+      return { level: "warn", text: "no upstream branch" };
+    case "detached_head":
+      return { level: "none", text: "detached HEAD" };
+    case "no_commits":
+      return { level: "none", text: "no commits yet" };
+    case "not_a_repository":
+      return { level: "none", text: "not a git repository" };
+    case "no_directory":
+      return { level: "none", text: "no such directory" };
+    case "inspection_failed":
+      return { level: "none", text: `unknown -- ${state.reason || "the probe failed"}` };
+    default:
+      return { level: "none", text: "unknown" };
+  }
+}
+
+/// The Time Machine line: level and words, distinguishing observed
+/// (`configured`/`not_configured`) from unknown (`unavailable`, or no
+/// answer at all) from `unsupported` (not this platform -- never a warning).
+export function timeMachineText(report) {
+  const tm = report && report.time_machine;
+  if (!tm) return { level: "none", text: "unknown" };
+  switch (tm.state) {
+    case "configured":
+      return { level: "ok", text: `configured -- ${(tm.destinations || []).join(", ") || MISSING}` };
+    case "not_configured":
+      return { level: "warn", text: "not configured" };
+    case "unavailable":
+      return { level: "none", text: `unknown -- ${tm.reason || "could not be read"}` };
+    case "unsupported":
+      return { level: "none", text: "not supported on this platform" };
+    default:
+      return { level: "none", text: "unknown" };
+  }
 }

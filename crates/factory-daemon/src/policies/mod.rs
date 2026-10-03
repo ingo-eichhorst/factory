@@ -10,6 +10,7 @@
 //! The one piece of state this module owns is the attestations themselves,
 //! kept in `PolicyStore` (`store.rs`), append-only.
 
+mod clock;
 mod store;
 pub use store::PolicyStore;
 
@@ -21,6 +22,7 @@ use factory_core::error::{FactoryError, Result};
 use factory_core::policy::{self, Attestation, ControlRef, Withdrawal};
 use factory_core::policy_export;
 use factory_core::protocol::{CatalogueSummary, CredentialRow, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy, WorkflowEnforcement, WorkflowEnforcementFinding};
+use factory_core::reporting_clock::{self, ClockDeadlineState, ClockMark};
 use factory_core::role::Roles;
 use factory_core::task::{NewTask, Task, TaskFilter};
 use factory_core::workflow::WorkflowDefinition;
@@ -80,9 +82,68 @@ fn needs_daemon_facts(applied: &[policy::Applied]) -> bool {
         .any(|check| matches!(check, policy::Check::Daemon { .. }))
 }
 
+/// Whether any check among `applied` is `daemon` naming one of the three
+/// `backup_*` facts (`#154`) -- gates `Engine::backup_fact`, the one part of
+/// this module's evidence gathering that reads the destination and the
+/// backup store, behind an actual need for it. Distinct from
+/// `needs_daemon_facts`: a catalogue asking only `power_assertion` must
+/// never pay for it.
+fn needs_backup_facts(applied: &[policy::Applied]) -> bool {
+    applied.iter().flat_map(|a| &a.evidence).any(|check| {
+        matches!(
+            check,
+            policy::Check::Daemon { fact } if matches!(fact.as_str(), "backup_recent" | "backup_offsite" | "backup_verified")
+        )
+    })
+}
+
 fn needs_dependencies_facts(applied: &[policy::Applied]) -> bool {
     applied.iter().flat_map(|a| &a.evidence)
         .any(|check| matches!(check, policy::Check::Dependencies { .. }))
+}
+
+/// Whether any check among `applied` is `attested` -- gates
+/// `Engine::attested_runs`, the one part of this module's evidence
+/// gathering that reads finished runs and their `StepAttestation`s (`#158`).
+fn needs_attested_facts(applied: &[policy::Applied]) -> bool {
+    applied
+        .iter()
+        .flat_map(|a| &a.evidence)
+        .any(|check| matches!(check, policy::Check::Attested { .. }))
+}
+
+/// Every category an `attested` check among `applied`'s controls names, and
+/// the widest of those controls' own effective `max_age`
+/// (`Applied::max_age`, already folded and tightened) -- what
+/// `Engine::attested_runs`'s window covers, `now - 2*that`, so
+/// `direct_status`'s own `2*W` stale lookback never reads short of what was
+/// fetched, however many `attested` checks the scope's controls carry, each
+/// with its own window. `Applied::max_age` is always `Some` on a control
+/// carrying an `attested` check -- `Check::own_max_age` always returns one
+/// for it -- so this never has to fall back to a default.
+fn attested_categories(
+    applied: &[policy::Applied],
+) -> (BTreeSet<String>, Option<factory_core::policy::Duration>) {
+    let mut categories = BTreeSet::new();
+    let mut widest: Option<factory_core::policy::Duration> = None;
+    for a in applied {
+        if !a
+            .evidence
+            .iter()
+            .any(|c| matches!(c, policy::Check::Attested { .. }))
+        {
+            continue;
+        }
+        for check in &a.evidence {
+            if let policy::Check::Attested { category, .. } = check {
+                categories.insert(category.clone());
+            }
+        }
+        if let Some(w) = a.max_age {
+            widest = Some(widest.map_or(w, |cur| cur.max(w)));
+        }
+    }
+    (categories, widest)
 }
 
 /// Every agent Factory would actually dispatch in `scope` --
@@ -265,20 +326,19 @@ impl Engine {
     /// config snapshot -- the same for every scope a report evaluates
     /// (`Evidence::gates`' own reasoning), so this is resolved once, not per
     /// scope, and it is a plain sync read: no store, no filesystem walk,
-    /// just the config `Engine::infrastructure` already reads for
-    /// `DaemonFacts.interfaces`.
+    /// no call through `Engine::infrastructure` (which does both, for the
+    /// host and store facts `DaemonFacts` also carries). It shares
+    /// `crate::interfaces::interface_facts` with `infrastructure` instead --
+    /// the one derivation of what each configured interface actually binds
+    /// to (#193, phase 1, F8) -- so the two never drift apart.
     fn daemon_facts(&self) -> policy::DaemonFact {
         let snapshot = self.factory_snapshot();
         let daemon_config = &snapshot.config.daemon;
 
-        let http_binds: Vec<String> = daemon_config
-            .interfaces
-            .iter()
+        let http_binds: Vec<String> = crate::interfaces::interface_facts(&daemon_config.interfaces)
+            .into_iter()
             .filter(|i| i.kind == "http")
-            .map(|i| {
-                i.string("bind")
-                    .unwrap_or_else(|| crate::interfaces::http::DEFAULT_BIND.to_string())
-            })
+            .filter_map(|i| i.bind)
             .collect();
         // No `http` interface at all is vacuously loopback-only -- nothing
         // is exposed beyond loopback either way. A `bind` that does not
@@ -433,9 +493,12 @@ impl Engine {
     /// scope of their own, so a dataset named by two scopes' catalogues is
     /// still only walked once), the `daemon` fact (the same for every scope,
     /// resolved only when some scope's catalogue actually asks a `daemon`
-    /// question), and the credential inventory behind `secrets` (the one
-    /// part of this that touches the filesystem, gated the same way).
-    /// Shared by `policy_report` and `scenarios::Engine::scenarios_report`
+    /// question), the `backup_*` fact (`#154`, gated the same way but on its
+    /// own three names -- `needs_backup_facts` -- since it reads the
+    /// destination and the backup store, not just the config snapshot
+    /// `daemon_facts` does), and the credential inventory behind `secrets`
+    /// (the one part of this that touches the filesystem, gated the same
+    /// way). Shared by `policy_report` and `scenarios::Engine::scenarios_report`
     /// (`#100`), which calls this once for the baseline `Applied` sets and
     /// again for each scenario's own -- a scenario's overlay can name a
     /// `gate`/`daemon`/`secrets` check the baseline never did (an
@@ -444,7 +507,12 @@ impl Engine {
     pub(crate) async fn dataset_level_facts(
         &self,
         per_scope_applied: &[(&Scope, Vec<policy::Applied>)],
-    ) -> Result<(BTreeMap<String, policy::GateFact>, Option<policy::DaemonFact>, Vec<CredentialRow>)> {
+    ) -> Result<(
+        BTreeMap<String, policy::GateFact>,
+        Option<policy::DaemonFact>,
+        Vec<CredentialRow>,
+        Option<factory_core::backup::BackupFact>,
+    )> {
         let mut dataset_names: BTreeSet<String> = BTreeSet::new();
         for (_, applied) in per_scope_applied {
             dataset_names.extend(gate_dataset_names(applied));
@@ -459,7 +527,44 @@ impl Engine {
         } else {
             Vec::new()
         };
-        Ok((gates, daemon_fact, credential_rows))
+        let backup_fact = if per_scope_applied.iter().any(|(_, applied)| needs_backup_facts(applied)) {
+            Some(self.backup_fact(Utc::now()).await?)
+        } else {
+            None
+        };
+        Ok((gates, daemon_fact, credential_rows, backup_fact))
+    }
+
+    /// `#158`: `scope`'s own `attested` evidence, gathered only when
+    /// `applied` actually names the check -- `None` when it does not,
+    /// distinct from the empty `Vec` a scope with nothing attested yet
+    /// would carry. Exact scope, no ancestor roll-up -- the same rule
+    /// `task`/`workflow` checks already follow -- over
+    /// `now - 2*widest(applied)`, so `direct_status`'s own stale lookback
+    /// (`2*W`) always has enough history behind it, whichever `attested`
+    /// check on this scope needs the longest window.
+    async fn attested_evidence(
+        &self,
+        scope: &str,
+        applied: &[policy::Applied],
+    ) -> Result<Option<Vec<factory_core::conformance::AttestedRun>>> {
+        if !needs_attested_facts(applied) {
+            return Ok(None);
+        }
+        let (categories, widest) = attested_categories(applied);
+        let w = widest
+            .unwrap_or(factory_core::policy::Duration::from_hours(0))
+            .as_time_delta();
+        let now = Utc::now();
+        let window = factory_core::operations::Window {
+            from: now - (w + w),
+            to: now,
+        };
+        let scopes: BTreeSet<String> = std::iter::once(scope.to_string()).collect();
+        Ok(Some(
+            self.attested_runs(Some(&scopes), Some(&categories), window)
+                .await?,
+        ))
     }
 
     /// One scope's own `Evidence`, built from `applied` (its own applicable
@@ -481,6 +586,7 @@ impl Engine {
         gates: &BTreeMap<String, policy::GateFact>,
         daemon_fact: Option<policy::DaemonFact>,
         credential_rows: &[CredentialRow],
+        backup_fact: Option<factory_core::backup::BackupFact>,
     ) -> Result<policy::Evidence> {
         let ancestor_names: BTreeSet<&str> = snapshot
             .config
@@ -503,6 +609,7 @@ impl Engine {
         } else {
             None
         };
+        let attested = self.attested_evidence(&t.name, applied).await?;
         Ok(policy::Evidence {
             tags: tags.clone(),
             attestations: all_attestations
@@ -517,6 +624,8 @@ impl Engine {
             secrets,
             daemon: daemon_fact,
             dependencies,
+            backup: backup_fact,
+            attested,
         })
     }
 
@@ -551,7 +660,7 @@ impl Engine {
                         factory_core::workflow::WorkflowNodeKind::Gate => factory_core::control_plan::StepKind::Gate,
                         factory_core::workflow::WorkflowNodeKind::Review => factory_core::control_plan::StepKind::Review,
                         factory_core::workflow::WorkflowNodeKind::Approval => factory_core::control_plan::StepKind::Approval,
-                        factory_core::workflow::WorkflowNodeKind::Task => continue,
+                        factory_core::workflow::WorkflowNodeKind::Task | factory_core::workflow::WorkflowNodeKind::Expand => continue,
                     };
                     enforcement.push(WorkflowEnforcement {
                         workflow: definition.id.clone(),
@@ -621,10 +730,20 @@ impl Engine {
         // against its own, larger `applied` sets, so a policy fact is
         // gathered by exactly one function regardless of which report is
         // asking for it.
-        let (gates, daemon_fact, credential_rows) = self.dataset_level_facts(&per_scope_applied).await?;
+        let (gates, daemon_fact, credential_rows, backup_fact) = self.dataset_level_facts(&per_scope_applied).await?;
         for (t, applied) in &per_scope_applied {
             let evidence = self
-                .evidence_for_scope(&snapshot, t, applied, &tags, &all_attestations, &gates, daemon_fact, &credential_rows)
+                .evidence_for_scope(
+                    &snapshot,
+                    t,
+                    applied,
+                    &tags,
+                    &all_attestations,
+                    &gates,
+                    daemon_fact,
+                    &credential_rows,
+                    backup_fact.clone(),
+                )
                 .await?;
             findings.extend(policy::evidence_findings(&evidence, &t.name));
 
@@ -748,11 +867,17 @@ impl Engine {
             BTreeMap::new()
         };
         let daemon = needs_daemon_facts(&applied).then(|| self.daemon_facts());
+        let backup = if needs_backup_facts(&applied) {
+            Some(self.backup_fact(Utc::now()).await?)
+        } else {
+            None
+        };
         let dependencies = if needs_dependencies_facts(&applied) {
             Some(crate::dependencies::fact(&self.dependencies_report(&scope_obj.name).await?))
         } else {
             None
         };
+        let attested = self.attested_evidence(&scope_obj.name, &applied).await?;
         let evidence = policy::Evidence {
             tags,
             attestations: history.clone(),
@@ -763,6 +888,8 @@ impl Engine {
             secrets,
             daemon,
             dependencies,
+            backup,
+            attested,
         };
         let evaluated = policy::evaluate(&applied, &evidence, Utc::now())
             .into_iter()
@@ -788,7 +915,14 @@ impl Engine {
 
     /// Record an attestation: `Request::PolicyAttest`. Refuses empty
     /// evidence, a past or missing expiry, an unknown control, and a
-    /// control that does not apply -- or is `n/a` -- at `scope`.
+    /// control that does not apply -- or is `n/a` -- at `scope`. With
+    /// `clock` set (a submission against the CRA Art. 14 reporting clock,
+    /// `#157` phase 1), also refuses any control but `cra/art-14`, an
+    /// unknown clock item, one whose own scope is not exactly `scope` (a
+    /// subtree read would otherwise let a root-scope attestation cover a
+    /// child's item), an excluded item, and a deadline that already has a
+    /// live (unwithdrawn) submission.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn policy_attest(
         &self,
         caller: &Caller,
@@ -797,6 +931,7 @@ impl Engine {
         evidence: String,
         note: Option<String>,
         expires_at: chrono::DateTime<Utc>,
+        clock: Option<ClockMark>,
     ) -> Result<Attestation> {
         if evidence.trim().is_empty() {
             return Err(FactoryError::BadRequest("evidence must not be empty".into()));
@@ -806,6 +941,14 @@ impl Engine {
             return Err(FactoryError::BadRequest(format!(
                 "expires_at {expires_at} must be in the future"
             )));
+        }
+        if clock.is_some() {
+            let art_14 = reporting_clock::art_14();
+            if control != art_14 {
+                return Err(FactoryError::BadRequest(format!(
+                    "a reporting-clock submission may only be recorded against {art_14}, not {control}"
+                )));
+            }
         }
 
         let snapshot = self.factory_snapshot();
@@ -827,6 +970,43 @@ impl Engine {
             )));
         }
 
+        if let Some(mark) = &clock {
+            // The item's own scope must *equal* the canonical `scope` --
+            // `policy_clock(Some(&scope))` rolls up the subtree the same way
+            // `Request::Policy` does, so a descendant's item can appear in
+            // it too; only an exact match may be attested here.
+            let clock_now = self.policy_clock(Some(&scope)).await?;
+            let item = clock_now.items.iter().find(|i| i.item == mark.item).ok_or_else(|| {
+                FactoryError::BadRequest(format!(
+                    "{} is not a reporting-clock item in {scope:?}'s subtree",
+                    mark.item
+                ))
+            })?;
+            if item.scope != scope {
+                return Err(FactoryError::BadRequest(format!(
+                    "{} belongs to scope {:?}, not {scope:?} -- attest it there",
+                    mark.item, item.scope
+                )));
+            }
+            if let Some(state) = &item.excluded {
+                return Err(FactoryError::BadRequest(format!(
+                    "{} is excluded ({state}); there is nothing left to report",
+                    mark.item
+                )));
+            }
+            let deadline = item
+                .deadlines
+                .iter()
+                .find(|d| d.deadline == mark.deadline)
+                .expect("compute always emits both deadlines for an unexcluded item");
+            if matches!(deadline.state, ClockDeadlineState::Met | ClockDeadlineState::Late) {
+                return Err(FactoryError::BadRequest(format!(
+                    "{} already has a live submission for its {} deadline",
+                    mark.item, mark.deadline
+                )));
+            }
+        }
+
         let attestation = Attestation {
             id: uuid::Uuid::new_v4().to_string(),
             control,
@@ -837,6 +1017,7 @@ impl Engine {
             attested_at: now,
             expires_at,
             withdrawn: None,
+            clock,
         };
         self.policies.append_attestation(&attestation).await?;
         Ok(attestation)
@@ -1050,10 +1231,18 @@ mod tests {
     //! on disk, a real scope tree, and the store behind `Engine`.
 
     use super::*;
+    use chrono::DateTime;
+    use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
-    use factory_core::policy::{ControlStatus, StatusKind};
+    use factory_core::config::{Config, DaemonConfig, Factory, Instance, InterfaceConfig, PolicyDeclaration, Scope};
+    use factory_core::control_plan::{
+        AttestationVerdict, RequiredStep, StepAttestation, StepKind, GATE_ACTOR,
+    };
+    use factory_core::dependencies::AttachmentKind;
+    use factory_core::policy::{ControlRef, ControlStatus, StatusKind};
+    use factory_core::protocol::Payload;
     use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
+    use factory_core::task::NewTask;
     use factory_plugins::{Registry, SqliteStore};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -1123,6 +1312,7 @@ mod tests {
             scope: None,
             scopes: Vec::new(),
             roles: Default::default(),
+            dashboard: None,
             policies: PolicyDeclaration {
                 frameworks: vec!["cra".to_string()],
                 ..Default::default()
@@ -1214,6 +1404,7 @@ mod tests {
                 "https://example.com/policy".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(30),
+                None,
             )
             .await
             .unwrap();
@@ -1261,6 +1452,7 @@ mod tests {
                 "".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(1),
+                None,
             )
             .await
             .unwrap_err();
@@ -1274,6 +1466,7 @@ mod tests {
                 "https://example.com".to_string(),
                 None,
                 Utc::now() - chrono::Duration::days(1),
+                None,
             )
             .await
             .unwrap_err();
@@ -1287,6 +1480,7 @@ mod tests {
                 "https://example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(1),
+                None,
             )
             .await
             .unwrap_err();
@@ -1303,6 +1497,7 @@ mod tests {
                 "https://example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(1),
+                None,
             )
             .await
             .unwrap_err();
@@ -1322,6 +1517,7 @@ mod tests {
                 "https://one.example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(30),
+                None,
             )
             .await
             .unwrap();
@@ -1334,6 +1530,7 @@ mod tests {
                 "https://two.example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(30),
+                None,
             )
             .await
             .unwrap();
@@ -1551,6 +1748,7 @@ mod tests {
             scope: None,
             scopes: Vec::new(),
             roles: Default::default(),
+            dashboard: None,
             policies: PolicyDeclaration { frameworks: vec!["house".to_string()], ..Default::default() },
             quality: Default::default(),
             infrastructure: Default::default(),
@@ -1568,6 +1766,39 @@ mod tests {
         let registry = Registry::with_builtins();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    /// A bare-bones engine for the F8 mutation test below (`#193`, phase 1):
+    /// no policy catalogue at all -- `infrastructure()` and `daemon_facts()`
+    /// need none -- just an interfaces list the caller sets directly.
+    fn engine_with_interfaces(interfaces: Vec<InterfaceConfig>) -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-policies-f8-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig { interfaces, ..DaemonConfig::default() },
+            scope: None,
+            scopes: Vec::new(),
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    fn http_interface(bind: Option<&str>) -> InterfaceConfig {
+        let mut settings = BTreeMap::new();
+        if let Some(bind) = bind {
+            settings.insert("bind".to_string(), serde_yaml_ng::Value::String(bind.to_string()));
+        }
+        InterfaceConfig { kind: "http".into(), settings }
     }
 
     #[tokio::test]
@@ -1641,6 +1872,74 @@ mod tests {
         assert!(facts.foreman_enabled);
         assert_eq!(facts.http_loopback_only, Some(true), "the default bind, 127.0.0.1:8787, is loopback");
         assert!(facts.power_assertion);
+    }
+
+    /// `#193`, phase 1, F8's mutation test: `daemon_facts`'s
+    /// `http_loopback_only` must equal "all HTTP binds in
+    /// `infrastructure().interfaces` are loopback" over four configs -- no
+    /// `http` interface at all, an explicit loopback bind, a wide-open
+    /// `0.0.0.0` bind, and a bare hostname that cannot be parsed as a socket
+    /// address. Checking against both an oracle computed straight from
+    /// `infrastructure()`'s own output *and* a hardcoded expectation catches
+    /// either side silently going back to deriving the bind on its own --
+    /// two derivations that drifted the same wrong way would still agree
+    /// with each other, but not with the hardcoded value.
+    #[tokio::test]
+    async fn http_loopback_only_matches_infrastructures_own_interfaces_over_four_configs() {
+        async fn check(interfaces: Vec<InterfaceConfig>, want: Option<bool>) {
+            let engine = engine_with_interfaces(interfaces);
+
+            let Payload::Infrastructure { daemon, .. } = engine.infrastructure().await else {
+                panic!("not an infrastructure payload");
+            };
+            let oracle: Option<bool> = {
+                let http_binds: Vec<&str> =
+                    daemon.interfaces.iter().filter(|i| i.kind == "http").filter_map(|i| i.bind.as_deref()).collect();
+                if http_binds.is_empty() {
+                    Some(true)
+                } else {
+                    http_binds
+                        .iter()
+                        .map(|bind| bind.parse::<std::net::SocketAddr>().map(|addr| addr.ip().is_loopback()))
+                        .collect::<std::result::Result<Vec<bool>, _>>()
+                        .ok()
+                        .map(|loopback| loopback.iter().all(|l| *l))
+                }
+            };
+            assert_eq!(oracle, want, "the oracle itself must match the fixed expectation for this config");
+            assert_eq!(
+                engine.daemon_facts().http_loopback_only,
+                oracle,
+                "policy's http_loopback_only must equal infrastructure()'s own interfaces"
+            );
+        }
+
+        check(vec![], Some(true)).await;
+        check(vec![http_interface(Some("127.0.0.1:9000"))], Some(true)).await;
+        check(vec![http_interface(Some("0.0.0.0:8787"))], Some(false)).await;
+        check(vec![http_interface(Some("example.internal:8787"))], None).await;
+    }
+
+    /// `#154`: `dataset_level_facts` never gathers the backup fact when no
+    /// scope's applicable controls name a `backup_*` fact -- `house.yaml`'s
+    /// `j` names only `power_assertion`. The positive side (a catalogue that
+    /// does name one gathers it, and correctly) is `backup::tests`'
+    /// `backup_and_verify_satisfy_a_backup_verified_control_and_leave_backup_offsite_open`,
+    /// which would see `art-32-restore` stuck at "not resolved" rather than
+    /// `Satisfied` if the gather were ever skipped there.
+    #[tokio::test]
+    async fn dataset_level_facts_never_gathers_the_backup_fact_when_no_check_names_one() {
+        let engine = l123_test_engine();
+        let snapshot = engine.factory_snapshot();
+        let (catalogues, _findings, _tags) = engine.load_catalogues_and_tags().await.unwrap();
+        let chain = engine.policy_chain("root");
+        let (applied, _cf) = policy::applicable(&catalogues, &chain);
+        assert!(!needs_backup_facts(&applied), "house.yaml names no backup_* fact");
+
+        let root_scope = snapshot.config.scopes.iter().find(|s| s.name == "root").unwrap();
+        let per_scope_applied = vec![(root_scope, applied)];
+        let (_, _, _, backup_fact) = engine.dataset_level_facts(&per_scope_applied).await.unwrap();
+        assert!(backup_fact.is_none(), "no check here names a backup_* fact, so it must never be gathered");
     }
 
     // -- policy_remediate / policy_export (#83) ------------------------------
@@ -1810,6 +2109,7 @@ mod tests {
                 "https://example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(30),
+                None,
             )
             .await
             .unwrap();
@@ -1838,6 +2138,7 @@ mod tests {
                 "https://example.com/company".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(30),
+                None,
             )
             .await
             .unwrap();
@@ -1862,5 +2163,453 @@ mod tests {
 
         let err = engine.policy_export_render(Some("engineering"), "yaml").await.unwrap_err();
         assert!(err.to_string().contains("unknown export format"), "{err}");
+    }
+
+    // ------------------------------------------------ the reporting clock
+
+    /// Writes one dependency document straight to disk in the exact layout
+    /// `dependencies::write_attachment` itself produces -- there is no
+    /// active run to attach through in these tests, and the daemon's write
+    /// path (`Engine::attach_dependency`) needs one.
+    fn write_dep_doc(
+        root: &std::path::Path,
+        scope: &str,
+        run_id: &str,
+        kind: factory_core::dependencies::AttachmentKind,
+        bytes: &[u8],
+        attached_at: chrono::DateTime<Utc>,
+        id: &str,
+    ) {
+        let dir = root.join(".factory/dependencies").join(scope).join(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let filename = format!("{id}.cdx.json");
+        std::fs::write(dir.join(&filename), bytes).unwrap();
+        let attachment = factory_core::dependencies::Attachment {
+            id: id.to_string(),
+            kind,
+            scope: scope.to_string(),
+            run_id: run_id.to_string(),
+            task_id: "t1".to_string(),
+            attempt: 1,
+            attached_at,
+            filename,
+            spec_version: "1.6".to_string(),
+            states: match kind {
+                factory_core::dependencies::AttachmentKind::Sbom => {
+                    vec![factory_core::dependencies::LifecycleState::Built]
+                }
+                factory_core::dependencies::AttachmentKind::Vulnerabilities => Vec::new(),
+            },
+        };
+        std::fs::write(
+            dir.join(format!("{id}.meta.json")),
+            serde_json::to_vec_pretty(&attachment).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A single-scope (`demo`) instance whose only control is `cra/art-14`,
+    /// backed by a real `PolicyStore` file at `db` -- so a second `Engine`
+    /// built over the same `root`/`db` is what a restart looks like, the
+    /// same pattern `intake.rs`'s own restart test uses.
+    fn clock_engine(root: &std::path::Path, db: &std::path::Path) -> Arc<Engine> {
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: None,
+            scopes: vec![scope_at("demo-id", "demo", "demo", "")],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration { frameworks: vec!["cra".to_string()], ..Default::default() },
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root: root.to_path_buf(), config };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let policies = PolicyStore::open(db).unwrap();
+        Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()).with_policy_store(policies))
+    }
+
+    #[tokio::test]
+    async fn policy_attest_with_clock_refuses_the_wrong_control_an_unknown_item_and_an_excluded_one() {
+        let root = std::env::temp_dir().join(format!("factory-policies-clock-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/cra.yaml"),
+            "framework: cra\ntitle: Cyber Resilience Act\nkind: regulation\ncontrols:\n  - id: art-14\n    title: Reporting\n    evidence:\n      - check: attestation\n",
+        )
+        .unwrap();
+
+        let now = Utc::now();
+        let sbom = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","metadata":{"lifecycles":[{"phase":"build"}]},"components":[{"type":"library","name":"demo-lib","version":"1.2.3","bom-ref":"pkg:cargo/demo-lib@1.2.3"}]}"#;
+        let sighting = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","vulnerabilities":[{"id":"CVE-2026-8888","affects":[{"ref":"pkg:cargo/demo-lib@1.2.3"}],"properties":[{"name":"factory:kev","value":"true"}]}]}"#;
+        let excluded = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","vulnerabilities":[{"id":"CVE-2026-8888","affects":[{"ref":"pkg:cargo/demo-lib@1.2.3"}],"properties":[{"name":"factory:kev","value":"true"}],"analysis":{"state":"not_affected"}}]}"#;
+        write_dep_doc(&root, "demo", "r1", AttachmentKind::Sbom, sbom, now - chrono::Duration::hours(2), "s1");
+        write_dep_doc(&root, "demo", "r1", AttachmentKind::Vulnerabilities, sighting, now - chrono::Duration::hours(2), "v1");
+        write_dep_doc(&root, "demo", "r2", AttachmentKind::Sbom, sbom, now - chrono::Duration::minutes(5), "s2");
+        write_dep_doc(&root, "demo", "r2", AttachmentKind::Vulnerabilities, excluded, now - chrono::Duration::minutes(5), "v2");
+
+        let db = root.join("policies.sqlite");
+        let engine = clock_engine(&root, &db);
+        let owner = Caller::Owner;
+        let item = reporting_clock::ClockItemRef::Finding { scope: "demo".into(), vulnerability: "CVE-2026-8888".into() };
+        let mark = |item: reporting_clock::ClockItemRef| ClockMark { item, deadline: reporting_clock::ClockDeadlineKind::EarlyWarning };
+
+        let err = engine
+            .policy_attest(
+                &owner,
+                "cra/other".parse().unwrap(),
+                "demo".to_string(),
+                "https://example.com/notice".to_string(),
+                None,
+                now + chrono::Duration::weeks(520),
+                Some(mark(item.clone())),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("cra/art-14"), "{err}");
+
+        let unknown = reporting_clock::ClockItemRef::Finding { scope: "demo".into(), vulnerability: "CVE-0000-0000".into() };
+        let err = engine
+            .policy_attest(
+                &owner,
+                "cra/art-14".parse().unwrap(),
+                "demo".to_string(),
+                "https://example.com/notice".to_string(),
+                None,
+                now + chrono::Duration::weeks(520),
+                Some(mark(unknown)),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not a reporting-clock item"), "{err}");
+
+        // CVE-2026-8888's newest built document reports it `not_affected` --
+        // excluded, so there is nothing left to attest.
+        let err = engine
+            .policy_attest(
+                &owner,
+                "cra/art-14".parse().unwrap(),
+                "demo".to_string(),
+                "https://example.com/notice".to_string(),
+                None,
+                now + chrono::Duration::weeks(520),
+                Some(mark(item)),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("excluded"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_valid_clock_submission_flips_the_deadline_to_met_refuses_a_duplicate_and_survives_a_restart() {
+        let root = std::env::temp_dir().join(format!("factory-policies-clock-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/cra.yaml"),
+            "framework: cra\ntitle: Cyber Resilience Act\nkind: regulation\ncontrols:\n  - id: art-14\n    title: Reporting\n    evidence:\n      - check: attestation\n",
+        )
+        .unwrap();
+
+        let now = Utc::now();
+        let sbom = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","metadata":{"lifecycles":[{"phase":"build"}]},"components":[{"type":"library","name":"demo-lib","version":"1.2.3","bom-ref":"pkg:cargo/demo-lib@1.2.3"}]}"#;
+        let vulns = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","vulnerabilities":[{"id":"CVE-2026-9999","affects":[{"ref":"pkg:cargo/demo-lib@1.2.3"}],"properties":[{"name":"factory:kev","value":"true"}]}]}"#;
+        write_dep_doc(&root, "demo", "r1", AttachmentKind::Sbom, sbom, now - chrono::Duration::hours(1), "s1");
+        write_dep_doc(&root, "demo", "r1", AttachmentKind::Vulnerabilities, vulns, now - chrono::Duration::hours(1), "v1");
+
+        let db = root.join("policies.sqlite");
+        let engine = clock_engine(&root, &db);
+        let owner = Caller::Owner;
+        let item = reporting_clock::ClockItemRef::Finding { scope: "demo".into(), vulnerability: "CVE-2026-9999".into() };
+
+        let attestation = engine
+            .policy_attest(
+                &owner,
+                "cra/art-14".parse().unwrap(),
+                "demo".to_string(),
+                "https://example.com/notice".to_string(),
+                None,
+                now + chrono::Duration::weeks(520),
+                Some(ClockMark { item: item.clone(), deadline: reporting_clock::ClockDeadlineKind::EarlyWarning }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(attestation.clock.as_ref().unwrap().item, item);
+
+        let clock = engine.policy_clock(Some("demo")).await.unwrap();
+        let found = clock.items.iter().find(|i| i.item == item).unwrap();
+        assert_eq!(found.deadlines[0].state, ClockDeadlineState::Met);
+
+        // A second submission against the same (item, deadline) is refused
+        // while the first one is still live.
+        let err = engine
+            .policy_attest(
+                &owner,
+                "cra/art-14".parse().unwrap(),
+                "demo".to_string(),
+                "https://example.com/again".to_string(),
+                None,
+                now + chrono::Duration::weeks(520),
+                Some(ClockMark { item: item.clone(), deadline: reporting_clock::ClockDeadlineKind::EarlyWarning }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already has a live submission"), "{err}");
+
+        // A fresh `Engine` over the same `root` and the same `PolicyStore`
+        // file -- what a restart looks like -- still reads `met`.
+        let restarted = clock_engine(&root, &db);
+        let clock = restarted.policy_clock(Some("demo")).await.unwrap();
+        let found = clock.items.iter().find(|i| i.item == item).unwrap();
+        assert_eq!(found.deadlines[0].state, ClockDeadlineState::Met);
+    }
+
+    // -- attested (#158) ------------------------------------------------
+
+    #[tokio::test]
+    async fn needs_attested_facts_is_false_for_a_catalogue_with_no_attested_check() {
+        let engine = test_engine();
+        let (catalogues, _findings, _tags) = engine.load_catalogues_and_tags().await.unwrap();
+        let chain = engine.policy_chain("company");
+        let (applied, _findings) = policy::applicable(&catalogues, &chain);
+        assert!(
+            !needs_attested_facts(&applied),
+            "cra.yaml here names no attested check"
+        );
+    }
+
+    /// A single scope, one control with an `attested` check (`category:
+    /// feature`, `step: tests`, `max_age: 7d`) -- everything else this
+    /// module's evidence gathering could name is left out, so the only
+    /// thing that can move the control off `open` is the run this test
+    /// builds directly through the store.
+    fn attested_test_engine() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!(
+            "factory-policies-attested-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/house.yaml"),
+            "framework: house\n\
+             title: House rules\n\
+             kind: best-practice\n\
+             controls:\n\
+             \x20\x20- id: tested\n\x20\x20\x20\x20title: Feature work passes tests\n\x20\x20\x20\x20evidence:\n\
+             \x20\x20\x20\x20\x20\x20- check: attested\n\x20\x20\x20\x20\x20\x20\x20\x20category: feature\n\x20\x20\x20\x20\x20\x20\x20\x20step: tests\n\x20\x20\x20\x20\x20\x20\x20\x20max_age: 7d\n",
+        )
+        .unwrap();
+
+        let config = Config {
+            version: 1,
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
+            daemon: DaemonConfig::default(),
+            scope: None,
+            scopes: vec![scope_at("demo-id", "demo", ".", "")],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration {
+                frameworks: vec!["house".to_string()],
+                ..Default::default()
+            },
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let factory = Factory { root, config };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(
+            factory,
+            registry,
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
+    }
+
+    /// A finished `feature`-category run in `scope`, held to one gate step
+    /// (`tests`), attested by `GATE_ACTOR` with `verdict`, both dated
+    /// `ended_at` -- built directly through the store and `PolicyStore`,
+    /// bypassing dispatch and verification entirely: this module's own
+    /// evidence gathering is what is under test, not the verifier.
+    async fn attested_feature_run(
+        engine: &Arc<Engine>,
+        scope: &str,
+        ended_at: DateTime<Utc>,
+        verdict: AttestationVerdict,
+    ) -> factory_core::run::Run {
+        let new = NewTask {
+            title: "add the thing".into(),
+            instructions: "true".into(),
+            scope: Some(scope.to_string()),
+            agent: Some("shell".into()),
+            runtime: Some("quiet".into()),
+            worktree: Some(false),
+            category: Some("feature".into()),
+            ..Default::default()
+        };
+        let task = task_from_new(new, scope.to_string(), "shell".into(), "quiet".into());
+        let task = engine.store.create(&task).await.unwrap();
+        let run = engine
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "quiet".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        let required = vec![RequiredStep {
+            step: "tests".into(),
+            kind: StepKind::Gate,
+            command: Some("true".into()),
+            timeout_seconds: None,
+            required_by: Vec::new(),
+            node_id: None,
+            actor: None,
+            by: None,
+        }];
+        let run = engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(ended_at),
+                    required_steps: Some(required),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let attestation = StepAttestation {
+            id: uuid::Uuid::new_v4().to_string(),
+            run_id: run.id.clone(),
+            task_id: task.id.clone(),
+            scope: scope.to_string(),
+            category: "feature".to_string(),
+            step: "tests".to_string(),
+            kind: StepKind::Gate,
+            actor: GATE_ACTOR.to_string(),
+            verdict,
+            required_by: Vec::new(),
+            command: Some("true".to_string()),
+            exit_code: Some(if verdict == AttestationVerdict::Pass {
+                0
+            } else {
+                1
+            }),
+            output: None,
+            dir: "/tmp".to_string(),
+            commit: None,
+            dirty: None,
+            node_id: None,
+            at: ended_at,
+            findings: None,
+            round: 0,
+            worktree_digest: None,
+        };
+        engine
+            .policies
+            .append_step_attestation(&attestation)
+            .await
+            .unwrap();
+        run
+    }
+
+    #[tokio::test]
+    async fn policy_report_and_policy_control_agree_on_an_attested_control_through_satisfied_stale_and_open(
+    ) {
+        let engine = attested_test_engine();
+        let control = ControlRef::new("house", "tested");
+        let now = Utc::now();
+
+        // A run an hour old: well within the 7d `max_age` -- satisfied.
+        let run = attested_feature_run(
+            &engine,
+            "demo",
+            now - chrono::Duration::hours(1),
+            AttestationVerdict::Pass,
+        )
+        .await;
+        let report = engine.policy_report(Some("demo")).await.unwrap();
+        assert_eq!(
+            report.rows[0].statuses[0].status.kind(),
+            StatusKind::Satisfied
+        );
+        let detail = engine
+            .policy_control(control.clone(), "demo")
+            .await
+            .unwrap();
+        assert_eq!(detail.status.kind(), StatusKind::Satisfied);
+
+        // Moved back through a `RunPatch` to 10 days: outside 7d, inside
+        // 2*7d -- stale, not open.
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    ended_at: Some(now - chrono::Duration::days(10)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let report = engine.policy_report(Some("demo")).await.unwrap();
+        assert_eq!(report.rows[0].statuses[0].status.kind(), StatusKind::Stale);
+        let detail = engine
+            .policy_control(control.clone(), "demo")
+            .await
+            .unwrap();
+        assert_eq!(detail.status.kind(), StatusKind::Stale);
+
+        // Moved back further, past 2*7d -- open.
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    ended_at: Some(now - chrono::Duration::days(20)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let report = engine.policy_report(Some("demo")).await.unwrap();
+        assert_eq!(report.rows[0].statuses[0].status.kind(), StatusKind::Open);
+        let detail = engine.policy_control(control, "demo").await.unwrap();
+        assert_eq!(detail.status.kind(), StatusKind::Open);
+    }
+
+    #[tokio::test]
+    async fn policy_report_and_policy_control_agree_that_a_failed_gate_stays_open() {
+        let engine = attested_test_engine();
+        let control = ControlRef::new("house", "tested");
+        let now = Utc::now();
+        attested_feature_run(
+            &engine,
+            "demo",
+            now - chrono::Duration::hours(1),
+            AttestationVerdict::Fail,
+        )
+        .await;
+
+        let report = engine.policy_report(Some("demo")).await.unwrap();
+        assert_eq!(report.rows[0].statuses[0].status.kind(), StatusKind::Open);
+        let detail = engine.policy_control(control, "demo").await.unwrap();
+        assert_eq!(detail.status.kind(), StatusKind::Open);
     }
 }

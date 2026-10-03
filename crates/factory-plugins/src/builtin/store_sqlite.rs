@@ -21,7 +21,11 @@ use std::sync::{Arc, Mutex};
 
 /// Bumped whenever the shape below changes. A database at any other version is
 /// discarded.
-const SCHEMA_VERSION: i64 = 4;
+/// The task-store schema this build can open without discarding its task
+/// tables. Backup restore checks this before it commits a restored root: a
+/// newer or older snapshot must never be installed only for startup to erase
+/// the operating history it was meant to recover.
+pub const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
@@ -352,6 +356,10 @@ impl TaskStore for SqliteStore {
                 sql.push_str(" AND scope = ?");
                 args.push(Box::new(scope.clone()));
             }
+            if let Some(parent) = &filter.parent_task_id {
+                sql.push_str(" AND json_extract(data, '$.parent_task_id') = ?");
+                args.push(Box::new(parent.clone()));
+            }
             sql.push_str(" ORDER BY created_at DESC");
             if let Some(limit) = filter.limit {
                 sql.push_str(&format!(" LIMIT {limit}"));
@@ -387,9 +395,15 @@ impl TaskStore for SqliteStore {
             }
             if patch.clear_estimate {
                 task.estimate_seconds = None;
+                task.estimate = None;
             }
             if let Some(v) = patch.estimate_seconds {
                 task.estimate_seconds = Some(v);
+                task.estimate = Some(factory_core::task::Estimate::point(v));
+            }
+            if let Some(v) = patch.estimate {
+                task.estimate_seconds = Some(v.time.expected);
+                task.estimate = Some(v);
             }
             if let Some(v) = patch.scope {
                 task.scope = v;
@@ -487,6 +501,12 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.closure {
                 task.closure = Some(v);
             }
+            if patch.clear_slot_wait {
+                task.slot_wait = None;
+            }
+            if let Some(v) = patch.slot_wait {
+                task.slot_wait = Some(v);
+            }
             task.updated_at = Utc::now();
 
             write_task(conn, &task)?;
@@ -541,7 +561,19 @@ impl TaskStore for SqliteStore {
                 worktree_branch: None,
                 runtime: new.runtime.clone(),
                 session: None,
+                last_session: None,
                 token: Some(new.token.clone()),
+                spent_token_sha256: None,
+                // Set right after, in the same `update_run` call that
+                // records `original_estimate`/`provider_account`, when this
+                // is a `--continue` dispatch -- `create_run` itself has no
+                // notion of a previous run.
+                superseded_token_sha256s: Vec::new(),
+                continued_from: None,
+                resumed_session: None,
+                original_estimate: None,
+                provider_account: None,
+                re_estimate: None,
                 result: None,
                 routed_to: None,
                 error: None,
@@ -558,6 +590,7 @@ impl TaskStore for SqliteStore {
                 block_suspected_since: None,
                 turn_ended_at: None,
                 turn_end_reason: None,
+                turn_ended_session_id: None,
                 required_steps: Vec::new(),
                 usage: None,
             };
@@ -577,6 +610,9 @@ impl TaskStore for SqliteStore {
                 task.failure = None;
                 task.closure = None;
                 task.routed_to = None;
+                // The wait, if there was one, is over: a run now exists
+                // (`#179`).
+                task.slot_wait = None;
                 task.updated_at = Utc::now();
                 write_task(&tx, &task)?;
             }
@@ -618,7 +654,20 @@ impl TaskStore for SqliteStore {
                 run.session = None;
             }
             if let Some(v) = patch.session {
-                run.session = Some(v);
+                run.session = Some(v.clone());
+                run.last_session = Some(v);
+            }
+            if let Some(v) = patch.last_session {
+                run.last_session = Some(v);
+            }
+            if let Some(v) = patch.original_estimate {
+                run.original_estimate = Some(v);
+            }
+            if let Some(v) = patch.provider_account {
+                run.provider_account = Some(v);
+            }
+            if let Some(v) = patch.re_estimate {
+                run.re_estimate = Some(v);
             }
             if let Some(v) = patch.result {
                 run.result = Some(v);
@@ -634,6 +683,18 @@ impl TaskStore for SqliteStore {
             }
             if patch.clear_token {
                 run.token = None;
+            }
+            if let Some(v) = patch.spent_token_sha256 {
+                run.spent_token_sha256 = Some(v);
+            }
+            if !patch.superseded_token_sha256s.is_empty() {
+                run.superseded_token_sha256s = patch.superseded_token_sha256s;
+            }
+            if let Some(v) = patch.continued_from {
+                run.continued_from = Some(v);
+            }
+            if let Some(v) = patch.resumed_session {
+                run.resumed_session = Some(v);
             }
             if let Some(v) = patch.ended_at {
                 run.ended_at = Some(v);
@@ -663,6 +724,9 @@ impl TaskStore for SqliteStore {
             }
             if let Some(v) = patch.turn_end_reason {
                 run.turn_end_reason = Some(v);
+            }
+            if let Some(v) = patch.turn_ended_session_id {
+                run.turn_ended_session_id = Some(v);
             }
             // A run that reached a terminal state is over, whether or not the
             // caller remembered to say when.
@@ -1047,6 +1111,7 @@ mod tests {
             status: TaskStatus::Pending,
             schedule: None,
             estimate_seconds: None,
+            estimate: None,
             result: None,
             routed_to: None,
             error: None,
@@ -1062,6 +1127,9 @@ mod tests {
             worktree: false,
             knowledge_hints: false,
             workflow_origin: None,
+            parent_task_id: None,
+            decomposition_part: None,
+            depends_on: Vec::new(),
             bench_origin: None,
             retry: None,
             pending_retry: None,
@@ -1070,6 +1138,7 @@ mod tests {
             intake: None,
             failure: None,
             closure: None,
+            slot_wait: None,
         }
     }
 
@@ -1102,6 +1171,21 @@ mod tests {
         assert_eq!(mirrored.runs, 1);
         assert_eq!(mirrored.status, TaskStatus::Dispatching);
         assert_eq!(mirrored.last_run_at, Some(run.started_at));
+    }
+
+    #[tokio::test]
+    async fn tasks_can_be_queried_by_their_real_parent_relation() {
+        let store = SqliteStore::in_memory().unwrap();
+        let mut child = sample_task("child");
+        child.parent_task_id = Some("parent".into());
+        store.create(&sample_task("parent")).await.unwrap();
+        store.create(&child).await.unwrap();
+
+        let found = store
+            .list(&TaskFilter { parent_task_id: Some("parent".into()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(found.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(), vec!["child"]);
     }
 
     // A scope's tasks can live in another engine entirely; the run still
@@ -1267,10 +1351,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(estimated.estimate_seconds, Some(900));
+        assert_eq!(estimated.estimate, Some(factory_core::task::Estimate::point(900)));
         assert_eq!(
             store.get("t1").await.unwrap().unwrap().estimate_seconds,
             Some(900)
         );
+
+        let range = factory_core::task::Estimate {
+            time: factory_core::task::TimeEstimateRange { low: 600, expected: 1200, high: 1800 },
+            cost: Some(factory_core::task::CostEstimateRange { low: 1.0, expected: 2.0, high: 4.0 }),
+        };
+        let estimated = store
+            .update("t1", &TaskPatch { estimate: Some(range.clone()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(estimated.estimate_seconds, Some(1200));
+        assert_eq!(estimated.estimate, Some(range));
 
         let cleared = store
             .update(
@@ -1283,6 +1379,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cleared.estimate_seconds, None);
+        assert_eq!(cleared.estimate, None);
         assert_eq!(
             store.get("t1").await.unwrap().unwrap().estimate_seconds,
             None

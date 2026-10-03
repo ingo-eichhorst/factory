@@ -23,8 +23,6 @@ use std::sync::Arc;
 
 use crate::engine::Engine;
 
-pub const DEFAULT_BIND: &str = "127.0.0.1:8787";
-
 pub struct HttpInterface;
 
 #[async_trait]
@@ -43,10 +41,7 @@ impl Interface<Engine> for HttpInterface {
         ctx: InterfaceContext,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<()> {
-        let bind = ctx
-            .config
-            .string("bind")
-            .unwrap_or_else(|| DEFAULT_BIND.to_string());
+        let bind = ctx.config.http_bind();
 
         let app = router(engine);
 
@@ -121,6 +116,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
         .route("/api/dependencies", get(dependencies))
+        .route("/api/doctor", get(doctor))
         .route("/api/infrastructure", get(infrastructure))
         .route("/api/backup", get(backup))
         .route("/api/backup/run", post(backup_run))
@@ -140,6 +136,9 @@ fn router(engine: Arc<Engine>) -> Router {
         // against evidence Factory already has, re-read on every call like
         // knowledge and datasets above.
         .route("/api/policy", get(policy))
+        // The CRA Art. 14 reporting clock (`#157`, phase 1) -- read-only,
+        // the same subtree-or-instance resolution `GET /api/policy` uses.
+        .route("/api/policy/clock", get(policy_clock))
         .route("/api/policy/controls/{framework}/{id}", get(policy_control))
         .route("/api/policy/attestations", post(create_attestation))
         .route(
@@ -149,6 +148,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/policy/remediate", post(policy_remediate))
         .route("/api/policy/export", get(policy_export))
         .route("/api/metrics", get(metrics))
+        .route("/api/dashboard", get(dashboard).put(dashboard_set).delete(dashboard_reset))
         .route("/api/costs", get(costs))
         .route("/api/goals", get(goals))
         .route("/api/goals/checkins", post(create_goals_checkin))
@@ -160,10 +160,14 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/quality/remediate", post(quality_remediate))
         .route("/api/operations", get(operations))
         .route("/api/intake", get(intake_board).post(intake_add))
+        .route("/api/intake/security-reports", get(intake_security_reports))
         .route("/api/intake/{id}/triage", post(intake_triage))
         .route("/api/intake/{id}/assess", post(intake_assess))
         .route("/api/intake/{id}/decide", post(intake_decide))
         .route("/api/intake/{id}/info", post(intake_info))
+        .route("/api/intake/{id}/flag-security", post(intake_flag_security))
+        .route("/api/intake/{id}/security", post(intake_security))
+        .route("/api/intake/{id}/publish", post(intake_publish))
         .route("/api/benchmarks", get(benchmarks))
         .route("/api/datasets", get(list_datasets).post(create_dataset))
         .route("/api/datasets/{name}", get(get_dataset).delete(delete_dataset))
@@ -256,7 +260,10 @@ async fn run(engine: &Arc<Engine>, request: Request) -> AxumResponse {
 
 /// The same, for a caller that presented a token.
 async fn run_as(engine: &Arc<Engine>, request: Request, token: Option<String>) -> AxumResponse {
-    let response = engine.handle(Envelope { request, token }).await;
+    // Keep the protocol future off axum's deeper extractor/routing stack.
+    // Review/approval orchestration grows that future even for read-only
+    // requests such as the roster used at browser startup.
+    let response = Box::pin(engine.handle(Envelope { request, token })).await;
     let code = status_for(&response);
     (code, Json(response)).into_response()
 }
@@ -365,6 +372,10 @@ async fn infrastructure(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Infrastructure).await
 }
 
+async fn doctor(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::Doctor).await
+}
+
 async fn backup(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Backup).await
 }
@@ -383,9 +394,10 @@ struct VerifyQuery {
 
 /// `POST /api/backup/verify?snapshot=` -- the newest when `snapshot` is left
 /// out. A query parameter, like `withdraw_attestation`'s `reason`, so a bare
-/// POST works.
+/// POST works. `identity` (`#152`) is never accepted over HTTP: decrypting
+/// an encrypted snapshot is CLI-only, like restore.
 async fn backup_verify(State(engine): State<Arc<Engine>>, Query(q): Query<VerifyQuery>) -> AxumResponse {
-    run(&engine, Request::BackupVerify { snapshot: q.snapshot }).await
+    run(&engine, Request::BackupVerify { snapshot: q.snapshot, identity: None }).await
 }
 
 async fn knowledge(State(engine): State<Arc<Engine>>) -> AxumResponse {
@@ -477,6 +489,19 @@ async fn policy(State(engine): State<Arc<Engine>>, Query(q): Query<PolicyQuery>)
     .await
 }
 
+/// `GET /api/policy/clock?scope=` -- the CRA Art. 14 reporting clock
+/// (`#157`, phase 1): `scope` empty or absent means the whole instance,
+/// exactly like `GET /api/policy` itself.
+async fn policy_clock(State(engine): State<Arc<Engine>>, Query(q): Query<PolicyQuery>) -> AxumResponse {
+    run(
+        &engine,
+        Request::PolicyClock {
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+        },
+    )
+    .await
+}
+
 #[derive(serde::Deserialize)]
 struct PolicyControlQuery {
     scope: String,
@@ -521,6 +546,15 @@ struct AttestBody {
     /// have to compute one by hand; an RFC3339 timestamp is still accepted
     /// here exactly as it is on the CLI's `--expires`.
     expires: String,
+    /// A CRA Art. 14 reporting-clock item this attestation also submits
+    /// against (`#157`, phase 1): `finding:<scope>:<vulnerability>` or
+    /// `report:<task-id>`. Given together with `deadline` or not at all.
+    #[serde(default)]
+    clock_item: Option<String>,
+    /// Which of the clock item's two deadlines `clock_item` submits:
+    /// `early_warning`/`early-warning` or `notification`.
+    #[serde(default)]
+    deadline: Option<String>,
 }
 
 /// `POST /api/policy/attestations` -- record an attestation. `control` and
@@ -544,6 +578,31 @@ async fn create_attestation(
             return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response()
         }
     };
+    let clock = match (body.clock_item, body.deadline) {
+        (Some(item), Some(deadline)) => {
+            let item: factory_core::reporting_clock::ClockItemRef = match item.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response()
+                }
+            };
+            let deadline: factory_core::reporting_clock::ClockDeadlineKind = match deadline.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response()
+                }
+            };
+            Some(factory_core::reporting_clock::ClockMark { item, deadline })
+        }
+        (None, None) => None,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(Response::error("bad_request", "clock_item and deadline must be given together")),
+            )
+                .into_response()
+        }
+    };
     run(
         &engine,
         Request::PolicyAttest {
@@ -552,6 +611,7 @@ async fn create_attestation(
             evidence: body.evidence,
             note: body.note,
             expires_at,
+            clock,
         },
     )
     .await
@@ -680,11 +740,11 @@ struct CostsQuery {
     scope: Option<String>,
 }
 
-/// `GET /api/costs?group_by=task|issue|scope|agent&from=&to=&scope=` --
-/// usage and cost summed per group over the runs that started in the
-/// window (#117). `from`/`to` are RFC 3339; the window defaults to the last
-/// thirty days. A grouping v1 does not offer yet (`provider`, `workflow`)
-/// is a 400 that says so, not an empty answer.
+/// `GET /api/costs?group_by=task|issue|scope|agent|provider|workflow&from=&to=&scope=`
+/// -- usage and cost summed per group over the runs that started in the
+/// window (#117; `workflow` since #164). `from`/`to` are RFC 3339; the
+/// window defaults to the last thirty days. A grouping this endpoint does
+/// not offer is a 400 that says so, not an empty answer.
 async fn costs(State(engine): State<Arc<Engine>>, Query(q): Query<CostsQuery>) -> AxumResponse {
     let group_by = match q.group_by.as_deref().filter(|g| !g.trim().is_empty()) {
         None => factory_core::usage::CostGroupBy::default(),
@@ -722,10 +782,15 @@ struct MetricsQuery {
     /// catalogues imply.
     #[serde(default)]
     ids: String,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    window: Option<factory_core::metrics::MetricsWindow>,
 }
 
-/// `GET /api/metrics?ids=a,b` -- every named metric's computed value, its
-/// history where it has one, and the definition behind it.
+/// `GET /api/metrics?ids=a,b&scope=&window=day|14d|90d` -- every named
+/// metric's computed value, its history where it has one, and the definition
+/// behind it.
 async fn metrics(State(engine): State<Arc<Engine>>, Query(q): Query<MetricsQuery>) -> AxumResponse {
     let mut ids = Vec::new();
     for raw in q.ids.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -734,7 +799,81 @@ async fn metrics(State(engine): State<Arc<Engine>>, Query(q): Query<MetricsQuery
             Err(e) => return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response(),
         }
     }
-    run(&engine, Request::Metrics { ids }).await
+    run(
+        &engine,
+        Request::Metrics {
+            ids,
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+            window: q.window,
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct DashboardQuery {
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// `GET /api/dashboard?scope=` -- the resolved dashboard layout for `scope`
+/// (the instance root's own when left out), and where it came from
+/// (`#159`). An unknown scope is a 404, like `/api/quality`'s own.
+async fn dashboard(State(engine): State<Arc<Engine>>, Query(q): Query<DashboardQuery>) -> AxumResponse {
+    run(
+        &engine,
+        Request::Dashboard {
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct DashboardSetBody {
+    tiles: Vec<factory_core::dashboard::Tile>,
+}
+
+/// `scope` is required on the write side of `/api/dashboard`, unlike the
+/// read: saving or resetting means naming which scope's own block this is,
+/// not falling back to the caller's (`#160`). `None` for missing or blank;
+/// the caller turns that into the 400 -- kept a plain `Option` rather than a
+/// `Result<_, AxumResponse>` so a missing scope does not make every success
+/// path carry a whole HTTP response's worth of `Err` around with it.
+fn required_scope(q: &DashboardQuery) -> Option<String> {
+    q.scope.clone().filter(|s| !s.trim().is_empty())
+}
+
+fn scope_required_response() -> AxumResponse {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(Response::error("bad_request", "scope is required")),
+    )
+        .into_response()
+}
+
+/// `PUT /api/dashboard?scope=` -- save `scope`'s own layout whole (`#160`).
+/// An unknown metric or an empty `tiles` is refused with a 400 naming the
+/// tile; an unknown scope is a 404, the same as the read side.
+async fn dashboard_set(
+    State(engine): State<Arc<Engine>>,
+    Query(q): Query<DashboardQuery>,
+    Json(body): Json<DashboardSetBody>,
+) -> AxumResponse {
+    let Some(scope) = required_scope(&q) else {
+        return scope_required_response();
+    };
+    run(&engine, Request::DashboardSet { scope, tiles: body.tiles }).await
+}
+
+/// `DELETE /api/dashboard?scope=` -- remove `scope`'s own block and reveal
+/// whatever it was overriding (`#160`). Refused with a 400 when `scope`
+/// writes no block of its own to remove.
+async fn dashboard_reset(State(engine): State<Arc<Engine>>, Query(q): Query<DashboardQuery>) -> AxumResponse {
+    let Some(scope) = required_scope(&q) else {
+        return scope_required_response();
+    };
+    run(&engine, Request::DashboardReset { scope }).await
 }
 
 #[derive(serde::Deserialize)]
@@ -931,6 +1070,55 @@ async fn intake_info(
     Json(body): Json<IntakeInfoBody>,
 ) -> AxumResponse {
     run(&engine, Request::IntakeInfo { id, text: body.text }).await
+}
+
+#[derive(serde::Deserialize)]
+struct IntakeFlagSecurityBody {
+    #[serde(default)]
+    reason: String,
+}
+
+/// `POST /api/intake/{id}/flag-security` -- `{reason}` (`#170`). Flagging
+/// only adds scrutiny, so it needs no more than `intake.assess` already does.
+async fn intake_flag_security(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<IntakeFlagSecurityBody>,
+) -> AxumResponse {
+    run(&engine, Request::IntakeFlagSecurity { id, reason: body.reason }).await
+}
+
+#[derive(serde::Deserialize)]
+struct IntakeSecurityBody {
+    verdict: factory_core::intake::SecurityVerdict,
+    #[serde(default)]
+    evidence: String,
+}
+
+/// `POST /api/intake/{id}/security` -- `{verdict, evidence?}` (`#170`).
+/// Confirming or dismissing is the owner's alone: the UI sends no token, so
+/// every browser caller already is the owner (`run`, below).
+async fn intake_security(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<IntakeSecurityBody>,
+) -> AxumResponse {
+    run(&engine, Request::IntakeSecurity { id, verdict: body.verdict, evidence: body.evidence }).await
+}
+
+/// `GET /api/intake/security-reports?scope=` -- every confirmed security
+/// report over the scope's subtree (`#170`), the L4 fact `#157`'s reporting
+/// clock will read.
+async fn intake_security_reports(State(engine): State<Arc<Engine>>, Query(q): Query<IntakeQuery>) -> AxumResponse {
+    run(&engine, Request::IntakeSecurityReports { scope: q.scope }).await
+}
+
+/// `POST /api/intake/{id}/publish` -- approve and post a decided GitHub
+/// item's triage comment and labels to the issue it came from (`#171`).
+/// Every browser caller is the owner (`run`, above, sends no token), which
+/// always passes; posting here *is* the approval.
+async fn intake_publish(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::IntakePublish { id }).await
 }
 
 /// `POST /api/scenarios/promote` -- turn a scenario into real work. Answers
@@ -1244,13 +1432,33 @@ fn refused(why: String) -> AxumResponse {
     (StatusCode::BAD_REQUEST, Json(response)).into_response()
 }
 
+/// `POST /api/tasks/{id}/run`'s body: `{"reason": "...", "continue": true}`,
+/// either field optional, or nothing at all. `#178`'s `continue` mirrors the
+/// CLI's `--continue` and the socket's `task.run.continue`.
+#[derive(serde::Deserialize, Default)]
+struct RunTaskBody {
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default, rename = "continue")]
+    continue_run: bool,
+}
+
+/// Read the same way `reason_of` reads `ReasonBody` -- an empty body is
+/// every field at its default, not a parse error.
+fn run_task_body_of(body: &[u8]) -> std::result::Result<RunTaskBody, String> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(RunTaskBody::default());
+    }
+    serde_json::from_slice::<RunTaskBody>(body).map_err(|e| format!("not a reason body: {e}"))
+}
+
 async fn run_task(
     State(engine): State<Arc<Engine>>,
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> AxumResponse {
-    match reason_of(&body) {
-        Ok(reason) => run(&engine, Request::TaskRun { id, reason }).await,
+    match run_task_body_of(&body) {
+        Ok(body) => run(&engine, Request::TaskRun { id, reason: body.reason, continue_run: body.continue_run }).await,
         Err(why) => refused(why),
     }
 }
@@ -1983,6 +2191,7 @@ mod tests {
             scope: Some(company.clone()),
             scopes: vec![company],
             roles: Default::default(),
+            dashboard: None,
             policies: PolicyDeclaration::default(),
             quality: vec!["baseline".into()],
             infrastructure: Default::default(),
@@ -2032,8 +2241,16 @@ mod tests {
         assert_eq!(json["data"]["report"]["from"], "2026-01-01T00:00:00Z");
 
         let (status, json) = request(engine.clone(), "GET", "/api/costs?group_by=provider", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["report"]["group_by"], "provider");
+
+        let (status, json) = request(engine.clone(), "GET", "/api/costs?group_by=workflow", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["report"]["group_by"], "workflow");
+
+        let (status, json) = request(engine.clone(), "GET", "/api/costs?group_by=bogus", None).await;
         assert_eq!(status, 400, "{json}");
-        assert!(json["message"].as_str().unwrap().contains("provider"), "{json}");
+        assert!(json["message"].as_str().unwrap().contains("bogus"), "{json}");
 
         let (status, _) = request(engine, "GET", "/api/tasks/nope/usage", None).await;
         assert_eq!(status, 404);
@@ -2055,12 +2272,183 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_api_metrics_accepts_scope_and_window_and_rejects_unknown_values() {
+        let engine = engine_with_quality();
+        let (status, json) = request(
+            engine.clone(),
+            "GET",
+            "/api/metrics?ids=agent_hours,bench.resolve_rate.missing&scope=company&window=14d",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["kind"], "metrics");
+        let registry = json["data"]["registry"].as_array().unwrap();
+        assert_eq!(registry[0]["id"], "agent_hours");
+        assert_eq!(registry[0]["unit"], "hours");
+        assert_eq!(registry[0]["coverage"], "scope_aware");
+        assert_eq!(registry[1]["coverage"], "instance_wide");
+
+        let (status, _) = request(engine.clone(), "GET", "/api/metrics?window=7d", None).await;
+        assert_eq!(status, 400);
+        let (status, _) = request(engine, "GET", "/api/metrics?scope=missing", None).await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
     async fn post_api_quality_remediate_refuses_a_met_scenario_with_a_400() {
         let engine = engine_with_quality();
         let body = r#"{"scope":"company","attribute":"reliability","scenario":"sandboxed"}"#;
         let (status, json) = request(engine, "POST", "/api/quality/remediate", Some(body)).await;
         assert_eq!(status, 400, "{json}");
         assert!(json["message"].as_str().unwrap_or_default().contains("already met"), "{json}");
+    }
+
+    fn engine_with_dashboard() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-http-test-{}", uuid::Uuid::new_v4()));
+        let mut company: Scope = serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let mut demo: Scope = serde_yaml_ng::from_str(
+            "id: demo-id\nname: demo\ndashboard:\n  tiles:\n    - { view: kpis, size: m }\n",
+        )
+        .unwrap();
+        demo.path = PathBuf::from("demo");
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company, demo],
+            roles: Default::default(),
+            dashboard: Some(
+                serde_yaml_ng::from_str("tiles:\n  - { metric: throughput_week, size: s }\n").unwrap(),
+            ),
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            plugins_dir: None,
+        };
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    #[tokio::test]
+    async fn get_api_dashboard_resolves_the_layout_and_an_unknown_scope_is_a_404() {
+        let engine = engine_with_dashboard();
+        let (status, json) = request(engine.clone(), "GET", "/api/dashboard", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["kind"], "dashboard");
+        // The root's own configured scope is named "company", so that is
+        // what `source` says answered -- never the magic string "root".
+        assert_eq!(json["data"]["source"], "company", "no scope given resolves the instance root's own");
+        assert_eq!(json["data"]["tiles"][0]["metric"], "throughput_week");
+
+        // The root's own scope carries no override of its own, so naming it
+        // explicitly falls through to the same root block.
+        let (status, json) = request(engine.clone(), "GET", "/api/dashboard?scope=company", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["source"], "company");
+
+        let (status, json) = request(engine.clone(), "GET", "/api/dashboard?scope=demo", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["source"], "demo", "demo's own override wins over the root's");
+        assert_eq!(json["data"]["tiles"][0]["view"], "kpis");
+        assert_eq!(json["data"]["tiles"][0]["size"], "m");
+
+        let (status, _) = request(engine, "GET", "/api/dashboard?scope=nope", None).await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
+    async fn get_api_dashboard_with_no_block_anywhere_answers_null_tiles_and_null_source() {
+        // `engine_with_quality` declares no `dashboard:` at all, root or scope.
+        let engine = engine_with_quality();
+        let (status, json) = request(engine, "GET", "/api/dashboard", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["tiles"], serde_json::Value::Null, "use the UI's built-in default");
+        assert_eq!(json["data"]["source"], serde_json::Value::Null, "never the word \"default\"");
+    }
+
+    /// A real instance on disk, root and one nested scope, so `PUT`/`DELETE`
+    /// (which read and rewrite a real config file, unlike the in-memory-only
+    /// `engine_with_dashboard` above) have something to write to.
+    fn engine_with_dashboard_files() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-http-dashboard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory")).unwrap();
+        std::fs::write(
+            root.join(".factory/config.yaml"),
+            "version: 1\ninstance:\n  id: test\n  name: test\nscope:\n  id: company-id\n  name: company\n\
+             dashboard:\n  tiles:\n    - { metric: throughput_week, size: s }\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("demo/.factory")).unwrap();
+        std::fs::write(
+            root.join("demo/.factory/config.yaml"),
+            "version: 1\nscope:\n  id: demo-id\n  name: demo\n",
+        )
+        .unwrap();
+        let mut factory = factory_core::config::Factory::load(&root).unwrap();
+        crate::discovery::apply(&mut factory).unwrap();
+        factory.config.validate().unwrap();
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    #[tokio::test]
+    async fn put_api_dashboard_saves_and_round_trips_through_a_get() {
+        let engine = engine_with_dashboard_files();
+        let body = r#"{"tiles":[{"view":"kpis","size":"m"}]}"#;
+        let (status, json) = request(engine.clone(), "PUT", "/api/dashboard?scope=demo", Some(body)).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["kind"], "dashboard");
+        assert_eq!(json["data"]["source"], "demo");
+        assert_eq!(json["data"]["tiles"][0]["view"], "kpis");
+
+        let (status, json) = request(engine, "GET", "/api/dashboard?scope=demo", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["source"], "demo");
+        assert_eq!(json["data"]["tiles"][0]["view"], "kpis");
+    }
+
+    #[tokio::test]
+    async fn put_api_dashboard_needs_scope_and_refuses_an_unknown_metric_or_scope() {
+        let engine = engine_with_dashboard_files();
+
+        let (status, json) = request(engine.clone(), "PUT", "/api/dashboard", Some(r#"{"tiles":[]}"#)).await;
+        assert_eq!(status, 400, "{json}");
+        assert!(json["message"].as_str().unwrap_or_default().contains("scope"), "{json}");
+
+        let bad = r#"{"tiles":[{"metric":"not_a_metric","size":"s"}]}"#;
+        let (status, json) = request(engine.clone(), "PUT", "/api/dashboard?scope=demo", Some(bad)).await;
+        assert_eq!(status, 400, "{json}");
+        let message = json["message"].as_str().unwrap_or_default();
+        assert!(message.contains("dashboard.tiles[0].metric"), "names the block and the tile: {json}");
+        assert!(message.contains("not_a_metric"), "{json}");
+
+        let ok = r#"{"tiles":[{"view":"kpis","size":"s"}]}"#;
+        let (status, _) = request(engine, "PUT", "/api/dashboard?scope=nope", Some(ok)).await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
+    async fn delete_api_dashboard_resets_and_is_refused_with_no_block_of_its_own() {
+        let engine = engine_with_dashboard_files();
+
+        // `demo` writes no `dashboard:` of its own yet.
+        let (status, json) = request(engine.clone(), "DELETE", "/api/dashboard?scope=demo", None).await;
+        assert_eq!(status, 400, "{json}");
+        assert!(json["message"].as_str().unwrap_or_default().contains("defines no dashboard"), "{json}");
+
+        let put = r#"{"tiles":[{"view":"kpis","size":"m"}]}"#;
+        let (status, _) = request(engine.clone(), "PUT", "/api/dashboard?scope=demo", Some(put)).await;
+        assert_eq!(status, 200);
+
+        let (status, json) = request(engine.clone(), "DELETE", "/api/dashboard?scope=demo", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["source"], "company", "falls back to the root's own layout");
+
+        let (status, _) = request(engine, "DELETE", "/api/dashboard", None).await;
+        assert_eq!(status, 400, "scope is required on the write side, unlike the read");
     }
 
     async fn serve() -> std::net::SocketAddr {
@@ -2073,6 +2461,7 @@ mod tests {
             scope: None,
             scopes: vec![serde_yaml_ng::from_str("id: demo-id\nname: demo\npath: .\n").unwrap()],
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             infrastructure: Default::default(),
@@ -2141,6 +2530,7 @@ mod tests {
             )
             .unwrap()],
             roles: Default::default(),
+            dashboard: None,
             policies: Default::default(),
             quality: Default::default(),
             infrastructure: Default::default(),
