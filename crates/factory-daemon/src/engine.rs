@@ -21,7 +21,7 @@ use factory_core::protocol::{
 };
 use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
-use factory_core::run::{BlockSource, FailKind, NewRun, Run, RunPatch, RunStatus, Trigger};
+use factory_core::run::{BlockSource, FailKind, NewRun, Run, RunPatch, RunStatus, RunTaskStatus, Trigger};
 use factory_core::task::{
     NewTask, PendingRetry, RetryPolicy, SlotWait, Task, TaskEntry, TaskFailure, TaskFilter, TaskPatch,
     TaskReport, TaskStatus, WorkflowOrigin,

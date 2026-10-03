@@ -73,40 +73,7 @@ pub fn check_category(category: &str) -> Result<(), String> {
 
 // ============================================================ requirement
 
-/// What kind of step a requirement names. Derived from the step's name:
-/// `review` and `approval` are the two that need a person or another agent;
-/// every other name (`tests`, `lint`, `sbom`, `security_scan`, ...) is a gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StepKind {
-    Gate,
-    Review,
-    Approval,
-}
-
-impl StepKind {
-    pub fn of(step: &str) -> Self {
-        match step {
-            "review" => Self::Review,
-            "approval" => Self::Approval,
-            _ => Self::Gate,
-        }
-    }
-
-    /// Every control-plan step is enforced. The kind decides which
-    /// coordinator produces its evidence.
-    pub fn enforced(self) -> bool {
-        true
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Gate => "gate",
-            Self::Review => "review",
-            Self::Approval => "approval",
-        }
-    }
-}
+pub use factory_kernel::StepKind;
 
 /// One `requires:` entry on a policy control or a quality attribute, exactly
 /// as authored:
@@ -412,96 +379,11 @@ fn order(steps: Vec<PlanStep>) -> (Vec<PlanStep>, Option<String>) {
 
 // ============================================================ attestation
 
-/// One step a particular run must pass before it is `done`, fixed at
-/// dispatch -- a catalogue edited while the run works does not change what
-/// it is held to, the same rule a workflow run's definition snapshot keeps.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RequiredStep {
-    /// The plan step's id -- what an attestation names.
-    pub step: String,
-    pub kind: StepKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_seconds: Option<u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_by: Vec<String>,
-    /// The declaration that selected the functionary (`independent` or
-    /// `person`). Additive so v1 snapshots still deserialize.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub by: Option<String>,
-    /// The concrete agent/person identity frozen at dispatch. Approval uses
-    /// `owner`; an unbound independent review stays `None` and blocks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actor: Option<String>,
-    /// The gate node this step is, in the workflow run's snapshot -- or in
-    /// the implicit one-node definition a standalone task is planned as.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
-}
+pub use factory_kernel::RequiredStep;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttestationVerdict {
-    Pass,
-    Fail,
-}
+pub use factory_kernel::AttestationVerdict;
 
-impl AttestationVerdict {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pass => "pass",
-            Self::Fail => "fail",
-        }
-    }
-}
-
-/// The evidence one step left for one run: who produced it, what it
-/// judged, and what it found. Written once, append-only, and never edited --
-/// a second verification of the same run appends new ones.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StepAttestation {
-    pub id: String,
-    pub run_id: String,
-    pub task_id: String,
-    pub scope: String,
-    pub category: String,
-    pub step: String,
-    pub kind: StepKind,
-    /// Who produced the evidence -- [`GATE_ACTOR`] for a gate.
-    pub actor: String,
-    pub verdict: AttestationVerdict,
-    /// Review findings or a person's decision reason.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub findings: Option<String>,
-    /// Rework round this evidence belongs to. Zero is the first pass.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub round: u32,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_by: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-    /// The last 4 KiB of the gate's combined output.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
-    /// The directory the gate judged -- the run's worktree, or the scope.
-    pub dir: String,
-    /// `git rev-parse HEAD` in `dir` when the gate ran, and whether the tree
-    /// had uncommitted changes: the state the verdict is about.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dirty: Option<bool>,
-    /// SHA-256 over the exact tracked diff and untracked file contents that
-    /// this evidence judged. Additive so older attestations remain readable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
-    pub at: DateTime<Utc>,
-}
+pub use factory_kernel::StepAttestation;
 
 /// Whether a run's evidence is complete, and if not, why -- in words a
 /// person reads in the Inbox.
@@ -577,10 +459,6 @@ pub fn judge(
         }
     }
     out
-}
-
-fn is_zero(n: &u32) -> bool {
-    *n == 0
 }
 
 #[cfg(test)]

@@ -16,51 +16,13 @@
 //! module's output into a `Check::Attested` status, so this stays free of
 //! that dependency rather than the two modules importing each other.
 
-use crate::control_plan::{self, AttestationVerdict, RequiredStep, StepAttestation, StepKind};
-use crate::run::{FailKind, RunStatus};
+use crate::control_plan::{self, AttestationVerdict, StepAttestation, StepKind};
+use crate::run::FailKind;
+#[cfg(test)]
+use crate::run::RunStatus;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 
-/// One finished run as the `attested` check and both metrics see it: enough
-/// to judge conformance without a second store read. `Engine::attested_runs`
-/// only ever returns a run that is finished (`operations::is_finished`) and
-/// whose task is not `bench_origin` -- a bench attempt is judged by its own
-/// case gate, never by a control plan (`verification.rs`'s
-/// `required_steps_for_task`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttestedRun {
-    pub run_id: String,
-    pub task_id: String,
-    /// The task's own scope, canonicalised (`Factory::canonical_scope_name`)
-    /// -- never rolled up to an ancestor: the same exact-scope rule
-    /// `task`/`workflow` checks already follow.
-    pub scope: String,
-    /// `control_plan::effective_category(task.category)`, read off the
-    /// task's *current* record, not something frozen at dispatch -- a task
-    /// recategorised later moves its past runs along with it, the same as
-    /// every other field `Engine::attested_runs` reads off the live task.
-    pub category: String,
-    /// The run's own executing agent -- `step_evidence`'s and `conforms`'s
-    /// own exclusion, the same rule `control_plan::judge` applies: nothing
-    /// the run's own agent attested ever counts as evidence for it.
-    pub agent: String,
-    pub status: RunStatus,
-    /// Always `Some` on the runs this module ever sees -- `Engine::attested_runs`
-    /// only returns finished runs -- kept as the same type `Run::ended_at`
-    /// is, rather than asserting it away.
-    pub ended_at: DateTime<Utc>,
-    /// Why the run ended `Failed` or `Cancelled`, straight off `Run::fail_kind`
-    /// -- `None` for a run that ended `Done`. [`Self::is_infrastructure_failure`]
-    /// is the one thing this module reads it for: `conformance_rate` excludes
-    /// a run that never reached an agent from both sides of the ratio.
-    pub fail_kind: Option<FailKind>,
-    /// This run's own control plan, fixed at dispatch (`Run::required_steps`).
-    pub required_steps: Vec<RequiredStep>,
-    /// Every attestation this run has collected, whatever step or round --
-    /// oldest first, the same order `PolicyStore::step_attestations`/
-    /// `step_attestations_for` hand back.
-    pub attestations: Vec<StepAttestation>,
-}
+pub use factory_kernel::AttestedRun;
 
 /// One enforced step's own evidence, from the newest attestation for it by
 /// anyone other than the run's own agent -- the same filter
@@ -73,16 +35,24 @@ pub enum StepEvidence {
     Failed,
     /// No attestation from anyone but the run's own agent -- whether
     /// because nothing has attested the step yet, or because the run's own
-    /// control plan never required it at all. [`AttestedRun::holds`]
+    /// control plan never required it at all. [`ConformanceEvidence::holds`]
     /// distinguishes the two for a caller that needs to say which.
     Missing,
 }
 
-impl AttestedRun {
+/// Conformance evaluation remains with its evaluator, not in L0.
+pub trait ConformanceEvidence {
+    fn holds(&self, step: &str) -> bool;
+    fn step_evidence(&self, step: &str) -> StepEvidence;
+    fn held(&self) -> bool;
+    fn is_infrastructure_failure(&self) -> bool;
+    fn conforms(&self) -> bool;
+}
+impl ConformanceEvidence for AttestedRun {
     /// Whether `step` was ever named in this run's own `required_steps` --
     /// enforced or not. A caller building a reason for [`StepEvidence::Missing`]
     /// uses this to say "never held to it" instead of "no evidence yet".
-    pub fn holds(&self, step: &str) -> bool {
+    fn holds(&self, step: &str) -> bool {
         self.required_steps.iter().any(|s| s.step == step)
     }
 
@@ -90,7 +60,7 @@ impl AttestedRun {
     /// by someone other than this run's own agent, the same "newest wins,
     /// self-attested never counts" rule [`Self::conforms`] applies to the
     /// whole run.
-    pub fn step_evidence(&self, step: &str) -> StepEvidence {
+    fn step_evidence(&self, step: &str) -> StepEvidence {
         let required = self.required_steps.iter().find(|s| s.step == step);
         let newest = self
             .attestations
@@ -108,7 +78,7 @@ impl AttestedRun {
     /// Whether this run holds at least one enforced gate, review or approval.
     /// A run with nothing required never counts
     /// for or against `conformance_rate`: nothing was ever demanded of it.
-    pub fn held(&self) -> bool {
+    fn held(&self) -> bool {
         self.required_steps.iter().any(|s| s.kind.enforced())
     }
 
@@ -120,7 +90,7 @@ impl AttestedRun {
     /// against the rate would turn a conformance metric into a reliability
     /// one. A person's or an agent's own cancellation, and an agent-reported
     /// failure, are not infrastructure and still count against it.
-    pub fn is_infrastructure_failure(&self) -> bool {
+    fn is_infrastructure_failure(&self) -> bool {
         self.fail_kind.is_some_and(FailKind::is_infrastructure)
     }
 
@@ -129,7 +99,7 @@ impl AttestedRun {
     /// so a step attested in *any* verification round still counts, not
     /// only the round nearest to now -- a re-verification only ever adds
     /// attestations, it never withdraws what an earlier round already left.
-    pub fn conforms(&self) -> bool {
+    fn conforms(&self) -> bool {
         control_plan::judge(
             &self.required_steps,
             &self.attestations,
@@ -161,7 +131,7 @@ pub struct ConformanceFigure {
 /// runs, among `runs` of `category` -- `runs` is expected already narrowed
 /// to finished runs of the scope subtree and window a caller asked about
 /// (`Engine::attested_runs`); this only filters by category, by `held()`,
-/// and by [`AttestedRun::is_infrastructure_failure`], never by scope or
+/// and by [`ConformanceEvidence::is_infrastructure_failure`], never by scope or
 /// time. A held run that was cancelled by a person or an agent, or that the
 /// agent itself reported failed, without passing evidence, still counts
 /// against the rate -- declared but not shown to be met is not met, the
