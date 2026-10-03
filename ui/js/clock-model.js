@@ -36,7 +36,7 @@ export function itemKey(item) {
 /// failed): an empty map, same as no clock item ever matching.
 export function clockIndex(clock) {
   const map = new Map();
-  for (const item of (clock && clock.items) || []) map.set(itemKey(item.item), item);
+  for (const item of clock?.items || []) map.set(itemKey(item.item), item);
   return map;
 }
 

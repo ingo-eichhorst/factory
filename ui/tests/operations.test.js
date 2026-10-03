@@ -55,7 +55,8 @@ test("the Inbox no longer derives its own list from the task list", () => {
 
 test("a policy_changed event reloads the Inbox too, since a clock submission can flip one of its rows to met (#157/#170 phase 2)", () => {
   assert.match(dashboard, /api\("\/api\/policy\/clock"\)/);
-  assert.match(wiring, /ev\.type === "policy_changed" && state\.tab === "inbox"\) loadInbox\(\);/);
+  assert.match(wiring, /ev\.type === "policy_changed" && state\.tab === "inbox"\) \{\s*loadInbox\(\)\.catch\(/,
+    "event-driven refresh handles its promise rejection");
 });
 
 test("a paused schedule is marked wherever a scheduled task is drawn", () => {

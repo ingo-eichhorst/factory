@@ -748,7 +748,9 @@ function onEvent(ev) {
   // `/api/operations` and `/api/policy/clock` together. Intake is not
   // wired here: its board reloads on a task event, and a clock submission
   // alone touches neither.
-  if (ev.type === "policy_changed" && state.tab === "inbox") loadInbox();
+  if (ev.type === "policy_changed" && state.tab === "inbox") {
+    loadInbox().catch(error => console.warn("could not refresh the Inbox after a policy change", error));
+  }
   // And a task carrying a `policy=` label appearing, changing status or going
   // away, which is `open_tasks` changing under a gap's "Create task"/"Task
   // open" (#98) -- the same rule, and the same restraint, as the Quality

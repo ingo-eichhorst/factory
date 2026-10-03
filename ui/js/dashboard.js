@@ -962,7 +962,7 @@ async function fetchClock() {
 /// knows about) or, until that task is loaded, its bare id.
 function clockReportTitle(taskId) {
   const t = state.tasks.get(taskId);
-  return (t && t.title) || taskId;
+  return t?.title || taskId;
 }
 
 /// A finding has no task of its own to open -- Dependencies is where its
@@ -1010,7 +1010,8 @@ function inboxItemRow(it) {
   // today only a reporting-clock finding, pointed at Dependencies
   // (`clockFindingHref`, `inboxRows`). `liveness_lost` is the older,
   // special-cased fallback for the same shape of thing.
-  const href = it.task_id ? "" : it.href || (it.kind === "liveness_lost" ? routeHref(null, "roster") : "");
+  const fallbackHref = it.href || (it.kind === "liveness_lost" ? routeHref(null, "roster") : "");
+  const href = it.task_id ? "" : fallbackHref;
   // The reason is the agent's own words when it gave any -- a blocked
   // run's question, a failure's last error -- and the daemon's otherwise.
   return `<div class="inbox-item"${it.task_id ? ` data-task="${esc(it.task_id)}"` : ""}${it.run_id ? ` data-run="${esc(it.run_id)}"` : ""}${href ? ` data-href="${esc(href)}"` : ""}>

@@ -304,8 +304,11 @@ function clockDeadlinesBlock(card) {
   return `<label>CRA Art. 14 reporting clock <span class="sub">only the 24h/72h deadlines exist yet -- the 14-day final report is #157 phases 2-3</span></label>
     <ul class="sub">${item.deadlines
       .map(
-        (d) => `<li><span class="badge s-${esc(d.state)}">${esc(d.stateLabel)}</span> ${esc(d.label)}, due ${esc(d.dueAt)} -- ${esc(d.text)}
-          ${d.submission ? `<br>submitted by ${esc(d.submission.by)} at ${esc(d.submission.at)}` : ""}</li>`,
+        (d) => {
+          const submission = d.submission ? `<br>submitted by ${esc(d.submission.by)} at ${esc(d.submission.at)}` : "";
+          return `<li><span class="badge s-${esc(d.state)}">${esc(d.stateLabel)}</span> ${esc(d.label)}, due ${esc(d.dueAt)} -- ${esc(d.text)}
+            ${submission}</li>`;
+        },
       )
       .join("")}</ul>`;
 }
