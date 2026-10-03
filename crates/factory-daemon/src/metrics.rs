@@ -177,12 +177,12 @@ fn environment_metric(id: &str) -> Option<(&str, &str)> {
     (metrics::ENVIRONMENT_METRICS.contains(&name) && !env.contains('.')).then_some((name, env))
 }
 
-/// `#158` phase 1: `conformance_rate.<category>` and `gate_fail_rate`, the
-/// two registry families `Engine::attested_runs` backs -- one read shared
-/// by both, whatever mix of categories and however many of the two a
+/// `#158`: conformance, gate failure and independent review rejection, the
+/// registry families `Engine::attested_runs` backs -- one read shared
+/// by all, whatever mix of categories and however many a
 /// request actually asks for.
 fn is_attestation_metric(id: &str) -> bool {
-    id.starts_with("conformance_rate.") || id == "gate_fail_rate"
+    id.starts_with("conformance_rate.") || id == "gate_fail_rate" || id == "review_reject_rate"
 }
 
 impl Engine {
@@ -587,6 +587,9 @@ impl Engine {
             (attestation_metric_value(id, sources.attested.expect("needs_attested set"), category, now), None)
         } else if id.as_str() == "gate_fail_rate" {
             let figure = factory_core::conformance::gate_fail_rate(sources.attested.expect("needs_attested set"));
+            (figure_to_value(id, &figure, now), None)
+        } else if id.as_str() == "review_reject_rate" {
+            let figure = factory_core::conformance::review_reject_rate(sources.attested.expect("needs_attested set"));
             (figure_to_value(id, &figure, now), None)
         } else if let Some(dataset) = id.as_str().strip_prefix("bench.resolve_rate.") {
             (self.bench_resolve_rate_value(id, dataset, now).await?, None)
@@ -3345,8 +3348,9 @@ mod tests {
     // -- conformance_rate / gate_fail_rate (#158) ----------------------------
 
     #[test]
-    fn is_attestation_metric_names_only_the_two_new_families() {
+    fn is_attestation_metric_names_only_the_conformance_families() {
         assert!(is_attestation_metric("gate_fail_rate"));
+        assert!(is_attestation_metric("review_reject_rate"));
         assert!(is_attestation_metric("conformance_rate.feature"));
         assert!(
             !is_attestation_metric("first_pass_yield"),
@@ -3537,6 +3541,111 @@ mod tests {
             Some(2.0 / 3.0)
         );
         assert_eq!(metric(&all, "gate_fail_rate").value, Some(1.0 / 3.0));
+    }
+
+    async fn reviewed_run(
+        engine: &Arc<Engine>,
+        scope: &str,
+        ended_at: DateTime<Utc>,
+        verdicts: &[factory_core::control_plan::AttestationVerdict],
+    ) {
+        use factory_core::control_plan::{AttestationVerdict, StepKind};
+        let run = held_run(engine, scope, "feature", ended_at, AttestationVerdict::Pass).await;
+        let mut required = run.required_steps.clone();
+        let mut step = required[0].clone();
+        step.step = "review".into();
+        step.kind = StepKind::Review;
+        step.command = None;
+        step.actor = Some("reviewer".into());
+        required.push(step);
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &factory_core::run::RunPatch {
+                    required_steps: Some(required),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let base = engine.run_attestations(&run.id).await.unwrap().remove(0);
+        for (round, verdict) in verdicts.iter().enumerate() {
+            let mut a = base.clone();
+            a.id = uuid::Uuid::new_v4().to_string();
+            a.step = "review".into();
+            a.kind = StepKind::Review;
+            a.actor = "reviewer".into();
+            a.command = None;
+            a.exit_code = None;
+            a.verdict = *verdict;
+            a.round = round as u32;
+            engine.policies.append_step_attestation(&a).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn review_reject_rate_uses_one_fact_read_for_scope_windows_goals_and_signposts() {
+        use factory_core::control_plan::AttestationVerdict::{Fail, Pass};
+        let engine = subtree_engine();
+        let root = engine.factory_snapshot().root.clone();
+        std::fs::create_dir_all(root.join(".factory/goals")).unwrap();
+        std::fs::create_dir_all(root.join(".factory/scenarios")).unwrap();
+        std::fs::write(root.join(".factory/goals/2026-q4.yaml"),
+            "cycle: {id: 2026-q4, from: 2026-10-01, to: 2026-12-31}\nobjectives:\n  - id: quality\n    scope: work\n    title: Independent review\n    key_results:\n      - {id: rejection, title: Fewer rejections, kind: committed, metric: review_reject_rate, baseline: 1, target: 0}\n").unwrap();
+        std::fs::write(root.join(".factory/scenarios/review-watch.yaml"),
+            "name: review-watch\ntitle: Review rejections\nsignposts:\n  - {metric: review_reject_rate, above: 0.4}\n").unwrap();
+        let id = MetricId::new("review_reject_rate").unwrap();
+        let empty = engine
+            .metrics_for(std::slice::from_ref(&id), Utc::now(), Some("work"), None)
+            .await
+            .unwrap();
+        assert!(metric(&empty, "review_reject_rate").value.is_none());
+        assert!(metric(&empty, "review_reject_rate")
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("no independent review"));
+        let base = Utc::now();
+        reviewed_run(&engine, "work", base, &[Fail, Pass]).await;
+        reviewed_run(&engine, "work", base - chrono::Duration::days(2), &[Fail]).await;
+        reviewed_run(&engine, "side", base, &[Pass]).await;
+        let now = Utc::now();
+        let scoped = engine
+            .metrics_for(std::slice::from_ref(&id), now, Some("work"), None)
+            .await
+            .unwrap();
+        assert_eq!(metric(&scoped, "review_reject_rate").value, Some(2.0 / 3.0));
+        assert_eq!(metric(&scoped, "review_reject_rate").as_of, base);
+        let day = engine
+            .metrics_for(
+                std::slice::from_ref(&id),
+                now,
+                Some("work"),
+                Some(MetricsWindow::Day),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metric(&day, "review_reject_rate").value, Some(0.5));
+        let all = engine
+            .metrics_for(std::slice::from_ref(&id), now, None, None)
+            .await
+            .unwrap();
+        assert_eq!(metric(&all, "review_reject_rate").value, Some(0.5));
+        let goals = engine
+            .goals_report(Some("work"), Some("2026-q4"))
+            .await
+            .unwrap();
+        let kr = &goals.report.as_ref().unwrap().objectives[0].key_results[0];
+        // Existing Goals semantics: scope filters visible objectives, while
+        // metric values are computed over the whole instance.
+        assert_eq!(kr.value, Some(0.5));
+        assert_eq!(kr.score, Some(0.5));
+        let scenarios = engine.scenarios_report(Some("work")).await.unwrap();
+        assert!(scenarios
+            .triggered
+            .iter()
+            .any(|s| s.scenario == "review-watch"));
     }
 
     #[tokio::test]

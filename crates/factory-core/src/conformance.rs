@@ -1,7 +1,7 @@
-//! `#158` phase 1: what a run's attestations say about whether it conformed
+//! `#158`: what a run's attestations say about whether it conformed
 //! to its own control plan, shared by the `attested` policy check
-//! (`policy::Check::Attested`) and the two `conformance_rate.<category>`/
-//! `gate_fail_rate` registry metrics -- one pure place that reuses
+//! (`policy::Check::Attested`) and the conformance_rate.<category>,
+//! gate_fail_rate and review_reject_rate registry metrics -- one pure place that reuses
 //! `control_plan::judge` rather than re-deriving "did this run pass" a
 //! second time.
 //!
@@ -10,7 +10,7 @@
 //! a finished run's own `required_steps` (frozen at dispatch,
 //! `Run::required_steps`) and every attestation it collected
 //! (`PolicyStore::step_attestations_for`) -- a batch read shared by policy
-//! evidence gathering and both metrics, so a run is never judged twice by
+//! evidence gathering and the metrics, so a run is never judged twice by
 //! two different code paths. Nothing here touches a store, a clock, or
 //! `factory_core::policy` -- `policy.rs` is the one caller that turns this
 //! module's output into a `Check::Attested` status, so this stays free of
@@ -205,6 +205,50 @@ pub fn gate_fail_rate(runs: &[AttestedRun]) -> ConformanceFigure {
         value: Some(f64::from(failed) / f64::from(total)),
         as_of,
         reason: None,
+    }
+}
+
+/// Failed independent review decisions over all review decisions, across
+/// finished runs already narrowed to the requested scope/window. Each
+/// (step, round) counts once; a duplicate's newest decision wins. Approval,
+/// gates, self-review and evidence from anyone but the frozen reviewer do
+/// not count. A missing review is unknown, not an invented rejection.
+pub fn review_reject_rate(runs: &[AttestedRun]) -> ConformanceFigure {
+    let mut total = 0usize;
+    let mut failed = 0usize;
+    let mut as_of = None;
+    for run in runs {
+        let mut rounds = std::collections::BTreeMap::new();
+        for a in run.attestations.iter().filter(|a| {
+            a.kind == StepKind::Review
+                && a.actor != run.agent
+                && run.required_steps.iter().any(|s| {
+                    s.step == a.step
+                        && s.kind == StepKind::Review
+                        && s.actor.as_deref().is_none_or(|actor| actor == a.actor)
+                })
+        }) {
+            let key = (&a.step, a.round);
+            let current: &mut &StepAttestation = rounds.entry(key).or_insert(a);
+            if (a.at, &a.id) > (current.at, &current.id) {
+                *current = a;
+            }
+        }
+        if rounds.is_empty() {
+            continue;
+        }
+        total += rounds.len();
+        failed += rounds
+            .values()
+            .filter(|a| a.verdict == AttestationVerdict::Fail)
+            .count();
+        as_of = Some(as_of.map_or(run.ended_at, |at: DateTime<Utc>| at.max(run.ended_at)));
+    }
+    ConformanceFigure {
+        value: (total > 0).then(|| failed as f64 / total as f64),
+        as_of,
+        reason: (total == 0)
+            .then(|| "no independent review decision among the selected runs".to_string()),
     }
 }
 
@@ -603,5 +647,64 @@ mod tests {
         let figure = gate_fail_rate(&[]);
         assert_eq!(figure.value, None);
         assert!(figure.reason.is_some());
+    }
+
+    #[test]
+    fn review_reject_rate_counts_each_round_once_and_only_the_frozen_independent_reviewer() {
+        let now = Utc::now();
+        let mut required = step("review", StepKind::Review);
+        required.actor = Some("reviewer".into());
+        let make = |actor: &str, round, verdict, seconds| {
+            let mut a = attest(
+                "review",
+                verdict,
+                actor,
+                now + chrono::Duration::seconds(seconds),
+            );
+            a.kind = StepKind::Review;
+            a.round = round;
+            a
+        };
+        let r = run(
+            RunStatus::Failed,
+            "feature",
+            vec![required],
+            vec![
+                make("reviewer", 0, AttestationVerdict::Fail, 0),
+                make("reviewer", 1, AttestationVerdict::Fail, 1),
+                make("reviewer", 1, AttestationVerdict::Pass, 2),
+                make("worker", 2, AttestationVerdict::Fail, 3),
+                make("stranger", 3, AttestationVerdict::Fail, 4),
+                attest("tests", AttestationVerdict::Fail, "gate", now),
+            ],
+            now,
+        );
+        let figure = review_reject_rate(&[r]);
+        assert_eq!(
+            figure.value,
+            Some(0.5),
+            "one failed and one passed round; self/foreign/gate evidence ignored"
+        );
+        assert_eq!(figure.as_of, Some(now));
+        assert!(figure.reason.is_none());
+    }
+
+    #[test]
+    fn review_reject_rate_is_unknown_without_independent_reviews_not_zero_or_failure() {
+        let now = Utc::now();
+        let r = run(
+            RunStatus::Cancelled,
+            "feature",
+            vec![step("review", StepKind::Review)],
+            vec![],
+            now,
+        );
+        let figure = review_reject_rate(&[r]);
+        assert!(figure.value.is_none());
+        assert!(figure.as_of.is_none());
+        assert!(figure
+            .reason
+            .unwrap()
+            .contains("no independent review decision"));
     }
 }
