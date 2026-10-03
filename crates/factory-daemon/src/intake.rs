@@ -100,7 +100,7 @@ impl Engine {
         };
         let record = Intake {
             stage: IntakeStage::Received,
-            source: Box::new(IntakeSource { kind, reference, provider: None, relayed_by: None }),
+            source: Box::new(IntakeSource { kind, reference, provider: None, relayed_by: None, repository: None, number: None, external_id: None }),
             requester,
             received_at: now,
             triage: None,
@@ -172,7 +172,7 @@ impl Engine {
         };
         let record = Intake {
             stage: IntakeStage::Received,
-            source: Box::new(IntakeSource { kind, reference: Some(reference), provider: clean(new.provider), relayed_by: Some(relayed_by) }),
+            source: Box::new(IntakeSource { kind, reference: Some(reference), provider: clean(new.provider), relayed_by: Some(relayed_by), repository: None, number: None, external_id: None }),
             requester,
             received_at,
             triage: None,
@@ -496,6 +496,23 @@ impl Engine {
         let routed_scope = factory.scope(&assessment.routing.scope)?.clone();
         let definition = self.ready_definition_for(&factory, &routed_scope);
         intake::validate(&assessment, &definition).map_err(FactoryError::BadRequest)?;
+        // `owns`/`estimate_seconds` are the executable-plan marker. Old
+        // assessments with only the legacy split shape remain proposals and
+        // keep the explicit owner-approved `intake decide split` fallback.
+        let executable_plan = decide
+            && assessment
+                .split
+                .iter()
+                .any(|part| !part.owns.is_empty() || part.estimate_seconds.is_some());
+        if executable_plan {
+            if assessment.routing.workflow.is_some() {
+                return Err(FactoryError::BadRequest(
+                    "an executable decomposition creates its own tasks; leave routing.workflow out".into(),
+                ));
+            }
+            intake::validate_plan(&assessment.split)
+                .map_err(|error| FactoryError::BadRequest(format!("the executable plan: {error}")))?;
+        }
         intake::validate_duplicates(&record.candidates, &assessment.duplicates).map_err(FactoryError::BadRequest)?;
         // Normalized once, here, the same way `routing.scope`/`agent` are
         // resolved below: `validate` itself only checks the trimmed form, so
@@ -606,7 +623,7 @@ impl Engine {
             .as_ref()
             .and_then(|i| i.security.as_ref())
             .is_some_and(|f| f.state == intake::SecurityState::Possible);
-        if possible && matches!(decision, Decision::Ready { .. }) {
+        if possible && (matches!(decision, Decision::Ready { .. }) || executable_plan) {
             self.entry(
                 &item.id,
                 asked.entry(
@@ -617,6 +634,9 @@ impl Engine {
             )
             .await;
             return Ok(item);
+        }
+        if executable_plan && intake::plan_is_ready(&assessment, &definition) {
+            return self.intake_expand_plan(caller, &item).await;
         }
         self.intake_decide(caller, id, decision).await
     }
@@ -825,6 +845,74 @@ impl Engine {
                 Ok(task)
             }
         }
+    }
+
+    /// Execute a complete plan as one generated workflow.  Its expand node
+    /// materialises every internal child, roots start at once, dependants
+    /// remain scheduled, and the workflow owns integration through one PR.
+    async fn intake_expand_plan(self: &Arc<Self>, caller: &Caller, item: &Task) -> Result<Task> {
+        if item.parent_task_id.is_some() {
+            return Err(FactoryError::BadRequest(
+                "automatic decomposition is one level deep; finish this child as a bounded task".into(),
+            ));
+        }
+        let record = open_record(item)?.clone();
+        let triage = record.triage.clone().ok_or_else(|| {
+            FactoryError::BadRequest("an executable plan needs an assessment".into())
+        })?;
+        intake::validate_plan(&triage.assessment.split)
+            .map_err(|error| FactoryError::BadRequest(format!("the executable plan: {error}")))?;
+        let parts = intake::split_parts(&record, &triage.assessment.split)
+            .map_err(FactoryError::BadRequest)?;
+        let workflow = self
+            .start_decomposition_workflow(item, &parts, &triage.assessment.routing, caller)
+            .await?;
+        let children = self
+            .store
+            .list(&TaskFilter { parent_task_id: Some(item.id.clone()), ..Default::default() })
+            .await?;
+        let result = format!(
+            "expanded into {} tasks in workflow {}: {}",
+            children.len(),
+            workflow.id,
+            children.iter().map(|task| format!("{} ({})", task.title, task.id)).collect::<Vec<_>>().join("; ")
+        );
+        let now = Utc::now();
+        let decided = DecisionRecord {
+            decision: Decision::Split { parts: parts.clone() },
+            by: caller.describe(),
+            at: now,
+            workflow_run: Some(workflow.id.clone()),
+            parts: children.iter().map(|task| task.id.clone()).collect(),
+        };
+        let mut next = record;
+        next.stage = IntakeStage::Split;
+        next.questions.clear();
+        next.decision = Some(decided.clone());
+        next.outbound = crate::github_outbound::awaiting_approval_outbound(&next, &decided);
+        let task = self
+            .write_intake(
+                &item.id,
+                next,
+                TaskPatch {
+                    status: Some(TaskStatus::Done),
+                    result: Some(result.clone()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let asked = Asked::new(caller, None);
+        self.entry(
+            &task.id,
+            asked.entry(
+                "intake_plan_expanded",
+                format!("{result} ({})", asked.words()),
+                serde_json::json!({ "decision": decided, "parts": parts }),
+            ),
+        )
+        .await;
+
+        Ok(task)
     }
 
     /// A `split` decision: each part an intake item of its own in the item's
@@ -1837,6 +1925,7 @@ mod tests {
                     },
                     gate: None,
                     exits: Vec::new(),
+                    expand: None,
                 }],
                 ..Default::default()
             })
@@ -2044,6 +2133,7 @@ mod tests {
                 instructions: "rounds on runs".into(),
                 depends_on: vec!["resume".into()],
                 acceptance: None,
+                ..Default::default()
             },
             factory_core::intake::SplitPart {
                 id: "resume".into(),
@@ -2051,6 +2141,7 @@ mod tests {
                 instructions: "capture and resume sessions".into(),
                 depends_on: vec![],
                 acceptance: Some("cargo test resume_".into()),
+                ..Default::default()
             },
         ];
         a
@@ -2116,6 +2207,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_complete_plan_expands_into_related_tasks_without_child_intake() {
+        let engine = engine();
+        let item = add(&engine, "Build the whole subsystem").await;
+        let mut plan = assessment("demo");
+        plan.complexity = 10;
+        plan.split = vec![
+            factory_core::intake::SplitPart {
+                id: "foundation".into(),
+                title: "Build foundation".into(),
+                instructions: "true".into(),
+                acceptance: Some("foundation tests pass".into()),
+                owns: vec!["core".into()],
+                interface: Some("core API is available".into()),
+                estimate_seconds: Some(600),
+                ..Default::default()
+            },
+            factory_core::intake::SplitPart {
+                id: "surface".into(),
+                title: "Build surface".into(),
+                instructions: "true".into(),
+                depends_on: vec!["foundation".into()],
+                acceptance: Some("surface tests pass".into()),
+                owns: vec!["ui".into()],
+                interface: Some("UI consumes the core API".into()),
+                estimate_seconds: Some(600),
+            },
+        ];
+
+        let expanded = engine.intake_assess(&Caller::Owner, &item.id, plan, true).await.unwrap();
+        assert_eq!(expanded.status, TaskStatus::Done);
+        assert_eq!(expanded.intake.as_ref().unwrap().stage, IntakeStage::Split);
+        assert!(expanded.result.as_deref().unwrap().starts_with("expanded into 2 tasks"));
+
+        let tasks = engine.store.list(&TaskFilter::default()).await.unwrap();
+        let children: Vec<&Task> = tasks.iter().filter(|task| task.parent_task_id.as_deref() == Some(&item.id)).collect();
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().all(|task| task.intake.is_none()), "children are executable tasks, not GitHub/intake children");
+        let foundation = children.iter().find(|task| task.decomposition_part.as_deref() == Some("foundation")).unwrap();
+        let surface = children.iter().find(|task| task.decomposition_part.as_deref() == Some("surface")).unwrap();
+        assert_eq!(surface.depends_on, vec![foundation.id.clone()]);
+        assert_eq!(surface.status, TaskStatus::Pending);
+        assert_eq!(surface.runs, 0);
+        engine.start_run_due(&surface.id, Trigger::Manual, Due::now()).await;
+        let still_waiting = engine.require(&surface.id).await.unwrap();
+        assert_eq!(still_waiting.status, TaskStatus::Pending);
+        assert_eq!(still_waiting.runs, 0, "a direct run request cannot jump its dependency");
+        assert!(kinds(&engine, &surface.id).await.contains(&"dependency_held".to_string()));
+
+        engine
+            .store
+            .update(
+                &foundation.id,
+                &TaskPatch { status: Some(TaskStatus::Done), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        let ready = engine.dependency_ready_tasks().await.unwrap();
+        assert_eq!(ready.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(), vec![surface.id.as_str()]);
+    }
+
+    #[tokio::test]
     async fn the_triage_run_may_propose_a_split_but_not_make_one() {
         let engine = engine();
         let item = add(&engine, "Everything at once").await;
@@ -2155,6 +2307,7 @@ mod tests {
                     },
                     gate: None,
                     exits: Vec::new(),
+                    expand: None,
                 }],
                 ..Default::default()
             })
@@ -2439,6 +2592,9 @@ mod tests {
                     reference: Some("https://github.com/o/r/issues/9".into()),
                     provider: None,
                     relayed_by: None,
+                    repository: None,
+                    number: None,
+                    external_id: None,
                 }),
                 requester: "octocat".into(),
                 received_at,

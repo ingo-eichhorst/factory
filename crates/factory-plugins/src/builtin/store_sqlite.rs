@@ -356,6 +356,10 @@ impl TaskStore for SqliteStore {
                 sql.push_str(" AND scope = ?");
                 args.push(Box::new(scope.clone()));
             }
+            if let Some(parent) = &filter.parent_task_id {
+                sql.push_str(" AND json_extract(data, '$.parent_task_id') = ?");
+                args.push(Box::new(parent.clone()));
+            }
             sql.push_str(" ORDER BY created_at DESC");
             if let Some(limit) = filter.limit {
                 sql.push_str(&format!(" LIMIT {limit}"));
@@ -1123,6 +1127,9 @@ mod tests {
             worktree: false,
             knowledge_hints: false,
             workflow_origin: None,
+            parent_task_id: None,
+            decomposition_part: None,
+            depends_on: Vec::new(),
             bench_origin: None,
             retry: None,
             pending_retry: None,
@@ -1164,6 +1171,21 @@ mod tests {
         assert_eq!(mirrored.runs, 1);
         assert_eq!(mirrored.status, TaskStatus::Dispatching);
         assert_eq!(mirrored.last_run_at, Some(run.started_at));
+    }
+
+    #[tokio::test]
+    async fn tasks_can_be_queried_by_their_real_parent_relation() {
+        let store = SqliteStore::in_memory().unwrap();
+        let mut child = sample_task("child");
+        child.parent_task_id = Some("parent".into());
+        store.create(&sample_task("parent")).await.unwrap();
+        store.create(&child).await.unwrap();
+
+        let found = store
+            .list(&TaskFilter { parent_task_id: Some("parent".into()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(found.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(), vec!["child"]);
     }
 
     // A scope's tasks can live in another engine entirely; the run still

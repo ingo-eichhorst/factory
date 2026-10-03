@@ -254,6 +254,8 @@ mod tests {
                 subject: "demo".to_string(),
                 detail: "cra/annex-i-2-3 marked not applicable with no rationale".to_string(),
             }],
+            workflow_enforcement: vec![],
+            workflow_findings: vec![],
             catalogues: vec![CatalogueSummary {
                 framework: "cra".to_string(),
                 title: "Cyber Resilience Act".to_string(),

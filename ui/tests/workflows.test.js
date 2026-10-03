@@ -41,11 +41,19 @@ import {
   setInputField,
   supersededTasks,
   validate,
+  workflowNodeKindLabel,
   workflowRouteTail,
 } from "../js/workflow-model.js";
 
+const bareDocument = { addEventListener() {}, getElementById: () => null, querySelectorAll: () => [] };
+globalThis.document = bareDocument;
+globalThis.CSS = { escape: value => String(value) };
+const { paintStatuses } = await import("../js/workflows.js");
+
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
+const view = readFileSync(new URL("../js/workflows.js", import.meta.url), "utf8");
+const css = readFileSync(new URL("../app.css", import.meta.url), "utf8");
 
 test("Workflows is a Process peer of Tasks with an accessible canvas and summary", () => {
   // Intake (`#119`) sits between them -- the queue in front of the line --
@@ -56,6 +64,24 @@ test("Workflows is a Process peer of Tasks with an accessible canvas and summary
   // Not anchored at the closing bracket: Operations follows (`#106`), and
   // `operations.test.js` pins the whole row.
   assert.match(app, /proc: \["tasks", "intake", "workflows"/);
+});
+
+test("status painting preserves every locked control card's kind class", () => {
+  for (const kind of ["gate", "review", "approval"]) {
+    const card = {
+      className: "",
+      classList: { add(name) { card.className += ` ${name}`; } },
+      querySelector: () => null,
+    };
+    paintStatuses({
+      graph: { nodes: [{ id: kind, kind }], edges: [] },
+      nodeRoot: { querySelector: () => card },
+      executionFor: () => ({ status: "running" }),
+      nodesOnly: true,
+    });
+    assert.match(card.className, new RegExp(`(?:^| )wf-k-${kind}(?: |$)`));
+    assert.match(card.className, /(?:^| )wf-s-running(?: |$)/);
+  }
 });
 
 // ------------------------------------------------------------------ R1: drag
@@ -91,6 +117,26 @@ test("a new task node gets an id nothing else has and Factory's ordinary default
   assert.equal(a.task.worktree, true);
   assert.equal(a.task.schedule, undefined);
   assert.deepEqual(a.position, { x: 10, y: 20 });
+});
+
+test("generated expand nodes stay distinct and expose their fan-out on the canvas", () => {
+  assert.equal(
+    workflowNodeKindLabel({ kind: "expand", expand: { children: ["api", "ui"] } }),
+    "EXPAND · 2 children",
+  );
+  assert.equal(
+    workflowNodeKindLabel({ kind: "gate", gate: { locked: true, required_by: ["policy"] } }),
+    "GATE 🔒 · required by policy",
+  );
+  assert.equal(workflowNodeKindLabel(node("work")), "TASK");
+  assert.equal(
+    workflowNodeKindLabel({ kind: "review", gate: { locked: true, actor: "checker", required_by: ["policy"] } }),
+    "REVIEW 🔒 · checker · required by policy",
+  );
+  assert.equal(
+    workflowNodeKindLabel({ kind: "approval", gate: { locked: true, actor: "owner" } }),
+    "APPROVAL 🔒 · owner",
+  );
 });
 
 test("duplicating a node gets a new id and an offset, non-overlapping position", () => {
@@ -240,6 +286,42 @@ test("an edge reflects progress: a done parent draws in the run colour, anything
   for (const status of NODE_STATUSES.filter(s => s !== "done")) {
     assert.equal(edgeStatusClass(status), "");
   }
+});
+
+test("running and verifying are blue while done and completed edges stay green", () => {
+  const rule = selector => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`${escaped}\\s*\\{([^}]*)\\}`).exec(css)?.[1] || "";
+  };
+  const runningNode = rule(".workflow-node.wf-s-running");
+  const verifyingNode = rule(".workflow-node.wf-s-verifying");
+  const runningBadge = rule(".wf-badge.wf-s-running");
+  const verifyingBadge = rule(".wf-badge.wf-s-verifying");
+  const doneNode = rule(".workflow-node.wf-s-done");
+  const doneBadge = rule(".wf-badge.wf-s-done");
+  const doneEdge = rule(".workflow-edge.wf-edge-done");
+
+  assert.match(runningNode, /border-left:\s*4px solid var\(--signal\)/);
+  assert.match(runningNode, /background:\s*var\(--signal-wash\)/);
+  assert.match(runningNode, /box-shadow:\s*0 0 0 1px var\(--signal\)/);
+  assert.match(verifyingNode, /border-left:\s*3px dotted var\(--signal\)/);
+  assert.match(verifyingNode, /background:\s*var\(--signal-wash\)/);
+  for (const badge of [runningBadge, verifyingBadge]) {
+    assert.match(badge, /color:\s*var\(--signal-ink\)/);
+    assert.match(badge, /background:\s*var\(--signal-wash\)/);
+  }
+  assert.match(doneNode, /var\(--run\)/);
+  assert.match(doneBadge, /var\(--run\)/);
+  assert.match(doneEdge, /var\(--run\)/);
+});
+
+test("every Workflows run-status surface uses the workflow badge classes", () => {
+  assert.match(view, /class="wf-badge \$\{nodeStatusClass\(run\.status\)\}"/);
+  assert.equal(
+    view.match(/class="wf-badge \$\{nodeStatusClass\(currentRun\.status\)\}"/g)?.length,
+    2,
+    "the toolbar and inspector statuses must both share the workflow badge palette",
+  );
 });
 
 test("fit-to-content frames every node inside the viewport", () => {
@@ -551,6 +633,30 @@ test("#143 rework targets on github-issue: ancestor task nodes only, in definiti
   assert.deepEqual(ids("review"), ["triage", "implement"]);
   assert.deepEqual(ids("implement"), ["triage"]);
   assert.deepEqual(ids("triage"), []);
+});
+
+test("injected controls stay locked and visually distinct from ordinary work", () => {
+  const nodes = [
+    node("work"),
+    { id: "gate", kind: "gate", task: { title: "tests" }, gate: { locked: true } },
+    { id: "review", kind: "review", task: { title: "review" }, gate: { locked: true } },
+    { id: "approval", kind: "approval", task: { title: "approval" }, gate: { locked: true } },
+  ];
+  const edges = [
+    { id: "wg", from: "work", to: "gate" },
+    { id: "gr", from: "gate", to: "review" },
+    { id: "ra", from: "review", to: "approval" },
+  ];
+  assert.deepEqual(reworkTargets(nodes, edges, "approval").map(n => n.id), ["work"]);
+  assert.match(view, /workflowNodeKindLabel\(node\)/);
+  for (const control of nodes.slice(1)) {
+    assert.match(workflowNodeKindLabel(control), new RegExp(`^${control.kind.toUpperCase()} 🔒`));
+  }
+  assert.match(workflowNodeKindLabel(nodes[2]), /no independent functionary/);
+  assert.match(workflowNodeKindLabel({ ...nodes[2], gate: { locked: true, actor: "checker" } }), /checker/);
+  for (const kind of ["gate", "review", "approval"]) {
+    assert.match(css, new RegExp(`\\.workflow-node\\.wf-k-${kind}`));
+  }
 });
 
 test("#143 rework targets: a node with no kind is a task, as the server's default has it", () => {

@@ -75,7 +75,7 @@ export function closeReason(t) {
 /// deliberately closed. A legacy `failed` row goes there too.
 export function columnFor(t) {
   if (t.status === "blocked" || t.status === "failed") return "blocked";
-  if (t.status === "pending") return t.schedule ? "scheduled" : "manual";
+  if (t.status === "pending") return (t.schedule || (t.depends_on || []).length) ? "scheduled" : "manual";
   // `verifying` is still in progress: the agent said done and the daemon is
   // running the steps its control plan requires (`#118`).
   if (t.status === "dispatching" || t.status === "running" || t.status === "verifying") return "active";
@@ -87,6 +87,17 @@ export function columnFor(t) {
 /// retrying, or how it was closed. `{ tone, text, detail }` or `null`.
 /// `tone` is `fault`, `wait` or `closed`; `detail` is the last error or
 /// the closer's note, when there is one.
+function pendingStanding(t) {
+  if (t.status !== "pending") return null;
+  if (t.pending_retry) {
+    const kind = t.failure ? failKindLabel(t.failure.kind) : "a failure";
+    return { tone: "wait", text: `retrying after ${kind} (retry ${t.pending_retry.attempts})`, detail: t.error || null };
+  }
+  const count = (t.depends_on || []).length;
+  if (!count) return null;
+  return { tone: "wait", text: `waiting for ${count} prerequisite${count === 1 ? "" : "s"}`, detail: null };
+}
+
 export function standing(t) {
   if (!t) return null;
   if (hasFailed(t)) {
@@ -96,10 +107,8 @@ export function standing(t) {
   }
   // Keyed off the queued retry, never off `failure` alone: a pending task
   // with a failure and no retry is not mid-retry.
-  if (t.status === "pending" && t.pending_retry) {
-    const kind = t.failure ? failKindLabel(t.failure.kind) : "a failure";
-    return { tone: "wait", text: `retrying after ${kind} (retry ${t.pending_retry.attempts})`, detail: t.error || null };
-  }
+  const pending = pendingStanding(t);
+  if (pending) return pending;
   if (t.status === "done" && t.routed_to) {
     return { tone: "closed", text: `done → ${t.routed_to}`, detail: null };
   }
@@ -110,6 +119,17 @@ export function standing(t) {
     return { tone: "closed", text, detail: c.note || null };
   }
   return null;
+}
+
+/// A decomposition child's compact place in its parent, using task data --
+/// never the compatibility labels. `tasks` is the map already held by the
+/// client; the id remains useful when the closed parent is outside a scope
+/// filter or an older server omitted it from a partial response.
+export function relationLabel(t, tasks) {
+  if (!t?.parent_task_id) return null;
+  const parent = tasks?.get?.(t.parent_task_id);
+  const part = t.decomposition_part ? `part ${t.decomposition_part}` : "child task";
+  return `${part} of ${parent?.title || t.parent_task_id.slice(0, 8)}`;
 }
 
 /// Which of the modal's task actions apply. Run and Cancel follow the

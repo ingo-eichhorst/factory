@@ -665,6 +665,9 @@ pub enum Action {
     SkipNext,
     PauseSchedule,
     ResumeSchedule,
+    Approve,
+    Reject,
+    AcceptRework,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1030,7 +1033,22 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 .get(&run.id)
                 .cloned()
                 .unwrap_or_else(|| "blocked, waiting for a human".into());
-            found.push(base(ExceptionKind::Blocked, Severity::High, since, reason, vec![Action::Answer, Action::Cancel]));
+            let actions = match run.blocked_source {
+                Some(crate::run::BlockSource::Verification)
+                    if run.session.is_none()
+                        && run
+                            .required_steps
+                            .iter()
+                            .any(|s| s.kind == crate::control_plan::StepKind::Approval) =>
+                {
+                    vec![Action::Approve, Action::Reject, Action::Cancel]
+                }
+                Some(crate::run::BlockSource::Verification) if reason.contains("failed:") => {
+                    vec![Action::AcceptRework, Action::Cancel]
+                }
+                _ => vec![Action::Answer, Action::Cancel],
+            };
+            found.push(base(ExceptionKind::Blocked, Severity::High, since, reason, actions));
         } else {
             if let Some(since) = run.block_suspected_since {
                 let mut e = base(
@@ -1723,6 +1741,9 @@ mod tests {
             worktree: false,
             knowledge_hints: false,
             workflow_origin: None,
+            parent_task_id: None,
+            decomposition_part: None,
+            depends_on: Vec::new(),
             bench_origin: None,
             retry: None,
             pending_retry: None,

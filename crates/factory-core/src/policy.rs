@@ -4438,6 +4438,8 @@ mod tests {
             timeout_seconds: None,
             required_by: Vec::new(),
             node_id: None,
+            by: None,
+            actor: None,
         }
     }
 
@@ -4458,6 +4460,8 @@ mod tests {
             kind: crate::control_plan::StepKind::Gate,
             actor: actor.to_string(),
             verdict,
+            findings: None,
+            round: 0,
             required_by: Vec::new(),
             command: Some("true".to_string()),
             exit_code: Some(
@@ -4471,6 +4475,7 @@ mod tests {
             dir: "/tmp".to_string(),
             commit: None,
             dirty: None,
+            worktree_digest: None,
             node_id: None,
             at,
         }

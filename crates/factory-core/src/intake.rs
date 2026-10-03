@@ -115,7 +115,7 @@ pub enum SourceKind {
     /// An agent handing work on instead of creating a task directly -- the
     /// delegation path. Set by the daemon from the caller, never claimed.
     Agent,
-    /// An open GitHub issue carrying `needs-triage`. Set only by the daemon's
+    /// An open GitHub issue carrying `factory:intake`. Set only by the daemon's
     /// read-only poller, never accepted as caller-supplied provenance.
     Github,
     /// An email, relayed in on somebody else's behalf (`#167`) -- never a
@@ -168,13 +168,25 @@ pub struct IntakeSource {
     /// from before `#167`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relayed_by: Option<String>,
+    /// Canonical `owner/repository` for a GitHub source. Kept separately
+    /// from the display URL so a rename or redirect does not erase which
+    /// repository and issue number were loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<u64>,
+    /// GitHub's stable node/database id. New GitHub receipts carry it;
+    /// older rows continue to deduplicate by their canonical URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
 }
 
 impl IntakeSource {
-    /// The identity a receipt is deduplicated by: `(kind, provider,
-    /// reference)`, and only for the three kinds whose reference is a
-    /// provider's own stable id, never free text a person typed --
-    /// `Github` (the poller's own canonical issue URL) and a relayed
+    /// The identity a receipt is deduplicated by: GitHub's stable external
+    /// id when present, otherwise `(kind, provider, reference)`, and only
+    /// for the three kinds whose reference is a provider's own stable id,
+    /// never free text a person typed -- `Github` (legacy rows use the
+    /// poller's canonical issue URL) and a relayed
     /// `Email` or `Chat`'s message id (`#167`). `None` for `Cli`, `Ui` and
     /// `Agent`, and for a reference that is empty or absent: there, receipt
     /// stays exactly as it always has -- always creates, and `#166`'s
@@ -182,6 +194,11 @@ impl IntakeSource {
     pub fn identity(&self) -> Option<(SourceKind, Option<String>, String)> {
         if !matches!(self.kind, SourceKind::Github | SourceKind::Email | SourceKind::Chat) {
             return None;
+        }
+        if self.kind == SourceKind::Github {
+            if let Some(id) = self.external_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+                return Some((self.kind, self.repository.clone(), id.to_string()));
+            }
         }
         let reference = self.reference.as_deref()?.trim();
         if reference.is_empty() {
@@ -645,7 +662,7 @@ fn overlap(a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSe
 /// same message id under different provider names is worth a look either
 /// way.
 pub fn duplicate_candidates(item: &Task, tasks: &[Task]) -> Vec<DuplicateCandidate> {
-    let item_parent = item.labels.get(PARENT_LABEL).map(String::as_str);
+    let item_parent = item.parent_task_id.as_deref().or_else(|| item.labels.get(PARENT_LABEL).map(String::as_str));
     let item_source = item.intake.as_ref().map(|i| &i.source);
     let item_tokens = signature(&item.title, &item.instructions);
 
@@ -657,7 +674,7 @@ pub fn duplicate_candidates(item: &Task, tasks: &[Task]) -> Vec<DuplicateCandida
         if item_parent == Some(t.id.as_str()) {
             continue; // t is the item it was split from
         }
-        let t_parent = t.labels.get(PARENT_LABEL).map(String::as_str);
+        let t_parent = t.parent_task_id.as_deref().or_else(|| t.labels.get(PARENT_LABEL).map(String::as_str));
         if t_parent == Some(item.id.as_str()) {
             continue; // t is one of the item's own parts
         }
@@ -1409,10 +1426,9 @@ pub struct Routing {
     pub agents: BTreeMap<String, String>,
 }
 
-/// One smaller item an assessment proposes, or a person writes, when an item
-/// is too big to be ready (`#180`'s plan, before its `expand` node exists).
-/// A split makes each part an intake item of its own, so each is triaged --
-/// and has to pass the seven axes -- on its own.
+/// One smaller item in a decomposition. Submitted with `--decide`, a complete
+/// plan becomes ordinary internal tasks immediately; the explicit legacy
+/// `split` decision still makes new intake items as a manual fallback.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitPart {
     /// Short and unique within the split: what `depends_on` names.
@@ -1427,6 +1443,18 @@ pub struct SplitPart {
     /// How to tell the part is done -- a command, or a sentence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance: Option<String>,
+    /// Paths or named components this part may change. Automatic expansion
+    /// uses this to keep independently runnable siblings from being handed
+    /// overlapping work.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
+    /// The API, data shape or hand-off this part promises its dependents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+    /// The part's own expected active time. A decomposition is not valid if
+    /// it merely moves one unbounded estimate into several unbounded tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_seconds: Option<u64>,
 }
 
 /// At most this many parts: more is a plan, not a split, and each part is
@@ -1471,6 +1499,106 @@ pub fn validate_split(parts: &[SplitPart]) -> Result<(), String> {
     Ok(())
 }
 
+/// The stronger contract for a split Factory may execute without another
+/// approval step. The legacy `split` decision remains intentionally looser:
+/// it produces fresh intake items which are assessed again. An executable
+/// plan instead makes ordinary tasks, so every part must already be a small,
+/// standalone, verifiable unit with an estimate and an ownership boundary.
+pub fn validate_plan(parts: &[SplitPart]) -> Result<(), String> {
+    validate_split(parts)?;
+    for part in parts {
+        if part.instructions.trim().is_empty() {
+            return Err(format!("part {} needs standalone instructions", part.id));
+        }
+        if part.acceptance.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            return Err(format!("part {} needs an acceptance check", part.id));
+        }
+        if part.estimate_seconds.is_none_or(|seconds| seconds == 0) {
+            return Err(format!("part {} needs an estimate of at least one second", part.id));
+        }
+        if part.owns.is_empty() || part.owns.iter().any(|owned| owned.trim().is_empty()) {
+            return Err(format!("part {} needs a non-empty ownership boundary", part.id));
+        }
+        if part.interface.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            return Err(format!("part {} needs an interface or hand-off contract", part.id));
+        }
+    }
+
+    for (index, left) in parts.iter().enumerate() {
+        for right in parts.iter().skip(index + 1) {
+            // Ordered tasks may deliberately hand the same component from
+            // one worker to the next. Only siblings which can run in
+            // parallel must have disjoint ownership.
+            if transitively_depends_on(parts, left, &right.id)
+                || transitively_depends_on(parts, right, &left.id)
+            {
+                continue;
+            }
+            let overlap = left.owns.iter().find_map(|owned| {
+                right
+                    .owns
+                    .iter()
+                    .find(|other| ownership_overlaps(owned, other))
+                    .map(|other| (owned, other))
+            });
+            if let Some((owned, other)) = overlap {
+                return Err(format!(
+                    "parallel parts {} and {} have overlapping ownership {:?} and {:?}",
+                    left.id,
+                    right.id,
+                    owned.trim(),
+                    other.trim()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ownership_overlaps(left: &str, right: &str) -> bool {
+    let left = left.trim().trim_end_matches('/');
+    let right = right.trim().trim_end_matches('/');
+    left == right
+        || left.strip_prefix(right).is_some_and(|tail| tail.starts_with('/'))
+        || right.strip_prefix(left).is_some_and(|tail| tail.starts_with('/'))
+}
+
+/// Whether decomposition is the only thing keeping this assessment from
+/// ready. A plan may replace the complexity blocker; it must never wave
+/// through a missing decision, duplicate, failed readiness axis, or failed
+/// scope-specific check.
+pub fn plan_is_ready(a: &Assessment, definition: &ReadyDefinition) -> bool {
+    definition.unreadable.is_empty()
+        && !a.duplicates.iter().any(|d| d.verdict == DuplicateVerdict::Confirmed)
+        && Axis::ALL.into_iter().all(|axis| {
+            a.axes.iter().find(|check| check.axis == axis).is_some_and(|check| {
+                check.pass
+                    || (axis == Axis::Observability
+                        && check.cost.is_some_and(|cost| definition.observability_tolerance.allows(cost)))
+            })
+        })
+        && definition.applicable(a.category.trim()).into_iter().all(|required| {
+            a.checks.iter().find(|answer| answer.id == required.id).is_some_and(|answer| answer.pass)
+        })
+}
+
+fn transitively_depends_on(parts: &[SplitPart], part: &SplitPart, target: &str) -> bool {
+    let mut pending = part.depends_on.clone();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        let id = id.trim();
+        if id == target.trim() {
+            return true;
+        }
+        if seen.insert(id.to_string()) {
+            if let Some(next) = parts.iter().find(|candidate| candidate.id.trim() == id) {
+                pending.extend(next.depends_on.iter().cloned());
+            }
+        }
+    }
+    false
+}
+
 /// The parts in an order where each comes after everything it depends on,
 /// otherwise as written; `None` for a cycle.
 pub fn split_order(parts: &[SplitPart]) -> Option<Vec<&SplitPart>> {
@@ -1509,8 +1637,9 @@ pub struct Assessment {
     /// empty, the failed axes' evidence is what gets asked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<String>,
-    /// A proposed split, for an item too big or too loose to be ready as one.
-    /// Only proposed: the verdict is unchanged, and a person decides `split`.
+    /// A decomposition for an item too big to be ready as one. With
+    /// `--decide`, a fully specified plan is expanded automatically; the
+    /// verdict still records the parent's complexity blocker.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub split: Vec<SplitPart>,
     /// Every stored candidate (`Intake::candidates`) answered confirmed or
@@ -1792,9 +1921,9 @@ pub enum Decision {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duplicate_of: Option<String>,
     },
-    /// Replace it with smaller items, each handed back into intake. Empty
-    /// parts take the assessment's proposal. Needs no verdict: an item
-    /// nobody could assess as one is exactly the one to split.
+    /// Manual fallback: replace it with smaller items, each handed back into
+    /// intake. Empty parts take the assessment's proposal. Executable plans
+    /// use `intake assess --decide` instead and create ordinary tasks.
     Split {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         parts: Vec<SplitPart>,
@@ -1822,7 +1951,7 @@ pub struct DecisionRecord {
     /// to one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run: Option<String>,
-    /// The intake items a split made, in the parts' order.
+    /// The tasks a split or executable plan made, in the parts' order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<String>,
 }
@@ -1927,6 +2056,9 @@ pub fn split_parts(intake: &Intake, given: &[SplitPart]) -> Result<Vec<SplitPart
             instructions: p.instructions.trim().to_string(),
             depends_on: p.depends_on.iter().map(|d| d.trim().to_string()).collect(),
             acceptance: p.acceptance.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()),
+            owns: p.owns.iter().map(|owned| owned.trim().to_string()).collect(),
+            interface: p.interface.map(|interface| interface.trim().to_string()).filter(|interface| !interface.is_empty()),
+            estimate_seconds: p.estimate_seconds,
         })
         .collect())
 }
@@ -2686,11 +2818,14 @@ pub fn triage_instructions(item: &Task, record: &Intake, definition: &ReadyDefin
          cheaper one for mechanical steps. A step's model is its agent's; there is no \
          separate model setting. With no fitting workflow, route to the scope and, if one \
          clearly fits, an agent there. Say why in the summary.\n\
-         9. If the scope axis fails or complexity is 9-10, propose a split in `split`: two to \
+         9. If complexity is 9-10, write an executable decomposition in `split`: two to \
          eight parts, each bounded enough to pass the seven axes on its own, with a short id, \
-         a title, its own instructions, `depends_on` naming the parts that come first, and \
-         an acceptance check. It is a proposal -- the verdict stays needs-info and a person \
-         decides to split -- so write each part to stand alone.\n\n\
+         a title, standalone instructions, `depends_on` naming parts that come first, an \
+         acceptance check, `estimate_seconds`, `interface` naming its hand-off, and `owns` naming its paths or components. \
+         Parallel parts must not own the same surface. Leave `routing.workflow` out: Factory \
+         creates ordinary internal tasks, starts roots, and releases dependent tasks as their \
+         predecessors finish. A failed readiness axis is still needs-info; decomposition only \
+         resolves complexity.\n\n\
          ## Where it can go\n\n",
     );
     out.push_str(&routes_text(routes));
@@ -2733,8 +2868,8 @@ pub fn triage_instructions(item: &Task, record: &Intake, definition: &ReadyDefin
       "summary": "One or two sentences: what it is, and why this call and this route.",
       "questions": ["Only for needs-info: one concrete question per gap."],
       "split": [
-        {"id": "first", "title": "...", "instructions": "...", "acceptance": "..."},
-        {"id": "second", "title": "...", "instructions": "...", "depends_on": ["first"], "acceptance": "..."}
+        {"id": "first", "title": "...", "instructions": "...", "acceptance": "...", "owns": ["path/or-component"], "interface": "the API or hand-off it leaves", "estimate_seconds": 1800},
+        {"id": "second", "title": "...", "instructions": "...", "depends_on": ["first"], "acceptance": "...", "owns": ["another-component"], "interface": "what its dependents can rely on", "estimate_seconds": 1800}
       ],
       "duplicates": [
         {"kind": "task", "reference": "<id>", "title": "...", "evidence": "...", "match": "source", "verdict": "confirmed"},
@@ -2886,7 +3021,7 @@ pub fn decision_event(
     let fact = |kind, at| Some(Ok(IntakeDecisionFact { kind, at, received_at }));
     match kind {
         "intake_needs_info" => fact(IntakeDecisionKind::NeedsInfo, entry_at),
-        "triage_verdict" | "intake_closed" | "intake_split" => {
+        "triage_verdict" | "intake_closed" | "intake_split" | "intake_plan_expanded" => {
             let Some(record) = data.and_then(|d| d.get("decision")) else { return Some(Err(())) };
             let Ok(record) = serde_json::from_value::<DecisionRecord>(record.clone()) else {
                 return Some(Err(()));
@@ -3175,7 +3310,7 @@ mod tests {
     fn open(triage: Option<Triage>) -> Intake {
         Intake {
             stage: IntakeStage::Triaging,
-            source: Box::new(IntakeSource { kind: SourceKind::Cli, reference: None, provider: None, relayed_by: None }),
+            source: Box::new(IntakeSource { kind: SourceKind::Cli, reference: None, provider: None, relayed_by: None, repository: None, number: None, external_id: None }),
             requester: "the owner".into(),
             received_at: at(),
             triage,
@@ -3386,7 +3521,7 @@ mod tests {
     fn received(reference: Option<&str>) -> Intake {
         Intake {
             stage: IntakeStage::Received,
-            source: Box::new(IntakeSource { kind: SourceKind::Github, reference: reference.map(String::from), provider: None, relayed_by: None }),
+            source: Box::new(IntakeSource { kind: SourceKind::Github, reference: reference.map(String::from), provider: None, relayed_by: None, repository: None, number: None, external_id: None }),
             requester: "the owner".into(),
             received_at: at(),
             triage: None,
@@ -3985,6 +4120,7 @@ mod tests {
             instructions: format!("do {id}"),
             depends_on: deps.iter().map(|d| d.to_string()).collect(),
             acceptance: None,
+            ..Default::default()
         }
     }
 
@@ -4017,6 +4153,31 @@ mod tests {
         a.split = vec![part("a", &[]), part("b", &["a"])];
         assert!(validate(&a, &def()).is_ok());
         assert!(matches!(evaluate(&a, &def(), &no_reference(), "x", at()).verdict, Verdict::NeedsInfo { .. }));
+    }
+
+    #[test]
+    fn an_executable_plan_needs_complete_parts_and_disjoint_parallel_ownership() {
+        let planned = |id: &str, deps: &[&str], owned: &str| SplitPart {
+            acceptance: Some(format!("test {id}")),
+            owns: vec![owned.into()],
+            interface: Some(format!("{id} hand-off")),
+            estimate_seconds: Some(600),
+            ..part(id, deps)
+        };
+        let mut incomplete = part("a", &[]);
+        incomplete.acceptance = Some("test a".into());
+        assert!(validate_plan(&[incomplete, planned("b", &["a"], "b")])
+            .unwrap_err()
+            .contains("estimate"));
+
+        let overlap = [planned("a", &[], "engine"), planned("b", &[], "engine")];
+        assert!(validate_plan(&overlap).unwrap_err().contains("overlapping ownership"));
+
+        let nested = [planned("a", &[], "crates/core"), planned("b", &[], "crates/core/src/task.rs")];
+        assert!(validate_plan(&nested).unwrap_err().contains("overlapping ownership"));
+
+        let ordered_overlap = [planned("a", &[], "engine"), planned("b", &["a"], "engine")];
+        assert!(validate_plan(&ordered_overlap).is_ok(), "ordered handoffs may share an owned surface");
     }
 
     #[test]
