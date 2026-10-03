@@ -982,6 +982,10 @@ pub struct Attestation {
     /// policies/mod.rs`) is the only writer, and only for `cra/art-14`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock: Option<crate::reporting_clock::ClockMark>,
+    /// An evidenced corrective-measure availability time for the final
+    /// report clock; not an attestation that the whole control is met.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrective: Option<crate::reporting_clock::CorrectiveMeasureMark>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1373,7 +1377,7 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                     // A clock submission (`#157`) is evidence for one
                     // deadline, not for the control as a whole -- skip it
                     // here exactly like a withdrawn row.
-                    if att.control != applied.control || att.withdrawn.is_some() || att.clock.is_some() {
+                    if att.control != applied.control || att.withdrawn.is_some() || att.clock.is_some() || att.corrective.is_some() {
                         continue;
                     }
                     if att.expires_at > now {
@@ -3076,6 +3080,7 @@ mod tests {
                 attested_at: now,
                 expires_at: now + chrono::Duration::days(30),
                 withdrawn: None,
+                corrective: None,
                 clock: None,
             }],
             ..Default::default()
@@ -3099,6 +3104,7 @@ mod tests {
                 attested_at: now - chrono::Duration::days(400),
                 expires_at: now - chrono::Duration::days(1),
                 withdrawn: None,
+                corrective: None,
                 clock: None,
             }],
             ..Default::default()
@@ -3126,6 +3132,7 @@ mod tests {
                     by: "owner".to_string(),
                     reason: None,
                 }),
+                corrective: None,
                 clock: None,
             }],
             ..Default::default()
@@ -3152,6 +3159,7 @@ mod tests {
                 attested_at: now,
                 expires_at: now + chrono::Duration::days(30),
                 withdrawn: None,
+                corrective: None,
                 clock: Some(crate::reporting_clock::ClockMark {
                     item: crate::reporting_clock::ClockItemRef::Finding {
                         scope: "demo".to_string(),
@@ -3208,6 +3216,7 @@ mod tests {
                 attested_at: now - chrono::Duration::days(400),
                 expires_at: now - chrono::Duration::days(1),
                 withdrawn: None,
+                corrective: None,
                 clock: None,
             }],
             ..Default::default()
@@ -3270,6 +3279,7 @@ mod tests {
                 attested_at: now,
                 expires_at: now + chrono::Duration::days(30),
                 withdrawn: None,
+                corrective: None,
                 clock: None,
             }],
             ..Default::default()

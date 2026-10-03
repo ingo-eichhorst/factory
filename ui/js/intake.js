@@ -150,10 +150,8 @@ function securityBadge(card) {
 /// A confirmed report's own CRA Art. 14 deadlines (`#157`/`#170` phase 2),
 /// one badge per deadline -- empty when the clock was not read (no confirmed
 /// report on this board) or has nothing for this card yet (`reportDeadlines`
-/// resolves one split hop, never further; see its own comment). Only the 24h
-/// early warning and 72h notification exist -- the 14-day final report is
-/// `#157` phases 2-3, still without a source for the corrective-measure time
-/// it would run from.
+/// resolves the root through server-derived membership). The final report appears
+/// when corrective-measure evidence supplies its anchor.
 function clockDeadlinesHtml(card) {
   if (!clock) return "";
   const item = reportDeadlines(clockIdx, card, nowFromClock(clock));
@@ -163,7 +161,7 @@ function clockDeadlinesHtml(card) {
       (d) =>
         `<span class="badge s-${esc(d.state)}" title="${esc(d.text)} · due ${esc(d.dueAt)}">${esc(d.label)}: ${esc(d.stateLabel)}</span>`,
     )
-    .join("");
+    .join("") + (item.awaitingMeasure ? `<span class="badge s-stale">final report: awaiting measure evidence</span>` : "");
 }
 
 /// A decided GitHub item's outbound state (`#171`), shown wherever a card or
@@ -301,7 +299,7 @@ function clockDeadlinesBlock(card) {
   if (!clock) return "";
   const item = reportDeadlines(clockIdx, card, nowFromClock(clock));
   if (!item) return "";
-  return `<label>CRA Art. 14 reporting clock <span class="sub">only the 24h/72h deadlines exist yet -- the 14-day final report is #157 phases 2-3</span></label>
+  return `<label>CRA Art. 14 reporting clock <span class="sub">${item.awaitingMeasure ? "final report: awaiting corrective-measure evidence" : `corrective measure available ${esc(item.correctiveMeasure.available_at)}; evidence: ${esc(item.correctiveMeasure.evidence)}`}</span></label>
     <ul class="sub">${item.deadlines
       .map(
         (d) => {

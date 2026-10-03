@@ -606,10 +606,14 @@ struct AttestBody {
     /// `report:<task-id>`. Given together with `deadline` or not at all.
     #[serde(default)]
     clock_item: Option<String>,
-    /// Which of the clock item's two deadlines `clock_item` submits:
-    /// `early_warning`/`early-warning` or `notification`.
+    /// Which deadline `clock_item` submits: early_warning, notification
+    /// or final_report (hyphenated spellings are accepted too).
     #[serde(default)]
     deadline: Option<String>,
+    #[serde(default)]
+    corrective_item: Option<String>,
+    #[serde(default)]
+    available_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// `POST /api/policy/attestations` -- record an attestation. `control` and
@@ -658,6 +662,10 @@ async fn create_attestation(
                 .into_response()
         }
     };
+    let corrective = match corrective_mark(body.corrective_item, body.available_at) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response(),
+    };
     run(
         &engine,
         Request::PolicyAttest {
@@ -667,9 +675,23 @@ async fn create_attestation(
             note: body.note,
             expires_at,
             clock,
+            corrective,
         },
     )
     .await
+}
+
+fn corrective_mark(
+    item: Option<String>,
+    available_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> std::result::Result<Option<factory_core::reporting_clock::CorrectiveMeasureMark>, String> {
+    match (item, available_at) {
+        (Some(item), Some(available_at)) => {
+            Ok(Some(factory_core::reporting_clock::CorrectiveMeasureMark { item: item.parse()?, available_at }))
+        }
+        (None, None) => Ok(None),
+        _ => Err("corrective_item and available_at must be given together".into()),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -2219,6 +2241,16 @@ mod tests {
     //! the query string and the optional reason body are what this file
     //! adds, so they are what is checked here -- the report itself is
     //! `operations.rs`'s to test.
+
+    #[test]
+    fn corrective_measure_http_requires_both_fields_and_valid_item() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-01T09:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert!(super::corrective_mark(None, None).unwrap().is_none());
+        assert!(super::corrective_mark(Some("report:t1".into()), Some(at)).unwrap().is_some());
+        assert!(super::corrective_mark(Some("report:t1".into()), None).is_err());
+        assert!(super::corrective_mark(None, Some(at)).is_err());
+        assert!(super::corrective_mark(Some("unknown:t1".into()), Some(at)).is_err());
+    }
 
     use super::*;
     use factory_core::adapter::TaskStore;

@@ -750,7 +750,7 @@ enum PolicyCmd {
         evidence: String,
         /// `30d`, `12w`, a bare date (`2027-01-01`), or a full RFC3339
         /// timestamp. Defaults to `520w` (chosen since `Duration` has no
-        /// years) when `--clock-item` is given -- CRA evidence is kept far
+        /// years) when `--clock-item` or `--corrective-item` is given -- CRA evidence is kept far
         /// longer than an ordinary attestation's expiry ever matters for --
         /// and is otherwise required.
         #[arg(long)]
@@ -761,16 +761,24 @@ enum PolicyCmd {
         /// phase 1): `finding:<scope>:<vulnerability>` or
         /// `report:<task-id>`, from `factory policy clock`. Requires
         /// `--deadline`.
-        #[arg(long = "clock-item", requires = "deadline")]
+        #[arg(long = "clock-item", requires = "deadline", conflicts_with = "corrective_item")]
         clock_item: Option<String>,
-        /// Which of `--clock-item`'s two deadlines this submits:
-        /// `early-warning` or `notification`. Requires `--clock-item`.
+        /// Which deadline this submits: `early-warning`, `notification`
+        /// or `final-report`. Requires `--clock-item`.
         #[arg(long, requires = "clock_item")]
         deadline: Option<String>,
+        /// Record evidenced corrective/mitigating measure availability for
+        /// this clock item, instead of a submission.
+        #[arg(long, requires = "available_at", conflicts_with = "clock_item")]
+        corrective_item: Option<String>,
+        /// When the measure became available (RFC3339), not the record time.
+        #[arg(long, requires = "corrective_item")]
+        available_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     /// The CRA Art. 14 reporting clock (`#157`, phase 1): every exploited L2
     /// finding and confirmed L4 security report's 24-hour early-warning and
-    /// 72-hour notification deadlines. `--scope` narrows to that subtree,
+    /// 72-hour notification deadlines, plus the 14-day final report once
+    /// corrective-measure availability is evidenced. `--scope` narrows to that subtree,
     /// the whole instance when absent -- the same rollup `status` itself
     /// uses.
     Clock {
@@ -3457,7 +3465,7 @@ async fn policy_cmd(json: bool, client: &Client, cmd: PolicyCmd) -> Result<()> {
             })
         }
 
-        PolicyCmd::Attest { control, scope, evidence, expires, note, clock_item, deadline } => {
+        PolicyCmd::Attest { control, scope, evidence, expires, note, clock_item, deadline, corrective_item, available_at } => {
             let control: ControlRef = control.parse().map_err(|e: String| anyhow!(e))?;
             let clock = match (clock_item, deadline) {
                 (Some(item), Some(deadline)) => {
@@ -3467,14 +3475,20 @@ async fn policy_cmd(json: bool, client: &Client, cmd: PolicyCmd) -> Result<()> {
                 }
                 _ => None,
             };
+            let corrective = match (corrective_item, available_at) {
+                (Some(item), Some(available_at)) => Some(reporting_clock::CorrectiveMeasureMark {
+                    item: item.parse().map_err(|e: String| anyhow!(e))?, available_at,
+                }),
+                _ => None,
+            };
             let expires = match expires {
                 Some(e) => e,
-                None if clock.is_some() => "520w".to_string(),
-                None => return Err(anyhow!("--expires is required unless --clock-item is given")),
+                None if clock.is_some() || corrective.is_some() => "520w".to_string(),
+                None => return Err(anyhow!("--expires is required unless --clock-item or --corrective-item is given")),
             };
             let expires_at = policy::parse_expiry(&expires, chrono::Utc::now()).map_err(|e| anyhow!(e))?;
             let payload = client
-                .send(Request::PolicyAttest { control, scope, evidence, note, expires_at, clock })
+                .send(Request::PolicyAttest { control, scope, evidence, note, expires_at, clock, corrective })
                 .await?;
             print(&payload, json, |p| match p {
                 Payload::PolicyAttestation { attestation } => Some(attestation_line(attestation)),
@@ -3708,7 +3722,7 @@ fn attestation_line(a: &factory_core::policy::Attestation) -> String {
 
 /// `factory policy clock [--scope]`: one block per item, its awareness time
 /// and whether the newest evidence still reports it, then either why it is
-/// excluded or its two deadlines and whatever submission met (or missed)
+/// excluded or its deadlines and whatever submission met (or missed)
 /// each one.
 fn policy_clock_text(clock: &reporting_clock::ReportingClock) -> String {
     if clock.items.is_empty() {
@@ -3726,6 +3740,10 @@ fn policy_clock_text(clock: &reporting_clock::ReportingClock) -> String {
         if let Some(state) = &item.excluded {
             out.push_str(&format!("  excluded: {state}\n"));
             continue;
+        }
+        match &item.corrective_measure {
+            Some(m) => out.push_str(&format!("  corrective measure available {}  evidence={}  ({} by {})\n", m.available_at.to_rfc3339(), m.evidence, m.attestation, m.by)),
+            None => out.push_str("  final_report awaiting corrective-measure evidence\n"),
         }
         for deadline in &item.deadlines {
             let submission = deadline
@@ -6629,6 +6647,17 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn corrective_measure_cli_requires_paired_flags_and_refuses_a_submission_mix() {
+        let base = ["factory", "policy", "attest", "cra/art-14", "--scope", "demo", "--evidence", "fix"];
+        let parse = |extra: &[&str]| Cli::try_parse_from(base.iter().copied().chain(extra.iter().copied()));
+        assert!(parse(&["--corrective-item", "report:t1", "--available-at", "2026-10-01T09:00:00Z"]).is_ok());
+        assert!(parse(&["--corrective-item", "report:t1"]).is_err());
+        assert!(parse(&["--available-at", "2026-10-01T09:00:00Z"]).is_err());
+        assert!(parse(&["--corrective-item", "report:t1", "--available-at", "not-a-date"]).is_err());
+        assert!(parse(&["--corrective-item", "report:t1", "--available-at", "2026-10-01T09:00:00Z", "--clock-item", "report:t1", "--deadline", "final-report"]).is_err());
+    }
+
     use super::*;
 
     fn write_temp(bytes: &[u8]) -> PathBuf {

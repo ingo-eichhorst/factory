@@ -317,9 +317,8 @@ function clockTableRow(row) {
 /// phase 2): drawn from `clock` alone, independent of the framework board
 /// above -- called from `renderPolicy` before its own failed-fetch early
 /// return, so neither read's failure ever hides the other's answer. Only
-/// the 24h early warning and 72h notification exist; the 14-day final
-/// report is `#157` phases 2-3, still without a source for the
-/// corrective-measure time it would run from.
+/// 24h/72h run from awareness, and the 14-day final report appears once
+/// evidenced corrective-measure availability has been recorded.
 function renderClockSection() {
   const body = $("policy-clock");
   const emptyEl = $("policy-no-clock");

@@ -365,6 +365,7 @@ mod tests {
             attested_at: now,
             expires_at: now + chrono::Duration::days(30),
             withdrawn: None,
+            corrective: None,
             clock: None,
         }
     }

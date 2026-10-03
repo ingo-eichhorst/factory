@@ -646,6 +646,8 @@ pub enum Request {
         /// root-scope reach as an ordinary attestation -- not a new door.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         clock: Option<crate::reporting_clock::ClockMark>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        corrective: Option<crate::reporting_clock::CorrectiveMeasureMark>,
     },
     /// Withdraw a previously recorded attestation. Append-only like the rest
     /// of the store: this writes a new row that references `id`, and never

@@ -916,9 +916,10 @@ impl Engine {
                 note,
                 expires_at,
                 clock,
+                corrective,
             } => {
                 let attestation = self
-                    .policy_attest(caller, control, scope, evidence, note, expires_at, clock)
+                    .policy_attest(caller, control, scope, evidence, note, expires_at, clock, corrective)
                     .await?;
                 self.bus.publish(Event::PolicyChanged {
                     scope: attestation.scope.clone(),

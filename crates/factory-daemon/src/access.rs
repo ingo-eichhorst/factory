@@ -1049,6 +1049,7 @@ mod tests {
             evidence: "https://example.com/policy".into(),
             note: None,
             expires_at: Utc::now() + chrono::Duration::days(30),
+            corrective: None,
             clock: None,
         };
         let withdraw = Request::PolicyWithdraw { id: "att-1".into(), reason: None };
@@ -1093,6 +1094,7 @@ mod tests {
                     evidence: "https://example.com/policy".into(),
                     note: None,
                     expires_at: Utc::now() + chrono::Duration::days(30),
+                    corrective: None,
                     clock: None,
                 }
             )
@@ -1110,6 +1112,7 @@ mod tests {
                     evidence: "https://example.com/policy".into(),
                     note: None,
                     expires_at: Utc::now() + chrono::Duration::days(30),
+                    corrective: None,
                     clock: None,
                 }
             )
@@ -2441,6 +2444,7 @@ mod tests {
             evidence: "https://example.com/notice".into(),
             note: None,
             expires_at: Utc::now() + chrono::Duration::days(30),
+            corrective: None,
             clock: Some(factory_core::reporting_clock::ClockMark {
                 item: factory_core::reporting_clock::ClockItemRef::Finding {
                     scope: "demo".into(),

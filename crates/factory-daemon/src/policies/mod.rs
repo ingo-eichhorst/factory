@@ -670,12 +670,14 @@ impl Engine {
     /// Record an attestation: `Request::PolicyAttest`. Refuses empty
     /// evidence, a past or missing expiry, an unknown control, and a
     /// control that does not apply -- or is `n/a` -- at `scope`. With
-    /// `clock` set (a submission against the CRA Art. 14 reporting clock,
-    /// `#157` phase 1), also refuses any control but `cra/art-14`, an
+    /// `clock` or `corrective` set (CRA Art. 14 reporting evidence), also
+    /// refuses any control but `cra/art-14`, an
     /// unknown clock item, one whose own scope is not exactly `scope` (a
     /// subtree read would otherwise let a root-scope attestation cover a
     /// child's item), an excluded item, and a deadline that already has a
-    /// live (unwithdrawn) submission.
+    /// live (unwithdrawn) submission. Corrective measures additionally refuse
+    /// future availability and duplicate live anchors; a final submission
+    /// requires an evidenced anchor. Expiry never erases either clock record.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn policy_attest(
         &self,
@@ -686,6 +688,7 @@ impl Engine {
         note: Option<String>,
         expires_at: chrono::DateTime<Utc>,
         clock: Option<ClockMark>,
+        corrective: Option<reporting_clock::CorrectiveMeasureMark>,
     ) -> Result<Attestation> {
         if evidence.trim().is_empty() {
             return Err(FactoryError::BadRequest("evidence must not be empty".into()));
@@ -696,7 +699,13 @@ impl Engine {
                 "expires_at {expires_at} must be in the future"
             )));
         }
-        if clock.is_some() {
+        if clock.is_some() && corrective.is_some() {
+            return Err(FactoryError::BadRequest("record a submission or a corrective measure, not both".into()));
+        }
+        if corrective.as_ref().is_some_and(|m| m.available_at > now) {
+            return Err(FactoryError::BadRequest("available_at must not be in the future".into()));
+        }
+        if clock.is_some() || corrective.is_some() {
             let art_14 = reporting_clock::art_14();
             if control != art_14 {
                 return Err(FactoryError::BadRequest(format!(
@@ -724,40 +733,45 @@ impl Engine {
             )));
         }
 
-        if let Some(mark) = &clock {
+        if let Some(mark_item) = clock.as_ref().map(|m| &m.item).or_else(|| corrective.as_ref().map(|m| &m.item)) {
             // The item's own scope must *equal* the canonical `scope` --
             // `policy_clock(Some(&scope))` rolls up the subtree the same way
             // `Request::Policy` does, so a descendant's item can appear in
             // it too; only an exact match may be attested here.
             let clock_now = self.policy_clock(Some(&scope)).await?;
-            let item = clock_now.items.iter().find(|i| i.item == mark.item).ok_or_else(|| {
+            let item = clock_now.items.iter().find(|i| &i.item == mark_item).ok_or_else(|| {
                 FactoryError::BadRequest(format!(
                     "{} is not a reporting-clock item in {scope:?}'s subtree",
-                    mark.item
+                    mark_item
                 ))
             })?;
             if item.scope != scope {
                 return Err(FactoryError::BadRequest(format!(
                     "{} belongs to scope {:?}, not {scope:?} -- attest it there",
-                    mark.item, item.scope
+                    mark_item, item.scope
                 )));
             }
             if let Some(state) = &item.excluded {
                 return Err(FactoryError::BadRequest(format!(
                     "{} is excluded ({state}); there is nothing left to report",
-                    mark.item
+                    mark_item
                 )));
             }
-            let deadline = item
-                .deadlines
-                .iter()
-                .find(|d| d.deadline == mark.deadline)
-                .expect("compute always emits both deadlines for an unexcluded item");
-            if matches!(deadline.state, ClockDeadlineState::Met | ClockDeadlineState::Late) {
-                return Err(FactoryError::BadRequest(format!(
-                    "{} already has a live submission for its {} deadline",
-                    mark.item, mark.deadline
-                )));
+            if let Some(mark) = &clock {
+                let deadline = item
+                    .deadlines
+                    .iter()
+                    .find(|d| d.deadline == mark.deadline)
+                    .ok_or_else(|| FactoryError::BadRequest("record an evidenced corrective measure before submitting the final report".into()))?;
+                if matches!(deadline.state, ClockDeadlineState::Met | ClockDeadlineState::Late) {
+                    return Err(FactoryError::BadRequest(format!(
+                        "{} already has a live submission for its {} deadline",
+                        mark.item, mark.deadline
+                    )));
+                }
+            }
+            if corrective.is_some() && item.corrective_measure.is_some() {
+                return Err(FactoryError::BadRequest("this item already has a live corrective-measure record; withdraw it before correcting it".into()));
             }
         }
 
@@ -772,6 +786,7 @@ impl Engine {
             expires_at,
             withdrawn: None,
             clock,
+            corrective,
         };
         self.policies.append_attestation(&attestation).await?;
         Ok(attestation)
@@ -1160,6 +1175,7 @@ mod tests {
                 None,
                 Utc::now() + chrono::Duration::days(30),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1208,6 +1224,7 @@ mod tests {
                 None,
                 Utc::now() + chrono::Duration::days(1),
                 None,
+                None,
             )
             .await
             .unwrap_err();
@@ -1222,6 +1239,7 @@ mod tests {
                 None,
                 Utc::now() - chrono::Duration::days(1),
                 None,
+                None,
             )
             .await
             .unwrap_err();
@@ -1235,6 +1253,7 @@ mod tests {
                 "https://example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(1),
+                None,
                 None,
             )
             .await
@@ -1252,6 +1271,7 @@ mod tests {
                 "https://example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(1),
+                None,
                 None,
             )
             .await
@@ -1273,6 +1293,7 @@ mod tests {
                 None,
                 Utc::now() + chrono::Duration::days(30),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1285,6 +1306,7 @@ mod tests {
                 "https://two.example.com".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(30),
+                None,
                 None,
             )
             .await
@@ -1916,6 +1938,7 @@ mod tests {
                 None,
                 Utc::now() + chrono::Duration::days(30),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1944,6 +1967,7 @@ mod tests {
                 "https://example.com/company".to_string(),
                 None,
                 Utc::now() + chrono::Duration::days(30),
+                None,
                 None,
             )
             .await
@@ -2073,6 +2097,7 @@ mod tests {
                 None,
                 now + chrono::Duration::weeks(520),
                 Some(mark(item.clone())),
+                None,
             )
             .await
             .unwrap_err();
@@ -2088,6 +2113,7 @@ mod tests {
                 None,
                 now + chrono::Duration::weeks(520),
                 Some(mark(unknown)),
+                None,
             )
             .await
             .unwrap_err();
@@ -2104,6 +2130,7 @@ mod tests {
                 None,
                 now + chrono::Duration::weeks(520),
                 Some(mark(item)),
+                None,
             )
             .await
             .unwrap_err();
@@ -2140,6 +2167,7 @@ mod tests {
                 None,
                 now + chrono::Duration::weeks(520),
                 Some(ClockMark { item: item.clone(), deadline: reporting_clock::ClockDeadlineKind::EarlyWarning }),
+                None,
             )
             .await
             .unwrap();
@@ -2160,6 +2188,7 @@ mod tests {
                 None,
                 now + chrono::Duration::weeks(520),
                 Some(ClockMark { item: item.clone(), deadline: reporting_clock::ClockDeadlineKind::EarlyWarning }),
+                None,
             )
             .await
             .unwrap_err();
@@ -2171,6 +2200,62 @@ mod tests {
         let clock = restarted.policy_clock(Some("demo")).await.unwrap();
         let found = clock.items.iter().find(|i| i.item == item).unwrap();
         assert_eq!(found.deadlines[0].state, ClockDeadlineState::Met);
+    }
+
+    #[tokio::test]
+    async fn corrective_measure_requires_valid_evidence_and_survives_restart_with_final_report() {
+        use reporting_clock::{ClockDeadlineKind, ClockItemRef, CorrectiveMeasureMark};
+        let root = std::env::temp_dir().join(format!("factory-clock-measure-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(root.join(".factory/policies/cra.yaml"),
+            "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: art-14\n    title: Reporting\n    evidence:\n      - check: attestation\n").unwrap();
+        let now = Utc::now();
+        let sbom = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","metadata":{"lifecycles":[{"phase":"build"}]},"components":[{"type":"library","name":"demo-lib","version":"1.2.3","bom-ref":"pkg:cargo/demo-lib@1.2.3"}]}"#;
+        let vulns = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","vulnerabilities":[{"id":"CVE-2026-9999","affects":[{"ref":"pkg:cargo/demo-lib@1.2.3"}],"properties":[{"name":"factory:kev","value":"true"}]}]}"#;
+        write_dep_doc(&root, "demo", "r1", AttachmentKind::Sbom, sbom, now - chrono::Duration::days(10), "s1");
+        write_dep_doc(&root, "demo", "r1", AttachmentKind::Vulnerabilities, vulns, now - chrono::Duration::days(10), "v1");
+        let db = root.join("policies.sqlite");
+        let engine = clock_engine(&root, &db);
+        let owner = Caller::Owner;
+        let item = ClockItemRef::Finding { scope: "demo".into(), vulnerability: "CVE-2026-9999".into() };
+        let control = reporting_clock::art_14();
+        let available = now - chrono::Duration::days(2);
+        let mark = CorrectiveMeasureMark { item: item.clone(), available_at: available };
+        let expiry = now + chrono::Duration::weeks(520);
+        let final_mark = ClockMark { item: item.clone(), deadline: ClockDeadlineKind::FinalReport };
+        let error = engine.policy_attest(&owner, control.clone(), "demo".into(), "notice".into(), None, expiry, Some(final_mark.clone()), None).await.unwrap_err();
+        assert!(error.to_string().contains("before submitting the final report"), "{error}");
+        for (bad, expected) in [
+            (CorrectiveMeasureMark { available_at: now + chrono::Duration::days(1), ..mark.clone() }, "future"),
+            (CorrectiveMeasureMark { item: ClockItemRef::Report { item: "unknown".into() }, ..mark.clone() }, "not a reporting-clock item"),
+        ] {
+            let error = engine.policy_attest(&owner, control.clone(), "demo".into(), "fix".into(), None, expiry, None, Some(bad)).await.unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        let error = engine.policy_attest(&owner, control.clone(), "demo".into(), "".into(), None, expiry, None, Some(mark.clone())).await.unwrap_err();
+        assert!(error.to_string().contains("evidence must not be empty"));
+        let error = engine.policy_attest(&owner, control.clone(), "demo".into(), "fix".into(), None, expiry, Some(final_mark.clone()), Some(mark.clone())).await.unwrap_err();
+        assert!(error.to_string().contains("not both"));
+        let anchor = engine.policy_attest(&owner, control.clone(), "demo".into(), "https://example.com/fix".into(), None, expiry, None, Some(mark.clone())).await.unwrap();
+        assert!(anchor.clock.is_none());
+        let error = engine.policy_attest(&owner, control.clone(), "demo".into(), "fix".into(), None, expiry, None, Some(mark.clone())).await.unwrap_err();
+        assert!(error.to_string().contains("already has a live corrective-measure"));
+        let clock = engine.policy_clock(Some("demo")).await.unwrap();
+        assert_eq!(clock.items[0].deadlines[2].due_at, available + chrono::Duration::days(14));
+        let detail = engine.policy_control(control.clone(), "demo").await.unwrap();
+        assert_eq!(detail.status.kind(), policy::StatusKind::Open, "measure is not whole-control compliance");
+        let submission = engine.policy_attest(&owner, control.clone(), "demo".into(), "notice".into(), None, expiry, Some(final_mark), None).await.unwrap();
+        let restarted = clock_engine(&root, &db);
+        let clock = restarted.policy_clock(Some("demo")).await.unwrap();
+        assert_eq!(clock.items[0].corrective_measure.as_ref().unwrap().attestation, anchor.id);
+        assert_eq!(clock.items[0].deadlines[2].state, ClockDeadlineState::Met);
+        assert_eq!(clock.items[0].deadlines[2].submission.as_ref().unwrap().attestation, submission.id);
+        restarted.policy_withdraw(&owner, anchor.id, Some("incorrect evidence".into())).await.unwrap();
+        let clock = restarted.policy_clock(Some("demo")).await.unwrap();
+        assert_eq!(clock.items[0].deadlines.len(), 2);
+        assert!(clock.items[0].corrective_measure.is_none());
+        restarted.policy_attest(&owner, control, "demo".into(), "replacement evidence".into(), None, expiry, None, Some(mark)).await.unwrap();
+        assert_eq!(restarted.policy_clock(Some("demo")).await.unwrap().items[0].deadlines[2].state, ClockDeadlineState::Met);
     }
 
     // -- attested (#158) ------------------------------------------------
