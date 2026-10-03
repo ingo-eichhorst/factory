@@ -2,6 +2,7 @@
 //! runs until it is told to stop.
 
 mod access;
+mod artifacts;
 mod agents;
 mod backup;
 mod bench;

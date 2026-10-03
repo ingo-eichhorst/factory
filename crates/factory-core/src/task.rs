@@ -882,6 +882,9 @@ impl TaskEntry {
 /// dispatched prompt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskReport {
+    /// Release artifact paths, relative to this run's worktree, on done only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<crate::run::RunStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

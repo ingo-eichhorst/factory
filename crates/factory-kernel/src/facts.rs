@@ -3,6 +3,7 @@
 //! and behavior. Provide defines live ports; Below bounds follow in phase 4.
 
 use crate::fact_vocabulary::*;
+use crate::ArtifactProvenance;
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -63,6 +64,10 @@ pub trait Fact: Serialize + DeserializeOwned {
     /// merely reads it, and never stored as of-record evidence (that is
     /// `policy::EvidenceRef`'s question, deferred to its own later ADR).
     type Producer: Level;
+}
+
+impl Fact for ArtifactProvenance {
+    type Producer = L4;
 }
 
 // ============================================================ daemon (L1)
@@ -456,6 +461,13 @@ pub struct FactCatalogueEntry {
 /// a wrong reader a compile error instead of a comment. All listed schemas
 /// and their nested vocabulary now live in L0.
 pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
+    FactCatalogueEntry {
+        fact: "ArtifactProvenance",
+        producer: "L4",
+        readers: &["L4 router (run provenance)"],
+        lives_in_kernel: true,
+        note: "append-only release artifact evidence (#158)",
+    },
     FactCatalogueEntry {
         fact: "KnowledgeTags",
         producer: "L5",

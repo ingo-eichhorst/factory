@@ -355,6 +355,7 @@ impl Engine {
             // run already carries: nothing written (`#118`).
             | Request::WorkflowLint { .. }
             | Request::RunAttestations { .. }
+            | Request::RunProvenance { .. }
             | Request::RoleList { .. }
             | Request::Subscribe => return Needs::Nothing,
 
@@ -1508,6 +1509,7 @@ mod tests {
 
     fn report() -> TaskReport {
         TaskReport {
+            artifacts: Vec::new(),
             status: Some(RunStatus::Running),
             message: Some("working".into()),
             result: None,

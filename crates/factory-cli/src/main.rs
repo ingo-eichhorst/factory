@@ -1077,6 +1077,8 @@ enum RunCmd {
     /// The evidence a run's required steps left (`#118`): who ran each
     /// gate, on which commit, and what it found. Append-only.
     Attestations { id: String },
+    /// Immutable release artifact evidence, as in-toto / SLSA v1 statements.
+    Provenance { id: String },
     /// Pass a required person approval before the subject is dispatched.
     Approve {
         id: String,
@@ -1386,6 +1388,10 @@ enum TaskCmd {
         /// the task record.
         #[arg(long = "result-file")]
         result_file: Option<PathBuf>,
+        /// Capture a release artifact from this run's working directory.
+        /// Repeat for multiple files; only valid with --status done.
+        #[arg(long = "artifact", requires = "status")]
+        artifacts: Vec<String>,
         #[arg(long)]
         error: Option<String>,
         /// Defaults to FACTORY_TASK_TOKEN, which the daemon sets in the
@@ -4895,6 +4901,17 @@ async fn run_cmd(json: bool, client: &Client, cmd: RunCmd) -> Result<()> {
                 _ => None,
             })
         }
+        RunCmd::Provenance { id } => {
+            let payload = client.send(Request::RunProvenance { id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::RunProvenance { records } => Some(if records.is_empty() {
+                    "no published artifact provenance".into()
+                } else {
+                    records.iter().map(|r| format!("{}  sha256:{}  {} bytes", r.artifact.name, r.artifact.sha256, r.artifact.size_bytes)).collect::<Vec<_>>().join("\n")
+                }),
+                _ => None,
+            })
+        }
         RunCmd::Approve { id, reason } => {
             let payload = client
                 .send(Request::RunApprove {
@@ -5321,6 +5338,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             result,
             send_to,
             result_file,
+            artifacts,
             error,
             token,
         } => {
@@ -5340,6 +5358,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 .send(Request::TaskReport {
                     id: need_id(id)?,
                     report: TaskReport {
+                        artifacts,
                         status,
                         message,
                         result,
@@ -6647,6 +6666,33 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provenance_cli_supports_repeated_artifacts_and_run_lookup() {
+        let cli = Cli::try_parse_from([
+            "factory",
+            "task",
+            "report",
+            "t1",
+            "--status",
+            "done",
+            "--artifact",
+            "a.bin",
+            "--artifact",
+            "b.bin",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Task(TaskCmd::Report { artifacts, .. }) => {
+                assert_eq!(artifacts, vec!["a.bin", "b.bin"])
+            }
+            _ => panic!("expected task report"),
+        }
+        assert!(
+            Cli::try_parse_from(["factory", "task", "report", "t1", "--artifact", "a.bin"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["factory", "run", "provenance", "r1", "--json"]).is_ok());
+    }
     #[test]
     fn corrective_measure_cli_requires_paired_flags_and_refuses_a_submission_mix() {
         let base = ["factory", "policy", "attest", "cra/art-14", "--scope", "demo", "--evidence", "fix"];

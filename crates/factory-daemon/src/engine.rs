@@ -1379,6 +1379,9 @@ impl Engine {
             Request::RunAttestations { id } => Ok(Payload::Attestations {
                 attestations: self.run_attestations(&id).await?,
             }),
+            Request::RunProvenance { id } => Ok(Payload::RunProvenance {
+                records: crate::facts::Facts::<factory_kernel::L4>::new(self).get::<factory_kernel::ArtifactProvenance>(&id).await?,
+            }),
             Request::RunApprove { id, reason } => Ok(Payload::Run {
                 run: Box::pin(self.decide_approval(
                         caller,
@@ -3583,6 +3586,9 @@ impl Engine {
 
         self.check_run_token(&run, report.token.as_deref(), task_id)?;
         let reporting_task = self.require(task_id).await?;
+        if !report.artifacts.is_empty() && report.status != Some(RunStatus::Done) {
+            return Err(FactoryError::BadRequest("artifacts may only be attached to a done report".into()));
+        }
         let review_report = reporting_task
             .labels
             .contains_key(crate::verification::REVIEW_RUN_LABEL);
@@ -3612,6 +3618,12 @@ impl Engine {
             ));
         }
 
+        let artifacts = if report.artifacts.is_empty() {
+            None
+        } else {
+            Some(self.capture_artifacts(&run, &reporting_task, &report.artifacts).await?)
+        };
+
         let message = report.message.clone().unwrap_or_else(|| {
             report
                 .result
@@ -3635,6 +3647,7 @@ impl Engine {
         .await;
 
         let mut patch = RunPatch {
+            artifacts,
             status: report.status,
             result: report.result,
             routed_to: report.send_to.clone(),
@@ -3693,7 +3706,9 @@ impl Engine {
                 self.begin_verification(&run, patch).await?
             }
             Some(status) if status.is_terminal() => {
-                self.close_session(&run).await;
+                if status != RunStatus::Done {
+                    self.close_session(&run).await;
+                }
                 self.finish_run(&run.id, status, patch, &format!("attempt {} ended", run.attempt))
                 .await?
             }
@@ -3750,6 +3765,47 @@ impl Engine {
         patch: RunPatch,
         _why: &str,
     ) -> Result<Run> {
+        let ended_at = Utc::now();
+        if status == RunStatus::Done {
+            let mut candidate = self.require_run(run_id).await?;
+            if candidate.status.is_terminal() {
+                return Err(FactoryError::BadRequest("the run already ended; artifact publication cannot complete it again".into()));
+            }
+            if let Some(artifacts) = &patch.artifacts {
+                candidate.artifacts = artifacts.clone();
+            }
+            if let Err(error) = self.publish_artifacts(&candidate, ended_at).await {
+                // Verification owns this hold. A failed publication must
+                // never leave a stopped coordinator stuck in `verifying`.
+                if candidate.status == RunStatus::Verifying && self.require_run(run_id).await?.status == RunStatus::Verifying {
+                    let blocked = self
+                        .store
+                        .update_run(
+                            run_id,
+                            &RunPatch {
+                                status: Some(RunStatus::Blocked),
+                                blocked_since: Some(Utc::now()),
+                                blocked_source: Some(BlockSource::Verification),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    self.entry(&candidate.task_id, TaskEntry::new("daemon", "blocked",
+                        format!("artifact provenance: {error}. Rebuild and report done with --artifact again, or cancel the run.")).in_run(run_id)).await;
+                    self.bus.publish(Event::RunUpdated {
+                        run: blocked.clone(),
+                    });
+                    self.mirror_to_task(&blocked).await;
+                }
+                return Err(error);
+            }
+            // Hashing/copy validation can take time. A cancel that landed
+            // during it remains authoritative; unpublished rows stay hidden.
+            if self.require_run(run_id).await?.status != candidate.status {
+                return Err(FactoryError::BadRequest("the run changed while publishing artifacts; completion was not recorded".into()));
+            }
+            self.close_session(&candidate).await;
+        }
         // `#178`: what `token` is about to lose to `clear_token` below,
         // carried forward as a digest (`spent_token_sha256`) -- never the
         // token itself, which is read back off the store rather than
@@ -3788,7 +3844,7 @@ impl Engine {
                     // Likewise a held `Stop` turn end: nothing is left to
                     // settle once the run is over.
                     clear_turn_ended: true,
-                    ended_at: Some(Utc::now()),
+                    ended_at: Some(ended_at),
                     ..patch
                 },
             )
@@ -4958,6 +5014,7 @@ mod tests {
                 .report(
                     task_id,
                     TaskReport {
+                        artifacts: Vec::new(),
                         status: Some(RunStatus::Done),
                         message: None,
                         result: Some("ok".into()),
@@ -6501,6 +6558,7 @@ mod tests {
             .report(
                 &task.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: None,
                     message: Some("the hook was wrong, I am still here".into()),
                     result: None,
@@ -6556,6 +6614,7 @@ mod tests {
             .report(
                 &task.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     result: Some("did it".into()),
                     send_to: None,
@@ -7116,6 +7175,7 @@ mod tests {
             .report(
                 &task.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Failed),
                     message: None,
                     result: None,
@@ -7145,6 +7205,7 @@ mod tests {
             .report(
                 &task.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     message: None,
                     result: Some("fine".into()),
@@ -7246,6 +7307,7 @@ mod tests {
     fn a_skip_is_blamed_on_the_previous_run_only_if_it_was_open_at_the_first_skipped_slot() {
         let t0 = Utc::now();
         let mut run = Run {
+            artifacts: Vec::new(),
             id: "r".into(),
             task_id: "t".into(),
             attempt: 1,
@@ -7299,6 +7361,7 @@ mod tests {
     fn a_skip_is_blamed_on_a_capacity_wait_when_the_run_was_queued_but_not_yet_started() {
         let t0 = Utc::now();
         let run = Run {
+            artifacts: Vec::new(),
             id: "r".into(),
             task_id: "t".into(),
             attempt: 1,
@@ -7470,6 +7533,7 @@ mod tests {
         let base = Utc::now();
         let t = |m: i64| base - chrono::Duration::minutes(m);
         let mut previous = Run {
+            artifacts: Vec::new(),
             id: "r".into(),
             task_id: "t".into(),
             attempt: 1,
@@ -8401,6 +8465,7 @@ mod tests {
             assert!(run.resumed_session.is_some(), "sanity: this one actually resumed");
 
             let stale_report = TaskReport {
+                artifacts: Vec::new(),
                 status: Some(RunStatus::Running),
                 message: Some("still going".into()),
                 result: None,
@@ -8414,6 +8479,7 @@ mod tests {
 
             // The new run's own token still works.
             let fresh_report = TaskReport {
+                artifacts: Vec::new(),
                 status: Some(RunStatus::Running),
                 message: Some("continuing".into()),
                 result: None,

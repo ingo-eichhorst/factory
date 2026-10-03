@@ -281,6 +281,10 @@ pub struct Run {
     /// nothing required, which reports `done` straight to `Done` as always.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_steps: Vec<crate::control_plan::RequiredStep>,
+    /// Immutable artifact bytes captured with an explicit done report (#158).
+    /// Provenance is published only after this attempt passes its required steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<factory_kernel::ArtifactSnapshot>,
     /// What this run used, as of its newest usage snapshot -- derived from
     /// the append-only snapshots the store keeps (`TaskStore::usage_snapshots`)
     /// and rewritten whole each time one is added, so a reader of a run
@@ -345,6 +349,8 @@ pub struct NewRun {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<Vec<factory_kernel::ArtifactSnapshot>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<RunStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

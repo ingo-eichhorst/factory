@@ -74,10 +74,10 @@ pub(crate) async fn run_shell_capture(dir: &Path, command: &str, timeout_secs: u
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct GitState {
-    commit: Option<String>,
-    dirty: Option<bool>,
-    digest: Option<String>,
+pub(crate) struct GitState {
+    pub(crate) commit: Option<String>,
+    pub(crate) dirty: Option<bool>,
+    pub(crate) digest: Option<String>,
 }
 
 fn directory_digest(root: &Path) -> std::io::Result<String> {
@@ -111,7 +111,7 @@ fn directory_digest(root: &Path) -> std::io::Result<String> {
 }
 
 /// HEAD plus the exact tracked diff and untracked bytes an attestation judges.
-async fn git_state(dir: &Path) -> GitState {
+pub(crate) async fn git_state(dir: &Path) -> GitState {
     let head = tokio::process::Command::new("git").arg("-C").arg(dir).args(["rev-parse", "HEAD"]).output().await;
     let commit = match head {
         Ok(out) if out.status.success() => Some(String::from_utf8_lossy(&out.stdout).trim().to_string()),
@@ -1256,19 +1256,22 @@ impl Engine {
             return Ok(());
         }
         if verdict.passed {
+            // Keep the session available if artifact validation/publication
+            // blocks completion. `finish_run` journals and mirrors the hold.
+            if let Err(error) = self.finish_run(
+                &run.id,
+                RunStatus::Done,
+                RunPatch { status: Some(RunStatus::Done), ..Default::default() },
+                "verified",
+            ).await {
+                self.sync_workflow_for_task(&task.id).await;
+                return Err(error);
+            }
             self.entry(
                 &task.id,
                 TaskEntry::new("daemon", "verified", "every required step attested and passed").in_run(&run.id),
             )
             .await;
-            self.close_session(&run).await;
-            self.finish_run(
-                &run.id,
-                RunStatus::Done,
-                RunPatch { status: Some(RunStatus::Done), ..Default::default() },
-                "verified",
-            )
-            .await?;
         } else {
             let reason = verdict.reason();
             let blocked = self
@@ -1607,6 +1610,7 @@ mod tests {
             .report(
                 task_id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     message: None,
                     result: Some("built it".into()),
@@ -1906,6 +1910,7 @@ mod tests {
             .report(
                 &review.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     message: None,
                     result: Some("independently checked".into()),
@@ -1945,6 +1950,7 @@ mod tests {
             .report(
                 &review.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     message: None,
                     result: Some("the public API lacks a denial test".into()),
@@ -1998,6 +2004,7 @@ mod tests {
         engine.report(
             &review.id,
             TaskReport {
+                artifacts: Vec::new(),
                 status: Some(RunStatus::Done),
                 message: None,
                 result: Some("retry reviewed the same digest".into()),
@@ -2023,6 +2030,7 @@ mod tests {
         let error = engine.report(
             &first_review.id,
             TaskReport {
+                artifacts: Vec::new(),
                 status: Some(RunStatus::Done),
                 message: None,
                 result: Some("reviewed the old state".into()),
@@ -2039,6 +2047,7 @@ mod tests {
         engine.report(
             &second_review.id,
             TaskReport {
+                artifacts: Vec::new(),
                 status: Some(RunStatus::Done),
                 message: None,
                 result: Some("reviewed the new state".into()),
@@ -2184,6 +2193,7 @@ mod tests {
             .report(
                 &task.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     message: None,
                     result: None,
@@ -2413,6 +2423,490 @@ mod tests {
     }
 
     // -- attested_runs (#158) ------------------------------------------------
+
+    fn provenance_git(work: &Path) {
+        std::fs::write(work.join(".gitignore"), "ignored-artifact.bin\n").unwrap();
+        std::fs::write(work.join("source.txt"), "source v1").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=Factory QA",
+                "-c",
+                "user.email=qa@example.invalid",
+                "commit",
+                "-qm",
+                "source",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(work)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    fn provenance_engine(requires: &str, spawn: bool) -> (Arc<Engine>, PathBuf) {
+        let (mut engine, work) = engine_with_verifier(requires, false);
+        let db = engine
+            .factory_snapshot()
+            .root
+            .join(".factory/provenance-test.sqlite");
+        Arc::get_mut(&mut engine).unwrap().policies =
+            crate::policies::PolicyStore::open(&db).unwrap();
+        if spawn {
+            engine.spawn_verifier();
+        }
+        (engine, work)
+    }
+
+    async fn provenance_done(engine: &Arc<Engine>, task: &Task, paths: &[&str]) -> Result<Run> {
+        let run = engine.store.active_run(&task.id).await?.unwrap();
+        engine
+            .report(
+                &task.id,
+                TaskReport {
+                    artifacts: paths.iter().map(|s| s.to_string()).collect(),
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: Some("built release".into()),
+                    send_to: None,
+                    error: None,
+                    token: run.token,
+                },
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn provenance_captures_real_bytes_and_frozen_evidence_after_verification() {
+        use sha2::Digest;
+        let (engine, work) = provenance_engine(
+            "      - { applies_to: [feature], step: tests, gate: \"true\" }",
+            false,
+        );
+        provenance_git(&work);
+        std::fs::write(work.join("release.bin"), b"release bytes\0\xff").unwrap();
+        let task = task(&engine, Some("feature")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let held = provenance_done(&engine, &task, &["release.bin"])
+            .await
+            .unwrap();
+        assert_eq!(held.status, RunStatus::Verifying);
+        assert!(engine.run_provenance(&held.id).await.unwrap().is_empty());
+        assert!(engine
+            .policies
+            .provenance(&held.id)
+            .await
+            .unwrap()
+            .is_empty());
+        engine.verify_run(&held.id).await.unwrap();
+        let done = engine.require_run(&held.id).await.unwrap();
+        assert_eq!(done.status, RunStatus::Done);
+        let records = crate::facts::Facts::<factory_kernel::L5>::new(&engine)
+            .get::<factory_kernel::ArtifactProvenance>(&held.id)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        let digest = format!("{:x}", sha2::Sha256::digest(b"release bytes\0\xff"));
+        assert_eq!(record.artifact.sha256, digest);
+        assert_eq!(
+            std::fs::read(
+                engine
+                    .factory_snapshot()
+                    .root
+                    .join(&record.artifact.storage_path)
+            )
+            .unwrap(),
+            b"release bytes\0\xff"
+        );
+        assert_eq!(
+            record.statement.predicate.evidence.required_steps,
+            held.required_steps
+        );
+        assert_eq!(record.statement.predicate.evidence.agent, held.agent);
+        assert_eq!(record.statement.predicate.evidence.attestations.len(), 1);
+        assert_eq!(
+            record.statement.predicate.evidence.attestations[0]
+                .worktree_digest
+                .as_deref(),
+            Some(record.artifact.source.worktree_digest.as_str())
+        );
+        assert_eq!(
+            record.statement.predicate.run_details.metadata.finished_on,
+            done.ended_at.unwrap()
+        );
+        assert!(!serde_json::to_string(record)
+            .unwrap()
+            .contains(held.token.as_deref().unwrap()));
+        // Later task edits and file changes never rewrite historical evidence.
+        std::fs::write(work.join("source.txt"), "source v2").unwrap();
+        std::fs::write(work.join("release.bin"), "new output").unwrap();
+        assert_eq!(engine.run_provenance(&held.id).await.unwrap(), records);
+        engine.policies.append_provenance(record).await.unwrap();
+        let mut changed = record.clone();
+        changed.artifact.sha256 = "0".repeat(64);
+        assert!(engine.policies.append_provenance(&changed).await.is_err());
+        assert_eq!(engine.run_provenance(&held.id).await.unwrap(), records);
+        let reopened = crate::policies::PolicyStore::open(
+            &engine
+                .factory_snapshot()
+                .root
+                .join(".factory/provenance-test.sqlite"),
+        )
+        .unwrap();
+        assert_eq!(reopened.provenance(&held.id).await.unwrap(), records);
+    }
+
+    #[tokio::test]
+    async fn provenance_changed_source_blocks_and_recapture_can_finish() {
+        let (engine, work) = provenance_engine(
+            "      - { applies_to: [feature], step: tests, gate: \"true\" }",
+            false,
+        );
+        provenance_git(&work);
+        std::fs::write(work.join("release.bin"), "v1").unwrap();
+        let task = task(&engine, Some("feature")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let held = provenance_done(&engine, &task, &["release.bin"])
+            .await
+            .unwrap();
+        std::fs::write(work.join("source.txt"), "changed").unwrap();
+        assert!(engine
+            .verify_run(&held.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("source worktree changed"));
+        let blocked = engine.require_run(&held.id).await.unwrap();
+        assert_eq!(blocked.status, RunStatus::Blocked);
+        assert_eq!(blocked.blocked_source, Some(BlockSource::Verification));
+        assert!(blocked.token.is_some());
+        assert!(
+            blocked.session.is_some(),
+            "a publication hold keeps the session available for repair"
+        );
+        assert!(engine.run_provenance(&held.id).await.unwrap().is_empty());
+        assert!(engine
+            .store
+            .run_entries(&held.id, 100)
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "blocked" && e.message.contains("artifact provenance")));
+        let retry = provenance_done(&engine, &task, &["release.bin"])
+            .await
+            .unwrap();
+        assert_ne!(retry.artifacts[0].id, held.artifacts[0].id);
+        engine.verify_run(&held.id).await.unwrap();
+        assert_eq!(
+            engine.require_run(&held.id).await.unwrap().status,
+            RunStatus::Done
+        );
+        assert_eq!(
+            engine.run_provenance(&held.id).await.unwrap()[0].id,
+            retry.artifacts[0].id
+        );
+    }
+
+    #[tokio::test]
+    async fn provenance_detects_ignored_output_and_stored_copy_tampering() {
+        for stored in [false, true] {
+            let (engine, work) = provenance_engine(
+                "      - { applies_to: [feature], step: tests, gate: \"true\" }",
+                false,
+            );
+            provenance_git(&work);
+            std::fs::write(work.join("ignored-artifact.bin"), "v1").unwrap();
+            let task = task(&engine, Some("feature")).await;
+            engine.start_run(&task.id, Trigger::Manual).await;
+            let held = provenance_done(&engine, &task, &["ignored-artifact.bin"])
+                .await
+                .unwrap();
+            let changed = if stored {
+                engine
+                    .factory_snapshot()
+                    .root
+                    .join(&held.artifacts[0].storage_path)
+            } else {
+                work.join("ignored-artifact.bin")
+            };
+            std::fs::write(changed, "tampered bytes").unwrap();
+            assert!(engine
+                .verify_run(&held.id)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("artifact bytes changed"));
+            assert_eq!(
+                engine.require_run(&held.id).await.unwrap().status,
+                RunStatus::Blocked
+            );
+            assert!(engine
+                .policies
+                .provenance(&held.id)
+                .await
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn provenance_refuses_unsafe_paths_bad_reports_and_non_git_sources() {
+        let (engine, work) = provenance_engine(TESTS_FOR_FEATURES, false);
+        std::fs::write(work.join("release.bin"), "v1").unwrap();
+        let task = task(&engine, Some("docs")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        assert!(provenance_done(&engine, &task, &["release.bin"])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("readable Git"));
+        provenance_git(&work);
+        std::fs::write(work.parent().unwrap().join("outside.bin"), "private").unwrap();
+        std::fs::create_dir_all(work.join(".factory")).unwrap();
+        std::fs::write(work.join(".factory/private"), "private").unwrap();
+        for paths in [
+            vec!["../outside.bin"],
+            vec![".git/HEAD"],
+            vec![".factory/private"],
+            vec!["missing"],
+            vec!["release.bin", "release.bin"],
+            vec!["release.bin"; 17],
+        ] {
+            assert!(
+                provenance_done(&engine, &task, &paths).await.is_err(),
+                "{paths:?}"
+            );
+        }
+        let active = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        assert!(matches!(
+            active.status,
+            RunStatus::Dispatching | RunStatus::Running
+        ));
+        assert!(engine
+            .report(
+                &task.id,
+                TaskReport {
+                    artifacts: vec!["release.bin".into()],
+                    status: Some(RunStatus::Running),
+                    token: active.token.clone(),
+                    message: None,
+                    result: None,
+                    send_to: None,
+                    error: None
+                }
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("done report"));
+        assert!(engine
+            .report(
+                &task.id,
+                TaskReport {
+                    artifacts: vec!["release.bin".into()],
+                    status: Some(RunStatus::Done),
+                    token: Some("wrong".into()),
+                    message: None,
+                    result: None,
+                    send_to: None,
+                    error: None
+                }
+            )
+            .await
+            .is_err());
+        let done = provenance_done(&engine, &task, &["release.bin"])
+            .await
+            .unwrap();
+        assert_eq!(done.status, RunStatus::Done);
+        assert_eq!(engine.run_provenance(&done.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn provenance_keeps_pre_dispatch_approval_and_digest_bound_independent_review() {
+        let requires = "      - { applies_to: [feature], step: approval }\n      - { applies_to: [feature], step: tests, gate: \"true\" }\n      - { applies_to: [feature], step: review, by: independent }";
+        let (engine, work) = provenance_engine(requires, true);
+        provenance_git(&work);
+        let task = task(&engine, Some("feature")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let held = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        assert_eq!(held.status, RunStatus::Blocked);
+        engine
+            .decide_approval(
+                &Caller::Owner,
+                &held.id,
+                AttestationVerdict::Pass,
+                "authorized build",
+            )
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if engine.require_run(&held.id).await.unwrap().status == RunStatus::Running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        std::fs::write(work.join("release.bin"), "approved build output").unwrap();
+        let subject = provenance_done(&engine, &task, &["release.bin"])
+            .await
+            .unwrap();
+        let review = review_task(&engine, &subject.id).await;
+        assert!(engine.run_provenance(&subject.id).await.unwrap().is_empty());
+        report_done(&engine, &review.id).await;
+        let done = settled(&engine, &subject.id).await;
+        assert_eq!(done.status, RunStatus::Done);
+        let record = &engine.run_provenance(&subject.id).await.unwrap()[0];
+        let evidence = &record.statement.predicate.evidence;
+        assert_eq!(evidence.required_steps, subject.required_steps);
+        assert_eq!(evidence.attestations.len(), 3);
+        let approval = evidence
+            .attestations
+            .iter()
+            .find(|a| a.kind == StepKind::Approval)
+            .unwrap();
+        assert_ne!(
+            approval.worktree_digest.as_deref(),
+            Some(record.artifact.source.worktree_digest.as_str())
+        );
+        for item in evidence
+            .attestations
+            .iter()
+            .filter(|a| a.kind != StepKind::Approval)
+        {
+            assert_eq!(
+                item.worktree_digest.as_deref(),
+                Some(record.artifact.source.worktree_digest.as_str())
+            );
+            assert_ne!(item.actor, subject.agent);
+        }
+    }
+
+    #[tokio::test]
+    async fn provenance_requires_current_independent_matching_functionary_evidence() {
+        let (engine, work) = provenance_engine(
+            "      - { applies_to: [feature], step: review, by: independent }",
+            false,
+        );
+        provenance_git(&work);
+        std::fs::write(work.join("release.bin"), "output").unwrap();
+        let task = task(&engine, Some("feature")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let held = provenance_done(&engine, &task, &["release.bin"])
+            .await
+            .unwrap();
+        assert!(engine.validate_artifacts(&held).await.is_err());
+        let step = &held.required_steps[0];
+        let mut evidence: StepAttestation = serde_json::from_value(serde_json::json!({
+            "id": "self", "run_id": held.id, "task_id": task.id,
+            "scope": "demo", "category": "feature", "step": step.step,
+            "kind": "review", "actor": held.agent, "verdict": "pass", "dir": work,
+            "worktree_digest": held.artifacts[0].source.worktree_digest, "at": Utc::now()
+        }))
+        .unwrap();
+        engine
+            .policies
+            .append_step_attestation(&evidence)
+            .await
+            .unwrap();
+        assert!(engine.validate_artifacts(&held).await.is_err());
+        evidence.id = "foreign".into();
+        evidence.actor = "not-the-frozen-reviewer".into();
+        engine
+            .policies
+            .append_step_attestation(&evidence)
+            .await
+            .unwrap();
+        assert!(engine.validate_artifacts(&held).await.is_err());
+        evidence.id = "stale".into();
+        evidence.actor = step.actor.clone().unwrap();
+        evidence.worktree_digest = Some("old-source".into());
+        engine
+            .policies
+            .append_step_attestation(&evidence)
+            .await
+            .unwrap();
+        assert!(engine.validate_artifacts(&held).await.is_err());
+        evidence.id = "current".into();
+        evidence.worktree_digest = Some(held.artifacts[0].source.worktree_digest.clone());
+        evidence.at = Utc::now();
+        engine
+            .policies
+            .append_step_attestation(&evidence)
+            .await
+            .unwrap();
+        assert!(engine.validate_artifacts(&held).await.is_ok());
+        evidence.id = "rejected".into();
+        evidence.verdict = AttestationVerdict::Fail;
+        evidence.at += chrono::Duration::seconds(1);
+        engine
+            .policies
+            .append_step_attestation(&evidence)
+            .await
+            .unwrap();
+        assert!(engine.validate_artifacts(&held).await.is_err());
+        assert!(engine.run_provenance(&held.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn provenance_partial_publication_stays_hidden_and_cancellation_cannot_be_overwritten() {
+        let (engine, work) = provenance_engine(TESTS_FOR_FEATURES, false);
+        provenance_git(&work);
+        std::fs::write(work.join("release.bin"), "output").unwrap();
+        let task = task(&engine, Some("docs")).await;
+        engine.start_run(&task.id, Trigger::Manual).await;
+        let mut run = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        run.artifacts = engine
+            .capture_artifacts(&run, &task, &["release.bin".into()])
+            .await
+            .unwrap();
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    artifacts: Some(run.artifacts.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let record =
+            factory_core::provenance::statement(&run, &run.artifacts[0], &[], "test", Utc::now());
+        engine.policies.append_provenance(&record).await.unwrap();
+        assert_eq!(engine.policies.provenance(&run.id).await.unwrap().len(), 1);
+        assert!(engine.run_provenance(&run.id).await.unwrap().is_empty());
+        engine
+            .cancel_task_run(
+                &task.id,
+                Some(&run.id),
+                factory_core::run::FailKind::CancelledByPerson,
+            )
+            .await
+            .unwrap();
+        assert!(engine
+            .finish_run(
+                &run.id,
+                RunStatus::Done,
+                RunPatch::default(),
+                "late completion"
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            engine.require_run(&run.id).await.unwrap().status,
+            RunStatus::Cancelled
+        );
+        assert!(engine.run_provenance(&run.id).await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn attested_runs_narrows_by_scope_category_and_window_and_excludes_bench_origin() {

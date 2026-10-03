@@ -25,6 +25,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<WorkflowFact, L4>("WorkflowFact", "L4");
     assert_producer::<ConfirmedSecurityReport, L4>("ConfirmedSecurityReport", "L4");
     assert_producer::<AttestedRun, L4>("AttestedRun", "L4");
+    assert_producer::<ArtifactProvenance, L4>("ArtifactProvenance", "L4");
     assert_producer::<GateFact, L5>("GateFact", "L5");
     assert_producer::<KnowledgeTags, L5>("KnowledgeTags", "L5");
 }
@@ -44,6 +45,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "WorkflowFact",
         "ConfirmedSecurityReport",
         "AttestedRun",
+        "ArtifactProvenance",
         "GateFact",
         "KnowledgeTags",
     ];

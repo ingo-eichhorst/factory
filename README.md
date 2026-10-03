@@ -2667,6 +2667,14 @@ factory workflow cancel <run-id>
 
 ## Compliant workflows
 
+Release outputs can be captured with
+`factory task report --status done --artifact dist/release.tar` and queried
+with `factory run provenance <run-id> --json` or
+`GET /api/runs/{id}/provenance`. The daemon emits append-only, unsigned
+in-toto/SLSA v1-format evidence only after the frozen required steps pass.
+See [artifact provenance](docs/artifact-provenance.md) for the byte/source
+checks, format, limits and local trust model (#158).
+
 A run used to be `done` the moment its own agent said so. Policy controls and
 quality attributes already *state* what good work includes -- an SBOM, a
 security scan, tests -- but nothing obliged a run to go through those steps or

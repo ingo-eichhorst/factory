@@ -4539,6 +4539,7 @@ mod tests {
             let ended = at() - chrono::Duration::days(ended_days_ago);
             let started = ended - chrono::Duration::seconds(wall_seconds);
             Run {
+                artifacts: Vec::new(),
                 id: format!("{task_id}-run"),
                 task_id: task_id.into(),
                 attempt: 1,

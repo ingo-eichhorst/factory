@@ -478,6 +478,7 @@ mod tests {
             .report(
                 task_id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(status),
                     message: Some("reported by test".into()),
                     result: None,
@@ -504,6 +505,7 @@ mod tests {
             .report(
                 task_id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     message: Some("reported by test".into()),
                     result: Some(result.into()),
@@ -1051,6 +1053,7 @@ mod tests {
             .report(
                 &root.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Running),
                     message: Some("working".into()),
                     result: None,
@@ -1302,6 +1305,7 @@ mod tests {
             .report(
                 task_id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     message: None,
                     result: Some(findings.into()),
@@ -1331,6 +1335,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         };
         let refused = engine.report(&review.id, TaskReport {
+            artifacts: Vec::new(),
             status: Some(RunStatus::Done), message: None, result: Some("findings".into()),
             send_to: Some("nowhere".into()), error: None, token: active.token,
         }).await.unwrap_err().to_string();
@@ -1429,6 +1434,7 @@ mod tests {
             .report(
                 &last.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     message: None,
                     result: Some("still wrong, twice".into()),
@@ -1644,6 +1650,7 @@ mod tests {
             .report(
                 &task.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Failed),
                     message: None,
                     result: None,
@@ -1663,6 +1670,7 @@ mod tests {
             .report(
                 &task.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     message: None,
                     result: None,
@@ -1813,6 +1821,7 @@ mod tests {
             .report(
                 &foundation.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     result: Some("foundation complete".into()),
                     token: foundation_run.token,
@@ -1838,6 +1847,7 @@ mod tests {
             .report(
                 &surface.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     result: Some("surface complete".into()),
                     token: surface_run.token,
@@ -1867,6 +1877,7 @@ mod tests {
             .report(
                 &surface.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     result: Some("combined check fixed".into()),
                     token: rework_run.token,

@@ -1469,6 +1469,7 @@ mod tests {
             .report(
                 &task.id,
                 TaskReport {
+                    artifacts: Vec::new(),
                     status: Some(RunStatus::Done),
                     message: None,
                     result: Some("command exited 0".into()),

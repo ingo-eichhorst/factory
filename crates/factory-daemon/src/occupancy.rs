@@ -1239,6 +1239,7 @@ mod tests {
 
     fn run(to: Option<i64>) -> Run {
         Run {
+            artifacts: Vec::new(),
             id: "r".into(),
             task_id: "t".into(),
             attempt: 1,

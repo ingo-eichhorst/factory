@@ -230,6 +230,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/runs/{id}", get(get_run))
         .route("/api/runs/{id}/entries", get(run_entries))
         .route("/api/runs/{id}/attestations", get(run_attestations))
+        .route("/api/runs/{id}/provenance", get(run_provenance))
         .route("/api/runs/{id}/usage", get(run_usage))
         .route("/api/runs/{id}/output", get(run_output))
         .route("/api/runs/{id}/input", post(run_input))
@@ -1795,6 +1796,10 @@ async fn run_attestations(State(engine): State<Arc<Engine>>, Path(id): Path<Stri
     run(&engine, Request::RunAttestations { id }).await
 }
 
+async fn run_provenance(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::RunProvenance { id }).await
+}
+
 async fn get_run(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
     run(&engine, Request::RunGet { id }).await
 }
@@ -2309,6 +2314,68 @@ mod tests {
         let status: u16 = text.split(' ').nth(1).unwrap().parse().unwrap();
         let (_, payload) = text.split_once("\r\n\r\n").unwrap();
         (status, serde_json::from_str(payload).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn provenance_http_reads_the_completed_run_and_rejects_invalid_reports() {
+        let engine = engine_with_quality();
+        let task = engine
+            .create(factory_core::task::NewTask {
+                title: "release".into(),
+                instructions: "true".into(),
+                scope: Some("company".into()),
+                agent: Some("shell".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let run = engine
+            .store
+            .create_run(&factory_core::run::NewRun {
+                task_id: task.id.clone(),
+                trigger: factory_core::run::Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "herdr".into(),
+                token: "callback".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        let path = format!("/api/runs/{}/provenance", run.id);
+        let (status, json) = request(engine.clone(), "GET", &path, None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["kind"], "run_provenance");
+        assert_eq!(json["data"]["records"], serde_json::json!([]));
+        let (status, _) = request(
+            engine.clone(),
+            "GET",
+            "/api/runs/nonexistent/provenance",
+            None,
+        )
+        .await;
+        assert_eq!(status, 404);
+        let report = format!("/api/tasks/{}/report", task.id);
+        let (status, json) = request(
+            engine.clone(),
+            "POST",
+            &report,
+            Some(r#"{"status":"running","artifacts":["release.bin"],"token":"callback"}"#),
+        )
+        .await;
+        assert_eq!(status, 400, "{json}");
+        let (status, json) = request(
+            engine.clone(),
+            "POST",
+            &report,
+            Some(r#"{"status":"done","token":"callback"}"#),
+        )
+        .await;
+        assert_eq!(status, 200, "{json}");
+        let (status, json) = request(engine, "GET", &path, None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["records"], serde_json::json!([]));
     }
 
     #[tokio::test]
