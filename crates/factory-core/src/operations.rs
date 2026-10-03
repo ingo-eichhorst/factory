@@ -1,4 +1,4 @@
-//! How the line is running: the read projection behind the L4 Operations
+//! How the line is running: the read projection behind the L4 Line
 //! tab, `factory stats` and the Inbox's attention list (issue `#106`). Pure,
 //! like `goals::evaluate` and `scenario::evaluate_signposts`: it is handed
 //! tasks, runs, standing agents and a few journal-derived facts, with `now`
@@ -404,7 +404,7 @@ pub const METRIC_EMPTY_NO_RECOVERY: &str = "no failure streak ended in a success
 /// The registry metrics this module computes (`metrics::registry`'s
 /// `cycle_time_p50` and neighbours), by id, over `window` -- the one entry
 /// point `factory-daemon`'s metric wiring calls, so the Goals and Scenarios
-/// tabs read exactly the numbers the Operations tab shows. `None` for an id
+/// tabs read exactly the numbers the Line tab shows. `None` for an id
 /// that is not one of them.
 pub fn registry_metric(id: &str, runs: &[Run], window: &Window) -> Option<Figure> {
     let since = recorded_since(runs);

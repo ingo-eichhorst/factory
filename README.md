@@ -1948,10 +1948,13 @@ gate everything else does, instead of becoming a task directly.
   updating an item when its source message is later edited; duplicate
   detection across sources.
 
-## Operations
+## Line
 
-L4 Process's third tab (`#106`), next to Tasks and Workflows: how the line
-is running, exception first. **A picture, not a controller** (design §8):
+L4 Process's last tab (`#106`), next to Tasks, Intake and Workflows: how the
+line is running, exception first. It was called Operations until `#185` gave
+that word to the running systems (see "Operations" below); the API and the
+CLI keep their names (`/api/operations`, `factory stats`), and an old
+`#<scope>/proc/operations` link opens Line. **A picture, not a controller** (design §8):
 nothing here starts, stops or retries anything on its own; the only new
 lever is that a person can pause a schedule. `factory_core::operations` is
 the pure model -- every word below is defined there, and tested on its own;
@@ -2092,6 +2095,144 @@ attention queue's first five rows, flow, aging, health against the previous
 window, and schedules; `factory stats attention [--scope S]` prints every
 exception with its reason and actions.
 
+## Operations
+
+The systems Factory builds and runs (`#185`), as an operator means the word:
+for every environment -- staging, production, a review environment -- what
+release runs there, whether it is healthy, whether it meets its SLO, and how
+releases fare. Not Factory's own production line, which is L4 Line above.
+`factory_core::environments` is the pure model and every decision in it;
+`crates/factory-daemon/src/environments/` records, checks and reports.
+
+**Environments are declared** in the scope that deploys them, beside its
+agents:
+
+```yaml
+# a scope's .factory/config.yaml
+scope:
+  name: factory
+  environments:
+    - name: production
+      tier: production                 # production | staging | ephemeral (the default)
+      url: https://factory.example.ts.net:8790
+      checks:
+        - { kind: http, path: /api/status, expect: 200, every: 60s, timeout: 5s }
+      slo: { availability: 99.5%, window: 28d }
+    - name: staging
+      tier: staging
+      promotes_to: production
+      url: https://factory.example.ts.net:8791
+      checks:
+        - { kind: http, path: /api/status, body: '"instance"', every: 60s }
+        - { name: disk, kind: command, command: 'test "$(df -P . | awk "NR==2{print \$5+0}")" -lt 90' }
+      slo: { availability: 99%, window: 28d }
+```
+
+An environment's name is unique across the instance, because it names
+metrics (`availability.staging`); `promotes_to` may name one in another
+scope. A check is `http` (a GET through `curl` on the daemon's `PATH` -- the
+daemon has no HTTP client, and what is worth checking is behind TLS -- with
+an expected status, 200 unless said, and an optional body substring), `tcp`
+(`host`, `port`), or `command` (run with `sh -c` in the scope's directory;
+exit 0 is healthy). `every` defaults to 60s and is at least 5s; `timeout`
+defaults to 10s and is at most 120s and never longer than `every`. `paused:
+true` stops an environment's checks: its status reads `unknown`, and a paused
+stretch neither spends nor earns error budget. Everything is checked at load.
+
+**Health.** A loop in the daemon runs every due check of every declared,
+unpaused environment, reading the configuration fresh each tick. Each check
+runs in a task of its own, in its own process group, killed at its timeout;
+one that hangs, cannot start or panics is a failed **sample**, and nothing a
+check does can take the daemon down. An environment is `up` when every check's
+latest answer was healthy, `down` when every one failed, `degraded` between,
+and `unknown` before anything was checked -- with how long it has been so.
+Two consecutive failures of a check open an **incident** from the first of
+them, the next success closes it, and overlapping incidents of different
+checks are one. Only a change of status is published
+(`environment_status_changed`), never a sample. Samples are kept 90 days --
+the one table here that is pruned, since a sample is an observation and not a
+record of anything anyone did -- so an SLO window is at most `90d`.
+
+**Deployments** are recorded by whoever makes them, in an append-only
+`deploy_events` table, so the history survives every release and restart:
+
+```sh
+id=$(factory deploy start --env staging --commit "$SHA" --describe "$(git describe)" \
+       --profile release --via release.sh)          # prints the deployment id
+factory deploy finish "$id" --status succeeded      # or failed / rolled-back --reason "..."
+factory deploy record --env review13 --commit "$SHA" --status succeeded   # by hand, in one go
+factory deploy list [--env staging]
+factory release add --scope factory --commit "$SHA" --version v0.4.0
+factory release list
+factory env [<name>] [--scope S]
+```
+
+A deployment records its release (commit, describe, version, profile, dirty,
+source, and the commit's committer time -- asked of the scope's repository
+when not given -- where lead time starts), its actor (the run and task whose
+token recorded it, a standing agent, or the owner), `via` (what recorded it:
+`release.sh`), `manual` (the owner with nothing in between), start and end,
+status (`running`, `succeeded`, `failed`, `rolled_back`), the reason, and the
+release that was running before -- what a rollback targets. **A success is
+verified**: the environment's own checks run once, right then, and a
+deployment only counts as `succeeded` if they pass; otherwise it is recorded
+as `failed` with the failing checks, and `deploy finish` exits non-zero.
+`--no-verify` skips that and says so on the record. A new deployment to an
+environment with one still `running` ends the old one as failed, naming the
+new one, rather than leaving it running forever. An environment nobody
+declared -- a throwaway review environment -- is still recorded, as
+`ephemeral`, without checks or an SLO. Recording needs `deploy.record` in the
+environment's scope; with `own` reach only from a run, and a run finishes only
+a deployment it started. Reading is open to every agent.
+
+The **release catalogue** is every `(scope, commit)` a deployment or
+`release add` recorded -- builds that actually happened, not git tags --
+with where each is running now and how many of its deployments failed.
+
+**SLA and release effectiveness** are computed from samples and deployments,
+never typed in, and are metrics in the registry like any other -- the Goals
+tab, the Scenarios drivers and dashboard tiles can read them:
+
+| metric | what |
+|---|---|
+| `availability.<env>` | healthy samples over the SLO window (28 days without one) |
+| `error_budget.<env>` | what is left of the budget: 1 untouched, 0 spent, below 0 overspent |
+| `incidents.<env>` | incidents in the window |
+| `mttr.<env>` | mean incident duration, over incidents that ended in the window |
+| `deploy_frequency.<env>` | successful deployments per week (DORA) |
+| `lead_time_p50.<env>` | committer time to deployment finished, median (DORA) |
+| `change_failure_rate.<env>` | finished deployments that failed, were rolled back, or were followed by an incident within an hour and before the next deployment (DORA) |
+| `time_to_restore_p50.<env>` | median incident duration (DORA) |
+
+DORA's keys are read per environment; the one at the end of a promotion path
+(production) is the one that speaks for the path. A figure with nothing to
+compute it from is `None` with the reason -- no samples is not 100%.
+
+**The tab** is L1 › Operations (`#<scope>/infra/environments`), narrowed by
+the rail's scope: environment cards in promotion order (status and since,
+current and deploying release, uptime 24h / 7d / SLO window against target,
+error budget, last check, a 24-hour strip per check, incidents, the DORA keys
+and MTTR); the deployment timeline, running first, failed and rolled-back ones
+standing out, with who, via, duration and verification; and the release
+catalogue. Polled every 30s and refetched on `deployment_updated` and
+`environment_status_changed`. `GET /api/environments?scope=` answers it.
+
+**Factory's own environments.** `.claude/skills/release/scripts/release.sh`
+records every release with the company daemon, whichever environment it went
+to: `deploy start` before the swap, `deploy finish` once the environment is
+up and reachable (a start the old CLI could not record is recorded whole at
+the end), a failed release as failed. It never fails a release because the
+daemon could not be reached. `envs.conf` still gives the scripts their ports
+and policies; the `environments:` declaration above, with the real Tailscale
+URLs, belongs in the `factory` scope's config once a daemon that reads it is
+installed.
+
+**Not yet:** promoting a release from the page (a `release` task gated by
+policy and approval, `#118` v2), mirroring deployments to GitHub's
+Deployments API, `ensure.sh`'s restarts as journaled actions, "slow" as a
+reason for `degraded`, alerting beyond Factory's own events, external
+monitoring as a check source, and more than one host.
+
 ## Tasks and runs
 
 A **task** is the standing intent: what to do, where, with which agent, and on
@@ -2110,7 +2251,7 @@ that has come due (or a queued retry), so an unscheduled task stays `pending`
 until someone runs it -- `--run` on create, `factory task run <id>` later, or
 the Run button. `task create` says which it is, the task's page says so while
 nothing has started it, and the dashboard's **Due** figure counts only what
-the scheduler will actually fire -- the same number as Operations'
+the scheduler will actually fire -- the same number as Line's
 `flow.queue_depth` -- with manual tasks named beside it, not in it (`#124`).
 
 ### A failure is Blocked; closing is a person's act (#122)
@@ -2697,7 +2838,7 @@ serialization, post-upgrade checks, and alerting, are separate work tracked in
   person can repair it with `scripts/repair-harness codex` ``, and a
   `harness_unhealthy` journal entry. Other tasks for it are held the same way,
   not failed one by one. It is one `harness_unhealthy` exception per binary in
-  the Operations "needs a human" list, and a row under `HARNESSES` in `factory
+  the Line "needs a human" list, and a row under `HARNESSES` in `factory
   infra` (and on the L1 Infrastructure page), with every task it holds.
 - **Held tasks are released on their own.** At most every `retry_seconds` the
   daemon looks at every task `blocked` with no run whose newest journal entry
@@ -3431,9 +3572,13 @@ forecast under `POST /api/scenarios/whatif` (see "Scenarios" above), the
 L5 Quality attributes tab under `GET /api/quality?scope=` and a scenario's
 remediation task under `POST /api/quality/remediate` (see "Quality
 attributes" above),
-L4 Operations tab under `GET /api/operations?scope=&window=`, skipping a
+L4 Line tab under `GET /api/operations?scope=&window=`, skipping a
 schedule's next slot under `POST /api/tasks/{id}/skip-next` and answering
-a blocked run under `POST /api/runs/{id}/answer` (see "Operations" above),
+a blocked run under `POST /api/runs/{id}/answer` (see "Line" above),
+the L1 Operations tab under `GET /api/environments?scope=`, a deployment's
+start and end under `POST /api/deployments` and
+`POST /api/deployments/{id}/finish`, and `POST /api/releases` (see
+"Operations" above),
 workflow CRUD under
 `/api/workflows`, workflow-run
 start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
@@ -3682,6 +3827,7 @@ dependency; fact ports and the strict command ladder follow in later phases.
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
     ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic
+    ui/js/{environments,environments-model}.js                   the L1 Operations tab (#185) and its pure shaping logic
     ui/js/{doctor,doctor-model}.js                               the L1 Doctor dependency view and its pure shaping logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter

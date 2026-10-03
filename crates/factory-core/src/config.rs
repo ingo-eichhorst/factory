@@ -442,6 +442,7 @@ impl Config {
         self.refuse_root_scope_dashboard()?;
         self.validate_dashboards(self.scopes.iter())?;
         self.infrastructure.validate()?;
+        self.validate_environments()?;
         for scope in self.scope.iter().chain(&self.scopes) {
             scope.validate_dependencies()?;
             refuse_zero_max_sessions(scope)?;
@@ -463,6 +464,35 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// Every scope's environments together: a name is unique across the
+    /// instance, and `promotes_to` may name one in another scope.
+    pub fn validate_environments(&self) -> Result<()> {
+        // The root scope is `scope:` and, once discovered, one of `scopes:`
+        // too; the same scope twice is not two declarations.
+        let mut seen = std::collections::BTreeSet::new();
+        crate::environments::validate(
+            self.scope
+                .iter()
+                .chain(&self.scopes)
+                .filter(|s| seen.insert(s.name.as_str()))
+                .map(|s| (s.name.as_str(), s.environments.as_slice())),
+        )
+    }
+
+    /// Every declared environment, with the name of the scope declaring it.
+    pub fn environments(&self) -> Vec<(String, crate::environments::EnvironmentDecl)> {
+        let mut out: Vec<(String, crate::environments::EnvironmentDecl)> = Vec::new();
+        for scope in self.scope.iter().chain(&self.scopes) {
+            for env in &scope.environments {
+                // The root scope can also be listed in `scopes:`; one copy.
+                if !out.iter().any(|(_, e)| e.name == env.name) {
+                    out.push((scope.name.clone(), env.clone()));
+                }
+            }
+        }
+        out
     }
 
     /// Validate the instance file before discovery replaces its legacy scope
@@ -1489,6 +1519,12 @@ pub struct Scope {
     /// Declared product components and external services for L2 Dependencies.
     #[serde(default, skip_serializing_if = "DependenciesConfig::is_empty")]
     pub dependencies: DependenciesConfig,
+    /// Where what this scope builds is deployed and kept running (`#185`):
+    /// each environment's tier, URL, health checks and SLO. See
+    /// `environments::EnvironmentDecl`; names are unique across the
+    /// instance, checked by `Config::validate`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<crate::environments::EnvironmentDecl>,
 }
 
 impl DependenciesConfig {

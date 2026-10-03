@@ -38,6 +38,42 @@ Every successful release prints two URLs. Give the Tailscale HTTPS URL to the
 requester (for example `https://factory.taile2330c.ts.net:8791/`) and also
 report the LAN URL. Never hand off `127.0.0.1`, `0.0.0.0`, or an unverified URL.
 
+## Every release is recorded
+
+`release.sh` records each release as a deployment with the company daemon
+(`#185`) -- whichever environment it went to -- so the L1 Operations tab and
+`factory deploy list` show what runs where, since when and who put it there:
+`factory deploy start --via release.sh` just before the swap, and `factory
+deploy finish` once the environment is up and reachable, which also runs the
+environment's declared health checks and records the release as failed if
+they do not pass. A release that dies half-way is recorded as failed. The
+first release made with a `factory` that predates `deploy` records the whole
+deployment at the end instead. Recording never fails a release on its own: a
+daemon that cannot be reached is a warning. Set `FACTORY_RELEASE_SCOPE` if the
+scope is not called `factory`.
+
+`RELEASED` still holds the latest release for these scripts; the history is
+the daemon's. Once a daemon that reads `environments:` is installed, declare
+the two standing environments in the `factory` scope's
+`.factory/config.yaml`, so they are health-checked and carry an SLO:
+
+```yaml
+  environments:
+    - name: production
+      tier: production
+      url: https://factory.taile2330c.ts.net:8790
+      checks:
+        - { kind: http, path: /api/status, expect: 200, every: 60s, timeout: 5s }
+      slo: { availability: 99.5%, window: 28d }
+    - name: staging
+      tier: staging
+      promotes_to: production
+      url: https://factory.taile2330c.ts.net:8791
+      checks:
+        - { kind: http, path: /api/status, expect: 200, every: 60s, timeout: 5s }
+      slo: { availability: 99%, window: 28d }
+```
+
 ## What the scripts will not do for you
 
 - **Production takes only what is on `origin/main`.** The check is an ancestry

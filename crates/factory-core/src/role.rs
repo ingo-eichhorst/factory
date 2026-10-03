@@ -552,7 +552,7 @@ mod tests {
     fn every_grant_belongs_to_a_group_a_person_reads() {
         for grant in Grant::ALL {
             assert!(
-                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals", "Backup", "Intake", "Dashboard"]
+                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals", "Backup", "Intake", "Dashboard", "Deployments"]
                     .contains(&grant.group()),
                 "{} has no group",
                 grant.as_str()
@@ -566,6 +566,7 @@ mod tests {
         assert_eq!(Grant::PolicyAttest.group(), "Policy");
         assert_eq!(Grant::GoalsCheckIn.group(), "Goals");
         assert_eq!(Grant::BackupRun.group(), "Backup");
+        assert_eq!(Grant::DeployRecord.group(), "Deployments");
         assert_eq!(Grant::DashboardEdit.group(), "Dashboard");
         for grant in [
             Grant::IntakeAdd,
@@ -585,27 +586,29 @@ mod tests {
         // and of `Grant::ALL`, in the order each was added, so a parallel
         // track appending its own grant there too merges without a real
         // conflict.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 12], Grant::DatasetEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::BenchRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::PolicyAttest);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::GoalsCheckIn);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::BackupRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::IntakeAdd);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakeInfo);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakeTriage);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::IntakeAssess);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::IntakeDecide);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::IntakePublish);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 13], Grant::DatasetEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 12], Grant::BenchRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::PolicyAttest);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::GoalsCheckIn);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::BackupRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::IntakeAdd);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::IntakeInfo);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakeTriage);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakeAssess);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::IntakeDecide);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::IntakePublish);
         // `#160`: the same seam, one grant later -- `dashboard.edit` lands at
         // the end too, so a parallel track adding its own grant after this
         // one merges without a real conflict either.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::DashboardEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::DashboardEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::DeployRecord);
         let all = Grant::expand("*").unwrap();
         assert!(all.contains(&Grant::DatasetEdit));
         assert!(all.contains(&Grant::BenchRun));
         assert!(all.contains(&Grant::PolicyAttest));
         assert!(all.contains(&Grant::GoalsCheckIn));
         assert!(all.contains(&Grant::BackupRun));
+        assert!(all.contains(&Grant::DeployRecord));
         assert!(all.contains(&Grant::IntakeAdd));
         assert!(all.contains(&Grant::IntakeInfo));
         assert!(all.contains(&Grant::IntakeTriage));

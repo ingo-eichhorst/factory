@@ -1617,6 +1617,7 @@ mod tests {
                 quality: Default::default(),
                 intake: Default::default(),
                 dependencies: Default::default(),
+                environments: Vec::new(),
             }],
             infrastructure: Default::default(),
             plugins_dir: None,

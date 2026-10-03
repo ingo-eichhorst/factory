@@ -200,10 +200,13 @@ pub enum Grant {
     IntakePublish,
     #[serde(rename = "dashboard.edit")]
     DashboardEdit,
+    /// Record a deployment or a release; its environment's scope is the subject.
+    #[serde(rename = "deploy.record")]
+    DeployRecord,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 32] = [
+    pub const ALL: [Grant; 33] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -236,6 +239,7 @@ impl Grant {
         Grant::IntakeDecide,
         Grant::IntakePublish,
         Grant::DashboardEdit,
+        Grant::DeployRecord,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -272,6 +276,7 @@ impl Grant {
             Self::IntakeDecide => "intake.decide",
             Self::IntakePublish => "intake.publish",
             Self::DashboardEdit => "dashboard.edit",
+            Self::DeployRecord => "deploy.record",
         }
     }
     pub fn describe(self) -> &'static str {
@@ -310,6 +315,7 @@ impl Grant {
                 "publish a decided GitHub item's triage comment and labels to its issue"
             }
             Self::DashboardEdit => "save or reset a scope's dashboard layout",
+            Self::DeployRecord => "record a deployment or a release",
         }
     }
     pub fn group(self) -> &'static str {
@@ -344,6 +350,7 @@ impl Grant {
             | Self::IntakeDecide
             | Self::IntakePublish => "Intake",
             Self::DashboardEdit => "Dashboard",
+            Self::DeployRecord => "Deployments",
         }
     }
 }

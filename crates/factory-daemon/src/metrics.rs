@@ -23,7 +23,7 @@
 //! The six operations metrics (`cycle_time_p50`/`_p85`, `queue_wait_p95`,
 //! `fail_rate`, `rework_rate`, `time_to_recover_p50`) are
 //! `factory_core::operations::registry_metric` over the trailing 28 days of
-//! runs -- the same functions the Operations tab's health strip calls, so a
+//! runs -- the same functions the Line tab's health strip calls, so a
 //! KR over one of them and the tab can never disagree about its value.
 //! Each is `as_of` the newest run behind it
 //! (`operations::registry_metric_as_of`), not the moment it was asked for
@@ -91,6 +91,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
+use factory_core::environments::EnvironmentCard;
 use factory_core::config::Scope;
 use factory_core::error::{FactoryError, Result};
 use factory_core::goals::GoalsCatalogue;
@@ -166,6 +167,13 @@ fn is_policy_metric(id: &str) -> bool {
 
 fn is_quality_metric(id: &str) -> bool {
     id.starts_with("quality.")
+}
+
+/// `availability.<env>` and its siblings (`#185`): the metric's name and
+/// the environment it names.
+fn environment_metric(id: &str) -> Option<(&str, &str)> {
+    let (name, env) = id.split_once('.')?;
+    (metrics::ENVIRONMENT_METRICS.contains(&name) && !env.contains('.')).then_some((name, env))
 }
 
 /// `#158` phase 1: `conformance_rate.<category>` and `gate_fail_rate`, the
@@ -333,6 +341,9 @@ impl Engine {
         } else {
             None
         };
+        let needs_environments =
+            computing.iter().any(|(id, r)| r.is_ok() && environment_metric(id.as_str()).is_some());
+        let environments = if needs_environments { Some(self.environment_cards(canonical_scope).await?) } else { None };
 
         let sources = ComputeSources {
             production: production.as_ref(),
@@ -342,6 +353,7 @@ impl Engine {
             hours: hours.as_ref(),
             intake: intake_input.as_ref(),
             backup: backup_fact.as_ref(),
+            environments: environments.as_ref(),
         };
         let mut computed: BTreeMap<MetricId, MetricValue> = BTreeMap::new();
         let mut computed_series: BTreeMap<MetricId, MetricSeries> = BTreeMap::new();
@@ -559,6 +571,8 @@ impl Engine {
             (intake_value(id, sources.intake.expect("needs_intake set"), now), None)
         } else if is_backup_metric(id.as_str()) {
             (backup_metric_value(id, sources.backup.expect("needs_backup set")), None)
+        } else if let Some((name, env)) = environment_metric(id.as_str()) {
+            (environment_value(id, sources.environments.expect("needs_environments set"), name, env, now), None)
         } else if let Some(framework) = id.as_str().strip_prefix("compliance.") {
             (compliance_value(id, policy_report.expect("needs_policy set"), framework, now), None)
         } else if let Some(framework) = id.as_str().strip_prefix("open_controls.") {
@@ -684,6 +698,14 @@ impl Engine {
         }
 
         ids.extend(goals_metric_ids(&catalogue));
+        // Every declared environment's SLA figures and DORA keys (`#185`).
+        for (_, decl) in snapshot.config.environments() {
+            for name in metrics::ENVIRONMENT_METRICS {
+                if let Ok(id) = MetricId::new(format!("{name}.{}", decl.name)) {
+                    ids.push(id);
+                }
+            }
+        }
         for characteristic in &characteristics {
             if let Ok(id) = MetricId::new(format!("quality.{characteristic}")) {
                 ids.push(id);
@@ -1140,6 +1162,7 @@ struct ComputeSources<'a> {
     hours: Option<&'a HoursTotals>,
     intake: Option<&'a IntakeInput>,
     backup: Option<&'a factory_core::backup::BackupFact>,
+    environments: Option<&'a BTreeMap<String, EnvironmentCard>>,
     /// `#158`: `Engine::attested_runs`'s finished runs, shared by
     /// `conformance_rate.<category>` and `gate_fail_rate`.
     attested: Option<&'a [factory_core::conformance::AttestedRun]>,
@@ -1175,6 +1198,44 @@ fn intake_value(id: &MetricId, intake: &IntakeInput, now: DateTime<Utc>) -> Metr
             as_of: now,
             reason: Some("no computation wired for this metric yet".to_string()),
         },
+    }
+}
+
+/// One environment metric off the card the Operations tab draws, so the
+/// two can never disagree. A figure with nothing to compute it from is
+/// `None` with the reason.
+fn environment_value(
+    id: &MetricId,
+    cards: &BTreeMap<String, EnvironmentCard>,
+    name: &str,
+    env: &str,
+    now: DateTime<Utc>,
+) -> MetricValue {
+    let answer = |value: Option<f64>, reason: &str| MetricValue {
+        id: id.clone(),
+        value,
+        as_of: now,
+        reason: value.is_none().then(|| reason.to_string()),
+    };
+    let Some(card) = cards.get(env) else {
+        return answer(None, &format!("no environment named {env:?} is declared or deployed to"));
+    };
+    let no_samples = "no health samples in the window yet";
+    let dora = &card.dora;
+    match name {
+        "availability" => answer(card.uptime_window, no_samples),
+        "error_budget" if card.slo.is_none() => answer(None, &format!("environment {env:?} declares no SLO")),
+        "error_budget" => answer(card.error_budget, no_samples),
+        "incidents" => answer(card.uptime_window.map(|_| card.incidents.len() as f64), no_samples),
+        "mttr" => answer(dora.mttr, "no incident ended in the window"),
+        "time_to_restore_p50" => answer(dora.time_to_restore_p50, "no incident ended in the window"),
+        "deploy_frequency" => answer(dora.deploy_frequency, "no successful deployment in the window"),
+        "lead_time_p50" => answer(
+            dora.lead_time_p50,
+            "no successful deployment in the window says when its commit was made",
+        ),
+        "change_failure_rate" => answer(dora.change_failure_rate, "no deployment finished in the window"),
+        _ => answer(None, "no computation wired for this metric yet"),
     }
 }
 

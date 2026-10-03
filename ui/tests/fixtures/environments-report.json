@@ -1,0 +1,114 @@
+{
+  "generated_at": "2026-09-26T12:00:00Z",
+  "environments": [
+    {
+      "name": "review13",
+      "scope": "factory",
+      "tier": "ephemeral",
+      "declared": false,
+      "paused": false,
+      "status": "unknown",
+      "current": {
+        "id": "d3", "scope": "factory", "environment": "review13",
+        "release": { "commit": "cccccccccccccccc", "describe": "v0.3-2-gccccccc", "source": "../worktrees/x" },
+        "actor": { "kind": "person", "name": "owner" },
+        "manual": true,
+        "started_at": "2026-09-26T09:00:00Z", "finished_at": "2026-09-26T09:02:00Z",
+        "status": "succeeded"
+      },
+      "uptime_24h": null, "uptime_7d": null, "uptime_window": null, "error_budget": null,
+      "checks": [],
+      "incidents": [],
+      "dora": { "window_days": 28, "deploy_frequency": 0.25, "lead_time_p50": null, "change_failure_rate": 0.0, "time_to_restore_p50": null, "mttr": null, "incidents": 0 }
+    },
+    {
+      "name": "staging",
+      "scope": "factory",
+      "tier": "staging",
+      "url": "https://factory.example.ts.net:8791",
+      "promotes_to": "production",
+      "declared": true,
+      "paused": false,
+      "status": "down",
+      "status_since": "2026-09-26T11:50:00Z",
+      "running": {
+        "id": "d5", "scope": "factory", "environment": "staging",
+        "release": { "commit": "eeeeeeeeeeeeeeee" },
+        "actor": { "kind": "run", "name": "builder", "run_id": "1a2b3c4d5e6f", "task_id": "t1" },
+        "manual": false,
+        "started_at": "2026-09-26T11:58:00Z",
+        "status": "running"
+      },
+      "slo": { "target": 0.99, "window_days": 28 },
+      "uptime_24h": 0.97, "uptime_7d": 0.995, "uptime_window": 0.985, "error_budget": -0.5,
+      "last_check": "2026-09-26T11:59:30Z",
+      "checks": [
+        {
+          "name": "/api/status", "kind": "http", "target": "https://factory.example.ts.net:8791/api/status", "every_seconds": 60,
+          "last": { "environment": "staging", "check": "/api/status", "at": "2026-09-26T11:59:30Z", "ok": false, "latency_ms": 5000, "detail": "timed out after 5s" },
+          "strip": [{ "start": "2026-09-25T12:00:00Z", "ok": 30, "failed": 0 }, { "start": "2026-09-25T12:30:00Z", "ok": 28, "failed": 2 }, { "start": "2026-09-25T13:00:00Z", "ok": 0, "failed": 0 }]
+        }
+      ],
+      "incidents": [
+        { "environment": "staging", "started_at": "2026-09-26T11:50:00Z", "checks": ["/api/status"] },
+        { "environment": "staging", "started_at": "2026-09-20T08:00:00Z", "ended_at": "2026-09-20T08:10:00Z", "checks": ["/api/status"] }
+      ],
+      "dora": { "window_days": 28, "deploy_frequency": 1.5, "lead_time_p50": 5400, "change_failure_rate": 0.25, "time_to_restore_p50": 600, "mttr": 600, "incidents": 2 }
+    },
+    {
+      "name": "production",
+      "scope": "factory",
+      "tier": "production",
+      "url": "https://factory.example.ts.net:8790",
+      "declared": true,
+      "paused": false,
+      "status": "up",
+      "status_since": "2026-09-24T12:00:00Z",
+      "current": {
+        "id": "d2", "scope": "factory", "environment": "production",
+        "release": { "commit": "bbbbbbbbbbbbbbbb", "describe": "v0.2", "version": "v0.2", "profile": "release", "committed_at": "2026-09-24T10:00:00Z" },
+        "actor": { "kind": "person", "name": "owner" },
+        "via": "release.sh",
+        "manual": false,
+        "started_at": "2026-09-24T11:55:00Z", "finished_at": "2026-09-24T12:00:00Z",
+        "status": "succeeded",
+        "previous_commit": "aaaaaaaaaaaaaaaa",
+        "verification": { "at": "2026-09-24T12:00:00Z", "ok": true, "checks": [{ "environment": "production", "check": "/api/status", "at": "2026-09-24T12:00:00Z", "ok": true, "latency_ms": 42, "detail": "200" }] }
+      },
+      "slo": { "target": 0.995, "window_days": 28 },
+      "uptime_24h": 1.0, "uptime_7d": 0.999, "uptime_window": 0.998, "error_budget": 0.6,
+      "last_check": "2026-09-26T11:59:40Z",
+      "checks": [],
+      "incidents": [],
+      "dora": { "window_days": 28, "deploy_frequency": 0.5, "lead_time_p50": 7200, "change_failure_rate": 0.5, "time_to_restore_p50": null, "mttr": null, "incidents": 0 }
+    }
+  ],
+  "releases": [
+    { "scope": "factory", "commit": "eeeeeeeeeeeeeeee", "first_seen": "2026-09-26T11:58:00Z", "running_on": [], "deployments": 1, "failed_deployments": 0 },
+    { "scope": "factory", "commit": "cccccccccccccccc", "describe": "v0.3-2-gccccccc", "first_seen": "2026-09-26T09:00:00Z", "running_on": ["review13"], "deployments": 1, "failed_deployments": 0 },
+    { "scope": "factory", "commit": "bbbbbbbbbbbbbbbb", "describe": "v0.2", "version": "v0.2", "profile": "release", "first_seen": "2026-09-24T11:55:00Z", "running_on": ["production"], "deployments": 2, "failed_deployments": 1 }
+  ],
+  "deployments": [
+    {
+      "id": "d5", "scope": "factory", "environment": "staging",
+      "release": { "commit": "eeeeeeeeeeeeeeee" },
+      "actor": { "kind": "run", "name": "builder", "run_id": "1a2b3c4d5e6f", "task_id": "t1" },
+      "manual": false, "started_at": "2026-09-26T11:58:00Z", "status": "running"
+    },
+    {
+      "id": "d4", "scope": "factory", "environment": "production",
+      "release": { "commit": "bbbbbbbbbbbbbbbb", "version": "v0.2" },
+      "actor": { "kind": "agent", "name": "Codex Builder" },
+      "manual": false, "started_at": "2026-09-25T10:00:00Z", "finished_at": "2026-09-25T10:03:00Z",
+      "status": "failed", "reason": "post-deploy verification failed: /api/status: expected 200, got 502",
+      "verification": { "at": "2026-09-25T10:03:00Z", "ok": false, "checks": [{ "environment": "production", "check": "/api/status", "at": "2026-09-25T10:03:00Z", "ok": false, "latency_ms": 30, "detail": "expected 200, got 502" }] }
+    },
+    {
+      "id": "d1", "scope": "factory", "environment": "production",
+      "release": { "commit": "aaaaaaaaaaaaaaaa", "dirty": true },
+      "actor": { "kind": "person", "name": "owner" },
+      "manual": true, "started_at": "2026-09-20T10:00:00Z", "finished_at": "2026-09-20T10:01:30Z",
+      "status": "rolled_back", "reason": "bad migration"
+    }
+  ]
+}

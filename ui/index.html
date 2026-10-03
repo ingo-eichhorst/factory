@@ -52,7 +52,7 @@
     <span class="lv-n">L5</span><span class="lv-name">Improvement</span><span class="lv-sub">Benchmarks, knowledge and quality</span>
   </button>
   <button id="lv-proc" class="lvl" data-level="proc" data-lv="4">
-    <span class="lv-n">L4</span><span class="lv-name">Process</span><span class="lv-sub">Tasks, intake, workflows, operations</span>
+    <span class="lv-n">L4</span><span class="lv-name">Process</span><span class="lv-sub">Tasks, intake, workflows, line</span>
   </button>
   <button id="lv-harn" class="lvl" data-level="harn" data-lv="3">
     <span class="lv-n">L3</span><span class="lv-name">Agent</span><span class="lv-sub">Who may work</span>
@@ -61,7 +61,7 @@
     <span class="lv-n">L2</span><span class="lv-name">Environment</span><span class="lv-sub">Sandboxes, secrets and dependencies</span>
   </button>
   <button id="lv-infra" class="lvl" data-level="infra" data-lv="1">
-    <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Host, daemon, Doctor and backup</span>
+    <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Host, daemon, Doctor, operations and backup</span>
   </button>
 </nav>
 
@@ -80,7 +80,7 @@
   <button id="tab-tasks" hidden>Tasks</button>
   <button id="tab-intake" hidden>Intake</button>
   <button id="tab-workflows" hidden>Workflows</button>
-  <button id="tab-operations" hidden>Operations</button>
+  <button id="tab-line" hidden>Line</button>
   <button id="tab-occupancy" hidden>Occupancy</button>
   <button id="tab-roster" hidden>Roster</button>
   <button id="tab-agent-runtime" hidden>Agent-runtime</button>
@@ -93,6 +93,7 @@
   <button id="tab-quality" hidden>Quality</button>
   <button id="tab-infrastructure" hidden>Infrastructure</button>
   <button id="tab-doctor" hidden>Doctor</button>
+  <button id="tab-environments" hidden>Operations</button>
   <button id="tab-backup" hidden>Backup</button>
 </nav>
 </div>
@@ -573,9 +574,9 @@
     <div id="intake">loading…</div>
   </div>
 
-  <div id="view-operations" hidden>
+  <div id="view-line" hidden>
     <div class="bar">
-      <h2>Operations</h2>
+      <h2>Line</h2>
       <span class="sub" id="ops-generated"></span>
       <span class="sp"></span>
       <button class="btn" id="ops-refresh">Refresh</button>
@@ -940,6 +941,28 @@
       see the host, the daemon and the AI accounts here.</p>
     <p class="env-note bad" id="infrastructure-error" hidden></p>
     <div class="infra-stack" id="infrastructure" hidden></div>
+  </div>
+
+  <!-- L1 Operations (#185): the environments the systems Factory builds run
+       in -- what runs where, whether it is healthy, whether it meets its SLO,
+       and every deployment -- from `GET /api/environments`
+       (`environments.js`). Not Factory's own line: that is L4 Line. -->
+  <div id="view-environments" hidden>
+    <div class="bar">
+      <h2>Operations</h2>
+      <span class="sub" id="environments-generated"></span>
+      <span class="sp"></span>
+      <button class="btn" id="environments-refresh">Refresh</button>
+    </div>
+    <!-- In the markup, not the fetched answer, so it goes on being said when
+         the request fails. -->
+    <p class="env-note">The systems Factory builds and runs, not Factory's own work (that is L4 Line). Status, uptime
+      and error budget are computed from the health checks the daemon runs, never typed in; a deployment is recorded
+      by whoever made it, and a success only counts once the environment's own checks pass.</p>
+    <p class="env-note" id="environments-unavailable" hidden>Operations is not available on this daemon: it was built
+      before <code>/api/environments</code> existed. Rebuild and restart the daemon to see environments here.</p>
+    <p class="env-note bad" id="environments-error" hidden></p>
+    <div class="bk-page" id="environments" hidden></div>
   </div>
 
   <div id="view-doctor" hidden>
