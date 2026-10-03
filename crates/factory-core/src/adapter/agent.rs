@@ -672,6 +672,9 @@ impl AgentContext {
                 Grant::RunInput => {
                     "run.input -> type into a run's own terminal; today that is the web UI, not this CLI".to_string()
                 }
+                Grant::RunApprove => format!(
+                    "run.approve -> {bin} run approve|reject <run-id> --reason \"...\"; {bin} run rework <run-id> accepts a verification rework proposal"
+                ),
                 Grant::WorkflowCreate => {
                     "workflow.create -> create a workflow in your scope; today that is the web UI's Process > Workflows view or POST /api/workflows, not this CLI".to_string()
                 }

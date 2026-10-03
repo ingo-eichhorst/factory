@@ -274,10 +274,11 @@ pub struct Engine {
     /// to spawn it from.
     pub(crate) bench_judge_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
     pub(crate) dataset_locks: crate::datasets::DatasetLocks,
-    /// Run ids queued for, or in, verification (`#118`) -- the dedup that
-    /// keeps one run's gates from running twice at once. See
-    /// `verification.rs`.
-    pub(crate) verifying: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Run ids queued for, or in, verification (`#118`). The bool remembers
+    /// a wake-up that arrived while the verifier owned the run, so releasing
+    /// that ownership replays it instead of losing a fast review result.
+    /// See `verification.rs`.
+    pub(crate) verifying: std::sync::Mutex<std::collections::HashMap<String, bool>>,
     /// Where `report` hands a `done` that needs verifying. The verifier
     /// (`spawn_verifier`) holds the other end; like `bench_judge_tx`, this is
     /// how a gate that runs for minutes stays off the report's own path.
@@ -1348,6 +1349,29 @@ impl Engine {
             Request::RunAttestations { id } => Ok(Payload::Attestations {
                 attestations: self.run_attestations(&id).await?,
             }),
+            Request::RunApprove { id, reason } => Ok(Payload::Run {
+                run: Box::pin(self.decide_approval(
+                        caller,
+                        &id,
+                        factory_core::control_plan::AttestationVerdict::Pass,
+                        &reason,
+                    ))
+                    .await?
+                    .redacted(),
+            }),
+            Request::RunReject { id, reason } => Ok(Payload::Run {
+                run: Box::pin(self.decide_approval(
+                        caller,
+                        &id,
+                        factory_core::control_plan::AttestationVerdict::Fail,
+                        &reason,
+                    ))
+                    .await?
+                    .redacted(),
+            }),
+            Request::RunRework { id } => Ok(Payload::Run {
+                run: Box::pin(self.accept_rework(caller, &id)).await?.redacted(),
+            }),
 
             Request::RunList { task_id, limit } => Ok(Payload::Runs {
                 runs: self
@@ -2217,6 +2241,15 @@ impl Engine {
         if let Some(category) = &patch.category {
             factory_core::control_plan::check_category(category).map_err(FactoryError::BadRequest)?;
         }
+        if patch.labels.as_ref().is_some_and(|labels| {
+            labels.contains_key(crate::verification::REVIEW_RUN_LABEL)
+                || labels.contains_key(crate::verification::REVIEW_STEP_LABEL)
+                || labels.contains_key(crate::verification::REVIEW_DIGEST_LABEL)
+        }) {
+            return Err(FactoryError::BadRequest(
+                "factory.review_* labels are reserved for daemon-created review tasks".into(),
+            ));
+        }
 
         let scope = patch.scope.clone().unwrap_or_else(|| current.scope.clone());
         if patch.scope.is_some() {
@@ -2378,7 +2411,7 @@ impl Engine {
     // -- creating ----------------------------------------------------------
 
     pub async fn create(&self, new: NewTask) -> Result<Task> {
-        self.create_task(new, None, None, None, None).await
+        self.create_task(new, None, None, None, None, false).await
     }
 
     /// A task born inside the intake gate (`#119`): `TaskStatus::Intake`
@@ -2393,7 +2426,7 @@ impl Engine {
                 "an intake item has no schedule; release it first, then schedule the task".into(),
             ));
         }
-        self.create_task(new, None, None, None, Some(intake)).await
+        self.create_task(new, None, None, None, Some(intake), false).await
     }
 
     pub(crate) async fn create_workflow_task(
@@ -2402,7 +2435,7 @@ impl Engine {
         origin: WorkflowOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, Some(origin), None, Some(id), None).await
+        self.create_task(new, Some(origin), None, Some(id), None, false).await
     }
 
     pub(crate) async fn create_bench_task(
@@ -2411,7 +2444,16 @@ impl Engine {
         origin: factory_core::bench::BenchOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, None, Some(origin), Some(id), None).await
+        self.create_task(new, None, Some(origin), Some(id), None, false).await
+    }
+
+    pub(crate) async fn create_review_task(
+        &self,
+        new: NewTask,
+        origin: Option<WorkflowOrigin>,
+        id: String,
+    ) -> Result<Task> {
+        self.create_task(new, origin, None, Some(id), None, true).await
     }
 
     async fn create_task(
@@ -2421,6 +2463,7 @@ impl Engine {
         bench_origin: Option<factory_core::bench::BenchOrigin>,
         id: Option<String>,
         intake: Option<factory_core::intake::Intake>,
+        internal_review: bool,
     ) -> Result<Task> {
         let factory = self.factory_snapshot();
         if new.title.trim().is_empty() {
@@ -2429,6 +2472,15 @@ impl Engine {
         if new.estimate_seconds == Some(0) {
             return Err(FactoryError::BadRequest(
                 "a task estimate must be at least one second".into(),
+            ));
+        }
+        if !internal_review
+            && (new.labels.contains_key(crate::verification::REVIEW_RUN_LABEL)
+                || new.labels.contains_key(crate::verification::REVIEW_STEP_LABEL)
+                || new.labels.contains_key(crate::verification::REVIEW_DIGEST_LABEL))
+        {
+            return Err(FactoryError::BadRequest(
+                "factory.review_* labels are reserved for daemon-created review tasks".into(),
             ));
         }
         if let Some(estimate) = &new.estimate {
@@ -2732,7 +2784,7 @@ impl Engine {
         self.record_bench_task_state(task_id).await;
     }
 
-    async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) -> Result<Run> {
+    pub(crate) async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) -> Result<Run> {
         let task = self.require(task_id).await?;
         // Resolve again rather than trusting what was written down: the config
         // may have changed since the task was created.
@@ -2782,14 +2834,28 @@ impl Engine {
         // What `done` will need, fixed now (`#118`) -- before the run row
         // exists, so a plan that cannot be resolved fails the dispatch
         // rather than letting the work start unplanned.
-        let required_steps = self.required_steps_for_task(&task).await?;
+        let required_steps = self.required_steps_for_task(&task, &agent_name).await?;
 
-        let token = factory_core::new_token();
-        // The capacity check and the run it admits happen under one lock, so
-        // two dispatches racing for the last slot cannot both read "one
-        // free" and both create a run (`#179`). Held only across this: the
-        // slower, fallible steps below (the power assertion, the worktree,
-        // the harness's own launch) never wait on it.
+        // An approval-held run already exists but has never launched. Once
+        // approved, resume that exact frozen snapshot instead of creating a
+        // second attempt that would ask for the same approval again.
+        let existing = self.store.active_run(task_id).await?.filter(|run| {
+            run.status == RunStatus::Blocked
+                && run.blocked_source == Some(BlockSource::Verification)
+                && run.session.is_none()
+                && run
+                    .required_steps
+                    .iter()
+                    .any(|s| s.kind == factory_core::control_plan::StepKind::Approval)
+        });
+        let resumed = existing.is_some();
+        let token = existing
+            .as_ref()
+            .and_then(|r| r.token.clone())
+            .unwrap_or_else(factory_core::new_token);
+        // Reserve capacity under the same lock for a fresh attempt and an
+        // approved held run. An approval-held run has no session and is not
+        // counted as occupying a slot until it resumes dispatch.
         let run = {
             let _admission = self.admission_lock.lock().await;
             let agent_max = declaration.as_ref().and_then(|d| d.max_sessions);
@@ -2798,8 +2864,12 @@ impl Engine {
                 let (in_use, max) = cap.holding_pair();
                 return Err(FactoryError::CapacityHeld { agent: agent_name.clone(), in_use, max });
             }
-            self.store
-                .create_run(&NewRun {
+            match existing {
+                Some(run) => self.store.update_run(
+                    &run.id,
+                    &RunPatch { status: Some(RunStatus::Dispatching), clear_blocked: true, ..Default::default() },
+                ).await?,
+                None => self.store.create_run(&NewRun {
                     task_id: task.id.clone(),
                     trigger,
                     agent: agent_name.clone(),
@@ -2808,9 +2878,15 @@ impl Engine {
                     token: token.clone(),
                     queued_at: Some(due.queued_at),
                     scheduled_for: due.scheduled_for,
-                })
-                .await?
+                }).await?,
+            }
         };
+        if resumed && task.slot_wait.is_some() {
+            self.store.update(task_id, &TaskPatch {
+                clear_slot_wait: true,
+                ..Default::default()
+            }).await?;
+        }
         let mut initial_patch = RunPatch {
             original_estimate: task.effective_estimate(),
             provider_account,
@@ -2853,9 +2929,7 @@ impl Engine {
         // before the worktree and the agent/runtime calls rather than after
         // them: those are exactly the slow, fallible steps a sleeping host
         // could stall inside, which is the case this issue is about.
-        self.power.acquire(&run.id).await;
-
-        let run = if required_steps.is_empty() {
+        let run = if resumed || required_steps.is_empty() {
             run
         } else {
             self.store
@@ -2863,19 +2937,25 @@ impl Engine {
                 .await?
         };
 
-        self.bus.publish(Event::RunStarted { run: run.clone() });
+        if resumed {
+            self.bus.publish(Event::RunUpdated { run: run.clone() });
+        } else {
+            self.bus.publish(Event::RunStarted { run: run.clone() });
+        }
         self.publish_task(task_id).await;
-        self.entry(
-            task_id,
-            TaskEntry::new(
-                "daemon",
-                "started",
-                format!("attempt {} started ({})", run.attempt, trigger.as_str()),
+        if !resumed {
+            self.entry(
+                task_id,
+                TaskEntry::new(
+                    "daemon",
+                    "started",
+                    format!("attempt {} started ({})", run.attempt, trigger.as_str()),
+                )
+                .in_run(&run.id),
             )
-            .in_run(&run.id),
-        )
-        .await;
-        if !run.required_steps.is_empty() {
+            .await;
+        }
+        if !resumed && !run.required_steps.is_empty() {
             let steps: Vec<String> = run
                 .required_steps
                 .iter()
@@ -2900,6 +2980,58 @@ impl Engine {
             )
             .await;
         }
+
+        let approval_evidence = self.policies.step_attestations(&run.id).await?;
+        let pending_approval = run
+            .required_steps
+            .iter()
+            .filter(|s| s.kind == factory_core::control_plan::StepKind::Approval)
+            .find(|approval| {
+                !approval_evidence
+                    .iter()
+                    .rev()
+                    .find(|a| {
+                        a.step == approval.step
+                            && a.kind == factory_core::control_plan::StepKind::Approval
+                    })
+                    .is_some_and(|a| {
+                        a.verdict == factory_core::control_plan::AttestationVerdict::Pass
+                    })
+            });
+        if let Some(approval) = pending_approval {
+                let held = self
+                    .store
+                    .update_run(
+                        &run.id,
+                        &RunPatch {
+                            status: Some(RunStatus::Blocked),
+                            blocked_since: Some(Utc::now()),
+                            blocked_source: Some(BlockSource::Verification),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                self.entry(
+                    task_id,
+                    TaskEntry::new(
+                        "daemon",
+                        "blocked",
+                        format!("approval {} is required before dispatch", approval.step),
+                    )
+                    .in_run(&run.id)
+                    .with_data(
+                        serde_json::json!({ "approval": approval.step, "actor": approval.actor }),
+                    ),
+                )
+                .await;
+                self.bus.publish(Event::RunUpdated { run: held.clone() });
+                self.mirror_to_task(&held).await;
+                return Ok(held);
+        }
+
+        // Approval has passed (or none was required); only now does this run
+        // acquire its liveness assertion and create an outward agent session.
+        self.power.acquire(&run.id).await;
 
         // A worktree of its own, made now rather than left to the harness --
         // the run row already exists, so it is named after it. Nothing below
@@ -3420,8 +3552,18 @@ impl Engine {
         })?;
 
         self.check_run_token(&run, report.token.as_deref(), task_id)?;
-        self.validate_workflow_send_to(task_id, report.status, report.send_to.as_deref())
-            .await?;
+        let reporting_task = self.require(task_id).await?;
+        let review_report = reporting_task
+            .labels
+            .contains_key(crate::verification::REVIEW_RUN_LABEL);
+        if !review_report {
+            self.validate_workflow_send_to(task_id, report.status, report.send_to.as_deref())
+                .await?;
+        } else if report.send_to.is_some() && report.status != Some(RunStatus::Done) {
+            return Err(FactoryError::BadRequest(
+                "a review rejects only with status done and --send-to".into(),
+            ));
+        }
 
         // While its gates run, a run's status is the verifier's to set. The
         // agent may still add a note, or give the run up; nothing else.
@@ -3511,27 +3653,31 @@ impl Engine {
             }
             Some(_) => patch.clear_blocked = true,
             None => {}
-        }
+        };
 
-        match report.status {
+        let updated = match report.status {
             // `#118`'s done gate: a run held to required steps is not done on
             // its agent's word. The session stays open -- see
             // `verification.rs`.
             Some(RunStatus::Done) if !run.required_steps.is_empty() => {
-                self.begin_verification(&run, patch).await
+                self.begin_verification(&run, patch).await?
             }
             Some(status) if status.is_terminal() => {
                 self.close_session(&run).await;
                 self.finish_run(&run.id, status, patch, &format!("attempt {} ended", run.attempt))
-                    .await
+                .await?
             }
             _ => {
                 let run = self.store.update_run(&run.id, &patch).await?;
                 self.bus.publish(Event::RunUpdated { run: run.clone() });
                 self.mirror_to_task(&run).await;
-                Ok(run)
+                run
             }
+        };
+        if review_report && report.status == Some(RunStatus::Done) {
+            self.settle_review_task(&reporting_task, &updated).await?;
         }
+        Ok(updated)
     }
 
     /// Cancel a task's active run. `kind` says on whose word -- a person, an
@@ -3633,6 +3779,13 @@ impl Engine {
         }
         self.mirror_to_task(&run).await;
         self.settle_retry(&run).await;
+        if status != RunStatus::Done {
+            if let Ok(Some(task)) = self.store.get(&run.task_id).await {
+                if let Some(subject) = task.labels.get(crate::verification::REVIEW_RUN_LABEL) {
+                    self.enqueue_verification(subject);
+                }
+            }
+        }
         Ok(run)
     }
 
@@ -4563,6 +4716,15 @@ mod tests {
     use factory_core::run::RunStatus;
     use factory_core::task::Schedule;
     use factory_plugins::{Registry, SqliteStore};
+
+    #[test]
+    fn request_future_stays_bounded_as_control_orchestration_grows() {
+        let engine = test_engine(PathBuf::from("/tmp"));
+        let caller = crate::access::Caller::Owner;
+        let future = engine.dispatch_request(&caller, Request::Status);
+        let bytes = std::mem::size_of_val(&future);
+        assert!(bytes < 64 * 1024, "request future uses {bytes} bytes before HTTP routing frames");
+    }
 
     /// A scope pointed at `scope_path`, one store in memory, and every
     /// built-in adapter registered -- enough to dispatch a task without a

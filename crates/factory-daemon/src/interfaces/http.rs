@@ -230,6 +230,9 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/runs/{id}/output", get(run_output))
         .route("/api/runs/{id}/input", post(run_input))
         .route("/api/runs/{id}/answer", post(run_answer))
+        .route("/api/runs/{id}/approve", post(run_approve))
+        .route("/api/runs/{id}/reject", post(run_reject))
+        .route("/api/runs/{id}/rework", post(run_rework))
         .with_state(engine)
 }
 
@@ -257,7 +260,10 @@ async fn run(engine: &Arc<Engine>, request: Request) -> AxumResponse {
 
 /// The same, for a caller that presented a token.
 async fn run_as(engine: &Arc<Engine>, request: Request, token: Option<String>) -> AxumResponse {
-    let response = engine.handle(Envelope { request, token }).await;
+    // Keep the protocol future off axum's deeper extractor/routing stack.
+    // Review/approval orchestration grows that future even for read-only
+    // requests such as the roster used at browser startup.
+    let response = Box::pin(engine.handle(Envelope { request, token })).await;
     let code = status_for(&response);
     (code, Json(response)).into_response()
 }
@@ -1946,6 +1952,45 @@ async fn run_input(
 struct AnswerBody {
     text: String,
     reason: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DecisionBody {
+    reason: String,
+}
+
+async fn run_approve(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<DecisionBody>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::RunApprove {
+            id,
+            reason: body.reason,
+        },
+    )
+    .await
+}
+
+async fn run_reject(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<DecisionBody>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::RunReject {
+            id,
+            reason: body.reason,
+        },
+    )
+    .await
+}
+
+async fn run_rework(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::RunRework { id }).await
 }
 
 /// `POST /api/runs/{id}/answer` -- `{text, reason}`, both required.

@@ -43,6 +43,9 @@ export const ACTION_LABELS = {
   skip_next: "Skip next",
   pause_schedule: "Pause schedule",
   resume_schedule: "Resume schedule",
+  approve: "Approve",
+  reject: "Reject",
+  accept_rework: "Accept rework",
 };
 
 export const STAGES = ["queued", "dispatching", "running", "blocked"];
@@ -273,6 +276,12 @@ export function actionRequest(action, row, { reason, text } = {}) {
       return { path: `/api/tasks/${task}`, method: "PATCH", body: { schedule_paused: false, ...withReason } };
     case "answer":
       return { path: `/api/runs/${encodeURIComponent(row.run_id || "")}/answer`, method: "POST", body: { text: text || "", reason: why } };
+    case "approve":
+      return { path: `/api/runs/${encodeURIComponent(row.run_id || "")}/approve`, method: "POST", body: { reason: why } };
+    case "reject":
+      return { path: `/api/runs/${encodeURIComponent(row.run_id || "")}/reject`, method: "POST", body: { reason: why } };
+    case "accept_rework":
+      return { path: `/api/runs/${encodeURIComponent(row.run_id || "")}/rework`, method: "POST", body: {} };
     default:
       return null;
   }
@@ -284,6 +293,7 @@ export function actionRequest(action, row, { reason, text } = {}) {
 /// without a reason.
 export function actionReady(action, { reason, text } = {}) {
   if (action === "answer") return !!(text && text.trim()) && !!(reason && reason.trim());
+  if (["approve", "reject"].includes(action)) return !!(reason && reason.trim());
   return true;
 }
 
@@ -307,6 +317,12 @@ export function actionConsequence(action, row) {
       return `Resumes the schedule of ${what}. The next slot is worked out from now -- slots passed while paused are not caught up.`;
     case "answer":
       return `Types your answer into the blocked run's own session and presses enter. The run stays blocked until its agent says otherwise.`;
+    case "approve":
+      return `Records an attributed approval and dispatches ${what}. The executing agent cannot approve its own work.`;
+    case "reject":
+      return `Records an attributed rejection and keeps ${what} stopped.`;
+    case "accept_rework":
+      return `Accepts the verifier's findings and starts the next bounded rework round for ${what}.`;
     default:
       return "";
   }

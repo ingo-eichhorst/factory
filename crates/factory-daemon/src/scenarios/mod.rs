@@ -1584,6 +1584,8 @@ mod tests {
             timeout_seconds: None,
             required_by: Vec::new(),
             node_id: None,
+            actor: None,
+            by: None,
         }];
         let now = chrono::Utc::now();
         let run = engine
@@ -1620,6 +1622,9 @@ mod tests {
                 dirty: None,
                 node_id: None,
                 at: now,
+                findings: None,
+                round: 0,
+                worktree_digest: None,
             })
             .await
             .unwrap();

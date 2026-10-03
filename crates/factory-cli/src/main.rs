@@ -913,6 +913,20 @@ enum RunCmd {
     /// The evidence a run's required steps left (`#118`): who ran each
     /// gate, on which commit, and what it found. Append-only.
     Attestations { id: String },
+    /// Pass a required person approval before the subject is dispatched.
+    Approve {
+        id: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Reject a required approval and keep the line stopped.
+    Reject {
+        id: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Accept the verifier's evidence-backed rework proposal.
+    Rework { id: String },
     /// One run's usage snapshots as the runtime answered them -- at
     /// dispatch, each turn end and the end -- the record behind the usage
     /// `run show` prints (#117).
@@ -3859,6 +3873,9 @@ fn action_str(a: ops::Action) -> &'static str {
         ops::Action::SkipNext => "skip next",
         ops::Action::PauseSchedule => "pause schedule",
         ops::Action::ResumeSchedule => "resume schedule",
+        ops::Action::Approve => "approve",
+        ops::Action::Reject => "reject",
+        ops::Action::AcceptRework => "accept rework",
     }
 }
 
@@ -4335,6 +4352,39 @@ async fn run_cmd(json: bool, client: &Client, cmd: RunCmd) -> Result<()> {
             let payload = client.send(Request::RunAttestations { id }).await?;
             print(&payload, json, |p| match p {
                 Payload::Attestations { attestations } => Some(attestations_text(attestations)),
+                _ => None,
+            })
+        }
+        RunCmd::Approve { id, reason } => {
+            let payload = client
+                .send(Request::RunApprove {
+                    id: id.clone(),
+                    reason,
+                })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Run { run } => Some(format!("approved {id}: {}", run.status.as_str())),
+                _ => None,
+            })
+        }
+        RunCmd::Reject { id, reason } => {
+            let payload = client
+                .send(Request::RunReject {
+                    id: id.clone(),
+                    reason,
+                })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Run { run } => Some(format!("rejected {id}: {}", run.status.as_str())),
+                _ => None,
+            })
+        }
+        RunCmd::Rework { id } => {
+            let payload = client.send(Request::RunRework { id: id.clone() }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Run { run } => {
+                    Some(format!("accepted rework for {id}: {}", run.status.as_str()))
+                }
                 _ => None,
             })
         }

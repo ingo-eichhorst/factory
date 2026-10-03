@@ -91,10 +91,12 @@ impl AttestedRun {
     /// self-attested never counts" rule [`Self::conforms`] applies to the
     /// whole run.
     pub fn step_evidence(&self, step: &str) -> StepEvidence {
+        let required = self.required_steps.iter().find(|s| s.step == step);
         let newest = self
             .attestations
             .iter()
-            .filter(|a| a.step == step && a.actor != self.agent)
+            .filter(|a| a.step == step && a.actor != self.agent
+                && required.and_then(|s| s.actor.as_deref()).is_none_or(|actor| actor == a.actor))
             .max_by_key(|a| a.at);
         match newest {
             Some(a) if a.verdict == AttestationVerdict::Pass => StepEvidence::Passed,
@@ -103,9 +105,8 @@ impl AttestedRun {
         }
     }
 
-    /// Whether this run holds at least one step v1 can actually enforce
-    /// (`StepKind::enforced`, gates only -- `review`/`approval` are v2). A
-    /// run with nothing required, or only unenforced steps, never counts
+    /// Whether this run holds at least one enforced gate, review or approval.
+    /// A run with nothing required never counts
     /// for or against `conformance_rate`: nothing was ever demanded of it.
     pub fn held(&self) -> bool {
         self.required_steps.iter().any(|s| s.kind.enforced())
@@ -250,6 +251,8 @@ mod tests {
             timeout_seconds: None,
             required_by: vec![],
             node_id: None,
+            by: None,
+            actor: None,
         }
     }
 
@@ -269,6 +272,8 @@ mod tests {
             kind: StepKind::Gate,
             actor: actor.into(),
             verdict,
+            findings: None,
+            round: 0,
             required_by: vec![],
             command: Some("true".into()),
             exit_code: Some(if verdict == AttestationVerdict::Pass {
@@ -280,6 +285,7 @@ mod tests {
             dir: "/tmp".into(),
             commit: None,
             dirty: None,
+            worktree_digest: None,
             node_id: None,
             at,
         }
@@ -347,6 +353,23 @@ mod tests {
     }
 
     #[test]
+    fn step_evidence_and_conformance_require_the_frozen_review_functionary() {
+        let t0 = Utc::now();
+        let mut review = step("review", StepKind::Review);
+        review.actor = Some("checker".into());
+        let mut r = run(RunStatus::Done, "feature", vec![review], vec![
+            attest("review", AttestationVerdict::Pass, "other", t0),
+        ], t0);
+        assert_eq!(r.step_evidence("review"), StepEvidence::Missing);
+        assert!(!r.conforms());
+        let mut evidence = attest("review", AttestationVerdict::Pass, "checker", t0);
+        evidence.kind = StepKind::Review;
+        r.attestations.push(evidence);
+        assert_eq!(r.step_evidence("review"), StepEvidence::Passed);
+        assert!(r.conforms());
+    }
+
+    #[test]
     fn step_evidence_takes_the_newest_attestation_across_re_verification_rounds() {
         let t0 = Utc::now();
         let r = run(
@@ -375,7 +398,7 @@ mod tests {
     #[test]
     fn conforms_matches_judge_across_re_verification_rounds() {
         let t0 = Utc::now();
-        let passing = run(
+        let mut passing = run(
             RunStatus::Done,
             "feature",
             vec![
@@ -390,10 +413,11 @@ mod tests {
             )],
             t0,
         );
-        assert!(
-            passing.conforms(),
-            "an unenforced review step never blocks conformance"
-        );
+        assert!(!passing.conforms(), "a missing independent review blocks conformance");
+        let mut review = attest("review", AttestationVerdict::Pass, "checker", t0);
+        review.kind = StepKind::Review;
+        passing.attestations.push(review);
+        assert!(passing.conforms(), "gates and independent review both passed");
 
         let failing = run(
             RunStatus::Done,
@@ -414,7 +438,7 @@ mod tests {
     fn held_is_true_only_with_an_enforced_step() {
         let t0 = Utc::now();
         assert!(!run(RunStatus::Done, "feature", vec![], vec![], t0).held());
-        assert!(!run(
+        assert!(run(
             RunStatus::Done,
             "feature",
             vec![step("review", StepKind::Review)],
@@ -422,6 +446,9 @@ mod tests {
             t0
         )
         .held());
+        assert!(run(
+            RunStatus::Done, "release", vec![step("approval", StepKind::Approval)], vec![], t0,
+        ).held());
         assert!(run(
             RunStatus::Done,
             "feature",
