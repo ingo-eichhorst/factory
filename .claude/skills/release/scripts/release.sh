@@ -71,7 +71,18 @@ REPO="$(repo_root)"
 
 BUILD_DIR=""
 TEMP_WORKTREE=""
+# The deployment recorded with the company daemon, once the swap begins, and
+# whether its ending has been recorded yet. Recording is best-effort: a
+# daemon that is down, or a `factory` from before `deploy` existed, is a
+# warning, never a failed release.
+DEPLOY_ID=""
+DEPLOY_DONE=0
+DEPLOY_STARTED=""
 cleanup() {
+  if [ -n "$DEPLOY_ID" ] && [ "$DEPLOY_DONE" -eq 0 ]; then
+    record deploy finish "$DEPLOY_ID" --status failed \
+      --reason "release.sh stopped before $ENV_NAME was up and reachable" >/dev/null 2>&1 || true
+  fi
   if [ -n "$TEMP_WORKTREE" ] && [ -d "$TEMP_WORKTREE" ]; then
     git -C "$REPO" worktree remove --force "$TEMP_WORKTREE" >/dev/null 2>&1 || true
   fi
@@ -218,6 +229,19 @@ PY
 
 # ----------------------------------------------------------------- the swap
 
+COMMITTED_AT="$(git -C "$REPO" show -s --format=%cI "$SHA" 2>/dev/null || true)"
+RELEASE_ARGS=(--env "$ENV_NAME" --scope "$RECORD_SCOPE" --commit "$SHA" --describe "$DESCRIBE"
+  --profile "$PROFILE" --source "$SOURCE_DESC" --via release.sh)
+[ -z "$COMMITTED_AT" ] || RELEASE_ARGS+=(--committed-at "$COMMITTED_AT")
+[ "$DIRTY" = "no" ] || RELEASE_ARGS+=(--dirty)
+DEPLOY_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if DEPLOY_ID="$(record deploy start "${RELEASE_ARGS[@]}" 2>/dev/null)"; then
+  note "recording deployment $DEPLOY_ID"
+else
+  DEPLOY_ID=""
+  note "warning: could not record the deployment's start; it is recorded once $ENV_NAME is up"
+fi
+
 if [ "$MODE" = company ]; then
   # This is the self-hosted company daemon. It runs from ~/.local/bin under
   # launchd; rename both binaries before kickstart so an agent callback and the
@@ -264,6 +288,25 @@ if ! verify_network_access "$ENV_NAME" "$BASE"; then
 fi
 
 TAILSCALE_URL="$(tailscale_url "$ENV_NAME")"
+
+# The ending, which runs the environment's declared health checks before a
+# success is recorded as one. A start that could not be recorded -- the first
+# release of a CLI that has `deploy` -- is recorded whole now instead.
+DEPLOY_DONE=1
+if [ -n "$DEPLOY_ID" ]; then
+  RECORDED="$(record deploy finish "$DEPLOY_ID" --status succeeded 2>&1)" && RECORD_OK=1 || RECORD_OK=0
+else
+  RECORDED="$(record deploy record "${RELEASE_ARGS[@]}" --started-at "$DEPLOY_STARTED" --status succeeded 2>&1)" \
+    && RECORD_OK=1 || RECORD_OK=0
+fi
+if [ "$RECORD_OK" -eq 1 ]; then
+  note "$RECORDED"
+elif printf '%s' "$RECORDED" | grep -q "recorded as failed"; then
+  note "$RECORDED"
+  die "$ENV_NAME is up, but its declared health checks did not pass; the deployment is recorded as failed"
+else
+  note "warning: the deployment was not recorded: $RECORDED"
+fi
 
 cat > "$(env_released "$ENV_NAME")" <<EOF
 env: $ENV_NAME

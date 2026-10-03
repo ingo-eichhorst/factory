@@ -103,84 +103,15 @@ impl IntakeStage {
     }
 }
 
-/// Which way an item came in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceKind {
-    /// `factory intake add`, typed by a person.
-    Cli,
-    /// The web UI's Intake view.
-    Ui,
-    /// An agent handing work on instead of creating a task directly -- the
-    /// delegation path. Set by the daemon from the caller, never claimed.
-    Agent,
-    /// An open GitHub issue carrying `factory:intake`. Set only by the daemon's
-    /// read-only poller, never accepted as caller-supplied provenance.
-    Github,
-    /// An email, relayed in on somebody else's behalf (`#167`) -- never a
-    /// daemon-run mailbox. `IntakeSource::provider` names the mail system
-    /// (`apple-mail`) and `reference` is its own message id, required.
-    Email,
-    /// A chat request, relayed the same way (`#167`) -- `provider` names the
-    /// channel (`imessage`), `reference` its own message id, required.
-    Chat,
-}
+pub use factory_kernel::SourceKind;
 
-impl SourceKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Cli => "cli",
-            Self::Ui => "ui",
-            Self::Agent => "agent",
-            Self::Github => "github",
-            Self::Email => "email",
-            Self::Chat => "chat",
-        }
-    }
-}
+pub use factory_kernel::IntakeSource;
 
-/// Where an item came from, and -- for a relayed [`SourceKind::Email`] or
-/// [`SourceKind::Chat`] (`#167`) -- who relayed it and through which
-/// provider. Relayed, not trusted: the daemon records `relayed_by` as the
-/// caller's own [`crate::role`]-vocabulary description
-/// (`Caller::describe`), never something a caller can claim to be, and
-/// `provider`/`reference` travel exactly as given.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IntakeSource {
-    pub kind: SourceKind,
-    /// Whatever identifies the item where it came from -- an issue URL, a
-    /// mail id, the task an agent was working on. Free text, never followed,
-    /// except that `email` and `chat` require it: the provider's own message
-    /// id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reference: Option<String>,
-    /// The system that relayed an `email` or `chat` item in -- `apple-mail`,
-    /// `imessage` -- as the relay named it, never validated against a fixed
-    /// list. Absent for every other kind. `#[serde(default)]`: absent on
-    /// every row from before `#167`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    /// Who handed an `email` or `chat` item in, when that is not the source
-    /// itself -- `Caller::describe`, the same vocabulary [`Intake::requester`]
-    /// uses. Absent for every kind that arrives on its own behalf (`cli`,
-    /// `ui`, `agent`, `github`). `#[serde(default)]`: absent on every row
-    /// from before `#167`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relayed_by: Option<String>,
-    /// Canonical `owner/repository` for a GitHub source. Kept separately
-    /// from the display URL so a rename or redirect does not erase which
-    /// repository and issue number were loaded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub number: Option<u64>,
-    /// GitHub's stable node/database id. New GitHub receipts carry it;
-    /// older rows continue to deduplicate by their canonical URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_id: Option<String>,
+/// Receipt deduplication stays in L4, not in the shared schema.
+pub trait IntakeSourceIdentity {
+    fn identity(&self) -> Option<(SourceKind, Option<String>, String)>;
 }
-
-impl IntakeSource {
+impl IntakeSourceIdentity for IntakeSource {
     /// The identity a receipt is deduplicated by: GitHub's stable external
     /// id when present, otherwise `(kind, provider, reference)`, and only
     /// for the three kinds whose reference is a provider's own stable id,
@@ -190,7 +121,7 @@ impl IntakeSource {
     /// `Agent`, and for a reference that is empty or absent: there, receipt
     /// stays exactly as it always has -- always creates, and `#166`'s
     /// `duplicate_candidates` is the only signal a repeat gets.
-    pub fn identity(&self) -> Option<(SourceKind, Option<String>, String)> {
+    fn identity(&self) -> Option<(SourceKind, Option<String>, String)> {
         if !matches!(self.kind, SourceKind::Github | SourceKind::Email | SourceKind::Chat) {
             return None;
         }
@@ -423,28 +354,7 @@ pub fn decide_security(
     })
 }
 
-/// A confirmed security report, once it has left `possible` behind: the
-/// awareness time (always [`Intake::received_at`], never the confirmation or
-/// fix time), the source and who confirmed it, over the scope subtree
-/// (`Engine::confirmed_security_reports`). Plain serde data with no methods,
-/// so `#193`'s later move into an L0 fact port carries it unchanged; the CRA
-/// reporting clock (`#157`, phase 2) is the one thing that ever reads it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ConfirmedSecurityReport {
-    pub item: String,
-    pub scope: String,
-    pub awareness_at: DateTime<Utc>,
-    pub source: IntakeSource,
-    pub confirmed_by: String,
-    pub confirmed_at: DateTime<Utc>,
-    /// The intake item this was split from (`PARENT_LABEL`), if any. The CRA
-    /// reporting clock (`#157`, phase 1) follows this upward while the
-    /// parent is itself a confirmed report, and counts a whole split chain
-    /// once, at its root's own `awareness_at` -- a part's own `received_at`
-    /// is the split's time, not the original receipt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
-}
+pub use factory_kernel::ConfirmedSecurityReport;
 
 /// `task`'s confirmed report, if it has one -- whatever the task's current
 /// status or stage, since a confirmed report survives release
@@ -643,7 +553,7 @@ fn overlap(a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSe
 /// score then reference, so the same input always gives the same list.
 ///
 /// The source match stays keyed on `(kind, reference)`, not
-/// [`IntakeSource::identity`]'s stricter `(kind, provider, reference)`
+/// [`IntakeSourceIdentity::identity`]'s stricter `(kind, provider, reference)`
 /// (`#167`): this is advice for a triager to confirm or reject, not the
 /// identity a receipt is deduplicated by, and two relays racing to reuse the
 /// same message id under different provider names is worth a look either

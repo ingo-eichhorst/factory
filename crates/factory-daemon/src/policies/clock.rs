@@ -35,9 +35,11 @@ impl Engine {
 
         let mut findings = Vec::new();
         for name in &names {
-            findings.extend(self.exploited_findings(name).await?);
+            findings.extend(crate::facts::Facts::<factory_kernel::L6>::new(self)
+                .get::<factory_kernel::ExploitedFinding>(name).await?);
         }
-        let reports = self.confirmed_security_reports(scope).await?;
+        let reports = crate::facts::Facts::<factory_kernel::L6>::new(self)
+            .get::<factory_kernel::ConfirmedSecurityReport>(&scope.map(str::to_string)).await?;
         let attestations = self.policies.all().await?;
         Ok(reporting_clock::compute(&findings, &reports, &attestations, Utc::now()))
     }

@@ -27,6 +27,7 @@ use factory_core::intake::{
 };
 use factory_core::ready::{self, ReadyDefinition};
 use factory_core::role::Grant;
+use factory_core::intake::IntakeSourceIdentity;
 use factory_core::{Event, FactoryError, NewTask, Result, Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus, Trigger};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -1337,6 +1338,7 @@ mod tests {
             quality: Default::default(),
             intake: Default::default(),
             dependencies: Default::default(),
+            environments: Vec::new(),
         }
     }
 

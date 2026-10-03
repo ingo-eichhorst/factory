@@ -1211,20 +1211,7 @@ pub struct WorkflowLint {
 /// The one node of [`WorkflowDefinition::implicit`].
 pub const IMPLICIT_NODE: &str = "work";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowRunStatus {
-    Running,
-    Done,
-    Failed,
-    Cancelled,
-}
-
-impl WorkflowRunStatus {
-    pub fn is_terminal(self) -> bool {
-        !matches!(self, Self::Running)
-    }
-}
+pub use factory_kernel::WorkflowRunStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

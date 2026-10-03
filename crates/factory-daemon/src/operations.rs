@@ -1,5 +1,5 @@
 //! Where the Operations report is served, and the few actions it offers
-//! (`#106`, the L4 Operations tab and `factory stats`). Like `goals/mod.rs`
+//! (`#106`, the L4 Line tab and `factory stats`). Like `goals/mod.rs`
 //! and `scenarios/mod.rs`: `factory_core::operations` is the pure model,
 //! tested on its own, and decides what every number and exception means;
 //! this module gathers what it reads from the store, the journal and the
@@ -296,12 +296,8 @@ impl Engine {
         // `config.scopes` (`discovery::apply`), so this alone is every
         // scope, the same list `reconcile_agents` walks. A scope that
         // declares none is simply absent, not zero.
-        let capacity: BTreeMap<String, u32> = snapshot
-            .config
-            .scopes
-            .iter()
-            .filter_map(|s| s.max_sessions.map(|m| (s.name.clone(), m)))
-            .collect();
+        let capacity = crate::facts::Facts::<factory_kernel::L4>::new(self)
+            .get::<factory_kernel::ScopeCapacityFact>(&()).await?;
 
         let input = OperationsInput {
             now,
@@ -311,7 +307,7 @@ impl Engine {
             scope,
             detail,
             window,
-            capacity,
+            capacity: capacity.max_sessions,
             block_reasons,
             last_progress,
             skipped,
@@ -320,7 +316,7 @@ impl Engine {
             agent_runs,
             // Two ticks: a slot the next tick is about to fire is not late
             // -- what the model's own default means, at this instance's tick.
-            late_after_seconds: Some(2 * snapshot.config.daemon.tick_seconds as i64),
+            late_after_seconds: Some(2 * capacity.tick_seconds as i64),
             harnesses: self.harness.rows(&[], snapshot.config.daemon.harness_health.repair_script.as_deref()),
         };
         Ok(operations::report(&input))

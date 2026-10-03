@@ -9,9 +9,11 @@ mod configuration;
 mod costs;
 mod datasets;
 mod dependencies;
+mod environments;
 mod doctor;
 mod discovery;
 mod engine;
+mod facts;
 mod goals;
 mod github_intake;
 mod github_outbound;
@@ -166,6 +168,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         quality: Default::default(),
         intake: Default::default(),
         dependencies: Default::default(),
+        environments: Vec::new(),
     };
     let config = Config {
         version: 1,
@@ -294,13 +297,15 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let policy_store = policies::PolicyStore::open(&factory.database_path())?;
     let goals_store = goals::GoalsStore::open(&factory.database_path())?;
     let backup_store = backup::BackupStore::open(&factory.database_path())?;
+    let environment_store = environments::EnvironmentStore::open(&factory.database_path())?;
     let engine = Arc::new(
         Engine::new(factory.clone(), registry, store, factory_bin(), interface_names)
             .with_workflow_store(workflow_store)
             .with_bench_store(bench_store)
             .with_policy_store(policy_store)
             .with_goals_store(goals_store)
-            .with_backup_store(backup_store),
+            .with_backup_store(backup_store)
+            .with_environment_store(environment_store),
     );
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -383,6 +388,9 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // Its own loop rather than a slot in the scheduler's: a backup can take
     // minutes, and nothing the scheduler fires should wait behind one.
     let backups = tokio::spawn(backup::run(engine.clone(), shutdown_rx.clone()));
+    // The health checks of every declared environment (`#185`), on their
+    // own loop for the same reason: a check can take its whole timeout.
+    let health = tokio::spawn(environments::run(engine.clone(), shutdown_rx.clone()));
 
     engine.bus.publish(Event::DaemonStarted {
         at: chrono::Utc::now(),
@@ -421,6 +429,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     sched.abort();
     github_intake.abort();
     backups.abort();
+    health.abort();
     engine.registry.shutdown().await;
     Ok(())
 }

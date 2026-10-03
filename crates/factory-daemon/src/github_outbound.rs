@@ -470,6 +470,7 @@ mod tests {
             quality: Default::default(),
             intake: Default::default(),
             dependencies: Default::default(),
+            environments: Vec::new(),
         }
     }
 

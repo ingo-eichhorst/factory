@@ -20,6 +20,12 @@ COMPANY_LABEL="${FACTORY_LAUNCHD_LABEL:-com.business-factory.daemon}"
 # worktree does not mean a cold compile every time.
 BUILD_CACHE="$ENVS_HOME/.cargo-target"
 
+# Every deployment is recorded with the company daemon (`#185`), whichever
+# environment it went to: that is the instance whose Operations tab lists
+# them, and the one the `factory` scope this repo is lives in.
+RECORD_CLI="${FACTORY_RECORD_CLI:-$HOME/.local/bin/factory}"
+RECORD_SCOPE="${FACTORY_RELEASE_SCOPE:-factory}"
+
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*" >&2; }
 
@@ -236,4 +242,12 @@ wait_for_exit() {
     sleep 0.1 2>/dev/null || sleep 1
   done
   return 1
+}
+
+# `factory` against the company daemon, for recording a deployment. A run
+# that calls release.sh keeps its own FACTORY_TOKEN, so the deployment is
+# recorded as that run's.
+record() {
+  [ -x "$RECORD_CLI" ] || return 1
+  FACTORY_ROOT="$COMPANY_ROOT" "$RECORD_CLI" --root "$COMPANY_ROOT" "$@"
 }

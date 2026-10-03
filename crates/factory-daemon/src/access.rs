@@ -21,6 +21,8 @@ use factory_core::agent::AgentSession;
 use factory_core::error::{FactoryError, Result};
 use factory_core::protocol::Request;
 use factory_core::role::{Grant, Reach, Role, RoleDef};
+#[cfg(test)]
+use factory_core::role::GrantExpansion;
 use factory_core::task::{NewTask, Task};
 use factory_core::workflow::WorkflowActor;
 
@@ -268,6 +270,8 @@ impl Engine {
             // Checked against the root scope too: a backup is of the whole
             // instance's state (`#116`).
             Request::BackupRun | Request::BackupVerify { .. } => Grant::BackupRun,
+            // Checked against the environment's own scope (`#185`).
+            Request::DeployStart(_) | Request::DeployFinish(_) | Request::ReleaseAdd(_) => Grant::DeployRecord,
             // The same door `TaskCreate`/`PolicyRemediate` already open --
             // this is not a second one (`#100`).
             Request::ScenarioPromote { .. } => Grant::TaskCreate,
@@ -289,6 +293,8 @@ impl Engine {
             | Request::Infrastructure
             // Lists the destination and reads the history; writes nothing.
             | Request::Backup
+            // Samples and deployments folded on read; writes nothing.
+            | Request::Environments { .. }
             | Request::Knowledge
             | Request::KnowledgeSearch { .. }
             | Request::Benchmarks
@@ -708,6 +714,36 @@ impl Engine {
                 Reach::Scope => in_root_scope(),
                 Reach::Own => Err(deny("take or verify a backup; that requires scope reach")),
             },
+            // A deployment belongs to its environment's scope. Own reach
+            // covers what the caller's own run deploys and nothing else: it
+            // may start one from a run, and finish only one its run started.
+            Request::DeployStart(req) => {
+                in_scope(&self.deploy_scope(req, caller)?)?;
+                match def.reach {
+                    Reach::Scope => Ok(()),
+                    Reach::Own if run_id.is_some() => Ok(()),
+                    Reach::Own => Err(deny("record a deployment outside a run of its own")),
+                }
+            }
+            Request::DeployFinish(req) => {
+                let Some(deployment) = self.environments.deployment(&req.id).await? else {
+                    return Err(FactoryError::BadRequest(format!("no deployment {}", req.id)));
+                };
+                in_scope(&deployment.scope)?;
+                match def.reach {
+                    Reach::Scope => Ok(()),
+                    Reach::Own if run_id.is_some() && deployment.actor.run_id == *run_id => Ok(()),
+                    Reach::Own => Err(deny("finish a deployment its own run did not start")),
+                }
+            }
+            Request::ReleaseAdd(req) => {
+                in_scope(&req.scope)?;
+                match def.reach {
+                    Reach::Scope => Ok(()),
+                    Reach::Own if run_id.is_some() => Ok(()),
+                    Reach::Own => Err(deny("add a release outside a run of its own")),
+                }
+            }
 
             // Reads returned above, and anything needing a grant nobody holds
             // was refused above. Nothing should arrive here.
@@ -1148,6 +1184,55 @@ mod tests {
         assert!(!allowed(&e, &wearing("everything"), request.clone()).await);
         assert!(!allowed(&e, &foreman(), request.clone()).await);
         assert!(!allowed(&e, &worker("w"), request).await);
+    }
+
+    /// `deploy.record` is checked against the environment's own scope; own
+    /// reach covers only what a run of its own deploys, and reading the
+    /// environments is open to every agent (`#185`).
+    #[tokio::test]
+    async fn deploy_record_follows_the_environments_scope_and_own_reach_needs_a_run() {
+        use factory_core::environments::{DeployFinish, DeployStart, DeployStatus, ReleaseFacts};
+        let e = engine_with_roles_and_root_scope(
+            "company",
+            "roles:\n  releaser:\n    grants: [deploy.record]\n    reach: scope\n  \
+             own-releaser:\n    grants: [deploy.record]\n    reach: own\n",
+        );
+        let caller = |role: &str, run: Option<&str>| Caller::Agent {
+            scope: "demo".into(),
+            name: "r".into(),
+            role: Role::new(role),
+            run_id: run.map(str::to_string),
+        };
+        let start = |scope: Option<&str>| {
+            Request::DeployStart(DeployStart {
+                environment: "review13".into(),
+                scope: scope.map(str::to_string),
+                release: ReleaseFacts { commit: "abc".into(), ..Default::default() },
+                via: None,
+                started_at: None,
+            })
+        };
+        assert!(allowed(&e, &caller("releaser", None), start(None)).await, "its own scope");
+        assert!(!allowed(&e, &caller("releaser", None), start(Some("other"))).await, "another scope");
+        assert!(!allowed(&e, &caller("own-releaser", None), start(None)).await, "own reach without a run");
+        assert!(allowed(&e, &caller("own-releaser", Some("run-1")), start(None)).await, "its own run's deployment");
+        assert!(!allowed(&e, &worker("w"), start(None)).await, "a worker holds no deploy.record");
+        assert!(allowed(&e, &worker("w"), Request::Environments { scope: None }).await, "reading is open");
+
+        let d = e.deploy_start(&caller("releaser", Some("run-1")), DeployStart {
+            environment: "review13".into(),
+            scope: None,
+            release: ReleaseFacts { commit: "abc".into(), ..Default::default() },
+            via: None,
+            started_at: None,
+        })
+        .await
+        .unwrap();
+        let finish = Request::DeployFinish(DeployFinish { id: d.id.clone(), status: DeployStatus::Failed, reason: None, verify: true });
+        assert!(allowed(&e, &caller("own-releaser", Some("run-1")), finish.clone()).await, "the run that started it");
+        assert!(!allowed(&e, &caller("own-releaser", Some("run-2")), finish.clone()).await, "another run");
+        assert!(allowed(&e, &caller("releaser", None), finish).await, "scope reach");
+        assert!(allowed(&e, &Caller::Owner, start(Some("other"))).await);
     }
 
     /// `goals.checkin` is checked against the configured root scope exactly

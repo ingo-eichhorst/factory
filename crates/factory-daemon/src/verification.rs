@@ -20,12 +20,14 @@
 
 use crate::engine::Engine;
 use chrono::Utc;
+#[cfg(test)]
 use factory_core::conformance::AttestedRun;
 use factory_core::control_plan::{
     self, AttestationVerdict, ControlPlan, RequiredStep, StepAttestation, StepKind, GATE_ACTOR,
 };
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
+#[cfg(test)]
 use factory_core::operations::Window;
 use factory_core::policy;
 use factory_core::quality;
@@ -35,7 +37,9 @@ use factory_core::workflow::{
     WorkflowDefinition, WorkflowLint, WorkflowNodeKind, WorkflowNodeStatus, IMPLICIT_NODE,
 };
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -1318,86 +1322,15 @@ impl Engine {
     /// bench attempt's task (`Task::bench_origin`) is always left out -- its
     /// own case gate judges it, the same rule `required_steps_for_task`
     /// already applies, so a plan on top would never apply to it anyway.
-    /// This becomes `Provide<…>` in `#193` phase 3; until then it wraps
-    /// `PolicyStore` exactly where the table already lives.
+    /// Test compatibility entry point: production reads this through the
+    /// L4-owned fact provider in `facts/l4.rs`.
+    #[cfg(test)]
     pub(crate) async fn attested_runs(
-        &self,
-        scopes: Option<&BTreeSet<String>>,
-        categories: Option<&BTreeSet<String>>,
-        window: Window,
+        &self, scopes: Option<&BTreeSet<String>>, categories: Option<&BTreeSet<String>>, window: Window,
     ) -> Result<Vec<AttestedRun>> {
-        let mut runs = self.store.runs_between(window.from, window.to).await?;
-        runs.retain(|r| r.ended_at.is_some_and(|ended| window.contains(ended)));
-        if runs.is_empty() {
-            return Ok(Vec::new());
-        }
-        let snapshot = self.factory_snapshot();
-        let tasks = self.store.list(&TaskFilter::default()).await?;
-        let tasks_by_id: BTreeMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
-
-        struct Resolved {
-            run_id: String,
-            task_id: String,
-            scope: String,
-            category: String,
-            agent: String,
-            status: RunStatus,
-            ended_at: chrono::DateTime<Utc>,
-            fail_kind: Option<factory_core::run::FailKind>,
-            required_steps: Vec<RequiredStep>,
-        }
-        let mut resolved = Vec::new();
-        for run in runs {
-            let Some(task) = tasks_by_id.get(run.task_id.as_str()) else {
-                continue;
-            };
-            if task.bench_origin.is_some() {
-                continue;
-            }
-            let scope = snapshot.canonical_scope_name(&task.scope);
-            if let Some(scopes) = scopes {
-                if !scopes.contains(&scope) {
-                    continue;
-                }
-            }
-            let category = control_plan::effective_category(task.category.as_deref()).to_string();
-            if let Some(categories) = categories {
-                if !categories.contains(&category) {
-                    continue;
-                }
-            }
-            resolved.push(Resolved {
-                run_id: run.id.clone(),
-                task_id: task.id.clone(),
-                scope,
-                category,
-                agent: run.agent.clone(),
-                status: run.status,
-                ended_at: run.ended_at.expect("retained above"),
-                fail_kind: run.fail_kind,
-                required_steps: run.required_steps.clone(),
-            });
-        }
-        if resolved.is_empty() {
-            return Ok(Vec::new());
-        }
-        let run_ids: Vec<String> = resolved.iter().map(|r| r.run_id.clone()).collect();
-        let mut attestations_by_run = self.policies.step_attestations_for(&run_ids).await?;
-        Ok(resolved
-            .into_iter()
-            .map(|r| AttestedRun {
-                attestations: attestations_by_run.remove(&r.run_id).unwrap_or_default(),
-                run_id: r.run_id,
-                task_id: r.task_id,
-                scope: r.scope,
-                category: r.category,
-                agent: r.agent,
-                status: r.status,
-                ended_at: r.ended_at,
-                fail_kind: r.fail_kind,
-                required_steps: r.required_steps,
-            })
-            .collect())
+        crate::facts::Facts::<factory_kernel::L6>::new(self).get::<AttestedRun>(&crate::facts::AttestedQuery {
+            scopes: scopes.cloned(), categories: categories.cloned(), window,
+        }).await
     }
 
     /// `factory workflow lint`: the plan, the injection and the ordering
@@ -1617,6 +1550,7 @@ mod tests {
                 quality: Default::default(),
                 intake: Default::default(),
                 dependencies: Default::default(),
+                environments: Vec::new(),
             }],
             infrastructure: Default::default(),
             plugins_dir: None,

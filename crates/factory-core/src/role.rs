@@ -84,272 +84,15 @@ impl std::fmt::Display for Role {
     }
 }
 
-/// One thing a role may do. These name requests, not fields: a grant says
-/// *which* requests an agent may make, and `Reach` says *whose* subjects it
-/// may make them about. The finer rules -- that editing your own task is not
-/// the same as handing it to somebody else -- stay in `authorize()`, where
-/// they can be stated in a sentence rather than encoded in a name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum Grant {
-    #[serde(rename = "task.create")]
-    TaskCreate,
-    #[serde(rename = "task.edit")]
-    TaskEdit,
-    #[serde(rename = "task.delete")]
-    TaskDelete,
-    #[serde(rename = "task.run")]
-    TaskRun,
-    #[serde(rename = "task.cancel")]
-    TaskCancel,
-    /// Close a task with a reason, and reopen one (`#122`). Apart from
-    /// `task.cancel`, which ends a run: closing disposes of the task
-    /// itself, a failed one included, and is the act a failure waits for.
-    #[serde(rename = "task.close")]
-    TaskClose,
-    #[serde(rename = "task.report")]
-    TaskReport,
-    #[serde(rename = "task.attach")]
-    TaskAttach,
-    #[serde(rename = "agent.start")]
-    AgentStart,
-    #[serde(rename = "agent.configure")]
-    AgentConfigure,
-    #[serde(rename = "agent.stop")]
-    AgentStop,
-    #[serde(rename = "agent.input")]
-    AgentInput,
-    #[serde(rename = "run.input")]
-    RunInput,
-    /// Decide a required approval, reject one, or accept a verifier's
-    /// evidence-backed rework proposal.
-    #[serde(rename = "run.approve")]
-    RunApprove,
-    #[serde(rename = "workflow.create")]
-    WorkflowCreate,
-    #[serde(rename = "workflow.edit")]
-    WorkflowEdit,
-    #[serde(rename = "workflow.delete")]
-    WorkflowDelete,
-    #[serde(rename = "workflow.run")]
-    WorkflowRun,
-    #[serde(rename = "workflow.cancel")]
-    WorkflowCancel,
-    /// Add files to the knowledge base. The root scope is the subject: the
-    /// knowledge base is company-wide, not one project's.
-    #[serde(rename = "knowledge.write")]
-    KnowledgeWrite,
-    /// Create, edit, and delete datasets and their cases. The root scope is
-    /// the subject: datasets are company-wide, not one project's.
-    #[serde(rename = "dataset.edit")]
-    DatasetEdit,
-    /// Start, cancel, and clean bench runs. The root scope is the subject,
-    /// for the same reason as `dataset.edit`.
-    #[serde(rename = "bench.run")]
-    BenchRun,
-    /// Record an attestation for a control, or withdraw one already
-    /// recorded. The root scope is the subject, for the same reason as
-    /// `knowledge.write`: an attestation speaks for the company, not for
-    /// one project.
-    #[serde(rename = "policy.attest")]
-    PolicyAttest,
-    /// Record a check-in against a manual key result. The root scope is
-    /// the subject, for the same reason as `policy.attest`: a check-in
-    /// speaks for the company's own goals, not for one project, even when
-    /// the key result it moves belongs to an objective scoped to one.
-    #[serde(rename = "goals.checkin")]
-    GoalsCheckIn,
-    /// Take a backup now, or verify one (`#116`). The root scope is the
-    /// subject, for the same reason as `policy.attest`: a backup is of the
-    /// whole instance's state, not one project's.
-    #[serde(rename = "backup.run")]
-    BackupRun,
-    /// Hand something in through the intake gate (`#172`). Reach decides
-    /// which scope it may land in, exactly as `task.create` did for it
-    /// before this grant existed.
-    #[serde(rename = "intake.add")]
-    IntakeAdd,
-    /// Answer a needs-info on an item still in intake.
-    #[serde(rename = "intake.info")]
-    IntakeInfo,
-    /// Start the triage node on an item: a run of its own that answers with
-    /// an assessment.
-    #[serde(rename = "intake.triage")]
-    IntakeTriage,
-    /// Record an assessment on an item, and optionally decide it in the same
-    /// call.
-    #[serde(rename = "intake.assess")]
-    IntakeAssess,
-    /// Decide an item: release it (ready), send it back (needs-info), split
-    /// it, or close it (wontfix).
-    #[serde(rename = "intake.decide")]
-    IntakeDecide,
-    /// Publish a decided GitHub item's triage comment and labels to the
-    /// issue it came from (`#171`). The one outward-effect grant intake
-    /// has: it is never in `foreman` or `triager`, and never in a wildcard
-    /// (`*`, `intake.*`) -- see [`Grant::expand`] -- so a role gets it only
-    /// by naming it. The owner always passes; publishing *is* the approval.
-    #[serde(rename = "intake.publish")]
-    IntakePublish,
-    /// Save or reset one scope's own dashboard layout (`#160`, phase 5 of
-    /// `#150`). An ordinary grant, unlike the role-layer writes it otherwise
-    /// resembles: a layout cannot widen what an agent may do the way a role
-    /// definition could, so it needs no `Needs::Owner` carve-out and no
-    /// exclusion from a wildcard -- `foreman` gets it through `Grant::ALL`,
-    /// `worker` and `triager` do not, the same as every other grant they
-    /// leave out.
-    #[serde(rename = "dashboard.edit")]
-    DashboardEdit,
+pub use factory_kernel::Grant;
+
+/// Wildcard expansion is an authorisation rule, not part of the fact schema.
+pub trait GrantExpansion {
+    #[doc(hidden)]
+    fn wildcard_excluded(self) -> bool;
+    fn expand(written: &str) -> Result<Vec<Grant>>;
 }
-
-impl Grant {
-    pub const ALL: [Grant; 32] = [
-        Grant::TaskCreate,
-        Grant::TaskEdit,
-        Grant::TaskDelete,
-        Grant::TaskRun,
-        Grant::TaskCancel,
-        Grant::TaskClose,
-        Grant::TaskReport,
-        Grant::TaskAttach,
-        Grant::AgentStart,
-        Grant::AgentConfigure,
-        Grant::AgentStop,
-        Grant::AgentInput,
-        Grant::RunInput,
-        Grant::RunApprove,
-        Grant::WorkflowCreate,
-        Grant::WorkflowEdit,
-        Grant::WorkflowDelete,
-        Grant::WorkflowRun,
-        Grant::WorkflowCancel,
-        Grant::KnowledgeWrite,
-        Grant::DatasetEdit,
-        Grant::BenchRun,
-        Grant::PolicyAttest,
-        Grant::GoalsCheckIn,
-        Grant::BackupRun,
-        Grant::IntakeAdd,
-        Grant::IntakeInfo,
-        Grant::IntakeTriage,
-        Grant::IntakeAssess,
-        Grant::IntakeDecide,
-        Grant::IntakePublish,
-        Grant::DashboardEdit,
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::TaskCreate => "task.create",
-            Self::TaskEdit => "task.edit",
-            Self::TaskDelete => "task.delete",
-            Self::TaskRun => "task.run",
-            Self::TaskCancel => "task.cancel",
-            Self::TaskClose => "task.close",
-            Self::TaskReport => "task.report",
-            Self::TaskAttach => "task.attach",
-            Self::AgentStart => "agent.start",
-            Self::AgentConfigure => "agent.configure",
-            Self::AgentStop => "agent.stop",
-            Self::AgentInput => "agent.input",
-            Self::RunInput => "run.input",
-            Self::RunApprove => "run.approve",
-            Self::WorkflowCreate => "workflow.create",
-            Self::WorkflowEdit => "workflow.edit",
-            Self::WorkflowDelete => "workflow.delete",
-            Self::WorkflowRun => "workflow.run",
-            Self::WorkflowCancel => "workflow.cancel",
-            Self::KnowledgeWrite => "knowledge.write",
-            Self::DatasetEdit => "dataset.edit",
-            Self::BenchRun => "bench.run",
-            Self::PolicyAttest => "policy.attest",
-            Self::GoalsCheckIn => "goals.checkin",
-            Self::BackupRun => "backup.run",
-            Self::IntakeAdd => "intake.add",
-            Self::IntakeInfo => "intake.info",
-            Self::IntakeTriage => "intake.triage",
-            Self::IntakeAssess => "intake.assess",
-            Self::IntakeDecide => "intake.decide",
-            Self::IntakePublish => "intake.publish",
-            Self::DashboardEdit => "dashboard.edit",
-        }
-    }
-
-    /// The phrase used when a role is told it may not do this.
-    pub fn describe(self) -> &'static str {
-        match self {
-            Self::TaskCreate => "create tasks",
-            Self::TaskEdit => "change tasks",
-            Self::TaskDelete => "delete tasks",
-            Self::TaskRun => "start runs",
-            Self::TaskCancel => "cancel runs",
-            Self::TaskClose => "close and reopen tasks",
-            Self::TaskReport => "report on tasks",
-            Self::TaskAttach => "attach dependency scan documents",
-            Self::AgentStart => "start agents",
-            Self::AgentConfigure => "configure agents",
-            Self::AgentStop => "stop agents",
-            Self::AgentInput => "type into an agent's session",
-            Self::RunInput => "type into a run's session",
-            Self::RunApprove => "approve, reject, or accept rework for runs",
-            Self::WorkflowCreate => "create workflows",
-            Self::WorkflowEdit => "change workflows",
-            Self::WorkflowDelete => "delete workflows",
-            Self::WorkflowRun => "start workflows",
-            Self::WorkflowCancel => "cancel workflows",
-            Self::KnowledgeWrite => "add files to the knowledge base",
-            Self::DatasetEdit => "create, edit, and delete datasets and their cases",
-            Self::BenchRun => "start, cancel, and clean bench runs",
-            Self::PolicyAttest => "record and withdraw policy attestations",
-            Self::GoalsCheckIn => "record check-ins against manual key results",
-            Self::BackupRun => "take or verify a backup of the instance",
-            Self::IntakeAdd => "hand something in through the intake gate",
-            Self::IntakeInfo => "answer a needs-info on an intake item",
-            Self::IntakeTriage => "start a triage run on an intake item",
-            Self::IntakeAssess => "record an assessment on an intake item",
-            Self::IntakeDecide => "release, send back, split or close an intake item",
-            Self::IntakePublish => "publish a decided GitHub item's triage comment and labels to its issue",
-            Self::DashboardEdit => "save or reset a scope's dashboard layout",
-        }
-    }
-
-    /// Which part of the board this grant is about, as a person reads it. The
-    /// view groups a role's grants by this rather than keeping its own copy of
-    /// which grant belongs where.
-    pub fn group(self) -> &'static str {
-        match self {
-            Self::TaskCreate
-            | Self::TaskEdit
-            | Self::TaskDelete
-            | Self::TaskRun
-            | Self::TaskCancel
-            | Self::TaskClose
-            | Self::TaskReport
-            | Self::TaskAttach => "Tasks",
-            Self::AgentStart | Self::AgentConfigure | Self::AgentStop | Self::AgentInput => {
-                "Agents"
-            }
-            Self::RunInput | Self::RunApprove => "Runs",
-            Self::WorkflowCreate
-            | Self::WorkflowEdit
-            | Self::WorkflowDelete
-            | Self::WorkflowRun
-            | Self::WorkflowCancel => "Workflows",
-            Self::KnowledgeWrite => "Knowledge",
-            Self::DatasetEdit => "Datasets",
-            Self::BenchRun => "Bench",
-            Self::PolicyAttest => "Policy",
-            Self::GoalsCheckIn => "Goals",
-            Self::BackupRun => "Backup",
-            Self::IntakeAdd
-            | Self::IntakeInfo
-            | Self::IntakeTriage
-            | Self::IntakeAssess
-            | Self::IntakeDecide
-            | Self::IntakePublish => "Intake",
-            Self::DashboardEdit => "Dashboard",
-        }
-    }
-
+impl GrantExpansion for Grant {
     /// Left out of wildcard expansion (`expand`'s `*` and `prefix.*`
     /// branches): an outward effect a role must be given by its exact name,
     /// never swept in by a wildcard written before the grant existed or
@@ -362,7 +105,7 @@ impl Grant {
     /// One written grant, which may be a wildcard: `task.*`, `agent.*`, `*`.
     /// Anything that names nothing is refused rather than ignored -- a typo
     /// that quietly grants less is the failure nobody notices.
-    pub fn expand(written: &str) -> Result<Vec<Grant>> {
+    fn expand(written: &str) -> Result<Vec<Grant>> {
         let matched: Vec<Grant> = match written.trim() {
             "*" => Self::ALL.into_iter().filter(|g| !g.wildcard_excluded()).collect(),
             prefixed if prefixed.ends_with(".*") => {
@@ -809,7 +552,7 @@ mod tests {
     fn every_grant_belongs_to_a_group_a_person_reads() {
         for grant in Grant::ALL {
             assert!(
-                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals", "Backup", "Intake", "Dashboard"]
+                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals", "Backup", "Intake", "Dashboard", "Deployments"]
                     .contains(&grant.group()),
                 "{} has no group",
                 grant.as_str()
@@ -823,6 +566,7 @@ mod tests {
         assert_eq!(Grant::PolicyAttest.group(), "Policy");
         assert_eq!(Grant::GoalsCheckIn.group(), "Goals");
         assert_eq!(Grant::BackupRun.group(), "Backup");
+        assert_eq!(Grant::DeployRecord.group(), "Deployments");
         assert_eq!(Grant::DashboardEdit.group(), "Dashboard");
         for grant in [
             Grant::IntakeAdd,
@@ -842,27 +586,29 @@ mod tests {
         // and of `Grant::ALL`, in the order each was added, so a parallel
         // track appending its own grant there too merges without a real
         // conflict.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 12], Grant::DatasetEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::BenchRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::PolicyAttest);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::GoalsCheckIn);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::BackupRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::IntakeAdd);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakeInfo);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakeTriage);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::IntakeAssess);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::IntakeDecide);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::IntakePublish);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 13], Grant::DatasetEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 12], Grant::BenchRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::PolicyAttest);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::GoalsCheckIn);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::BackupRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::IntakeAdd);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::IntakeInfo);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakeTriage);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakeAssess);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::IntakeDecide);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::IntakePublish);
         // `#160`: the same seam, one grant later -- `dashboard.edit` lands at
         // the end too, so a parallel track adding its own grant after this
         // one merges without a real conflict either.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::DashboardEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::DashboardEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::DeployRecord);
         let all = Grant::expand("*").unwrap();
         assert!(all.contains(&Grant::DatasetEdit));
         assert!(all.contains(&Grant::BenchRun));
         assert!(all.contains(&Grant::PolicyAttest));
         assert!(all.contains(&Grant::GoalsCheckIn));
         assert!(all.contains(&Grant::BackupRun));
+        assert!(all.contains(&Grant::DeployRecord));
         assert!(all.contains(&Grant::IntakeAdd));
         assert!(all.contains(&Grant::IntakeInfo));
         assert!(all.contains(&Grant::IntakeTriage));

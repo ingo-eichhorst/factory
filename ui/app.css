@@ -1516,6 +1516,48 @@ button.linklike:hover { color: var(--signal); }
 .bk-contents { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 14px; }
 .bk-contents > section { min-width: 0; }
 
+/* ======================================================= L1 operations (#185):
+   one card per environment, its left edge and dot the status -- green,
+   amber, red from the shared `--run`/`--wait`/`--fault`, muted for unknown
+   -- then each check's last day as 48 half-hour slots, the deployment
+   timeline and the release catalogue. Reuses the Infrastructure cards and
+   facts and the Backup tables; only the status colours and the strip are
+   its own. */
+.sys-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 14px; }
+.sys-card[data-tone="ok"] { border-left-color: var(--run); }
+.sys-card[data-tone="warn"] { border-left-color: var(--wait); }
+.sys-card[data-tone="bad"] { border-left-color: var(--fault); }
+.sys-card[data-tone="none"] { border-left-color: var(--faint); }
+.sys-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; align-self: center; }
+.sys-dot[data-tone="ok"] { background: var(--run); }
+.sys-dot[data-tone="warn"] { background: var(--wait); }
+.sys-dot[data-tone="bad"] { background: var(--fault); }
+.tag.sys-badge[data-tone="ok"] { color: var(--run); border-color: var(--run); }
+.tag.sys-badge[data-tone="warn"] { color: var(--wait); border-color: var(--wait); }
+.tag.sys-badge[data-tone="bad"] { color: var(--fault); border-color: var(--fault); }
+.sys-status { margin: 0 0 10px; font: 600 15px/1.3 var(--cond); color: var(--ink); }
+.sys-none { margin: 10px 0 0; font-size: 12px; color: var(--muted); }
+.sys-checks { margin-top: 10px; display: grid; gap: 9px; border-top: 1px solid var(--line-soft); padding-top: 9px; }
+.sys-check { min-width: 0; }
+.sys-check-head { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; font-size: 12.5px; }
+.sys-check-head .mono { font: 400 11px/1.45 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+.sys-check-name { font-weight: 600; }
+.sys-check .sub { font-size: 11px; color: var(--muted); }
+.sys-strip { display: grid; grid-template-columns: repeat(48, 1fr); gap: 1px; margin: 4px 0 3px; height: 12px; }
+.sys-slot { background: var(--sunk); border-radius: 1px; }
+.sys-slot[data-tone="ok"] { background: var(--run); }
+.sys-slot[data-tone="bad"] { background: var(--fault); }
+.sys-incidents { margin-top: 10px; border-top: 1px solid var(--line-soft); padding-top: 8px; }
+.sys-incidents h4 { margin: 0 0 4px; font: 600 9px/1.3 var(--cond); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.sys-incidents h4 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.sys-incidents ul { margin: 0; padding-left: 16px; font-size: 12px; display: grid; gap: 2px; }
+.sys-dora { margin-top: 10px; border-top: 1px solid var(--line-soft); padding-top: 9px; }
+tr.sys-failed td { background: var(--sunk); }
+tr.sys-failed td:first-child { box-shadow: inset 3px 0 0 var(--fault); }
+@media (max-width: 760px) {
+  .sys-cards { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* ================================================================== L6
    direction: policy. A control's five statuses reuse the shared `.badge
    s-*` convention tasks already use (`statusBadge` in core.js) -- these

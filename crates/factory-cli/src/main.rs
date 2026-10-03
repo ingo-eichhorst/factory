@@ -79,6 +79,23 @@ enum Command {
         #[command(subcommand)]
         command: Option<BackupCmd>,
     },
+    /// Operations (`#185`): the environments what this company builds is
+    /// deployed to, what runs on each, whether it is healthy and whether it
+    /// meets its SLO. With a name, that environment's checks, incidents and
+    /// deployments.
+    Env {
+        /// One environment. Every one when left out.
+        name: Option<String>,
+        /// Only this scope and the scopes under it.
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Record deployments as they start and finish, or list them.
+    #[command(subcommand)]
+    Deploy(DeployCmd),
+    /// The release catalogue: what is available to deploy.
+    #[command(subcommand)]
+    Release(ReleaseCmd),
     /// Start, stop and type at standing agents.
     #[command(subcommand)]
     Agent(AgentCmd),
@@ -512,6 +529,145 @@ enum GoalsCmd {
         confidence: u8,
         #[arg(long)]
         note: Option<String>,
+    },
+}
+
+/// What a release is, as `deploy start`, `deploy record` and `release add`
+/// take it.
+#[derive(clap::Args)]
+struct ReleaseArgs {
+    /// The commit being released.
+    #[arg(long)]
+    commit: String,
+    /// `git describe`'s answer.
+    #[arg(long)]
+    describe: Option<String>,
+    /// A version or tag.
+    #[arg(long)]
+    version: Option<String>,
+    /// The build profile, e.g. release or debug.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Built from a working tree with uncommitted changes.
+    #[arg(long)]
+    dirty: bool,
+    /// Where it was built from: a ref, a branch or a worktree path.
+    #[arg(long)]
+    source: Option<String>,
+    /// The commit's committer time (RFC 3339). Asked of the scope's git
+    /// repository when left out; lead time for changes starts here.
+    #[arg(long)]
+    committed_at: Option<String>,
+}
+
+impl ReleaseArgs {
+    fn facts(self) -> Result<factory_core::environments::ReleaseFacts> {
+        Ok(factory_core::environments::ReleaseFacts {
+            commit: self.commit,
+            describe: self.describe,
+            version: self.version,
+            profile: self.profile,
+            dirty: self.dirty,
+            source: self.source,
+            committed_at: self.committed_at.as_deref().map(parse_rfc3339).transpose()?,
+        })
+    }
+}
+
+fn parse_rfc3339(text: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    Ok(chrono::DateTime::parse_from_rfc3339(text.trim())
+        .map_err(|e| anyhow!("{text:?} is not an RFC 3339 time: {e}"))?
+        .with_timezone(&chrono::Utc))
+}
+
+fn parse_deploy_status(text: &str) -> Result<factory_core::environments::DeployStatus> {
+    use factory_core::environments::DeployStatus;
+    match text.trim().replace('-', "_").as_str() {
+        "succeeded" | "success" | "ok" => Ok(DeployStatus::Succeeded),
+        "failed" | "failure" => Ok(DeployStatus::Failed),
+        "rolled_back" => Ok(DeployStatus::RolledBack),
+        other => Err(anyhow!("{other:?} is not how a deployment ends: succeeded, failed or rolled-back")),
+    }
+}
+
+#[derive(Subcommand)]
+enum DeployCmd {
+    /// A deployment has begun. Prints its id, which `finish` names.
+    /// `deploy.record`, in the environment's scope.
+    Start {
+        /// The environment, e.g. staging.
+        #[arg(long = "env")]
+        environment: String,
+        /// The scope, for an environment nobody declared. A declared one's
+        /// own scope is used.
+        #[arg(long)]
+        scope: Option<String>,
+        #[command(flatten)]
+        release: ReleaseArgs,
+        /// What is recording it, when not a person by hand: release.sh.
+        #[arg(long)]
+        via: Option<String>,
+        /// When it began (RFC 3339), for recording one after the fact.
+        #[arg(long)]
+        started_at: Option<String>,
+    },
+    /// A deployment has ended. A success runs the environment's own checks
+    /// first, and is recorded as failed if they do not pass -- then this
+    /// exits non-zero.
+    Finish {
+        id: String,
+        /// succeeded, failed or rolled-back.
+        #[arg(long)]
+        status: String,
+        #[arg(long)]
+        reason: Option<String>,
+        /// Record a success without running the checks. Said on the record.
+        #[arg(long)]
+        no_verify: bool,
+    },
+    /// Start and finish in one go, for a deployment done by hand.
+    Record {
+        #[arg(long = "env")]
+        environment: String,
+        #[arg(long)]
+        scope: Option<String>,
+        #[command(flatten)]
+        release: ReleaseArgs,
+        #[arg(long)]
+        status: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        via: Option<String>,
+        #[arg(long)]
+        started_at: Option<String>,
+        #[arg(long)]
+        no_verify: bool,
+    },
+    /// Deployments, running ones first, then newest first.
+    List {
+        #[arg(long = "env")]
+        environment: Option<String>,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCmd {
+    /// Put a release in the catalogue without deploying it.
+    Add {
+        #[arg(long)]
+        scope: String,
+        #[command(flatten)]
+        release: ReleaseArgs,
+    },
+    /// Every release, newest first, with where each is running.
+    List {
+        #[arg(long)]
+        scope: Option<String>,
     },
 }
 
@@ -1305,6 +1461,139 @@ async fn main() -> Result<()> {
                 _ => None,
             })
         }
+
+        Command::Env { name, scope } => {
+            let payload = client.send(Request::Environments { scope }).await?;
+            match name {
+                None => print(&payload, cli.json, env_list_text),
+                Some(name) => {
+                    let Payload::Environments { report } = &payload else {
+                        return print(&payload, cli.json, |_| None);
+                    };
+                    let card = report
+                        .environments
+                        .iter()
+                        .find(|c| c.name == name)
+                        .ok_or_else(|| anyhow!("no environment named {name:?} is declared or deployed to"))?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(card)?);
+                        Ok(())
+                    } else {
+                        println!("{}", env_detail_text(card, &report.deployments, report.generated_at));
+                        Ok(())
+                    }
+                }
+            }
+        }
+
+        Command::Deploy(cmd) => match cmd {
+            DeployCmd::Start { environment, scope, release, via, started_at } => {
+                let req = factory_core::environments::DeployStart {
+                    environment,
+                    scope,
+                    release: release.facts()?,
+                    via,
+                    started_at: started_at.as_deref().map(parse_rfc3339).transpose()?,
+                };
+                let payload = client.send(Request::DeployStart(req)).await?;
+                // The bare id, so a script can keep it: id=$(factory deploy start ...)
+                print(&payload, cli.json, |p| match p {
+                    Payload::Deployment { deployment } => Some(deployment.id.clone()),
+                    _ => None,
+                })
+            }
+            DeployCmd::Finish { id, status, reason, no_verify } => {
+                let wanted = parse_deploy_status(&status)?;
+                let req = factory_core::environments::DeployFinish { id, status: wanted, reason, verify: !no_verify };
+                let payload = client.send(Request::DeployFinish(req)).await?;
+                print(&payload, cli.json, deployment_text)?;
+                refused_success(&payload, wanted)
+            }
+            DeployCmd::Record { environment, scope, release, status, reason, via, started_at, no_verify } => {
+                let wanted = parse_deploy_status(&status)?;
+                let start = factory_core::environments::DeployStart {
+                    environment,
+                    scope,
+                    release: release.facts()?,
+                    via,
+                    started_at: started_at.as_deref().map(parse_rfc3339).transpose()?,
+                };
+                let Payload::Deployment { deployment } = client.send(Request::DeployStart(start)).await? else {
+                    return Err(anyhow!("the daemon did not answer with a deployment"));
+                };
+                let finish = factory_core::environments::DeployFinish {
+                    id: deployment.id.clone(),
+                    status: wanted,
+                    reason,
+                    verify: !no_verify,
+                };
+                let payload = client.send(Request::DeployFinish(finish)).await?;
+                print(&payload, cli.json, deployment_text)?;
+                refused_success(&payload, wanted)
+            }
+            DeployCmd::List { environment, scope, limit } => {
+                let payload = client.send(Request::Environments { scope }).await?;
+                let Payload::Environments { report } = &payload else {
+                    return print(&payload, cli.json, |_| None);
+                };
+                let rows: Vec<&factory_core::environments::Deployment> = report
+                    .deployments
+                    .iter()
+                    .filter(|d| environment.as_ref().is_none_or(|e| &d.environment == e))
+                    .take(limit)
+                    .collect();
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                } else {
+                    println!("{}", deployments_table(&rows, report.generated_at));
+                }
+                Ok(())
+            }
+        },
+
+        Command::Release(cmd) => match cmd {
+            ReleaseCmd::Add { scope, release } => {
+                let req = factory_core::environments::ReleaseAdd { scope, release: release.facts()? };
+                let payload = client.send(Request::ReleaseAdd(req)).await?;
+                print(&payload, cli.json, |p| match p {
+                    Payload::ReleaseAdded { scope, release } => {
+                        Some(format!("release {} added to {scope}", short(&release.commit)))
+                    }
+                    _ => None,
+                })
+            }
+            ReleaseCmd::List { scope } => {
+                let payload = client.send(Request::Environments { scope }).await?;
+                let Payload::Environments { report } = &payload else {
+                    return print(&payload, cli.json, |_| None);
+                };
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report.releases)?);
+                    return Ok(());
+                }
+                if report.releases.is_empty() {
+                    println!("no releases recorded yet");
+                    return Ok(());
+                }
+                println!("{:<10} {:<28} {:<16} {:<18} {:>7}  RUNNING ON", "COMMIT", "DESCRIBE", "SCOPE", "FIRST SEEN", "DEPLOYS");
+                for r in &report.releases {
+                    println!(
+                        "{:<10} {:<28} {:<16} {:<18} {:>7}  {}",
+                        short(&r.facts.commit),
+                        r.facts.version.as_deref().or(r.facts.describe.as_deref()).unwrap_or("--"),
+                        r.scope,
+                        r.first_seen.format("%Y-%m-%d %H:%M"),
+                        if r.failed_deployments > 0 {
+                            format!("{}/{}!", r.deployments, r.failed_deployments)
+                        } else {
+                            r.deployments.to_string()
+                        },
+                        if r.running_on.is_empty() { "--".into() } else { r.running_on.join(", ") }
+                    );
+                }
+                Ok(())
+            }
+        },
 
         Command::Infra => {
             let payload = client.send(Request::Infrastructure).await?;
@@ -2411,6 +2700,239 @@ fn kept_by_text(kept: &[factory_core::backup::KeptBy]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn short(commit: &str) -> String {
+    commit.chars().take(9).collect()
+}
+
+fn pct_or(v: Option<f64>) -> String {
+    v.map(|v| format!("{:.2}%", v * 100.0)).unwrap_or_else(|| "--".into())
+}
+
+fn env_status(s: factory_core::environments::EnvStatus) -> &'static str {
+    use factory_core::environments::EnvStatus;
+    match s {
+        EnvStatus::Up => "up",
+        EnvStatus::Degraded => "DEGRADED",
+        EnvStatus::Down => "DOWN",
+        EnvStatus::Unknown => "unknown",
+    }
+}
+
+fn tier(t: factory_core::environments::Tier) -> &'static str {
+    use factory_core::environments::Tier;
+    match t {
+        Tier::Production => "production",
+        Tier::Staging => "staging",
+        Tier::Ephemeral => "ephemeral",
+    }
+}
+
+/// A finish that asked for a success and was recorded as a failure -- its
+/// checks did not pass -- is an error to whoever asked, so a script stops.
+fn refused_success(payload: &Payload, wanted: factory_core::environments::DeployStatus) -> Result<()> {
+    use factory_core::environments::DeployStatus;
+    match payload {
+        Payload::Deployment { deployment } if wanted == DeployStatus::Succeeded && deployment.status != DeployStatus::Succeeded => {
+            Err(anyhow!("recorded as {}: {}", deployment.status.as_str(), deployment.reason.as_deref().unwrap_or("")))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn deployment_text(payload: &Payload) -> Option<String> {
+    let Payload::Deployment { deployment: d } = payload else { return None };
+    let mut out = format!(
+        "deployment {}  {} of {} to {}",
+        d.id,
+        d.status.as_str(),
+        short(&d.release.commit),
+        d.environment
+    );
+    if let Some(secs) = d.duration_seconds() {
+        out.push_str(&format!(" in {}", duration(secs as u64)));
+    }
+    if let Some(v) = &d.verification {
+        for s in &v.checks {
+            out.push_str(&format!(
+                "
+  {} {}  {}",
+                if s.ok { "ok  " } else { "FAIL" },
+                s.check,
+                s.detail.as_deref().unwrap_or("")
+            ));
+        }
+    } else if d.finished() {
+        out.push_str("
+  not verified");
+    }
+    if let Some(r) = &d.reason {
+        out.push_str(&format!("
+  reason: {r}"));
+    }
+    Some(out)
+}
+
+fn deployments_table(rows: &[&factory_core::environments::Deployment], now: chrono::DateTime<chrono::Utc>) -> String {
+    if rows.is_empty() {
+        return "no deployments recorded yet".into();
+    }
+    let mut out = format!("{:<14} {:<10} {:<12} {:>8} {:<16} {:<14} REASON
+", "ENV", "COMMIT", "STATUS", "TOOK", "WHO", "WHEN");
+    for d in rows {
+        let who = match &d.via {
+            Some(via) => format!("{} via {via}", d.actor.name),
+            None if d.manual => format!("{} (by hand)", d.actor.name),
+            None => d.actor.name.clone(),
+        };
+        out.push_str(&format!(
+            "{:<14} {:<10} {:<12} {:>8} {:<16} {:<14} {}
+",
+            d.environment,
+            short(&d.release.commit),
+            d.status.as_str(),
+            d.duration_seconds().map(|s| duration(s as u64)).unwrap_or_else(|| "--".into()),
+            who,
+            ago(now, d.started_at),
+            d.reason.as_deref().unwrap_or("")
+        ));
+    }
+    out.trim_end().to_string()
+}
+
+/// `factory env`: one line per environment, in promotion order.
+fn env_list_text(payload: &Payload) -> Option<String> {
+    let Payload::Environments { report } = payload else { return None };
+    if report.environments.is_empty() {
+        return Some(
+            "no environments declared or deployed to -- declare them under `environments:` in a scope's \
+             .factory/config.yaml"
+                .into(),
+        );
+    }
+    let mut out = format!(
+        "{:<14} {:<11} {:<9} {:<10} {:>9} {:>9} {:>9} {:>8}  SINCE
+",
+        "ENV", "TIER", "STATUS", "RUNNING", "24H", "7D", "SLO", "BUDGET"
+    );
+    for c in &report.environments {
+        let slo = match &c.slo {
+            Some(s) => format!("{}/{:.1}%", pct_or(c.uptime_window), s.target * 100.0),
+            None => pct_or(c.uptime_window),
+        };
+        out.push_str(&format!(
+            "{:<14} {:<11} {:<9} {:<10} {:>9} {:>9} {:>9} {:>8}  {}
+",
+            c.name,
+            tier(c.tier),
+            if c.paused { "paused" } else { env_status(c.status) },
+            c.current.as_ref().map(|d| short(&d.release.commit)).unwrap_or_else(|| "--".into()),
+            pct_or(c.uptime_24h),
+            pct_or(c.uptime_7d),
+            slo,
+            c.error_budget.map(|b| format!("{:.0}%", b * 100.0)).unwrap_or_else(|| "--".into()),
+            c.status_since.map(|t| ago(report.generated_at, t)).unwrap_or_else(|| "--".into())
+        ));
+    }
+    Some(out.trim_end().to_string())
+}
+
+fn env_detail_text(
+    c: &factory_core::environments::EnvironmentCard,
+    deployments: &[factory_core::environments::Deployment],
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let mut out = format!(
+        "{}  {}  {}  (scope {}{})
+",
+        c.name,
+        tier(c.tier),
+        if c.paused { "paused" } else { env_status(c.status) },
+        c.scope,
+        if c.declared { "" } else { ", not declared" }
+    );
+    if let Some(url) = &c.url {
+        out.push_str(&format!("  url          {url}
+"));
+    }
+    if let Some(next) = &c.promotes_to {
+        out.push_str(&format!("  promotes to  {next}
+"));
+    }
+    match &c.current {
+        Some(d) => out.push_str(&format!(
+            "  running      {} {}  since {}
+",
+            short(&d.release.commit),
+            d.release.version.as_deref().or(d.release.describe.as_deref()).unwrap_or(""),
+            ago(now, d.finished_at.unwrap_or(d.started_at))
+        )),
+        None => out.push_str("  running      nothing recorded
+"),
+    }
+    if let Some(d) = &c.running {
+        out.push_str(&format!("  deploying    {} since {}
+", short(&d.release.commit), ago(now, d.started_at)));
+    }
+    out.push_str(&format!("  uptime       24h {}  7d {}  window {}
+", pct_or(c.uptime_24h), pct_or(c.uptime_7d), pct_or(c.uptime_window)));
+    if let Some(slo) = &c.slo {
+        out.push_str(&format!(
+            "  slo          {:.2}% over {}d, error budget {}
+",
+            slo.target * 100.0,
+            slo.window_days,
+            c.error_budget.map(|b| format!("{:.0}% left", b * 100.0)).unwrap_or_else(|| "--".into())
+        ));
+    }
+    let d = &c.dora;
+    out.push_str(&format!(
+        "  dora         {}/week, lead time {}, change failure {}, restore {} (mttr {})
+",
+        d.deploy_frequency.map(|v| format!("{v:.1}")).unwrap_or_else(|| "--".into()),
+        d.lead_time_p50.map(|v| duration(v as u64)).unwrap_or_else(|| "--".into()),
+        pct_or(d.change_failure_rate),
+        d.time_to_restore_p50.map(|v| duration(v as u64)).unwrap_or_else(|| "--".into()),
+        d.mttr.map(|v| duration(v as u64)).unwrap_or_else(|| "--".into()),
+    ));
+    if !c.checks.is_empty() {
+        out.push_str("
+CHECKS
+");
+        for ch in &c.checks {
+            let last = match &ch.last {
+                Some(s) => format!("{} {}  {}", if s.ok { "ok  " } else { "FAIL" }, ago(now, s.at), s.detail.as_deref().unwrap_or("")),
+                None => "not checked yet".into(),
+            };
+            out.push_str(&format!("  {:<24} every {:>4}s  {}
+", ch.name, ch.every_seconds, last));
+        }
+    }
+    if !c.incidents.is_empty() {
+        out.push_str("
+INCIDENTS
+");
+        for i in &c.incidents {
+            out.push_str(&format!(
+                "  {}  {}  {}
+",
+                utc(&i.started_at),
+                match i.ended_at {
+                    Some(_) => format!("lasted {}", duration(i.duration_seconds(now) as u64)),
+                    None => format!("OPEN for {}", duration(i.duration_seconds(now) as u64)),
+                },
+                i.checks.join(", ")
+            ));
+        }
+    }
+    let mine: Vec<&factory_core::environments::Deployment> =
+        deployments.iter().filter(|d| d.environment == c.name).take(10).collect();
+    out.push_str("
+DEPLOYMENTS
+");
+    out.push_str(&deployments_table(&mine, now));
+    out
 }
 
 /// `factory backup status`, for a person: the hero line, the facts under
@@ -6066,6 +6588,12 @@ fn describe_event(e: &Event) -> String {
             verification.snapshot,
             if verification.ok { "ok" } else { "FAILED" }
         ),
+        Event::DeploymentUpdated { deployment: d } => {
+            format!("deploy   {} to {}  {}  ({})", short(&d.release.commit), d.environment, d.status.as_str(), d.id)
+        }
+        Event::EnvironmentStatusChanged { environment, status, .. } => {
+            format!("env      {environment}  {}", env_status(*status))
+        }
         Event::AgentActivity {
             subject, status, ..
         } => format!("activity {subject}  {}", status.as_str()),
