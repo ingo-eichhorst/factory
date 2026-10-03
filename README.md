@@ -670,6 +670,35 @@ whose `affects[].ref` values point into the SBOM by `bom-ref`. See
 `examples/dependency-scan.sh` for a declared-state Syft/Grype example; tests
 use checked-in CycloneDX fixtures and require neither tool.
 
+For opt-in source call analysis, run `examples/dependency-scan.sh --reachability`.
+It adds OSV-Scanner v2's native JSON output to the existing vulnerability
+attachment via `examples/dependency-reachability.mjs`, matching advisory
+ids/aliases and exact package ecosystem/name/version from the SBOM's PURL.
+`factory:reachability`, `factory:reachability-detail` and
+`factory:reachability-evidence` are JSON objects keyed by exact `affects[].ref`.
+Unsupported packages, missing analysis and ambiguous negative evidence remain
+`unknown`; a reported call is `reachable`, and exclusively explicit uncalled
+evidence is `unreachable`. These are scanner claims, not exploitability or VEX
+verdicts. The helper preserves authored `analysis`, severity and exploit flags.
+OSV exit 1 means findings and is accepted; scanner failures attach no evidence.
+
+The finding's reported reachability and analysis detail are shown unchanged in
+the CLI, HTTP projection and shared Dependencies/Doctor card. A scalar
+`factory:reachability` property is a vulnerability-wide claim; a per-ref object
+is component-specific. `analysis.detail` is preserved as prose and never
+classified. Duplicate conflicting properties remain explicit conflicting
+claims. The original evidence document/run/time is retained even if a later
+scan resolves the finding. No claim changes status, policy counts, reporting
+deadlines or authored VEX; absent evidence stays unknown.
+
+[OSV call analysis](https://google.github.io/osv-scanner/usage/scan-source/)
+requires language tools. Rust support is experimental, compiles the project,
+and executes its build scripts: use it only for trusted source in a suitable
+sandbox. Unsupported code, including dynamic linkage and some macro-generated
+paths, cannot establish a safe verdict. The independent `source-reachability`
+node in Factory's workflow scans declared checkout dependencies; its evidence
+does not describe installed binaries or the separate built/running documents.
+
 `factory dependencies <scope>` and `GET /api/dependencies?scope=` read the
 same projection. A finding is `open` when the newest scan still reports it,
 `assessed` when that scan carries CycloneDX `analysis`, `resolved` when a newer
@@ -723,9 +752,10 @@ Policy catalogues may read the same evidence:
   exploited_open: 0
 ```
 
-The v2 scan workflow supplies the build and installed-binary evidence used by
-`built_sbom` and Doctor. Observed services and reachability remain future
-work; the CRA Article 14 reporting clock's 24-hour and 72-hour deadlines
+The scan workflow supplies the build and installed-binary evidence used by
+`built_sbom` and Doctor, plus optional declared-source reachability evidence.
+Observed services still require sandbox enforcement evidence; the CRA Article
+14 reporting clock's 24-hour and 72-hour deadlines
 (`#157`, phase 1) read this same evidence -- see "Policies" below.
 
 `Engine::exploited_findings` (daemon `dependencies.rs`) is that clock's L2

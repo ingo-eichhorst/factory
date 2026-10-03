@@ -5446,6 +5446,19 @@ fn dependencies_text(report: &DependenciesReport) -> String {
                 format!("{:?}", finding.status).to_ascii_lowercase(),
                 finding.severity.as_str(), finding.id, finding.affected.name, finding.state
             ));
+            out.push_str(&format!(
+                "    reported reachability: {}\n",
+                finding.reachability.as_deref().unwrap_or("unknown")
+            ));
+            if let Some(detail) = &finding.analysis_detail {
+                out.push_str(&format!("    analysis detail: {detail}\n"));
+            }
+            if let Some(scan) = &finding.analysis_scan {
+                out.push_str(&format!(
+                    "    analysis evidence: document {} run {} at {}\n",
+                    scan.attachment.id, scan.attachment.run_id, scan.attachment.attached_at
+                ));
+            }
         }
     }
     if !report.services.is_empty() {
@@ -7187,6 +7200,30 @@ mod tests {
         let text = dependencies_text(&report);
         assert!(text.contains("built"));
         assert!(text.contains("v0.1.0 0123456789abcdef"));
+    }
+
+    #[test]
+    fn dependency_reachability_text_preserves_raw_evidence_and_original_scan() {
+        let mut report: DependenciesReport = serde_json::from_value(serde_json::json!({
+            "scope":"demo", "documents":[], "services":[], "findings":[{
+                "id":"CVE-REACH", "state":"built", "status":"open", "severity":"high",
+                "affected":{"bom_ref":"pkg:cargo/demo@1", "name":"demo", "path":[]},
+                "scan":{"attachment":{"id":"s", "kind":"vulnerabilities", "scope":"demo", "run_id":"r", "task_id":"t", "attempt":1,
+                    "attached_at":"2026-10-01T00:00:00Z", "filename":"v.cdx.json", "spec_version":"1.6", "states":[]}},
+                "reachability":"unreachable", "analysis_detail":"raw evidence; not a verdict"
+            }]
+        })).unwrap();
+        let text = dependencies_text(&report);
+        assert!(text.contains("reported reachability: unreachable"));
+        assert!(text.contains("analysis detail: raw evidence; not a verdict"));
+        assert!(text.contains("open"));
+        report.findings[0].analysis_scan = Some(report.findings[0].scan.clone());
+        report.findings[0].scan.attachment.id = "newer-absence".into();
+        report.findings[0].reachability = None;
+        let text = dependencies_text(&report);
+        assert!(text.contains("reported reachability: unknown"));
+        assert!(text.contains("analysis evidence: document s run r at"));
+        assert!(!text.contains("document newer-absence"));
     }
 
     // -- --timezone ----------------------------------------------------------
