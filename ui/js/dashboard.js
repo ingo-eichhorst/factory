@@ -63,11 +63,19 @@
 //! /api/operations`, `#106`): blocked runs with the agent's own words, runs
 //! out of retries, lost standing agents, late and missed schedules -- the
 //! same exceptions the L4 Operations tab shows per scope. Nothing here
-//! decides what needs a person any more; `operations.rs` does, once.
+//! decides what needs a person any more; `operations.rs` does, once. The
+//! Inbox also reads the CRA Art. 14 reporting clock (`GET
+//! /api/policy/clock`, `#157`/`#170` phase 2) alongside it, for its own
+//! overdue and due-soon deadlines -- a second, independent read, shaped by
+//! `clock-model.js`'s `inboxClockRows`, never folded into `operations.rs`'s
+//! own attention list: a clock deadline is not one of the exception kinds
+//! that endpoint speaks, and a failed clock read never blanks the rest of
+//! the Inbox.
 
 import { $, esc, api, state } from "./core.js";
 import { inScope, routeHref, scopeLabel } from "./scopes.js";
 import { ACTION_LABELS, actionRequest, fmtAge, inboxItems } from "./operations-model.js";
+import { inboxClockRows } from "./clock-model.js";
 import { taskUsageLine, costFigure } from "./usage-model.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
@@ -924,8 +932,57 @@ function costTile() {
 /// the first fetch, `null` when it failed -- kept apart so "loading", "not
 /// available" and "nothing waiting" read as three different things.
 let inboxReport;
+/// The last `/api/policy/clock` answer (`#157`/`#170` phase 2), fetched
+/// alongside it. `null` covers both "not fetched" and "the read failed" --
+/// unlike `inboxReport`, its own failure never blanks the Inbox: it is an
+/// addition to the daemon's attention queue, not the queue itself, and
+/// `inboxClockRows` already returns `[]` for a `null` clock (`clock-model.js`).
+let clockReport;
 let inboxAsked = 0;
 let inboxReceivedAt = 0; // when it arrived, on this browser's clock -- ages grow from there
+
+async function fetchOperationsReport() {
+  try {
+    return (await api("/api/operations")).report;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchClock() {
+  try {
+    return (await api("/api/policy/clock")).clock;
+  } catch {
+    return null;
+  }
+}
+
+/// A report clock item's own title: its task's (a confirmed security report
+/// is a task, `#170`; `state.tasks` already keeps every task Factory
+/// knows about) or, until that task is loaded, its bare id.
+function clockReportTitle(taskId) {
+  const t = state.tasks.get(taskId);
+  return t?.title || taskId;
+}
+
+/// A finding has no task of its own to open -- Dependencies is where its
+/// evidence lives.
+function clockFindingHref(scope) {
+  return routeHref(scope, "dependencies");
+}
+
+/// The Inbox's whole list: the daemon's own attention queue (`inboxItems`,
+/// `operations-model.js`) plus the reporting clock's own overdue and
+/// due-soon deadlines (`inboxClockRows`, `clock-model.js`) -- read from a
+/// different endpoint and shaped by a different pure function on purpose:
+/// a clock deadline is not an `ExceptionKind` `operations.rs` ever emits,
+/// so it never goes through `attentionRows`, which mirrors that closed
+/// vocabulary exactly. Concatenated, not re-sorted against each other --
+/// each block is already ordered within itself, and a missed legal
+/// deadline leads.
+function inboxRows(elapsedS) {
+  return [...inboxClockRows(clockReport, elapsedS, clockReportTitle, clockFindingHref), ...inboxItems(inboxReport, elapsedS)];
+}
 
 /// The Inbox is the daemon's attention list (`#106`), every scope, minus
 /// the observations: the same exceptions the Operations tab shows per scope
@@ -937,14 +994,10 @@ export async function loadInbox() {
   // Two refetches can overlap; only the newest one's answer is drawn, or a
   // slow old read could land last and bring back what was just resolved.
   const mine = ++inboxAsked;
-  let answer;
-  try {
-    answer = (await api("/api/operations")).report;
-  } catch {
-    answer = null;
-  }
+  const [ops, clock] = await Promise.all([fetchOperationsReport(), fetchClock()]);
   if (mine !== inboxAsked) return;
-  inboxReport = answer;
+  inboxReport = ops;
+  clockReport = clock;
   inboxReceivedAt = Date.now();
   renderInbox();
 }
@@ -953,7 +1006,12 @@ export async function loadInbox() {
 /// the whole list) and the dashboard's own `inbox` tile (`inboxTile`, top
 /// few), so there is one markup for it, not two that could drift apart.
 function inboxItemRow(it) {
-  const href = it.task_id ? "" : it.kind === "liveness_lost" ? routeHref(null, "roster") : "";
+  // `it.href`: a row with no task of its own but somewhere to go anyway --
+  // today only a reporting-clock finding, pointed at Dependencies
+  // (`clockFindingHref`, `inboxRows`). `liveness_lost` is the older,
+  // special-cased fallback for the same shape of thing.
+  const fallbackHref = it.href || (it.kind === "liveness_lost" ? routeHref(null, "roster") : "");
+  const href = it.task_id ? "" : fallbackHref;
   // The reason is the agent's own words when it gave any -- a blocked
   // run's question, a failure's last error -- and the daemon's otherwise.
   return `<div class="inbox-item"${it.task_id ? ` data-task="${esc(it.task_id)}"` : ""}${it.run_id ? ` data-run="${esc(it.run_id)}"` : ""}${href ? ` data-href="${esc(href)}"` : ""}>
@@ -1010,7 +1068,7 @@ export function renderInbox() {
     host.innerHTML = `<div class="err">What needs a person is not available right now.</div>`;
     return;
   }
-  const items = inboxItems(inboxReport, (Date.now() - inboxReceivedAt) / 1000);
+  const items = inboxRows((Date.now() - inboxReceivedAt) / 1000);
   if (!items.length) {
     host.innerHTML = `<div class="empty">Nothing waiting on a person right now.</div>`;
     return;
@@ -1020,10 +1078,10 @@ export function renderInbox() {
 }
 
 /// The dashboard's own `inbox` view tile: a count and the top few items off
-/// the same `inboxReport`/`inboxItems` the Inbox nav view reads -- reusing
-/// that fetch and model rather than a second, scoped copy of either, so the
-/// tile and the standalone Inbox can never disagree about what needs a
-/// person. Narrowed to the rail's own selection with `inScope`, client-side,
+/// the same `inboxRows` the Inbox nav view reads -- reusing that fetch and
+/// model rather than a second, scoped copy of either, so the tile and the
+/// standalone Inbox can never disagree about what needs a person. Narrowed
+/// to the rail's own selection with `inScope`, client-side,
 /// the same way `renderDashboard` already narrows `tasks`/`scopes` and the
 /// occupancy tiles narrow their rows -- every other tile on a scoped
 /// dashboard reads the selection, and an item with no `scope` at all (a
@@ -1034,7 +1092,7 @@ export function renderInbox() {
 function inboxTile() {
   if (inboxReport === undefined) return dcard("Inbox", "", `<div class="inbox-list"><div class="empty">loading…</div></div>`);
   if (inboxReport === null) return dcard("Inbox", "", `<div class="inbox-list"><div class="err">What needs a person is not available right now.</div></div>`);
-  const items = inboxItems(inboxReport, (Date.now() - inboxReceivedAt) / 1000).filter((it) => !it.scope || inScope(it.scope));
+  const items = inboxRows((Date.now() - inboxReceivedAt) / 1000).filter((it) => !it.scope || inScope(it.scope));
   if (!items.length) return dcard("Inbox", "0 waiting", `<div class="inbox-list"><div class="empty">Nothing waiting on a person right now.</div></div>`);
   const top = items.slice(0, 5).map(inboxItemRow).join("");
   return dcard("Inbox", `${items.length} waiting`, `<div class="inbox-list">${top}</div>`);
