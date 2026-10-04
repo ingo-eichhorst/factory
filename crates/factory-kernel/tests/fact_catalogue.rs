@@ -26,6 +26,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<ConfirmedSecurityReport, L4>("ConfirmedSecurityReport", "L4");
     assert_producer::<AttestedRun, L4>("AttestedRun", "L4");
     assert_producer::<ArtifactProvenance, L4>("ArtifactProvenance", "L4");
+    assert_producer::<CostReport, L4>("CostReport", "L4");
     assert_producer::<GateFact, L5>("GateFact", "L5");
     assert_producer::<KnowledgeTags, L5>("KnowledgeTags", "L5");
 }
@@ -46,6 +47,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "ConfirmedSecurityReport",
         "AttestedRun",
         "ArtifactProvenance",
+        "CostReport",
         "GateFact",
         "KnowledgeTags",
     ];
@@ -61,6 +63,19 @@ fn catalogue_is_complete_unique_and_has_readers() {
             assert!(["L1", "L2", "L3", "L4", "L5", "L6"].contains(&level));
         }
     }
+}
+
+#[test]
+fn old_cost_json_defaults_new_spend_history_and_scope_uncertainty() {
+    let row = serde_json::to_value(CostRow::new("total", None)).unwrap();
+    let report: CostReport = serde_json::from_value(serde_json::json!({
+        "group_by": "scope", "from": "2026-10-01T00:00:00Z", "to": "2026-10-02T00:00:00Z",
+        "rows": [], "total": row
+    })).unwrap();
+    assert_eq!(report.unattributed_runs, 0);
+    assert!(report.daily.is_empty());
+    let json = serde_json::to_value(report).unwrap();
+    assert!(json.get("daily").is_none() && json.get("unattributed_runs").is_none());
 }
 
 #[test]

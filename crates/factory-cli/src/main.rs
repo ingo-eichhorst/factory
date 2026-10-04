@@ -19,6 +19,7 @@ use factory_core::protocol::{
     GoalsReport, Payload, PolicyControlDetail, PolicyReport, Request, Response, ScenarioPromoteResult, ScenarioResult, ScenariosReport,
 };
 use factory_core::scenario;
+use factory_core::usage::{CostRowExt, TokenSumsExt};
 use factory_core::run::{Run, RunStatus};
 use factory_core::task::{
     CloseReason, CronSchedule, NewTask, RetryPolicy, Schedule, Task, TaskFilter, TaskPatch, TaskReport,
@@ -204,6 +205,14 @@ enum Command {
         /// Only this scope and its descendants.
         #[arg(long)]
         scope: Option<String>,
+    },
+    /// L6 monthly scope budgets and month-to-date spend. Limits are authored
+    /// in .factory/budgets/limits.yaml, never inferred from provider plans.
+    Budget {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long, default_value = "scope")]
+        by: String,
     },
     /// The L6 Goals tab: vision, mission, the north star and its inputs,
     /// every cycle's own summary, the asked (or current) cycle's graded
@@ -1983,6 +1992,14 @@ async fn main() -> Result<()> {
             })
         }
 
+        Command::Budget { scope, by } => {
+            let group_by = by.parse().map_err(|e: String| anyhow!(e))?;
+            let payload = client.send(Request::Budget { scope, group_by }).await?;
+            print(&payload, cli.json, |p| match p {
+                Payload::Budget { report } => Some(budget_text(report)),
+                _ => None,
+            })
+        }
         Command::Goals { scope, cycle, command } => {
             // `--scope`/`--cycle` before the subcommand name (or with none
             // at all) are the same flags `status` itself takes after it --
@@ -6358,6 +6375,20 @@ fn estimate_vs_actual(row: &factory_core::usage::CostRow) -> String {
     }
 }
 
+fn budget_text(report: &factory_core::budget::Report) -> String {
+    let mut text = format!("Budget — UTC month {} through {} (as of {})\nAuthored limits: {}\nSubtree caps overlap: they are not summed. Projection is linear observed pace.\n\n", report.month.from, report.month.until, report.month.as_of, report.catalogue);
+    for row in &report.budgets {
+        let limit = row.monthly_usd.map(|v| format!("${v:.2}")).unwrap_or_else(|| "unconfigured".into());
+        let remaining = row.assessment.remaining_usd.map(|v| format!("${v:.2}")).unwrap_or_else(|| "unknown".into());
+        let projected = row.assessment.projected_month_usd.map(|v| format!("${v:.2}")).unwrap_or_else(|| "unknown".into());
+        text.push_str(&format!("{} [{}]: limit {limit}; ${:.2} known; remaining {remaining}; month projection {projected}\n  {}\n", row.scope, row.relation, row.spent.cost_usd, row.assessment.reason));
+    }
+    for finding in &report.findings { text.push_str(&format!("Finding: {finding}\n")); }
+    text.push_str("\nSelected spend:\n");
+    text.push_str(&costs_text(&report.spend));
+    text
+}
+
 fn costs_text(r: &factory_core::usage::CostReport) -> String {
     let mut s = format!(
         "cost by {}, runs started {} to {}{}\n",
@@ -6366,6 +6397,9 @@ fn costs_text(r: &factory_core::usage::CostReport) -> String {
         r.to.format("%Y-%m-%d %H:%M"),
         r.scope.as_deref().map(|sc| format!(", scope {sc}")).unwrap_or_default()
     );
+    if r.unattributed_runs > 0 {
+        s.push_str(&format!("{} runs have unknown scope attribution; scoped sums may exclude their spend.\n", r.unattributed_runs));
+    }
     if r.rows.is_empty() {
         s.push_str("no runs in that window");
         return s;
@@ -7627,6 +7661,31 @@ mod tests {
     // -- usage and cost (#117) ----------------------------------------------
 
     #[test]
+    fn budget_cli_defaults_to_scope_and_accepts_provider_account_grouping() {
+        let cli = Cli::try_parse_from(["factory", "budget"]).unwrap();
+        assert!(matches!(cli.command, Command::Budget { by, scope: None } if by == "scope"));
+        let cli = Cli::try_parse_from(["factory", "budget", "--scope", "work", "--by", "provider"]).unwrap();
+        assert!(matches!(cli.command, Command::Budget { by, scope: Some(scope) } if by == "provider" && scope == "work"));
+    }
+
+    #[test]
+    fn budget_cli_shows_unknown_remaining_and_unattributed_scoped_spend() {
+        use factory_core::budget;
+        use factory_core::usage::{CostGroupBy, CostReport, CostRow};
+        let month = budget::Month::at(chrono::Utc::now()).unwrap();
+        let spent = CostRow { runs: 1, runs_unknown: 1, ..CostRow::new("total", None) };
+        let assessment = budget::assess(Some(50.0), &spent, 1, &month);
+        let report = budget::Report { catalogue: ".factory/budgets/limits.yaml".into(), group_by: CostGroupBy::Scope,
+            spend: CostReport { group_by: CostGroupBy::Scope, from: month.from, to: month.as_of, scope: Some("work".into()), rows: vec![spent.clone()], total: spent.clone(), unattributed_runs: 1, daily: Vec::new() },
+            budgets: vec![budget::ScopeBudget { id: "stable".into(), scope: "work".into(), path: "projects/work".into(), relation: "ancestor".into(), monthly_usd: Some(50.0), spent, unattributed_runs: 1, daily: Vec::new(), assessment }],
+            month, findings: Vec::new() };
+        let text = budget_text(&report);
+        assert!(text.contains("remaining unknown") && text.contains("month projection unknown"), "{text}");
+        assert!(text.contains("unknown scope attribution") && text.contains("[ancestor]"), "{text}");
+        assert!(text.contains("Subtree caps overlap: they are not summed."), "{text}");
+    }
+
+    #[test]
     fn a_when_is_a_span_back_a_date_or_rfc3339() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-25T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
         assert_eq!(parse_when("7d", now).unwrap().to_rfc3339(), "2026-09-18T12:00:00+00:00");
@@ -7668,6 +7727,8 @@ mod tests {
             scope: None,
             rows: vec![row.clone()],
             total: CostRow { key: "total".into(), ..row },
+            unattributed_runs: 0,
+            daily: Vec::new(),
         };
         let text = costs_text(&report);
         assert!(text.contains("issue=117"), "{text}");
@@ -7692,6 +7753,8 @@ mod tests {
             scope: None,
             rows: vec![row, nothing],
             total: CostRow::new("total", None),
+            unattributed_runs: 0,
+            daily: Vec::new(),
         };
         let text = costs_text(&report);
         assert!(text.contains("4/5 in range, 1.20x median"), "{text}");

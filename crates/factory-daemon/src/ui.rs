@@ -11,6 +11,16 @@ pub const INDEX_HTML: &str = include_str!("../../../ui/index.html");
 /// Everything the page asks for after the first byte, by request path.
 const ASSETS: &[(&str, &str, &str)] = &[
     (
+        "js/budget.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/budget.js"),
+    ),
+    (
+        "js/budget-model.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/budget-model.js"),
+    ),
+    (
         "app.css",
         "text/css; charset=utf-8",
         include_str!("../../../ui/app.css"),

@@ -235,6 +235,7 @@ pub enum Group {
     Quality,
     Vex,
     Intake,
+    Budgets,
     Guides,
     Logs,
 }
@@ -252,6 +253,7 @@ impl Group {
             Self::Quality => "quality",
             Self::Vex => "vex",
             Self::Intake => "intake",
+            Self::Budgets => "budgets",
             Self::Guides => "guides",
             Self::Logs => "logs",
         }
@@ -264,7 +266,7 @@ impl Group {
 /// here although the issue's table predates them -- AGENTS.md names them
 /// with the others. `intake/` (`#169`, per-scope definitions of ready) is
 /// the newest of the same kind.
-pub const AUTHORED: [(Group, &str, &str); 8] = [
+pub const AUTHORED: [(Group, &str, &str); 9] = [
     (Group::Knowledge, ".factory/knowledge/", "the knowledge vault: pages and documents"),
     (Group::Datasets, ".factory/datasets/", "benchmark datasets"),
     (Group::Policies, ".factory/policies/", "policy catalogues, drafts included"),
@@ -273,6 +275,7 @@ pub const AUTHORED: [(Group, &str, &str); 8] = [
     (Group::Quality, ".factory/quality/", "quality profiles"),
     (Group::Vex, ".factory/vex/", "authored CycloneDX VEX judgments"),
     (Group::Intake, ".factory/intake/", "definitions of ready"),
+    (Group::Budgets, ".factory/budgets/", "authored monthly scope budgets"),
 ];
 
 /// The two optional directories `include_logs: true` adds.

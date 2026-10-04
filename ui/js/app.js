@@ -36,6 +36,8 @@ import { loadPolicy, reloadPolicy, wirePolicy } from "./policy.js";
 import { loadGoals, reloadGoals, wireGoals } from "./goals.js";
 import { loadQuality, reloadQuality, wireQuality } from "./quality.js";
 import { loadScenarios, reloadScenarios, wireScenarios } from "./scenarios.js";
+import { loadBudget, reloadBudget, wireBudget } from "./budget.js";
+import { budgetEvent } from "./budget-model.js";
 
 // ------------------------------------------------------------------ views
 //
@@ -67,6 +69,7 @@ const VIEWS = {
   // cached metric computations, re-read on every request, and a change only
   // ever arrives as `goals_changed` (a check-in), not on a clock.
   goals: { onShow: loadGoals },
+  budget: { onShow: loadBudget },
   // Same again: the profiles are small YAML files re-read on every request,
   // and every value a scenario is judged on is already computed elsewhere.
   // What can change it arrives on the socket (`onEvent` below).
@@ -226,10 +229,8 @@ function applyModal([taskId, runId]) {
 // fallback in `scopes.js`.
 const LEVEL_VIEWS = {
   dash: ["dashboard", "site", "activity", "inbox"],
-  // Goals first, then Policy: Direction reads vision, then rules -- the
-  // long-term frame and this cycle's objectives, and only then the control
-  // catalogue that holds the company to what it already committed to.
-  dir: ["goals", "policy", "scenarios"],
+  // Direction: intent, its resource limits, rules, then what-if outcomes.
+  dir: ["goals", "budget", "policy", "scenarios"],
   // The work first, then how it is running. Intake sits beside Tasks: it
   // is the queue in front of them (`#119`).
   proc: ["tasks", "intake", "workflows", "line"],
@@ -342,6 +343,7 @@ function rerender(route) {
   // Same reason again: which objectives and roadmap items belong to a scope
   // is the daemon's own filter (`GET /api/goals?scope=`).
   else if (state.tab === "goals") loadGoals();
+  else if (state.tab === "budget") loadBudget();
   // Same reason again: which profiles bind a scope is its chain, folded by
   // the daemon (`GET /api/quality?scope=`).
   else if (state.tab === "quality") loadQuality();
@@ -606,6 +608,7 @@ async function boot() {
   wireRoles();
   wirePolicy();
   wireGoals();
+  wireBudget();
   wireQuality();
   wireScenarios();
   $("environment-refresh").onclick = () => refreshEnvironment();
@@ -792,6 +795,7 @@ function onEvent(ev) {
   // result detail modal, if one happens to be open on the checked-in key
   // result.
   if (ev.type === "goals_changed" && state.tab === "goals") reloadGoals();
+  if (state.tab === "budget" && budgetEvent(ev)) reloadBudget();
   // A backup taken (by a person or the schedule), failed or verified.
   if (isBackupEvent(ev) && state.tab === "backup") refreshBackup();
   // A deployment began or ended, or an environment's status changed.

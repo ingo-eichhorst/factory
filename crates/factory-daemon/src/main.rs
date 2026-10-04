@@ -6,6 +6,7 @@ mod artifacts;
 mod agents;
 mod backup;
 mod bench;
+mod budgets;
 mod configuration;
 mod costs;
 mod datasets;

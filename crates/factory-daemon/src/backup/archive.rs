@@ -1015,6 +1015,11 @@ fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
         .collect();
     out.push(loaded("intake", count(readiness.files.len(), "definition"), unparsed));
 
+    match factory_core::budget::load(root) {
+        Ok(catalogue) => out.push(loaded("budgets", count(catalogue.scopes.len(), "monthly limit"), Vec::new())),
+        Err(error) => out.push(loaded("budgets", "authored budget catalogue".into(), vec![error])),
+    }
+
     let vex_dir = root.join(FACTORY_DIR).join("vex");
     let mut vex_paths = Vec::new();
     let mut dirs = vec![vex_dir.clone()];
@@ -1115,6 +1120,7 @@ mod tests {
             fs::create_dir_all(f.join("goals")).unwrap();
             fs::create_dir_all(f.join("vex/demo")).unwrap();
             fs::create_dir_all(f.join("intake")).unwrap();
+            fs::create_dir_all(f.join("budgets")).unwrap();
             fs::create_dir_all(f.join("logs")).unwrap();
             fs::create_dir_all(root.join("projects/demo/.factory")).unwrap();
             fs::write(f.join("config.yaml"), "version: 1\ninstance:\n  id: inst-1\n  name: Test Instance\n").unwrap();
@@ -1124,6 +1130,7 @@ mod tests {
             )
             .unwrap();
             fs::write(f.join("intake/ready.yaml"), "max_complexity: 8\n").unwrap();
+            fs::write(f.join("budgets/limits.yaml"), "version: 1\nscopes: {demo-id: {monthly_usd: 50}}\n").unwrap();
             fs::write(f.join("knowledge/company/README.md"), "---\ntitle: readme\n---\n# Company\n").unwrap();
             fs::write(f.join("knowledge/data/secrets/token.txt"), "hunter2").unwrap();
             fs::write(f.join("knowledge/.env"), "KEY=hunter2").unwrap();
@@ -1211,6 +1218,7 @@ mod tests {
         assert_eq!(
             paths,
             [
+                ".factory/budgets/limits.yaml",
                 ".factory/config.yaml",
                 ".factory/factory.sqlite",
                 ".factory/intake/ready.yaml",
@@ -1223,6 +1231,7 @@ mod tests {
         assert_eq!(manifest.database.integrity, "ok");
         assert_eq!(manifest.database.user_version, 4);
         assert_eq!(manifest.database.tables, ["tasks"]);
+        assert_eq!(manifest.files.iter().find(|f| f.path == ".factory/budgets/limits.yaml").map(|f| f.group), Some(Group::Budgets));
         assert_eq!(
             manifest
                 .files
@@ -1251,7 +1260,7 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(left.len(), 1, "{left:?}");
-        assert_eq!(taken.files, 7);
+        assert_eq!(taken.files, 8);
     }
 
     #[test]
@@ -1269,13 +1278,24 @@ mod tests {
         let by_name: BTreeMap<&str, &VerifyCheck> = checks.iter().map(|c| (c.name.as_str(), c)).collect();
         for name in [
             "archive", "manifest", "checksums", "database", "config", "goals", "scenarios", "quality", "vex", "intake",
-            "datasets", "knowledge",
+            "datasets", "knowledge", "budgets",
         ] {
             assert_eq!(by_name[name].status, CheckStatus::Ok, "{name}: {}", by_name[name].detail);
         }
         assert_eq!(by_name["policies"].status, CheckStatus::Warn);
         assert!(by_name["policies"].detail.contains("broken.yaml"), "{}", by_name["policies"].detail);
         assert!(by_name["database"].detail.contains("1 tasks"), "{}", by_name["database"].detail);
+    }
+
+    #[test]
+    fn malformed_budget_intent_is_a_named_verification_warning_not_an_absent_budget() {
+        let instance = Instance::new("broken-budget");
+        fs::write(instance.root.join(".factory/budgets/limits.yaml"), "version: 1\nscopes: {demo-id: {monthly_usd: -1}}\n").unwrap();
+        let taken = instance.take(false);
+        let checks = verify(&taken.path, "inst-1", None);
+        let check = checks.iter().find(|c| c.name == "budgets").unwrap();
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.detail.contains("limits.yaml") && check.detail.contains("nonnegative"), "{}", check.detail);
     }
 
     #[test]
@@ -1326,7 +1346,8 @@ mod tests {
         let into = base.join("restored");
         let restored = restore(&taken.path, "inst-1", &instance.root, &into, None).unwrap();
         assert_eq!(restored.into, into.canonicalize().unwrap());
-        assert_eq!(restored.files, 7);
+        assert_eq!(restored.files, 8);
+        assert_eq!(fs::read(into.join(".factory/budgets/limits.yaml")).unwrap(), fs::read(instance.root.join(".factory/budgets/limits.yaml")).unwrap());
         assert!(!restored.checks.iter().any(|c| c.status == CheckStatus::Fail));
         assert!(factory_core::config::Factory::load(&into).is_ok());
         assert_eq!(fs::read_to_string(into.join(".factory/knowledge/company/README.md")).unwrap(), "---\ntitle: readme\n---\n# Company\n");

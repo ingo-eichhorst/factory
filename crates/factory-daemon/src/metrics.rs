@@ -776,8 +776,8 @@ impl Engine {
         window: Option<MetricsWindow>,
     ) -> Result<MetricValue> {
         let days = window.map(MetricsWindow::days).unwrap_or(7);
-        let report = self
-            .spend(&factory_core::usage::SpendQuery {
+        let report = crate::facts::Facts::<factory_kernel::L6>::new(self)
+            .get::<factory_kernel::CostReport>(&factory_core::usage::SpendQuery {
                 scope: scope.map(str::to_string),
                 from: Some(now - chrono::Duration::days(days)),
                 to: Some(now),
@@ -787,7 +787,8 @@ impl Engine {
         let total = &report.total;
         let unmeasured = total.runs_unknown + total.runs_cost_unknown;
         let lower_bound = total.runs_partial;
-        if unmeasured + lower_bound > 0 {
+        let unattributed = if scope.is_some() { report.unattributed_runs } else { 0 };
+        if unmeasured > 0 || lower_bound > 0 || unattributed > 0 {
             let known_runs = total.runs.saturating_sub(unmeasured).saturating_sub(lower_bound);
             return Ok(MetricValue {
                 id: id.clone(),
@@ -795,7 +796,7 @@ impl Engine {
                 as_of: now,
                 reason: Some(format!(
                     "${:.2} known over {known_runs} of {} runs started in the trailing {days} days; \
-                     {unmeasured} unmeasured, {lower_bound} a lower bound -- see factory cost --since {days}d",
+                     {unmeasured} unmeasured, {lower_bound} a lower bound, {unattributed} unattributed -- see factory cost --since {days}d",
                     total.cost_usd, total.runs,
                 )),
             });
@@ -2893,8 +2894,8 @@ mod tests {
             "the eight-day-old run started outside the trailing week, however recently it ended"
         );
 
-        let spend = engine
-            .spend(&factory_core::usage::SpendQuery {
+        let spend = crate::facts::Facts::<factory_kernel::L6>::new(&engine)
+            .get::<factory_kernel::CostReport>(&factory_core::usage::SpendQuery {
                 scope: Some("work".into()),
                 from: Some(now - chrono::Duration::days(7)),
                 to: Some(now),

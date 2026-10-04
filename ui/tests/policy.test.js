@@ -23,7 +23,7 @@ test("L6 Direction is live: the level button carries no disabled/title, and the 
   assert.match(page, /evidence is complete[\s\S]*never that anything is certified/);
   // Not anchored at the closing bracket: `dir` grows a trailing "scenarios"
   // (#100) after this pair.
-  assert.match(wiring, /dir:\s*\["goals",\s*"policy"/);
+  assert.match(wiring, /dir:\s*\["goals",\s*"budget",\s*"policy"/);
   assert.match(wiring, /policy:\s*\{\s*onShow:\s*loadPolicy\s*\}/);
 });
 
