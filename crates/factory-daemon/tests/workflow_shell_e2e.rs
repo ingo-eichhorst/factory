@@ -370,11 +370,13 @@ esac
     let instance_url = daemon.base_url();
     let cli = |args: &[&str]| Command::new(&factory_bin).arg("--root").arg(&instance_root).arg("--url").arg(&instance_url).arg("--json").args(args).env_remove("FACTORY_TOKEN").env_remove("FACTORY_TASK_TOKEN").env_remove("FACTORY_RUN_TOKEN").env_remove("FACTORY_URL").env_remove("FACTORY_SOCKET").output().unwrap();
     let sha = "0123456789abcdef0123456789abcdef01234567";
-    let output = cli(&["deploy", "start", "--env", "mirror-test", "--commit", sha, "--via", "private-origin-sentinel"]);
+    let submitted_sha = sha.to_uppercase();
+    let output = cli(&["deploy", "start", "--env", "mirror-test", "--commit", &submitted_sha, "--via", "private-origin-sentinel"]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let deployment: Value = serde_json::from_slice(&output.stdout).unwrap(); let id = deployment["deployment"]["id"].as_str().unwrap().to_owned();
     let plan_url = format!("{}/api/deployments/{id}/mirror-plan", daemon.base_url());
     let plan = expect_ok(&plan_url, &get(&plan_url))["plan"].clone();
+    assert_eq!(plan["commit"], sha, "GitHub's lowercase object id is canonical in the approved plan");
     let publish_url = format!("{}/api/deployments/{id}/publish", daemon.base_url());
     let inspected = cli(&["deploy", "mirror-plan", &id]);
     assert!(inspected.status.success()); assert_eq!(serde_json::from_slice::<Value>(&inspected.stdout).unwrap()["plan"], plan);
