@@ -19,4 +19,5 @@ pub mod policy_export;
 pub mod policy_report;
 pub mod policy_store;
 pub mod reporting_clock;
+pub mod renewal_store;
 pub mod scenario;

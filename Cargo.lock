@@ -838,6 +838,8 @@ dependencies = [
  "croner",
  "factory-core",
  "factory-direction",
+ "factory-environment",
+ "factory-infrastructure",
  "factory-kernel",
  "factory-plugins",
  "factory-process",
@@ -880,10 +882,12 @@ dependencies = [
  "anyhow",
  "chrono",
  "factory-kernel",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.10.9",
+ "tokio",
  "uuid",
 ]
 
@@ -893,9 +897,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "factory-kernel",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

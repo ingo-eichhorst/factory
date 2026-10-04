@@ -8,7 +8,7 @@ use crate::{engine::Engine, facts::Facts};
 use chrono::{DateTime, Utc};
 use factory_core::{config::Factory, error::Result, event::Event, renewals::*};
 use factory_kernel::{
-    CredentialExpiryFact, InfrastructureExpiryFact, ScheduledRunDatesFact, L1, L2, L6,
+    CredentialExpiryFact, InfrastructureExpiryFact, ScheduledRunDatesFact, L6,
 };
 use std::{collections::BTreeSet, process::Stdio, sync::Arc, time::Duration};
 use tokio::{io::AsyncWriteExt, process::Command};
@@ -16,8 +16,8 @@ use tokio::{io::AsyncWriteExt, process::Command};
 impl Engine {
     pub(crate) fn with_renewal_stores(
         mut self,
-        infrastructure: store::ObservationStore<L1>,
-        credentials: store::ObservationStore<L2>,
+        infrastructure: store::InfrastructureExpiryStore,
+        credentials: store::CredentialExpiryStore,
         alerts: store::AlertStore,
     ) -> Self {
         self.infrastructure_expiries = infrastructure;

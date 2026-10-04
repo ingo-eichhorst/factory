@@ -5040,7 +5040,7 @@ references and knowledge hints are plain L0 command values, not live facts
 or search/evaluation logic. Core is only the compatibility/conversion bridge;
 L3 never depends on it. The trait methods, guide and reporting text are unchanged.
 
-This is a partial physical migration: live providers, storage and runtime
+This is a partial physical migration: live providers and runtime
 services remain in the daemon. `factory-process` (L4) now owns the actual
 task/run lifecycle model, workflow planning and state, intake/ready rules,
 run usage deltas and provider-window allocation, occupancy schemas and the
@@ -5108,6 +5108,22 @@ remain unchanged; opening existing databases neither rewrites nor moves rows.
 No status table, new fact log, schema-version migration or extra database is
 introduced. Physical ownership is not completed live service/provider isolation.
 
+The remaining explicit SQLite store modules now live with their domains too:
+L1 owns backup events, deployment/health history and infrastructure expiry
+observations; L2 owns credential expiry observations; L4 owns workflow
+definitions/runs, recovery action journalling and deployment mirror receipts;
+L6 owns renewal push attempt receipts. Offline operator recovery receipt I/O
+also belongs to L4, with the old Core API canonically re-exported. Daemon store
+paths name the physical owners, not implementations or forwarding services.
+All keep their existing tables, indexes, JSON, upgrade rules and history on
+the same instance database. Expiry stores are concrete owner types, not a
+shared generic selector that can choose another level's table. Failed and
+incomplete probes retain last-known evidence without freshening its observed
+date; cache retirement and health sample pruning remain unchanged. A push
+claim interrupted before delivery stays an unknown attempt across restart.
+No scanner, task status, fact log or new adapter seam is introduced. Moving
+these stores does not isolate the live gatherers, probes, timers or router.
+
 The wire protocol, observer event stream and unchanged generic Interface
 seam now live in `factory-interfaces`, outside the six-level ladder.
 `factory-composition` owns whole-instance configuration/scope loading and
@@ -5130,8 +5146,8 @@ and strict command ladder are still ahead in #193.
 ## Layout
 
     crates/factory-kernel    L0: pure shared vocabulary and every live fact schema (Level/Fact, nested statuses, grants and evidence); no other factory-* dependency
-    crates/factory-infrastructure L1: backup, running environments and renewal domain behaviour
-    crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
+    crates/factory-infrastructure L1: backup, running environments, renewal behaviour and their SQLite stores
+    crates/factory-environment    L2: sandbox planning, secrets, dependencies and credential expiry store
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy, TaskStore and run evidence/provenance store
     crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam (full live services still pending)
