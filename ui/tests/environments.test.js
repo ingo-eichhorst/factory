@@ -494,8 +494,8 @@ test("GitHub mirrors are opt-in, explicitly reviewed and become stale when appro
   globalThis.fetch = async (url, options) => {
     calls.push([url, options]);
     return url.endsWith("/publish")
-      ? { ok: true, json: async () => ({ ok: true, receipt: { phase: "published" } }) }
-      : { ok: true, json: async () => ({ ok: true, report }) };
+      ? { ok: true, json: async () => ({ status: "ok", data: { receipt: { phase: "published" } } }) }
+      : { ok: true, json: async () => ({ status: "ok", data: { report } }) };
   };
   await publishDeployment(id, "exact-reviewed-digest");
   assert.equal(calls[0][0], `/api/deployments/${encodeURIComponent(id)}/publish`);
@@ -504,6 +504,44 @@ test("GitHub mirrors are opt-in, explicitly reviewed and become stale when appro
   assert.match(view, /Repository integrations may react to those events/);
   assert.match(view, /Approve this exact outbound write/);
   delete globalThis.fetch;
+});
+
+test("reviewing a GitHub mirror writes nothing, and modal approval remains frozen across refreshes", async () => {
+  const el = stubPage([...IDS, "sys-mirror-close", "sys-mirror-form"]);
+  const report = structuredClone(REPORT);
+  const id = report.deployments[0].id;
+  report.deployment_mirrors = { [id]: { plan: { deployment: id, repository: "owner/repo",
+    commit: "a".repeat(40), environment: "prod", state: "success", verified: true,
+    approval: "reviewed-digest" }, receipt: null } };
+  state.environments = report;
+  state.scope = null;
+  let modal;
+  document.querySelectorAll = () => [];
+  document.createElement = () => ({});
+  document.body = { appendChild: element => { modal = element; } };
+  globalThis.location = { hash: "#all/tasks" };
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push([url, options]);
+    return { ok: true, json: async () => ({ status: "ok", data: url.endsWith("/publish")
+      ? { receipt: { phase: "published" } } : { report } }) };
+  };
+  wireEnvironments();
+  el.environments.onclick({ target: { closest: selector => selector === "[data-deployment-publish]"
+    ? { dataset: { deploymentPublish: id } } : null } });
+  assert.equal(calls.length, 0, "opening the review modal cannot publish");
+  assert.match(modal.innerHTML, /owner\/repo/);
+  assert.match(modal.innerHTML, /Approve this exact outbound write/);
+  report.deployment_mirrors[id].plan.approval = "changed-after-review";
+  report.deployment_mirrors[id].plan.repository = "different/repo";
+  let prevented = false;
+  el["sys-mirror-form"].onsubmit({ preventDefault: () => { prevented = true; } });
+  assert.ok(prevented);
+  assert.deepEqual(JSON.parse(calls[0][1].body), { approval: "reviewed-digest" });
+  assert.equal(calls[0][0], `/api/deployments/${encodeURIComponent(id)}/publish`);
+  await new Promise(resolve => setImmediate(resolve));
+  delete globalThis.fetch;
+  delete globalThis.location;
 });
 
 test("health strips are selectable with incident markers, and missing samples or read failures are explicit", async () => {
