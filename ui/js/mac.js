@@ -17,6 +17,7 @@ import {
   changeRows,
   headline,
   macFailure,
+  installStep,
   macState,
   modeLabel,
   needsRule,
@@ -110,16 +111,28 @@ function hero(report) {
 function rule(report) {
   if (!needsRule(report)) return "";
   const s = report.sudoers;
-  return `<section class="bk-section mac-rule"><h3>Let Factory change it <span class="sub">once, by a person, in a terminal</span></h3>
+  const step = installStep(s);
+  const install = step.su
+    ? `<p class="infra-hint">${esc(step.lead)} First switch to that account:</p>
+      <pre class="infra-snippet mac-cmd"><code>${esc(step.su)}</code></pre>
+      <p class="infra-hint">then, as that administrator, run this. It checks the rule with <code>visudo -cf</code>
+        before installing it, root-owned and read-only:</p>`
+    : `<p class="infra-hint">This checks the rule with <code>visudo -cf</code> before installing it, root-owned and
+        read-only${step.lead ? `. ${esc(step.lead)}` : ":"}</p>`;
+  return `<article class="infra-card mac-rule" aria-labelledby="mac-rule-title">
+    <header class="infra-card-head">
+      <h3 id="mac-rule-title">Let Factory change it</h3>
+      <span class="sub">once, by a person, in a terminal</span>
+    </header>
     <p class="infra-hint">The daemon runs <code>sudo -n</code>, which never prompts. Install this rule at
       <code>${esc(s.path)}</code> -- it lets <code>${esc(s.user)}</code> run exactly these three commands as root,
       and nothing else:</p>
-    <pre class="infra-snippet"><code>${esc(s.rule)}</code></pre>
-    <p class="infra-hint">This checks the rule with <code>visudo -cf</code> before installing it, root-owned and
-      read-only:</p>
-    <pre class="infra-snippet"><code>${esc(s.install)}</code></pre>
-    <p class="infra-hint">Then <code>${esc(s.check)}</code> checks the whole configuration, and Refresh here.</p>
-  </section>`;
+    <pre class="infra-snippet mac-cmd"><code>${esc(s.rule)}</code></pre>
+    ${install}
+    <pre class="infra-snippet mac-cmd"><code>${esc(s.install)}</code></pre>
+    <p class="infra-hint">Then${step.su ? ", still as the administrator," : ""} <code>${esc(s.check)}</code> checks the
+      whole configuration, and Refresh here.</p>
+  </article>`;
 }
 
 function history(report) {

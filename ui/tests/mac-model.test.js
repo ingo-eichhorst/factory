@@ -6,6 +6,7 @@ import {
   MODES,
   changeRows,
   headline,
+  installStep,
   macFailure,
   macState,
   modeLabel,
@@ -162,4 +163,37 @@ test("both modules are served, or the browser 404s them", () => {
 test("the view sends only setBody's answer and draws no confirm of its own", () => {
   assert.match(view, /body: setBody\(mode\)/);
   assert.doesNotMatch(view, /confirm\(|alert\(|scrim\(/, "the click is the confirmation");
+});
+
+test("the install step names an administrator when the daemon's user is not one", () => {
+  // This host: the daemon runs as `factory`, which cannot sudo; `ingo` is the admin.
+  const notAdmin = installStep({ ...SUDOERS, admins: ["ingo"], user_is_admin: false });
+  assert.equal(notAdmin.kind, "admin");
+  assert.equal(notAdmin.su, "su - ingo");
+  assert.match(notAdmin.lead, /^Run as an administrator \(ingo\)/);
+  assert.match(notAdmin.lead, /factory cannot use sudo itself/);
+  const two = installStep({ ...SUDOERS, admins: ["ingo", "ada"], user_is_admin: false });
+  assert.equal(two.su, "su - ingo");
+  assert.match(two.lead, /\(ingo or ada\)/);
+});
+
+test("the install step keeps today's wording when the daemon's user is an admin", () => {
+  const self = installStep({ ...SUDOERS, user: "ingo", admins: ["ingo"], user_is_admin: true });
+  assert.deepEqual(self, { kind: "self", su: null, lead: "" });
+});
+
+test("with no administrator found the install step says from an administrator account", () => {
+  for (const s of [{ ...SUDOERS, admins: [], user_is_admin: false }, SUDOERS, null]) {
+    const step = installStep(s);
+    assert.equal(step.kind, "unknown");
+    assert.equal(step.su, null);
+    assert.match(step.lead, /from an administrator account/);
+  }
+});
+
+test("the rule card is an L1 card whose commands wrap inside it", () => {
+  assert.match(view, /<article class="infra-card mac-rule"/);
+  assert.match(view, /infra-snippet mac-cmd/);
+  const css = readFileSync(new URL("../app.css", import.meta.url), "utf8");
+  assert.match(css, /\.mac-cmd code \{[^}]*white-space: pre-wrap/);
 });

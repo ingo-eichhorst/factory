@@ -2776,8 +2776,12 @@ fn power_mode_text(payload: &Payload) -> Option<String> {
             out.push_str("  change      factory power-mode automatic|high-performance|energy-saving\n");
         } else {
             out.push_str(&format!(
-                "  read-only   Factory may not change it until {} holds:\n    {}\n  install     {}\n  check       {}\n",
-                report.sudoers.path, report.sudoers.rule, report.sudoers.install, report.sudoers.check
+                "  read-only   Factory may not change it until {} holds:\n    {}\n  install     {}:\n    {}\n  check       {}\n",
+                report.sudoers.path,
+                report.sudoers.rule,
+                report.sudoers.install_from(),
+                report.sudoers.install,
+                report.sudoers.check
             ));
         }
     }
@@ -7126,6 +7130,8 @@ mod tests {
                 rule: "factory ALL=(root) NOPASSWD: ...".into(),
                 install: "sudo visudo -cf ...".into(),
                 check: "sudo visudo -c".into(),
+                admins: vec!["ingo".into()],
+                user_is_admin: false,
             },
             notes: Vec::new(),
             changes: Vec::new(),
@@ -7135,7 +7141,7 @@ mod tests {
         assert!(text.contains("AC          High performance"), "{text}");
         assert!(text.contains("battery     Automatic"), "{text}");
         assert!(text.contains("factory ALL=(root) NOPASSWD: ..."), "{text}");
-        assert!(text.contains("install     sudo visudo -cf ..."), "{text}");
+        assert!(text.contains("install     as an administrator (ingo): su - ingo, then:\n    sudo visudo -cf ..."), "{text}");
 
         let with_identity = Cli::try_parse_from([
             "factory",

@@ -1502,6 +1502,15 @@ button.linklike:hover { color: var(--signal); }
 .mac-seg button:disabled { cursor: not-allowed; opacity: .55; }
 .mac-seg button.on:disabled { opacity: .8; }
 .mac-hero .env-note { margin: 10px 0 0; }
+/* The rule card is an Infrastructure card like the hero, so it has the same
+   padding as every other L1 card. Its commands are long single lines: they
+   wrap inside the card rather than run past its edge, and a soft wrap adds
+   no newline, so a copy is still the one command. */
+.mac-rule .infra-card-head .sub { font-size: 11px; color: var(--muted); }
+.mac-rule .infra-hint + .infra-snippet { margin-top: 6px; }
+.mac-rule .infra-snippet + .infra-hint { margin-top: 10px; }
+.mac-cmd { max-width: 100%; }
+.mac-cmd code { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ============================================================ L1 backup (#116):
    a status hero whose left edge and badge carry the age level -- green,

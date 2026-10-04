@@ -2405,6 +2405,30 @@ pub struct SudoersRule {
     pub install: String,
     /// The whole-configuration check to run afterwards.
     pub check: String,
+    /// The host's administrator accounts -- members of the `admin` group,
+    /// without `root` and `_`-prefixed system accounts -- read without
+    /// root (`dscl`). Installing the rule needs one of them: the daemon's
+    /// own user usually cannot `sudo` at all. Empty when none was found.
+    #[serde(default)]
+    pub admins: Vec<String>,
+    /// Whether `user` is itself one of `admins`, so it can install the rule
+    /// from its own account.
+    #[serde(default)]
+    pub user_is_admin: bool,
+}
+
+impl SudoersRule {
+    /// Who runs the install, in one line -- the same wording the L1 Mac
+    /// tab's `installStep` uses.
+    pub fn install_from(&self) -> String {
+        if self.user_is_admin {
+            format!("from {}'s own account", self.user)
+        } else if let Some(first) = self.admins.first() {
+            format!("as an administrator ({}): su - {first}, then", self.admins.join(" or "))
+        } else {
+            "from an administrator account".to_string()
+        }
+    }
 }
 
 /// One journaled power-mode change.

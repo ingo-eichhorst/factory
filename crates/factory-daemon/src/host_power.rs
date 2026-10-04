@@ -47,10 +47,13 @@ use factory_core::protocol::{PowerMode, PowerModeReport, SudoersRule};
 pub(crate) const PMSET: &str = "/usr/bin/pmset";
 /// `sudo`, by absolute path: a launchd job's `PATH` is not to be trusted.
 pub(crate) const SUDO: &str = "/usr/bin/sudo";
+/// `dscl`, for the `admin` group's members -- readable without root.
+pub(crate) const DSCL: &str = "/usr/bin/dscl";
 /// Where the drop-in goes.
 pub(crate) const SUDOERS_PATH: &str = "/etc/sudoers.d/factory-pmset";
 /// Long enough for a busy host; short enough that a page never hangs on it.
 #[cfg(target_os = "macos")]
+#[cfg_attr(test, allow(dead_code))]
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What a finished command said.
@@ -262,7 +265,36 @@ pub(crate) fn sudoers_rule(user: &str) -> SudoersRule {
         rule,
         install,
         check: "sudo visudo -c".to_string(),
+        admins: Vec::new(),
+        user_is_admin: false,
     }
+}
+
+/// `dscl . -read /Groups/admin GroupMembership`: `GroupMembership: root
+/// ingo _mbsetupuser`, or the key alone on its line with the names on the
+/// indented lines after it when they are long. `root` and the `_`-prefixed
+/// system accounts are not anyone a person would log in as, so they are
+/// left out.
+pub(crate) fn parse_admins(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut reading = false;
+    for line in text.lines() {
+        let rest = if let Some(rest) = line.strip_prefix("GroupMembership:") {
+            reading = true;
+            rest
+        } else if reading && line.starts_with(char::is_whitespace) {
+            line
+        } else {
+            reading = false;
+            continue;
+        };
+        for name in rest.split_whitespace() {
+            if name != "root" && !name.starts_with('_') && !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// The user this daemon runs as -- the one the rule has to name.
@@ -356,6 +388,18 @@ impl HostPower {
         }
     }
 
+    /// The administrator accounts, or none when `dscl` will not say --
+    /// the page then says "from an administrator account" without a name.
+    async fn admins(runner: &dyn Runner) -> Vec<String> {
+        match runner
+            .run(DSCL, &[".", "-read", "/Groups/admin", "GroupMembership"])
+            .await
+        {
+            Ok(out) if out.success => parse_admins(&out.stdout),
+            _ => Vec::new(),
+        }
+    }
+
     async fn custom(runner: &dyn Runner) -> std::result::Result<Custom, String> {
         match runner.run(PMSET, &["-g", "custom"]).await {
             Ok(out) if out.success => Ok(parse_custom(&out.stdout)),
@@ -401,6 +445,9 @@ impl HostPower {
             };
         };
         let mut notes = Vec::new();
+        let mut sudoers = sudoers;
+        sudoers.admins = Self::admins(runner.as_ref()).await;
+        sudoers.user_is_admin = sudoers.admins.iter().any(|a| *a == sudoers.user);
         let supported = Self::cap(runner.as_ref(), &mut notes).await;
         let custom = match Self::custom(runner.as_ref()).await {
             Ok(c) => c,
@@ -596,6 +643,9 @@ pub(crate) mod testing {
     pub(crate) const MAC_CAP: &str =
         "Capabilities for AC Power:\n displaysleep\n sleep\n lowpowermode\n highpowermode\n";
 
+    /// `dscl . -read /Groups/admin GroupMembership` on this host.
+    pub(crate) const ADMIN_GROUP: &str = "GroupMembership: root ingo _mbsetupuser\n";
+
     pub(crate) struct FakeHost {
         pub cap: String,
         /// `powermode` per section as `pmset` would print it; `None` drops
@@ -604,6 +654,8 @@ pub(crate) mod testing {
         pub battery: Mutex<Option<&'static str>>,
         /// The `powermode` values the sudoers rule permits.
         pub permitted: Mutex<Vec<&'static str>>,
+        /// What `dscl . -read /Groups/admin GroupMembership` prints.
+        pub admin_group: String,
         pub calls: Mutex<Vec<Vec<&'static str>>>,
     }
 
@@ -616,6 +668,7 @@ pub(crate) mod testing {
                 ac: Mutex::new(Some("0")),
                 battery: Mutex::new(Some("0")),
                 permitted: Mutex::new(Vec::new()),
+                admin_group: ADMIN_GROUP.to_string(),
                 calls: Mutex::new(Vec::new()),
             })
         }
@@ -677,6 +730,9 @@ pub(crate) mod testing {
             match (program, args) {
                 (PMSET, ["-g", "cap"]) => ok(self.cap.clone()),
                 (PMSET, ["-g", "custom"]) => ok(self.custom()),
+                (DSCL, [".", "-read", "/Groups/admin", "GroupMembership"]) => {
+                    ok(self.admin_group.clone())
+                }
                 (SUDO, ["-n", "-l", PMSET, "-a", "powermode", n]) => {
                     if self.permitted.lock().unwrap().contains(n) {
                         ok(format!("{PMSET} -a powermode {n}\n"))

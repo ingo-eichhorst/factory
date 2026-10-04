@@ -244,6 +244,7 @@ async fn a_mode_the_host_does_not_offer_is_refused_before_sudo_is_asked() {
         ac: std::sync::Mutex::new(Some("0")),
         battery: std::sync::Mutex::new(Some("0")),
         permitted: std::sync::Mutex::new(vec!["0", "1", "2"]),
+        admin_group: super::testing::ADMIN_GROUP.to_string(),
         calls: std::sync::Mutex::new(Vec::new()),
     });
     let power = HostPower::with_runner(host.clone(), "factory");
@@ -272,6 +273,7 @@ async fn a_host_with_no_energy_mode_offers_nothing_and_probes_nothing() {
         ac: std::sync::Mutex::new(None),
         battery: std::sync::Mutex::new(None),
         permitted: std::sync::Mutex::new(Vec::new()),
+        admin_group: super::testing::ADMIN_GROUP.to_string(),
         calls: std::sync::Mutex::new(Vec::new()),
     });
     let power = HostPower::with_runner(host.clone(), "factory");
@@ -279,7 +281,10 @@ async fn a_host_with_no_energy_mode_offers_nothing_and_probes_nothing() {
     assert!(report.applicable);
     assert!(report.supported.is_empty());
     assert!(!report.can_change);
-    assert!(host.calls().iter().all(|c| c[0] == PMSET));
+    assert!(
+        host.calls().iter().all(|c| c[0] != SUDO),
+        "nothing offered, so sudo is never asked"
+    );
 }
 
 #[tokio::test]
@@ -386,4 +391,66 @@ async fn through_the_engine_a_change_is_journaled_with_who_from_and_to() {
 #[test]
 fn the_mac_cap_fixture_is_the_hosts_shape() {
     assert_eq!(parse_cap(MAC_CAP), parse_cap(HOST_CAP));
+}
+
+#[test]
+fn admins_are_the_admin_groups_people_not_root_or_system_accounts() {
+    assert_eq!(
+        parse_admins("GroupMembership: root ingo _mbsetupuser\n"),
+        vec!["ingo"]
+    );
+    // Long memberships continue on indented lines.
+    assert_eq!(
+        parse_admins("GroupMembership:\n root ingo\n ada _spotlight ingo\n"),
+        vec!["ingo", "ada"]
+    );
+    assert!(parse_admins("GroupMembership: root _mbsetupuser\n").is_empty());
+    assert!(parse_admins("No such key: GroupMembership\n").is_empty());
+}
+
+/// The three cases the install step is worded for, end to end through a
+/// read: the daemon's user is not an admin (this host: `factory`, admin
+/// `ingo`), it is one, or no admin can be found.
+#[tokio::test]
+async fn the_install_step_names_an_administrator_when_the_daemon_user_is_not_one() {
+    let host = FakeHost::mac();
+    let report = HostPower::with_runner(host.clone(), "factory").read().await;
+    let s = &report.sudoers;
+    assert_eq!(s.admins, vec!["ingo"]);
+    assert!(!s.user_is_admin);
+    assert_eq!(
+        s.install_from(),
+        "as an administrator (ingo): su - ingo, then"
+    );
+    // The rule still names the daemon's own user, at the same path.
+    assert!(
+        s.rule.starts_with("factory ALL=(root) NOPASSWD: "),
+        "{}",
+        s.rule
+    );
+    assert_eq!(s.path, "/etc/sudoers.d/factory-pmset");
+    assert!(host.calls().contains(&vec![
+        DSCL,
+        ".",
+        "-read",
+        "/Groups/admin",
+        "GroupMembership"
+    ]));
+
+    let admin = HostPower::with_runner(FakeHost::mac(), "ingo").read().await;
+    assert!(admin.sudoers.user_is_admin);
+    assert_eq!(admin.sudoers.install_from(), "from ingo's own account");
+
+    let lonely = std::sync::Arc::new(FakeHost {
+        cap: MAC_CAP.into(),
+        ac: std::sync::Mutex::new(Some("0")),
+        battery: std::sync::Mutex::new(Some("0")),
+        permitted: std::sync::Mutex::new(Vec::new()),
+        admin_group: "GroupMembership: root _mbsetupuser\n".into(),
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let none = HostPower::with_runner(lonely, "factory").read().await;
+    assert!(none.sudoers.admins.is_empty());
+    assert!(!none.sudoers.user_is_admin);
+    assert_eq!(none.sudoers.install_from(), "from an administrator account");
 }
