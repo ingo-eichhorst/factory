@@ -29,16 +29,26 @@ pub async fn run(environment: &str, env_url: Option<&str>, dir: &Path, check: &C
         CheckKind::Tcp => tcp(check, timeout).await,
         CheckKind::Command => command(check, dir, timeout).await,
     };
-    let (ok, detail) = match outcome {
+    let (ok, mut detail) = match outcome {
         Ok(detail) => (true, detail),
         Err(detail) => (false, Some(detail)),
     };
+    let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let slow = ok && check.slow_after_ms.is_some_and(|threshold| latency_ms > threshold);
+    if slow {
+        let reason = format!("slow: {latency_ms}ms exceeds {}ms", check.slow_after_ms.expect("threshold present"));
+        detail = Some(match detail {
+            Some(answer) => format!("{answer}; {reason}"),
+            None => reason,
+        });
+    }
     Sample {
         environment: environment.to_string(),
         check: check.display_name(),
         at: Utc::now(),
         ok,
-        latency_ms: started.elapsed().as_millis() as u64,
+        latency_ms,
+        slow,
         detail,
     }
 }
@@ -200,6 +210,18 @@ mod tests {
 
     fn check(yaml: &str) -> CheckDecl {
         serde_yaml_ng::from_str(yaml).unwrap()
+    }
+
+    #[tokio::test]
+    async fn slow_success_keeps_the_answer_and_failures_are_not_slow_successes() {
+        let slow = run("e", None, Path::new("/"), &check("{ kind: command, command: 'sleep 0.1', slow_after_ms: 1 }")).await;
+        assert!(slow.ok && slow.slow, "{slow:?}");
+        assert!(slow.latency_ms > 1);
+        assert!(slow.detail.as_deref().unwrap().contains("exceeds 1ms"));
+        let failed = run("e", None, Path::new("/"), &check("{ kind: command, command: 'sleep 0.1; exit 1', slow_after_ms: 1 }")).await;
+        assert!(!failed.ok && !failed.slow, "{failed:?}");
+        let no_threshold = run("e", None, Path::new("/"), &check("{ kind: command, command: 'sleep 0.1' }")).await;
+        assert!(no_threshold.ok && !no_threshold.slow);
     }
 
     #[tokio::test]

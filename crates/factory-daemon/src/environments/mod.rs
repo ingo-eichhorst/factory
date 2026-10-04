@@ -91,6 +91,7 @@ async fn run_isolated(due: Due) -> Sample {
                 at: Utc::now(),
                 ok: false,
                 latency_ms: 0,
+                slow: false,
                 detail: Some("the check itself failed inside the daemon".into()),
             }
         }
@@ -104,7 +105,7 @@ async fn run_isolated(due: Due) -> Sample {
 struct Checker {
     last_started: HashMap<(String, String), std::time::Instant>,
     in_flight: BTreeSet<(String, String)>,
-    latest: HashMap<(String, String), bool>,
+    latest: HashMap<(String, String), EnvStatus>,
     status: HashMap<String, EnvStatus>,
 }
 
@@ -133,12 +134,12 @@ impl Checker {
     fn answered(&mut self, sample: &Sample, checks_of_env: &[String]) -> Option<EnvStatus> {
         let key = (sample.environment.clone(), sample.check.clone());
         self.in_flight.remove(&key);
-        self.latest.insert(key, sample.ok);
-        let latest: Vec<Option<bool>> = checks_of_env
+        self.latest.insert(key, sample.status());
+        let latest: Vec<Option<EnvStatus>> = checks_of_env
             .iter()
             .map(|c| self.latest.get(&(sample.environment.clone(), c.clone())).copied())
             .collect();
-        let now = env::status_of(&latest);
+        let now = env::status_of_checks(&latest);
         match self.status.insert(sample.environment.clone(), now) {
             Some(before) if before != now => Some(now),
             _ => None,
@@ -667,6 +668,7 @@ mod tests {
             at: at + Duration::minutes(i),
             ok,
             latency_ms: 1,
+            slow: false,
             detail: None,
         };
         engine.take_sample(&mut checker, sample(0, true)).await;
@@ -717,6 +719,45 @@ mod tests {
         assert!(next.ok);
     }
 
+    #[tokio::test]
+    async fn slow_status_events_report_and_verification_agree() {
+        let (engine, root) = engine_with(
+            "  - name: prod\n    slo: { availability: 99% }\n    checks: [{ kind: command, command: 'sleep 0.1', name: api, slow_after_ms: 1 }]\n",
+        );
+        let mut checker = Checker::default();
+        let mut events = engine.bus.subscribe();
+        let at = chrono::SubsecRound::trunc_subsecs(Utc::now() - Duration::seconds(5), 3);
+        let fast = Sample {
+            environment: "prod".into(), check: "api".into(), at,
+            ok: true, latency_ms: 1, slow: false, detail: None,
+        };
+        engine.take_sample(&mut checker, fast.clone()).await;
+        let slow = Sample {
+            at: at + Duration::seconds(1), latency_ms: 100, slow: true,
+            detail: Some("slow: 100ms exceeds 1ms".into()), ..fast.clone()
+        };
+        engine.take_sample(&mut checker, slow.clone()).await;
+        assert!(matches!(events.try_recv().unwrap(), Event::EnvironmentStatusChanged { status: EnvStatus::Degraded, .. }));
+        engine.take_sample(&mut checker, Sample { at: at + Duration::seconds(2), ..slow.clone() }).await;
+        assert!(events.try_recv().is_err(), "unchanged status publishes nothing");
+        let prod = engine.environments_report(None).await.unwrap().environments.remove(0);
+        assert_eq!(prod.status, EnvStatus::Degraded);
+        assert_eq!(prod.status_since, Some(slow.at));
+        assert_eq!(prod.uptime_window, Some(1.0));
+        assert_eq!(prod.error_budget, Some(1.0));
+        assert!(prod.incidents.is_empty());
+        assert_eq!(prod.checks[0].slow_after_ms, Some(1));
+        assert!(prod.checks[0].last.as_ref().unwrap().slow);
+        assert_eq!(prod.checks[0].strip.iter().map(|b| b.slow).sum::<u32>(), 2);
+        engine.take_sample(&mut checker, Sample { at: at + Duration::seconds(3), ..fast }).await;
+        assert!(matches!(events.try_recv().unwrap(), Event::EnvironmentStatusChanged { status: EnvStatus::Up, .. }));
+        let verified = engine.verify_environment("prod").await.unwrap();
+        assert!(verified.ok, "slow is not unavailable");
+        assert!(verified.checks[0].slow);
+        drop(engine);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// The SLA figures and DORA keys are registry metrics, computed from
     /// recorded samples and deployments, and listed by default for every
     /// declared environment.
@@ -734,6 +775,7 @@ mod tests {
                 at: now - Duration::minutes(30 - i),
                 ok: i != 3,
                 latency_ms: 1,
+                slow: false,
                 detail: None,
             };
             engine.environments.append_sample(sample).await.unwrap();
@@ -808,7 +850,7 @@ mod tests {
         let now = Utc::now();
         engine.environments.append_sample(Sample {
             environment: "prod".into(), check: "api".into(), at: now,
-            ok: true, latency_ms: 1, detail: None,
+            ok: true, latency_ms: 1, slow: false, detail: None,
         }).await.unwrap();
         let ids = ["availability.prod".parse().unwrap()];
         let own = engine.metrics_for(&ids, now, Some("company"), None).await.unwrap();

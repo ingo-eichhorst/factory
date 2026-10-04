@@ -222,11 +222,12 @@ export function releaseRows(report) {
   }));
 }
 
-/// A strip slot's tone: `ok` all healthy, `bad` any failure, `none` not
+/// A strip slot's tone: `ok` all fast, `warn` any slow, `bad` any failure, `none` not
 /// checked in that half hour.
 export function bucketTone(bucket) {
   if (!bucket) return "none";
   if (bucket.failed > 0) return "bad";
+  if (bucket.slow > 0) return "warn";
   if (bucket.ok > 0) return "ok";
   return "none";
 }
@@ -235,7 +236,7 @@ export function bucketTone(bucket) {
 export function lastCheckText(check, now) {
   const last = check && check.last;
   if (!last) return "not checked yet";
-  const bits = [last.ok ? "ok" : "failing"];
+  const bits = [last.ok ? (last.slow ? "slow" : "ok") : "failing"];
   if (last.detail) bits.push(last.detail);
   if (typeof last.latency_ms === "number") bits.push(`${last.latency_ms}ms`);
   bits.push(fmtAgo(now, last.at));

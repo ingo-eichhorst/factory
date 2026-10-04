@@ -39,10 +39,30 @@ CREATE TABLE IF NOT EXISTS health_samples (
     at TEXT NOT NULL,
     ok INTEGER NOT NULL,
     latency_ms INTEGER NOT NULL,
+    slow INTEGER NOT NULL DEFAULT 0,
     detail TEXT
 );
 CREATE INDEX IF NOT EXISTS health_samples_at ON health_samples(at);
 "#;
+
+/// Upgrade old instances without reclassifying any historical sample.
+/// Serialize schema checks with concurrent opens of the same database.
+fn initialize(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(error)?;
+    tx.execute_batch(SCHEMA).map_err(error)?;
+    let has_slow: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('health_samples') WHERE name = 'slow')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !has_slow {
+        tx.execute_batch("ALTER TABLE health_samples ADD COLUMN slow INTEGER NOT NULL DEFAULT 0")
+            .map_err(error)?;
+    }
+    tx.commit().map_err(error)
+}
 
 fn error(error: impl std::fmt::Display) -> FactoryError {
     FactoryError::adapter("environments sqlite", error.to_string())
@@ -107,16 +127,16 @@ pub struct EnvironmentStore {
 
 impl EnvironmentStore {
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path).map_err(error)?;
+        let mut conn = Connection::open(path).map_err(error)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
             .map_err(error)?;
-        conn.execute_batch(SCHEMA).map_err(error)?;
+        initialize(&mut conn)?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().map_err(error)?;
-        conn.execute_batch(SCHEMA).map_err(error)?;
+        let mut conn = Connection::open_in_memory().map_err(error)?;
+        initialize(&mut conn)?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -221,15 +241,16 @@ impl EnvironmentStore {
     pub async fn append_sample(&self, sample: Sample) -> Result<()> {
         self.with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO health_samples (environment, check_name, at, ok, latency_ms, detail) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO health_samples (environment, check_name, at, ok, latency_ms, detail, slow) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     sample.environment,
                     sample.check,
                     stamp(sample.at),
                     sample.ok as i64,
                     sample.latency_ms as i64,
-                    sample.detail
+                    sample.detail,
+                    sample.slow as i64,
                 ],
             )
             .map_err(error)?;
@@ -243,7 +264,7 @@ impl EnvironmentStore {
         self.with_conn(move |conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT environment, check_name, at, ok, latency_ms, detail FROM health_samples \
+                    "SELECT environment, check_name, at, ok, latency_ms, detail, slow FROM health_samples \
                      WHERE at >= ?1 ORDER BY at",
                 )
                 .map_err(error)?;
@@ -256,6 +277,7 @@ impl EnvironmentStore {
                         row.get::<_, i64>(3)?,
                         row.get::<_, i64>(4)?,
                         row.get::<_, Option<String>>(5)?,
+                        row.get::<_, bool>(6)?,
                     ))
                 })
                 .map_err(error)?
@@ -263,9 +285,9 @@ impl EnvironmentStore {
                 .map_err(error)?;
             Ok(rows
                 .into_iter()
-                .filter_map(|(environment, check, at, ok, latency, detail)| {
+                .filter_map(|(environment, check, at, ok, latency, detail, slow)| {
                     let at = DateTime::parse_from_rfc3339(&at).ok()?.with_timezone(&Utc);
-                    Some(Sample { environment, check, at, ok: ok != 0, latency_ms: latency.max(0) as u64, detail })
+                    Some(Sample { environment, check, at, ok: ok != 0, latency_ms: latency.max(0) as u64, slow, detail })
                 })
                 .collect())
         })
@@ -363,6 +385,7 @@ mod tests {
                     at: now - Duration::days(i),
                     ok,
                     latency_ms: 3,
+                    slow: false,
                     detail: None,
                 })
                 .await
@@ -373,5 +396,28 @@ mod tests {
         let left = store.samples_since(now - Duration::days(365)).await.unwrap();
         assert_eq!(left.len(), 2);
         assert!(!left[0].ok, "oldest first");
+    }
+
+    #[tokio::test]
+    async fn old_database_upgrade_is_idempotent_and_slow_history_survives_reopen() {
+        let root = std::env::temp_dir().join(format!("factory-env-upgrade-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("store.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE health_samples (environment TEXT NOT NULL, check_name TEXT NOT NULL, at TEXT NOT NULL, ok INTEGER NOT NULL, latency_ms INTEGER NOT NULL, detail TEXT)").unwrap();
+        let at = chrono::SubsecRound::trunc_subsecs(Utc::now(), 3);
+        conn.execute("INSERT INTO health_samples VALUES ('prod', 'api', ?1, 1, 9000, '200')", [stamp(at)]).unwrap();
+        drop(conn);
+        let store = EnvironmentStore::open(&path).unwrap();
+        let old = store.samples_since(at).await.unwrap().remove(0);
+        assert!(old.ok && !old.slow);
+        assert_eq!(old.latency_ms, 9000);
+        let slow = Sample { at: at + Duration::seconds(1), slow: true, detail: Some("200; slow: 9000ms exceeds 750ms".into()), ..old.clone() };
+        store.append_sample(slow.clone()).await.unwrap();
+        drop(store);
+        let reopened = EnvironmentStore::open(&path).unwrap();
+        assert_eq!(reopened.samples_since(at).await.unwrap(), vec![old, slow]);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

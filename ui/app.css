@@ -1547,6 +1547,7 @@ button.linklike:hover { color: var(--signal); }
 .sys-strip { display: grid; grid-template-columns: repeat(48, 1fr); gap: 1px; margin: 4px 0 3px; height: 12px; }
 .sys-slot { background: var(--sunk); border-radius: 1px; }
 .sys-slot[data-tone="ok"] { background: var(--run); }
+.sys-slot[data-tone="warn"] { background: var(--wait); }
 .sys-slot[data-tone="bad"] { background: var(--fault); }
 .sys-incidents { margin-top: 10px; border-top: 1px solid var(--line-soft); padding-top: 8px; }
 .sys-incidents h4 { margin: 0 0 4px; font: 600 9px/1.3 var(--cond); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }

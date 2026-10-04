@@ -2433,8 +2433,15 @@ daemon has no HTTP client, and what is worth checking is behind TLS -- with
 an expected status, 200 unless said, and an optional body substring), `tcp`
 (`host`, `port`), or `command` (run with `sh -c` in the scope's directory;
 exit 0 is healthy). `every` defaults to 60s and is at least 5s; `timeout`
-defaults to 10s and is at most 120s and never longer than `every`. `paused:
-true` stops an environment's checks: its status reads `unknown`, and a paused
+defaults to 10s and is at most 120s and never longer than `every`.
+Optional `slow_after_ms` is a positive integer below the timeout in milliseconds
+(e.g. `slow_after_ms: 750`). A successful response above it is recorded as
+slow, with its latency and reason, and makes the environment `degraded`.
+The classification survives restarts and threshold edits; older samples with
+no threshold are not retroactively classified. Slow successes still count as
+available in the availability SLO, do not open outage incidents, and do not
+fail post-deploy verification. Check dots and history strips show them in amber.
+`paused: true` stops an environment's checks: its status reads `unknown`, and a paused
 stretch neither spends nor earns error budget. Everything is checked at load.
 
 **Health.** A loop in the daemon runs every due check of every declared,
@@ -2442,7 +2449,8 @@ unpaused environment, reading the configuration fresh each tick. Each check
 runs in a task of its own, in its own process group, killed at its timeout;
 one that hangs, cannot start or panics is a failed **sample**, and nothing a
 check does can take the daemon down. An environment is `up` when every check's
-latest answer was healthy, `down` when every one failed, `degraded` between,
+latest answer was healthy and fast, `down` when every one failed, `degraded`
+when answers are mixed or a successful answer was slow,
 and `unknown` before anything was checked -- with how long it has been so.
 Two consecutive failures of a check open an **incident** from the first of
 them, the next success closes it, and overlapping incidents of different
@@ -2527,8 +2535,8 @@ installed.
 
 **Not yet:** promoting a release from the page (a `release` task gated by
 policy and approval, `#118` v2), mirroring deployments to GitHub's
-Deployments API, `ensure.sh`'s restarts as journaled actions, "slow" as a
-reason for `degraded`, alerting beyond Factory's own events, external
+Deployments API, `ensure.sh`'s restarts as journaled actions,
+alerting beyond Factory's own events, external
 monitoring as a check source, and more than one host.
 
 ## Tasks and runs
