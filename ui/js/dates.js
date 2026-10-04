@@ -5,10 +5,13 @@ import { datesQuery, datesSummary, expiryText, stateText, dateTone, dependencyTe
 
 let asked = 0;
 let badgeAsked = 0;
-let badgeReport = null;
+let badgeReport;
 
 export async function fetchDates(scope = null) {
-  try { return (await api(datesQuery(scope))).report; } catch { return null; }
+  try {
+    const report = (await api(datesQuery(scope))).report;
+    return report && Array.isArray(report.entries) ? report : null;
+  } catch { return null; }
 }
 
 export async function loadDateBadges() {
@@ -18,6 +21,7 @@ export async function loadDateBadges() {
 }
 
 export function dateBadges(dependency) {
+  if (badgeReport === null) return `<span class="tag sys-badge" data-tone="warn">dates unavailable</span>`;
   const entries = dependencyWarnings(badgeReport, dependency);
   return entries.map(entry => `<a class="tag sys-badge" data-tone="${dateTone(entry)}" href="${esc(entry.href)}" title="${esc(`${entry.observation.name}: ${expiryText(entry)} · ${entry.observation.renew}`)}">${esc(entry.observation.name)} · ${esc(stateText(entry))}${entry.milestone === "scheduled_run" ? " · scheduled risk" : ""}</a>`).join(" ");
 }
@@ -25,6 +29,7 @@ export function dateBadges(dependency) {
 export async function refreshDates() {
   const mine = ++asked;
   const scope = state.scope;
+  if (state.datesScope !== scope) { state.dates = undefined; state.datesScope = scope; renderDates(); }
   const report = await fetchDates(scope);
   if (mine !== asked || scope !== state.scope) return;
   state.dates = report;

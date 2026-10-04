@@ -1765,9 +1765,9 @@ async fn main() -> Result<()> {
             print(&payload, cli.json, |payload| match payload {
                 Payload::ImportantDates { report } => Some(report.entries.iter().map(|entry| {
                     let item = &entry.observation;
-                    let date = item.expires_at.map(|date| date.to_rfc3339()).unwrap_or_else(|| if item.no_expiry { "no reported expiry".into() } else { "unknown".into() });
+                    let date = item.expires_at.map(|date| date.to_rfc3339()).unwrap_or_else(|| if item.no_expiry { if item.source == factory_core::renewals::DateSource::GithubAuth { "no reported expiry".into() } else { "no expiry".into() } } else { "unknown".into() });
                     let dependencies = item.affects.iter().map(|dependency| dependency.label.as_str()).collect::<Vec<_>>().join(", ");
-                    format!("{}  {date}  {:?} / {:?}{}\n  {}\n  affects: {dependencies}\n  renew: {}\n", item.name, entry.state, item.basis, if entry.resolved { " (resolved by native clock)" } else { "" }, item.detail, item.renew)
+                    format!("{}  {date}  {:?} / {:?}{}\n  {}\n  affects: {dependencies}\n  renew: {} · owner: {}\n", item.name, entry.state, item.basis, if entry.resolved { " (resolved by native clock)" } else { "" }, item.detail, item.renew, item.owner)
                 }).collect::<Vec<_>>().join("\n")),
                 _ => None,
             })

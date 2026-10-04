@@ -24,7 +24,11 @@ struct Document {
     scope: Option<Section>,
 }
 
-async fn selected(path: &Path, root: bool) -> std::result::Result<Option<Vec<RenewalDecl>>, ()> {
+async fn selected(
+    path: &Path,
+    root: bool,
+    instance_file: bool,
+) -> std::result::Result<Option<Vec<RenewalDecl>>, ()> {
     let file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -39,7 +43,7 @@ async fn selected(path: &Path, root: bool) -> std::result::Result<Option<Vec<Ren
         return Err(());
     }
     let document: Document = serde_yaml_ng::from_slice(&bytes).map_err(|_| ())?;
-    if !root && !document.renewals.is_empty() {
+    if !instance_file && !document.renewals.is_empty() {
         return Err(());
     }
     let declarations = if root {
@@ -53,8 +57,9 @@ async fn selected(path: &Path, root: bool) -> std::result::Result<Option<Vec<Ren
 
 pub(crate) async fn read(engine: &Engine) -> Result<RenewalDeclarationsFact> {
     let snapshot = engine.factory_snapshot();
+    let instance_path = snapshot.factory_dir().join("config.yaml");
     let mut sources: Vec<(PathBuf, Option<String>, bool, Vec<RenewalDecl>)> = vec![(
-        snapshot.factory_dir().join("config.yaml"),
+        instance_path.clone(),
         None,
         true,
         snapshot.config.renewals.clone(),
@@ -84,7 +89,7 @@ pub(crate) async fn read(engine: &Engine) -> Result<RenewalDeclarationsFact> {
         } else {
             path.with_extension("scope-renewals")
         };
-        let values = match selected(&path, root).await {
+        let values = match selected(&path, root, path == instance_path).await {
             Ok(Some(values)) => {
                 engine
                     .renewal_declaration_cache

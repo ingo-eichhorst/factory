@@ -85,6 +85,7 @@ function stubPage(ids) {
 function answering(report, requested) {
   return async (path) => {
     requested.push(path);
+    if (path === "/api/important-dates") return { status: 200, statusText: "OK", json: async () => ({ status: "ok", data: { kind: "important_dates", report: { entries: [], overdue: 0, due_soon: 0, unknown: 0 } } }) };
     return { status: 200, statusText: "OK", json: async () => ({ status: "ok", data: { kind: "operations", report } }) };
   };
 }

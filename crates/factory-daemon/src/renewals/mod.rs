@@ -302,7 +302,7 @@ fn compose(
             });
         let mut observed = observed.cloned().unwrap_or_else(|| {
             probes::observation(
-                format!("declared:{}:{}", scope.unwrap_or("instance"), decl.name),
+                declaration_id(scope, &decl.name),
                 decl.name.clone(),
                 decl.kind,
                 DateSource::Declaration,
@@ -315,7 +315,7 @@ fn compose(
         if observed.source != DateSource::Declaration {
             used.insert(observed.id.clone());
             let source_id = observed.id.clone();
-            observed.id = format!("renewal:{}:{}", scope.unwrap_or("instance"), decl.name);
+            observed.id = declaration_id(scope, &decl.name);
             observed.detail = format!("{} (observation {source_id})", observed.detail);
         }
         if let Some(scope) = scope {
@@ -345,6 +345,13 @@ fn compose(
             .map(|observation| factory_core::renewals::entry(observation, None, now, runs)),
     );
     entries
+}
+
+fn declaration_id(scope: Option<&str>, name: &str) -> String {
+    format!(
+        "renewal:{}",
+        serde_json::to_string(&(scope, name)).expect("plain identity serializes")
+    )
 }
 
 fn encode(text: &str) -> String {
@@ -395,12 +402,7 @@ async fn observe_loop(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Rec
                 probes::observe(&snapshot, &probes::Tools::default(), Utc::now()),
             )
             .await;
-            let observed = observed.unwrap_or_else(|_| probes::Observed {
-                infrastructure: Vec::new(),
-                credentials: Vec::new(),
-                infrastructure_complete: false,
-                credentials_complete: false,
-            });
+            let observed = observed.unwrap_or_else(|_| probes::Observed::unavailable(Utc::now()));
             if let Err(error) = engine
                 .infrastructure_expiries
                 .replace(observed.infrastructure, observed.infrastructure_complete)
@@ -435,10 +437,12 @@ async fn push(engine: &Engine, report: &ImportantDatesReport) -> Result<()> {
                 Some(RenewalMilestone::OneDay | RenewalMilestone::Expired)
             )
     }) {
-        let identity = format!(
-            "{}:{:?}:{:?}",
-            entry.observation.id, entry.observation.expires_at, entry.milestone
-        );
+        let identity = serde_json::to_string(&(
+            &entry.observation.id,
+            entry.observation.expires_at,
+            entry.milestone,
+        ))
+        .expect("plain push identity serializes");
         if !engine
             .renewal_alerts
             .claim(identity.clone(), report.at)

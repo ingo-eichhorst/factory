@@ -24,6 +24,16 @@ const MAX_OUTPUT: u64 = 2 * 1024 * 1024;
 const MAX_ENDPOINTS: usize = 128;
 const MAX_PAGES: usize = 20;
 
+fn tailscale_program(path: &std::ffi::OsStr, bundled: &Path) -> String {
+    if std::env::split_paths(path).any(|directory| directory.join("tailscale").is_file()) {
+        "tailscale".into()
+    } else if bundled.is_file() {
+        bundled.to_string_lossy().into_owned()
+    } else {
+        "tailscale".into()
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Tools {
     pub openssl: String,
@@ -51,8 +61,12 @@ impl Default for Tools {
         };
         Self {
             openssl: std::env::var("FACTORY_DATES_OPENSSL").unwrap_or_else(|_| "openssl".into()),
-            tailscale: std::env::var("FACTORY_DATES_TAILSCALE")
-                .unwrap_or_else(|_| "tailscale".into()),
+            tailscale: std::env::var("FACTORY_DATES_TAILSCALE").unwrap_or_else(|_| {
+                tailscale_program(
+                    &crate::provision::augmented_path(),
+                    Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+                )
+            }),
             github: std::env::var("FACTORY_DATES_GITHUB").unwrap_or_else(|_| "gh".into()),
             openshell: std::env::var("FACTORY_DATES_OPENSHELL").ok(),
             metadata_home,
@@ -492,6 +506,33 @@ pub(crate) struct Observed {
     pub infrastructure_complete: bool,
     pub credentials_complete: bool,
 }
+impl Observed {
+    pub(crate) fn unavailable(now: DateTime<Utc>) -> Self {
+        let mut infrastructure = observation(
+            "discovery:infrastructure".into(),
+            "Infrastructure expiry discovery".into(),
+            DateKind::Other,
+            DateSource::Tls,
+            now,
+        );
+        let mut credentials = observation(
+            "discovery:providers".into(),
+            "Provider expiry discovery".into(),
+            DateKind::Other,
+            DateSource::Openshell,
+            now,
+        );
+        for item in [&mut infrastructure, &mut credentials] {
+            issue(item, "metadata discovery did not finish within its deadline; last-known sources retained");
+        }
+        Self {
+            infrastructure: vec![infrastructure],
+            credentials: vec![credentials],
+            infrastructure_complete: false,
+            credentials_complete: false,
+        }
+    }
+}
 pub(crate) async fn observe(factory: &Factory, tools: &Tools, now: DateTime<Utc>) -> Observed {
     if !tools.enabled {
         return Observed {
@@ -564,6 +605,8 @@ pub(crate) async fn observe(factory: &Factory, tools: &Tools, now: DateTime<Utc>
                         },
                         Err(_) => infrastructure_complete = false,
                     }
+                } else {
+                    infrastructure_complete = false;
                 }
             }
             Err(_) => infrastructure_complete = false,
@@ -573,7 +616,12 @@ pub(crate) async fn observe(factory: &Factory, tools: &Tools, now: DateTime<Utc>
         .openshell
         .clone()
         .or_else(|| crate::openshell::resolve_cli(None).ok());
+    if default_cli.is_none() {
+        infrastructure_complete = false;
+        credentials_complete = false;
+    }
     let mut active_gateway = None;
+    let mut gateway_certificates: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     let mut gateways: BTreeMap<
         (String, Option<String>),
         Vec<(String, String, factory_core::openshell::OpenshellConfig)>,
@@ -608,12 +656,16 @@ pub(crate) async fn observe(factory: &Factory, tools: &Tools, now: DateTime<Utc>
                     gateways
                         .entry((cli.clone(), Some(name.into())))
                         .or_default();
+                    let certificate_ids = gateway_certificates
+                        .entry((cli.clone(), name.into()))
+                        .or_default();
                     if let Some((host, port)) = gateway
                         .get("endpoint")
                         .and_then(|url| url.as_str())
                         .and_then(endpoint)
                     {
                         let (item, target) = tls_item(host, port, now);
+                        certificate_ids.push(item.id.clone());
                         certificates
                             .entry(item.id.clone())
                             .or_insert((item, target));
@@ -633,6 +685,7 @@ pub(crate) async fn observe(factory: &Factory, tools: &Tools, now: DateTime<Utc>
                             now,
                         );
                         item.renew = "refresh the OpenShell gateway's public mTLS certificates with its owner".into();
+                        certificate_ids.push(item.id.clone());
                         certificates
                             .insert(item.id.clone(), (item, CertificateTarget::PublicFile(path)));
                     }
@@ -666,6 +719,24 @@ pub(crate) async fn observe(factory: &Factory, tools: &Tools, now: DateTime<Utc>
         credentials_complete = false;
     }
     for ((cli, gateway), agents) in gateways.into_iter().take(32) {
+        if let Some(ids) = gateway
+            .as_ref()
+            .and_then(|gateway| gateway_certificates.get(&(cli.clone(), gateway.clone())))
+        {
+            for id in ids {
+                if let Some((certificate, _)) = certificates.get_mut(id) {
+                    certificate
+                        .affects
+                        .extend(agents.iter().map(|(scope, agent, _)| DateDependency {
+                            scope: Some(scope.clone()),
+                            agent: Some(agent.clone()),
+                            environment: None,
+                            provider: None,
+                            label: format!("{scope}/{agent}"),
+                        }));
+                }
+            }
+        }
         let listed =
             tokio::time::timeout(Duration::from_secs(30), providers(&cli, gateway.as_deref()))
                 .await
@@ -891,6 +962,18 @@ mod tests {
         }
         let _fixture = Fixture(root.clone());
         let cli = root.join("fixture");
+        let bundled = root.join("Tailscale");
+        std::fs::write(&bundled, "fixture").unwrap();
+        assert_eq!(
+            tailscale_program(std::ffi::OsStr::new("/no-tools"), &bundled),
+            bundled.to_string_lossy()
+        );
+        assert_eq!(
+            tailscale_program(std::ffi::OsStr::new("/no-tools"), &root.join("missing")),
+            "tailscale"
+        );
+        std::fs::write(root.join("tailscale"), "fixture").unwrap();
+        assert_eq!(tailscale_program(root.as_os_str(), &bundled), "tailscale");
         let write = |text: &str| {
             std::fs::write(&cli, text).unwrap();
             std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();

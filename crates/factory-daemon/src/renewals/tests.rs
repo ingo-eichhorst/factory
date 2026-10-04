@@ -14,6 +14,31 @@ struct Fixture {
     root: PathBuf,
     engine: Arc<Engine>,
 }
+
+#[test]
+fn renewal_async_frames_stay_bounded_on_daemon_worker_stacks() {
+    let f = fixture();
+    let snapshot = f.engine.factory_snapshot();
+    let tools = probes::Tools::default();
+    let (_shutdown, rx) = tokio::sync::watch::channel(false);
+    let dates = std::mem::size_of_val(&f.engine.important_dates(None));
+    let probes = std::mem::size_of_val(&probes::observe(&snapshot, &tools, Utc::now()));
+    let observer = std::mem::size_of_val(&observe_loop(f.engine.clone(), rx.clone()));
+    let supervisor = std::mem::size_of_val(&run(f.engine.clone(), rx));
+    let router = std::mem::size_of_val(
+        &f.engine
+            .handle_request(factory_core::protocol::Request::ImportantDates { scope: None }),
+    );
+    eprintln!("async frames: dates={dates}, probes={probes}, observer={observer}, supervisor={supervisor}, router={router}");
+    assert!(
+        dates < 256 * 1024
+            && probes < 256 * 1024
+            && observer < 256 * 1024
+            && supervisor < 256 * 1024
+            && router < 256 * 1024,
+        "metadata jobs must not exhaust daemon worker stacks"
+    );
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
@@ -192,6 +217,87 @@ async fn failed_discovery_preserves_a_last_known_expired_date_across_a_restart()
         restarted.important_dates(None).await.unwrap().entries[0].milestone,
         None
     );
+}
+
+#[tokio::test]
+async fn instance_scope_and_global_declarations_never_share_an_inbox_identity() {
+    let f = fixture();
+    let mut snapshot = f.engine.factory_snapshot();
+    snapshot.config.scopes[0].name = "instance".into();
+    snapshot.config.scope = Some(snapshot.config.scopes[0].clone());
+    let engine = engine(snapshot);
+    write(&f.root.join(".factory/config.yaml"), "renewals: [{name: licence, kind: licence, expires: 2020-01-01}]\nscope:\n renewals: [{name: licence, kind: licence, expires: 2020-01-01}]\n");
+    let report = engine.important_dates(None).await.unwrap();
+    assert_eq!(report.entries.len(), 2);
+    assert_ne!(
+        report.entries[0].observation.id,
+        report.entries[1].observation.id
+    );
+    assert_ne!(
+        declaration_id(Some("a:b"), "c"),
+        declaration_id(Some("a"), "b:c")
+    );
+}
+
+#[tokio::test]
+async fn separate_scope_file_rejects_misplaced_root_renewals_and_retains_its_last_good_section() {
+    let f = fixture();
+    let child = f.root.join("child");
+    std::fs::create_dir_all(child.join(".factory")).unwrap();
+    let mut snapshot = f.engine.factory_snapshot();
+    snapshot.config.scope = None;
+    snapshot.config.scopes[0].path = child.clone();
+    let engine = engine(snapshot);
+    let path = child.join(".factory/config.yaml");
+    write(
+        &path,
+        "scope:\n renewals: [{name: licence, kind: licence, expires: 2020-01-01}]\n",
+    );
+    let before = engine.important_dates(None).await.unwrap();
+    assert_eq!(before.entries.len(), 1);
+    assert!(before.observation_issues.is_empty());
+    write(&path, "renewals: [{name: misplaced, kind: licence, expires: 2027-01-01}]\nscope:\n renewals: []\n");
+    let after = engine.important_dates(None).await.unwrap();
+    assert_eq!(after.entries.len(), 1);
+    assert_eq!(
+        after.entries[0].observation.id,
+        before.entries[0].observation.id
+    );
+    assert_eq!(after.entries[0].milestone, Some(RenewalMilestone::Expired));
+    assert_eq!(after.observation_issues.len(), 1);
+}
+
+#[tokio::test]
+async fn missing_expiry_metadata_does_not_silently_renew_an_expired_dependency() {
+    let f = fixture();
+    let expired = dated("provider", Utc::now() - chrono::Duration::days(1));
+    f.engine
+        .credential_expiries
+        .replace(vec![expired.clone()], true)
+        .await
+        .unwrap();
+    let mut unknown = expired.clone();
+    unknown.expires_at = None;
+    unknown.basis = DateBasis::Unknown;
+    f.engine
+        .credential_expiries
+        .replace(vec![unknown], true)
+        .await
+        .unwrap();
+    let report = f.engine.important_dates(None).await.unwrap();
+    assert_eq!(report.entries[0].observation.expires_at, expired.expires_at);
+    assert_eq!(report.entries[0].state, DateState::Unknown);
+    assert_eq!(report.entries[0].milestone, Some(RenewalMilestone::Expired));
+    let mut renewed = expired;
+    renewed.expires_at = Some(Utc::now() + chrono::Duration::days(90));
+    f.engine
+        .credential_expiries
+        .replace(vec![renewed], true)
+        .await
+        .unwrap();
+    assert!(f.engine.important_dates(None).await.unwrap().entries[0]
+        .milestone
+        .is_none());
 }
 
 #[tokio::test]
@@ -582,6 +688,29 @@ async fn default_discovery_reads_real_public_tls_notafter_and_only_stats_claude_
         !args.contains("tls.key"),
         "the ledger never asks a tool to read the private key"
     );
+    let mut snapshot = f.engine.factory_snapshot();
+    snapshot.config.scopes[0].agents[0].sandbox = factory_core::config::Sandbox::Openshell;
+    snapshot.config.scopes[0].agents[0].openshell = Some(serde_yaml_ng::from_str(&format!("cli: {}\ngateway: default\nimage: custom-image\nproviders: [factory-claude]\npolicy: {{}}\n", cli.display())).unwrap());
+    let bound = probes::observe(&snapshot, &tools, Utc::now()).await;
+    for id in [
+        "tls:gateway.fixture:8443",
+        "openshell-cert:default:ca.crt",
+        "openshell:default:factory-claude",
+    ] {
+        let date = bound
+            .infrastructure
+            .iter()
+            .chain(&bound.credentials)
+            .find(|date| date.id == id)
+            .unwrap();
+        assert!(
+            date.affects
+                .iter()
+                .any(|dependency| dependency.scope.as_deref() == Some("demo")
+                    && dependency.agent.as_deref() == Some("curator")),
+            "{id} must warn its actual gateway dependant"
+        );
+    }
     // A hostile public filename cannot redirect metadata discovery into a
     // private key. Existing expiry remains last-known on that failed source.
     std::fs::remove_file(public.join("ca.crt")).unwrap();

@@ -91,6 +91,7 @@ test("a stale scoped response cannot replace the new selection; unavailable neve
   let finish;
   globalThis.fetch = () => new Promise(resolve => { finish = resolve; });
   const old = refreshDates();
+  assert.match(host.innerHTML, /Loading important dates/);
   state.scope = "new";
   globalThis.fetch = async () => response(report([]));
   await refreshDates();
@@ -111,4 +112,7 @@ test("all three dependency badge surfaces use the shared metadata; badges escape
   for (const name of ["agents", "sandboxes", "environments"]) {
     assert.match(readFileSync(new URL(`../js/${name}.js`, import.meta.url), "utf8"), /dateBadges\(/);
   }
+  globalThis.fetch = async () => response(null);
+  await loadDateBadges();
+  assert.match(dateBadges({ scope: "demo", agent: "curator" }), /dates unavailable/);
 });

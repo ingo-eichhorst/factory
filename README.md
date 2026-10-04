@@ -2360,6 +2360,7 @@ Sandboxes; environment dependencies light badges on Operations.
 
 No renewal configuration is needed for metadata discovery. In the background,
 Factory reads Tailscale's local `status --json` and `serve status --json`, checks
+the macOS app-bundled CLI when `tailscale` is not on PATH, checks
 the standing HTTPS ports 8790/8791 and any other advertised HTTPS listeners,
 and checks configured `environments:` HTTPS URLs. It reads OpenShell's
 `gateway list -o json`, inspects gateway peer certificates and the gateway's
@@ -2454,6 +2455,9 @@ inspection, unreadable dummy-token metadata, source-command nonexecution,
 native clock behavior, durable push receipts and a real daemon HTTP/CLI
 restart/scheduled-warning check. These fixtures do not themselves prove a
 particular live gateway or curator credential is installed and usable.
+When running a debug daemon directly outside Cargo, use the repository's
+configured debug stack headroom (`RUST_MIN_STACK=8388608`); Cargo supplies this
+automatically for its subprocesses. This is not a release-build requirement.
 
 ## Line
 

@@ -115,8 +115,18 @@ impl<L: ExpiryOwner> ObservationStore<L> {
             tx.execute(&format!("DELETE FROM {}", L::TABLE), [])
                 .map_err(error)?;
             for mut observation in observations {
-                if observation.issue.is_some() {
+                if observation.issue.is_some()
+                    || (observation.expires_at.is_none() && !observation.no_expiry)
+                {
                     if let Some(old) = previous.get(&observation.id) {
+                        if observation.issue.is_none()
+                            && (old.expires_at.is_some() || old.no_expiry)
+                        {
+                            observation.issue = Some(
+                                "source no longer reports an expiry; retaining last-known expiry"
+                                    .into(),
+                            );
+                        }
                         observation.expires_at = old.expires_at;
                         observation.no_expiry = old.no_expiry;
                         observation.observed_at = old.observed_at;
