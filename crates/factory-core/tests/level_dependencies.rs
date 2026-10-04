@@ -94,6 +94,20 @@ fn physical_level_crates_depend_only_on_kernel_and_the_directly_lower_level() {
         let owner = packages.iter().find(|p| p["name"] == name).unwrap();
         assert_eq!(owner["metadata"]["factory"]["level"], level);
     }
+    // These are outside-stack owners, not level/facade escape hatches.
+    for name in ["factory-composition", "factory-interfaces"] {
+        let outside = packages.iter().find(|p| p["name"] == name).unwrap();
+        assert!(outside["metadata"]["factory"]["level"].is_null());
+        for dependency in outside["dependencies"].as_array().unwrap() {
+            assert!(
+                !matches!(
+                    dependency["name"].as_str(),
+                    Some("factory-core" | "factory-daemon" | "factory-plugins")
+                ),
+                "{name} must not import the facade, router or plugins"
+            );
+        }
+    }
     let errors = violations(packages);
     assert!(
         errors.is_empty(),
@@ -140,6 +154,8 @@ fn aliases_target_tables_and_dev_build_edges_cannot_reach_outside_the_ladder() {
         "factory-daemon",
         "factory-plugins",
         "factory-cli",
+        "factory-composition",
+        "factory-interfaces",
         "factory-unknown-level",
         "innocent-workspace-bridge",
     ] {

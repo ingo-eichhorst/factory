@@ -781,6 +781,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "factory-composition"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "factory-agents",
+ "factory-assurance",
+ "factory-direction",
+ "factory-environment",
+ "factory-infrastructure",
+ "factory-kernel",
+ "factory-process",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+]
+
+[[package]]
 name = "factory-core"
 version = "0.1.0"
 dependencies = [
@@ -790,9 +808,11 @@ dependencies = [
  "csv",
  "factory-agents",
  "factory-assurance",
+ "factory-composition",
  "factory-direction",
  "factory-environment",
  "factory-infrastructure",
+ "factory-interfaces",
  "factory-kernel",
  "factory-process",
  "serde",
@@ -874,6 +894,25 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
+]
+
+[[package]]
+name = "factory-interfaces"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "factory-agents",
+ "factory-assurance",
+ "factory-composition",
+ "factory-direction",
+ "factory-environment",
+ "factory-infrastructure",
+ "factory-kernel",
+ "factory-process",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
