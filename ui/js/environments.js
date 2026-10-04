@@ -460,9 +460,12 @@ function deploymentMirrorHTML(offer) {
   const link = `https://github.com/${plan.repository}/deployments`;
   const status = current ? "Published" : "Awaiting explicit approval";
   const pending = publishingMirrors.has(plan.deployment);
+  const disabled = pending ? " disabled" : "";
+  let review = "";
+  if (!current) review = `<button type="button" data-deployment-publish="${esc(plan.deployment)}"${disabled}>Review mirror plan</button>`;
+  const error = receipt?.error ? `<p class="bk-bad">${esc(receipt.error)}</p>` : "";
   return `<div class="sub">GitHub: <a href="${esc(link)}" target="_blank" rel="noopener">${esc(plan.repository)}</a> · ${status}
-    ${receipt?.error ? `<p class="bk-bad">${esc(receipt.error)}</p>` : ""}
-    ${current ? "" : `<button type="button" data-deployment-publish="${esc(plan.deployment)}"${pending ? " disabled" : ""}>Review mirror plan</button>`}</div>`;
+    ${error}${review}</div>`;
 }
 
 export async function publishDeployment(id, approval) {
