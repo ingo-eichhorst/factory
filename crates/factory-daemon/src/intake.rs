@@ -2431,6 +2431,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_part_workflow_is_never_released_as_one_item() {
+        let engine = engine();
+        part_flow(&engine).await;
+        let item = add(&engine, "Build the whole subsystem").await;
+
+        // An item that is not a plan cannot be routed to one.
+        let mut single = assessment("demo");
+        single.routing.workflow = Some("part-flow".into());
+        let why = engine.intake_assess(&Caller::Owner, &item.id, single, false).await.unwrap_err();
+        assert!(why.to_string().contains("part-flow is a part workflow"), "{why}");
+
+        // A plan stored without --decide, and so with a ready verdict and
+        // no expansion yet: `decide ready` would drop the plan and run the
+        // template once, for no part.
+        let mut plan = plan_through("part-flow");
+        plan.complexity = 7;
+        let stored = engine.intake_assess(&Caller::Owner, &item.id, plan, false).await.unwrap();
+        assert_eq!(stored.intake.as_ref().unwrap().triage.as_ref().unwrap().verdict, Verdict::Ready);
+        let why = engine.intake_decide(&Caller::Owner, &item.id, Decision::Ready { run: false }).await.unwrap_err();
+        assert!(why.to_string().contains("Expand it instead"), "{why}");
+        let after = engine.require(&item.id).await.unwrap();
+        assert_eq!(after.status, TaskStatus::Intake, "nothing was released");
+        assert!(after.intake.as_ref().unwrap().decision.is_none());
+        assert!(engine.workflows.runs(None, None, 10).await.unwrap().is_empty(), "and no workflow started");
+    }
+
+    #[tokio::test]
     async fn the_triage_run_may_propose_a_split_but_not_make_one() {
         let engine = engine();
         let item = add(&engine, "Everything at once").await;

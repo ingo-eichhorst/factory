@@ -3252,4 +3252,142 @@ mod tests {
     fn node_named(id: &str) -> WorkflowNode {
         node(id)
     }
+
+    // --- #235 follow-up: QA of #238 ------------------------------------
+
+    /// The part values a real expansion writes in, for `part`.
+    fn part_values(part: &str) -> BTreeMap<String, String> {
+        PART_INPUTS
+            .iter()
+            .map(|name| {
+                let value = match *name {
+                    "part_id" => part.to_string(),
+                    "integration_branch" => "factory/issue-7".to_string(),
+                    other => format!("<{other}>"),
+                };
+                (name.to_string(), value)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_epic_part_review_sends_work_to_its_own_parts_implement_and_names_the_integration_branch() {
+        let draft: WorkflowDraft =
+            serde_yaml_ng::from_str(include_str!("../../../workflows/epic-part.yaml")).unwrap();
+        let template = WorkflowDefinition::from_draft(draft);
+        let shape = template.part_shape().unwrap();
+        let copy = template.expand_part(&shape, "api", &part_values("api"), "brief");
+        let review = copy.nodes.iter().find(|n| n.id == "api-review").unwrap();
+        assert_eq!(review.exits[0].to, "api-implement");
+        assert!(review.task.instructions.contains("done --send-to api-implement`"), "{}", review.task.instructions);
+        assert!(!review.task.instructions.contains("--send-to implement"), "the bare step id is refused after expansion");
+        assert!(review.task.instructions.contains("git diff factory/issue-7...HEAD"));
+        let implement = copy.nodes.iter().find(|n| n.id == "api-implement").unwrap();
+        assert!(implement.task.instructions.contains("git merge factory/issue-7"), "{}", implement.task.instructions);
+        assert!(!implement.task.instructions.contains("factory/*"), "names the one integration branch, not every Factory branch");
+        for node in &copy.nodes {
+            assert!(placeholders(&node.task.instructions).is_empty(), "{} keeps a placeholder", node.id);
+            assert!(placeholders(&node.task.title).is_empty(), "{} keeps a placeholder", node.id);
+        }
+    }
+
+    #[test]
+    fn a_gate_sending_the_terminal_back_after_integration_rework_moves_it_past_the_round_it_ran() {
+        let mut run = two_part_run("feature");
+        let plans = plan("feature", &[("tests", Some("cargo test"), None)]);
+        run.definition = run.definition.inject(&plans).0;
+        run.nodes = WorkflowRun::new(run.definition.clone(), WorkflowActor::Owner).nodes;
+        with_tasks(&mut run);
+        for node in &mut run.nodes {
+            node.status = WorkflowNodeStatus::Done;
+            node.exits_evaluated = true;
+        }
+        // Integration sent part a back once: the deliverable moved a round
+        // (the daemon's half), and the body down to the terminal with it.
+        let implement = run.nodes.iter_mut().find(|n| n.node_id == "a-implement").unwrap();
+        implement.round += 1;
+        implement.integration_rounds += 1;
+        let a = run.integration.as_ref().unwrap().parts[0].clone();
+        run.rework_part_body(&a);
+        let gate = run.nodes.iter().find(|n| n.node_id == "a-review.tests").unwrap();
+        assert_eq!((gate.round, gate.integration_rounds), (1, 1), "the terminal's gate moves with it");
+
+        // a-review then ran round 1, and its gate failed: a person accepts
+        // the rework, so the gate sends a-review back.
+        run.nodes.iter_mut().find(|n| n.node_id == "a-review").unwrap().status = WorkflowNodeStatus::Done;
+        assert!(matches!(run.send_back("a-review.tests", "a-review"), SendBack::Sent { round: 1, .. }));
+        let review = run.nodes.iter().find(|n| n.node_id == "a-review").unwrap();
+        assert_eq!(review.round, 2, "past round 1, which it already ran -- equal would be refused as superseded");
+        assert_eq!(review.exit_rounds(), 1);
+        let gate = run.nodes.iter().find(|n| n.node_id == "a-review.tests").unwrap();
+        assert_eq!(gate.exit_rounds(), 1, "the gate's own budget counts its one send-back");
+    }
+
+    #[test]
+    fn a_single_node_part_sent_back_by_its_gate_after_integration_rework_still_moves_forward() {
+        // A part without a template: integration moves only the part node,
+        // never its gate -- as it always has.
+        let mut run = two_part_run("feature");
+        let plans = plan("feature", &[("tests", Some("cargo test"), None)]);
+        run.definition = run.definition.inject(&plans).0;
+        run.nodes = WorkflowRun::new(run.definition.clone(), WorkflowActor::Owner).nodes;
+        with_tasks(&mut run);
+        for node in &mut run.nodes {
+            node.status = WorkflowNodeStatus::Done;
+        }
+        let implement = run.nodes.iter_mut().find(|n| n.node_id == "a-implement").unwrap();
+        implement.round = 1;
+        assert!(matches!(run.send_back("a-implement.tests", "a-implement"), SendBack::Sent { .. }));
+        assert_eq!(run.nodes.iter().find(|n| n.node_id == "a-implement").unwrap().round, 2);
+    }
+
+    #[test]
+    fn a_review_sending_back_after_a_gate_did_moves_every_node_forward_and_counts_only_its_own_rounds() {
+        let mut gate = gate_node("checked", "tests");
+        gate.gate.as_mut().unwrap().command = Some("cargo test".into());
+        gate.exits = vec![WorkflowExit { to: "implement".into(), check: None, agent: Some("fix it".into()), max_rounds: Some(5) }];
+        gate.gate.as_mut().unwrap().locked = true;
+        let mut review = node("review");
+        review.exits = vec![WorkflowExit { to: "implement".into(), check: None, agent: Some("fix it".into()), max_rounds: Some(5) }];
+        let def = definition(
+            vec![node("implement"), gate, review],
+            vec![e("implement", "checked"), e("checked", "review")],
+        );
+        def.validate().unwrap();
+        let mut run = WorkflowRun::new(def, WorkflowActor::Owner);
+        with_tasks(&mut run);
+        for node in &mut run.nodes {
+            node.status = WorkflowNodeStatus::Done;
+        }
+        assert!(matches!(run.send_back("checked", "implement"), SendBack::Sent { round: 1, .. }));
+        for node in &mut run.nodes {
+            node.status = WorkflowNodeStatus::Done;
+        }
+        // implement ran round 1; the review, still on round 0, sends it back.
+        assert!(matches!(run.send_back("review", "implement"), SendBack::Sent { round: 1, .. }));
+        let round = |id: &str| run.nodes.iter().find(|n| n.node_id == id).unwrap().round;
+        assert_eq!(round("implement"), 2, "never back onto round 1, which implement already ran");
+        assert_eq!(round("review"), 1);
+        assert_eq!(run.nodes.iter().find(|n| n.node_id == "review").unwrap().exit_rounds(), 1, "the gate's round is not the review's");
+    }
+
+    #[test]
+    fn a_before_rule_aimed_at_a_part_workflow_step_is_checked_in_every_copy() {
+        let mut publish = node("publish");
+        publish.task.worktree = Some(true);
+        let mut template = definition(vec![publish], vec![]);
+        template.category = Some("feature".into());
+        template.part = Some(PartSpec::default());
+        let plans = plan("feature", &[("sbom", Some("syft ."), Some("publish"))]);
+        let violations = template.inject(&plans).0.ordering_violations(&plans);
+        assert!(violations.iter().any(|v| v.starts_with("publish ")), "the template as written: {violations:?}");
+
+        let preview = template.part_preview(&template.part_shape().unwrap());
+        let violations = preview.inject(&plans).0.ordering_violations(&plans);
+        assert!(violations.iter().any(|v| v.starts_with("a-publish ")), "a part's copy of `publish` is `publish`: {violations:?}");
+        // Not a template step: a node merely ending in the name is not it.
+        let mut stray = definition(vec![node("re-publish")], vec![]);
+        stray.category = Some("feature".into());
+        assert!(stray.inject(&plans).0.ordering_violations(&plans).is_empty());
+    }
 }

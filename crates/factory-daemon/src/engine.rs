@@ -3283,21 +3283,10 @@ impl Engine {
             }
         }
         if feedback_round > 0 {
-            // `#235`: a round is a run of this node's sequence, and a part
-            // workflow's node also runs again when integration sends its
-            // part back -- which spends no workflow exit's budget. Say which.
             let integration_rounds = workflow_node.as_ref().map_or(0, |(node, _)| node.integration_rounds);
-            let title = if integration_rounds > 0 {
-                format!(
-                    "Workflow rework round {feedback_round} ({} sent back by a workflow step, {integration_rounds} by integration)",
-                    feedback_round.saturating_sub(integration_rounds)
-                )
-            } else {
-                format!("Workflow rework round {feedback_round}")
-            };
             upstream.push(UpstreamOutput {
                 node_id: "feedback-round".into(), task_id: task.id.clone(),
-                title,
+                title: feedback_round_title(feedback_round, integration_rounds),
                 result: Some("Feedback on the prior attempt is recorded as a new run of the same task.".into()),
             });
         }
@@ -3667,7 +3656,7 @@ impl Engine {
     /// then workflow parents in definition order -- with the result each
     /// finished with. A store or workflow-run read failure is logged and
     /// treated as "nothing found" rather than failing dispatch.
-    async fn upstream_outputs(&self, task: &Task) -> Vec<UpstreamOutput> {
+    pub(crate) async fn upstream_outputs(&self, task: &Task) -> Vec<UpstreamOutput> {
         let mut outputs = Vec::new();
         for parent_task_id in &task.depends_on {
             match self.store.get(parent_task_id).await {
@@ -5198,6 +5187,20 @@ struct WindowReading {
     used_percent: Option<f64>,
     plan_type: Option<String>,
     attribution_quality: Option<String>,
+}
+
+/// The upstream line a workflow feedback run is dispatched with. A round is
+/// one in this node's own sequence, and a part workflow's node (`#235`) also
+/// runs again when integration sends its part back -- which spends no
+/// workflow exit's budget -- so the line says how many were which.
+pub(crate) fn feedback_round_title(round: u32, integration_rounds: u32) -> String {
+    if integration_rounds == 0 {
+        return format!("Workflow rework round {round}");
+    }
+    format!(
+        "Workflow rework round {round} ({} sent back by a workflow step, {integration_rounds} by integration)",
+        round.saturating_sub(integration_rounds)
+    )
 }
 
 fn truncate(s: &str, n: usize) -> String {
