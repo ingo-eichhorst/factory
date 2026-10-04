@@ -6,6 +6,7 @@ mod l2;
 mod l3;
 mod l4;
 mod l5;
+mod process_metrics;
 
 use crate::engine::Engine;
 use chrono::{DateTime, Utc};
@@ -46,6 +47,20 @@ pub(crate) struct ReleaseSbomQuery {
     pub scope: String,
     pub commit: String,
     pub version: Option<String>,
+}
+
+pub(crate) struct ProductionQuery {
+    pub scope: Option<String>,
+    pub now: DateTime<Utc>,
+    pub minutes: Option<u32>,
+    pub bin: ProductionBin,
+}
+
+pub(crate) struct ProcessMetricsQuery {
+    pub scope: Option<String>,
+    pub now: DateTime<Utc>,
+    pub window: Option<factory_core::metrics::MetricsWindow>,
+    pub names: BTreeSet<String>,
 }
 
 /// Registered producer, with a response constrained to its own fact type.
@@ -96,6 +111,9 @@ port!(InfrastructureExpiryFact, l1, (), InfrastructureExpiryFact);
 port!(RenewalDeclarationsFact, l1, (), RenewalDeclarationsFact);
 port!(CredentialExpiryFact, l2, (), CredentialExpiryFact);
 port!(ScheduledRunDatesFact, l4, (), ScheduledRunDatesFact);
+port!(ProductionFact, l4, ProductionQuery, ProductionFact);
+port!(ProcessMetricFact, l4, ProcessMetricsQuery, BTreeMap<String, ProcessMetricFact>);
+port!(BenchResolutionFact, l5, String, Option<BenchResolutionFact>);
 port!(BackupFact, l1, DateTime<Utc>, BackupFact);
 port!(ScopeCapacityFact, l1, (), ScopeCapacityFact);
 port!(EnvironmentMetricFact, l1, Option<String>, BTreeMap<String, EnvironmentMetricFact>);
@@ -129,6 +147,9 @@ mod tests {
     fn registered<F: Port>() {}
     #[test]
     fn every_catalogued_fact_has_a_typed_producer_owned_port() {
+        registered::<ProductionFact>();
+        registered::<ProcessMetricFact>();
+        registered::<BenchResolutionFact>();
         registered::<DaemonConfigFact>();
         registered::<BackupFact>();
         registered::<ScopeCapacityFact>();
@@ -195,5 +216,27 @@ mod tests {
         assert!(metrics.contains("get::<factory_kernel::CostReport>") && metrics.contains("SpendBasis::Finished"));
         let branch = metrics.split("} else if matches!(id.as_str(), \"unit_cost\" | \"tokens_per_run\") {").nth(1).unwrap().split("} else if is_usage_metric").next().unwrap();
         assert!(branch.contains("sources.spend") && !branch.contains("usage_value"));
+    }
+
+    #[test]
+    fn registry_process_and_benchmark_reads_are_producer_owned() {
+        let metrics = include_str!("../metrics.rs").split("#[cfg(test)]").next().unwrap();
+        for forbidden in ["self.store.", "self.bench.", ".occupancy(", ".production_at("] {
+            assert!(!metrics.contains(forbidden), "metrics bypasses a fact port: {forbidden}");
+        }
+        for fact in ["ProductionFact", "ProcessMetricFact", "BenchResolutionFact"] {
+            assert!(metrics.contains(&format!("get::<factory_kernel::{fact}>")));
+        }
+        let process = include_str!("process_metrics.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(process.contains("impl Provide<ProductionFact> for Provider"));
+        assert!(process.contains("impl Provide<ProcessMetricFact> for Provider"));
+        assert!(!process.contains("crate::metrics") && !process.contains("crate::policies"));
+        for file in [
+            include_str!("../operations.rs"), include_str!("../intake.rs"),
+            include_str!("../quality/mod.rs"), include_str!("../environments/mod.rs"),
+            include_str!("../environments/recovery.rs"),
+        ] {
+            assert!(!file.split("#[cfg(test)]").next().unwrap().contains("crate::policies::subtree_scopes"));
+        }
     }
 }

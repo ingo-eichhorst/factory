@@ -26,6 +26,8 @@
 //!   identifies page/API composition outside the six-level ladder.
 
 mod duration;
+mod process_metrics;
+pub use process_metrics::{ProductionBin, ProductionBucket, ProductionFact, ProcessMetricFact, BenchResolutionFact};
 mod fact_vocabulary;
 pub mod facts;
 pub use fact_vocabulary::*;

@@ -256,7 +256,7 @@ impl Engine {
         let members: Option<BTreeSet<String>> = match scope {
             None => None,
             Some(name) => {
-                let (asked, subtree) = crate::policies::subtree_scopes(&snapshot, Some(name))?;
+                let (asked, subtree) = factory_core::config::subtree_scopes(&snapshot, Some(name))?;
                 let mut members: BTreeSet<String> = subtree.into_iter().map(|s| s.name).collect();
                 if let Some(asked) = asked {
                     members.insert(asked.name);
@@ -1171,7 +1171,7 @@ impl Engine {
         let members: Option<BTreeSet<String>> = match scope {
             None => None,
             Some(name) => {
-                let (asked, subtree) = crate::policies::subtree_scopes(&snapshot, Some(name))?;
+                let (asked, subtree) = factory_core::config::subtree_scopes(&snapshot, Some(name))?;
                 let mut members: BTreeSet<String> = subtree.into_iter().map(|s| s.name).collect();
                 if let Some(asked) = asked {
                     members.insert(asked.name);

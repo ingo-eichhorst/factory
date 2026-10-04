@@ -199,7 +199,7 @@ impl Engine {
         let scope = match scope {
             None => None,
             Some(name) => {
-                let (asked, subtree) = crate::policies::subtree_scopes(&snapshot, Some(name))?;
+                let (asked, subtree) = factory_core::config::subtree_scopes(&snapshot, Some(name))?;
                 let asked = asked.expect("a named scope resolves or errors");
                 let mut members: BTreeSet<String> = subtree.into_iter().map(|s| s.name).collect();
                 members.insert(asked.name.clone());

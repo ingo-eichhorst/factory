@@ -232,7 +232,7 @@ impl Engine {
         let members: Option<BTreeSet<String>> = match scope.as_deref() {
             None => None,
             Some(name) => {
-                let (asked, subtree) = crate::policies::subtree_scopes(&factory, Some(name))?;
+                let (asked, subtree) = factory_core::config::subtree_scopes(&factory, Some(name))?;
                 let mut names: BTreeSet<String> = subtree.into_iter().map(|s| s.name).collect();
                 if let Some(asked) = asked {
                     names.insert(asked.name);

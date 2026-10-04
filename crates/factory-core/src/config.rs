@@ -801,6 +801,11 @@ fn default_version() -> u32 {
     1
 }
 
+/// Common scope-tree resolution, independent of any policy service.
+pub fn subtree_scopes(snapshot: &Factory, scope: Option<&str>) -> Result<(Option<Scope>, Vec<Scope>)> {
+    snapshot.subtree_scopes(scope)
+}
+
 /// Nested files read only `scope:`; never silently drop renewal metadata.
 pub fn refuse_misplaced_scope_renewals(document: &serde_yaml_ng::Value, path: &Path) -> Result<()> {
     for key in ["renewals", "renewals_notify"] {
@@ -1898,6 +1903,20 @@ impl Factory {
         }
         let tmp = std::env::temp_dir();
         tmp.join(format!("factory-{}.sock", short_hash(&self.root)))
+    }
+
+    /// Resolve a whole authored scope subtree by paths, never name prefixes.
+    /// Shared by every level; policy is a consumer, not the owner of ancestry.
+    pub fn subtree_scopes(&self, scope: Option<&str>) -> Result<(Option<Scope>, Vec<Scope>)> {
+        let asked = scope.map(|name| self.scope(name)).transpose()?.cloned();
+        let scopes = match &asked {
+            Some(asked) => self.config.scopes.iter().filter(|child| {
+                child.name == asked.name || self.config.ancestors_of(child)
+                    .iter().any(|ancestor| ancestor.path == asked.path)
+            }).cloned().collect(),
+            None => self.config.scopes.clone(),
+        };
+        Ok((asked, scopes))
     }
 
     /// Every scope discovered from its own local configuration.

@@ -66,7 +66,7 @@ use factory_core::quality::{self, Level, Measure, QualityCatalogue, QualityTree,
 use factory_core::task::{NewTask, TaskFilter};
 
 use crate::engine::Engine;
-use crate::policies::subtree_scopes;
+use factory_core::config::subtree_scopes;
 
 /// The label a remediation task carries, and the key `ScopeQuality::open_tasks`
 /// and [`Engine::quality_remediate`] look it up by. The scope is part of it

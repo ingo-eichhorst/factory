@@ -4876,6 +4876,16 @@ configuration through a port. Queries preserve selective names and windows;
 responses can contain only the selected fact or a collection of it. No
 status table or fact log is introduced.
 
+The next phase-3 batch removes the metric registry's direct process and
+benchmark reads. L4 publishes production buckets and run/intake/occupancy/
+goal-task measurements; L5 publishes the newest settled benchmark's counts
+and evidence timestamps. Metrics and Scenarios read these through typed
+ports, preserving unknown values, existing window rules, scoped production
+and series/current-value agreement. Production's old wire names re-export
+the L0 schema unchanged. Shared subtree resolution now belongs to the common
+scope model, not L6 Policy, so lower levels do not import a policy helper.
+This does not finish the evaluator, signpost, crate or service migrations.
+
 The live read API now enforces `Producer: Below<Reader>` in L0 and in the
 daemon's typed wiring. The sealed relation allows exactly the fifteen
 strictly upward pairs among L1–L6, including adjacent reads. Downward and

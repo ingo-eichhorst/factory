@@ -102,7 +102,7 @@ impl Engine {
     /// `(from, now]` interval, including every exact-scope read merged for a
     /// subtree. The public production endpoint samples its clock once above.
     pub(crate) async fn production_at(
-        self: &Arc<Self>,
+        &self,
         minutes: Option<u32>,
         bin: Option<ProductionBin>,
         scope: Option<String>,

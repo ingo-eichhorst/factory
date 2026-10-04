@@ -74,7 +74,7 @@ use factory_core::scenario::{self, DriverId, Scenario};
 use factory_core::task::{NewTask, Task, TaskFilter};
 
 use crate::engine::Engine;
-use crate::policies::subtree_scopes;
+use factory_core::config::subtree_scopes;
 
 /// How many weeks of production history [`weekly_throughput_history`]
 /// draws from -- `scenario::Horizon::default()`'s own 26 weeks, so a
@@ -461,39 +461,16 @@ fn open_backlog(tasks: &[Task], target_names: &BTreeSet<&str>) -> f64 {
 }
 
 impl Engine {
-    /// The subtree-wide daily production grid `scenarios_report` samples
-    /// throughput history from. `Engine::production`'s own `scope` filter is
-    /// *exact*-match only -- "matches the scope named in the request,
-    /// nothing wider" (`production.rs`'s own doc comment) -- unlike every
-    /// other scope filter in this module, which rolls up a whole subtree.
-    /// So a request scoped to an ancestor (`scope: Some("projects")`, work
-    /// actually running in `projects/demo`) sums every target scope's own
-    /// exact-match daily grid, element-wise, rather than asking `production`
-    /// once for the ancestor alone and silently missing every descendant's
-    /// throughput -- each scope's own `daily` is the same fixed,
-    /// date-anchored 371-day grid (`production.rs`'s own "53 weeks, always"
-    /// rule), so the sum lines up index by index without re-deriving
-    /// anything. `asked: None` (the whole instance) is the one unscoped call
-    /// `Engine::production` itself already answers correctly.
-    async fn subtree_daily(self: &Arc<Self>, target_scopes: &[Scope], asked: Option<&str>) -> Result<Vec<factory_core::protocol::ProductionBucket>> {
-        if asked.is_none() {
-            return Ok(self.production(None, None, None).await?.daily);
-        }
-        let mut summed: Vec<factory_core::protocol::ProductionBucket> = Vec::new();
-        for t in target_scopes {
-            let scope_daily = self.production(None, None, Some(t.name.clone())).await?.daily;
-            if summed.is_empty() {
-                summed = scope_daily;
-            } else {
-                for (acc, d) in summed.iter_mut().zip(scope_daily.iter()) {
-                    acc.finished += d.finished;
-                    acc.scrapped += d.scrapped;
-                    acc.reworked += d.reworked;
-                    acc.first_pass += d.first_pass;
-                }
-            }
-        }
-        Ok(summed)
+    /// The L4-owned subtree production grid, read at this report's clock.
+    /// Scope containment, rework classification and aligned bucket merging
+    /// stay in the producing service, shared with registry metrics.
+    async fn subtree_daily(&self, asked: Option<&str>, now: DateTime<Utc>) -> Result<Vec<factory_core::protocol::ProductionBucket>> {
+        let fact = crate::facts::Facts::<factory_kernel::L6>::new(self)
+            .get::<factory_kernel::ProductionFact>(&crate::facts::ProductionQuery {
+                scope: asked.map(str::to_string), now, minutes: None,
+                bin: factory_kernel::ProductionBin::Day,
+            }).await?;
+        Ok(fact.daily)
     }
 
     /// The L6 Scenarios tab: `Request::Scenarios`.
@@ -614,7 +591,7 @@ impl Engine {
 
         let target_names: BTreeSet<&str> = target_scopes.iter().map(|s| s.name.as_str()).collect();
         let baseline_backlog = open_backlog(&tasks, &target_names);
-        let daily = self.subtree_daily(&target_scopes, asked.as_ref().map(|s| s.name.as_str())).await?;
+        let daily = self.subtree_daily(asked.as_ref().map(|s| s.name.as_str()), now).await?;
         let history = weekly_throughput_history(&daily, THROUGHPUT_HISTORY_WEEKS);
         let baseline_forecast = scenario::forecast_completion(
             &history,
@@ -938,7 +915,7 @@ impl Engine {
 
         let overridden_drivers = measured_overrides(&baseline_drivers, &overrides);
 
-        let daily = self.subtree_daily(&target_scopes, asked.as_ref().map(|s| s.name.as_str())).await?;
+        let daily = self.subtree_daily(asked.as_ref().map(|s| s.name.as_str()), now).await?;
         let history = weekly_throughput_history(&daily, THROUGHPUT_HISTORY_WEEKS);
         let factor = throughput_scale_factor(&baseline_drivers, &overridden_drivers);
         let scaled_history = scale_history(&history, factor);
@@ -1371,8 +1348,7 @@ mod tests {
             finished_run_in(&engine, "demo-app", &format!("run-{i}")).await;
         }
 
-        let (_asked, projects_subtree) = crate::policies::subtree_scopes(&engine.factory_snapshot(), Some("projects")).unwrap();
-        let daily = engine.subtree_daily(&projects_subtree, Some("projects")).await.unwrap();
+        let daily = engine.subtree_daily(Some("projects"), chrono::Utc::now()).await.unwrap();
         let total: u32 = daily.iter().map(|b| b.finished).sum();
         assert_eq!(total, 3, "the ancestor's own subtree_daily must include its descendant's throughput");
 

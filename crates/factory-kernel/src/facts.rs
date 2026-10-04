@@ -3,7 +3,7 @@
 //! and behavior. Provide defines live ports; Below enforces reader direction.
 
 use crate::fact_vocabulary::*;
-use crate::{ArtifactProvenance, CostReport};
+use crate::{ArtifactProvenance, CostReport, ProductionFact, ProcessMetricFact, BenchResolutionFact};
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -72,6 +72,16 @@ impl Fact for ArtifactProvenance {
 
 impl Fact for CostReport {
     type Producer = L4;
+}
+
+impl Fact for ProductionFact {
+    type Producer = L4;
+}
+impl Fact for ProcessMetricFact {
+    type Producer = L4;
+}
+impl Fact for BenchResolutionFact {
+    type Producer = L5;
 }
 
 // ============================================================ daemon (L1)
@@ -620,6 +630,18 @@ pub struct FactCatalogueEntry {
 /// a wrong level reader a compile error instead of a comment. All listed schemas
 /// and their nested vocabulary now live in L0.
 pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
+    FactCatalogueEntry {
+        fact: "ProductionFact", producer: "L4", readers: &["L6 metrics and Scenarios", "People production"],
+        lives_in_kernel: true, note: "live production buckets with the producer's rework and scope rules",
+    },
+    FactCatalogueEntry {
+        fact: "ProcessMetricFact", producer: "L4", readers: &["L6 metrics"],
+        lives_in_kernel: true, note: "process-owned run, intake, occupancy and goal-task measurements",
+    },
+    FactCatalogueEntry {
+        fact: "BenchResolutionFact", producer: "L5", readers: &["L6 metrics"],
+        lives_in_kernel: true, note: "newest settled benchmark counts and immutable evidence timestamps",
+    },
     FactCatalogueEntry {
         fact: "RenewalDeclarationsFact", producer: "L1", readers: &["L6 important dates"],
         lives_in_kernel: true, note: "validated authored expiry metadata read live; no credential values (#236)",
