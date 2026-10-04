@@ -62,10 +62,10 @@
 //! run-backed families follow.
 //!
 //! `backup_age_hours` and `backup_verified_age_days` (#154) are read off one
-//! `Engine::backup_fact(now)` call, at most once per `metrics_for` call --
+//! `Facts::get::<BackupFact>(&now)` call, at most once per `metrics_for` call --
 //! the same `BackupFact` a policy `daemon` check reads, never the report's
 //! own repository or Time Machine probes. Both are `as_of` the fact's own
-//! `at` (the `now` passed to `backup_fact`), not the moment the metric was
+//! `at` (the `now` passed to the port), not the moment the metric was
 //! asked for -- the same rule every other family here keeps. A value with no
 //! backup configured, an unreachable destination, no snapshot yet, no
 //! verification yet, or a failed newest verification is `None`, with the

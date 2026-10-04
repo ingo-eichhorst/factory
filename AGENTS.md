@@ -305,6 +305,13 @@ something impossible.
   nothing happened. Current-cache retirement and health retention keep their
   existing rules; append-only histories stay append-only. Native probes, timers
   and the remaining fact gatherers still need their isolated level services.
+  L1's live backup, environment metrics/publication, renewal declarations,
+  daemon configuration and scope-capacity providers now physically own their
+  reads. Wiring supplies only their own stores/cache and fresh plain inputs.
+  Backup pages and facts share one gather; environment page decorations from
+  L4 stay outside L1. Native read-only host probes and interface/bind derivation
+  live in L1 too. The sole shared calendar grid is L0; task misfire decisions
+  remain with the scheduler. This is not completed timer/command/service isolation.
 - Wire envelopes, responses, observer events and the unchanged Interface seam
   live in `factory-interfaces`, outside the stack. Whole-instance config/scope
   loading and cross-level page projections live in `factory-composition`.

@@ -227,41 +227,9 @@ impl Engine {
 
     /// Metric production reads L1 history only, not pending L4 workflows.
     async fn environment_report(&self, scope: Option<String>, actions: bool) -> Result<EnvironmentsReport> {
-        let factory = self.factory_snapshot();
-        let now = Utc::now();
-        let members: Option<BTreeSet<String>> = match scope.as_deref() {
-            None => None,
-            Some(name) => {
-                let (asked, subtree) = factory_core::config::subtree_scopes(&factory, Some(name))?;
-                let mut names: BTreeSet<String> = subtree.into_iter().map(|s| s.name).collect();
-                if let Some(asked) = asked {
-                    names.insert(asked.name);
-                }
-                Some(names)
-            }
-        };
-        let within = |s: &str| members.as_ref().is_none_or(|m| m.contains(s));
-        let declared: Vec<(String, EnvironmentDecl)> =
-            factory.config.environments().into_iter().filter(|(s, _)| within(s)).collect();
-        let window = declared
-            .iter()
-            .filter_map(|(_, d)| d.slo.as_ref().map(env::Slo::window_days))
-            .max()
-            .unwrap_or(env::DEFAULT_WINDOW_DAYS)
-            .max(env::DEFAULT_WINDOW_DAYS);
-        let names: BTreeSet<&str> = declared.iter().map(|(_, d)| d.name.as_str()).collect();
-        let samples: Vec<Sample> = self
-            .environments
-            .samples_since(now - Duration::days(window))
-            .await?
-            .into_iter()
-            .filter(|s| names.contains(s.environment.as_str()))
-            .collect();
-        let history = self.environments.deployments().await?;
-        let deployments: Vec<Deployment> = history.iter().filter(|d| within(&d.scope)).cloned().collect();
-        let added: Vec<(String, ReleaseFacts, DateTime<Utc>)> =
-            self.environments.releases_added().await?.into_iter().filter(|(s, _, _)| within(s)).collect();
-        let mut report = env::report(&declared, &samples, &deployments, &added, now);
+        let factory_infrastructure::environment_facts::History {
+            mut report, declarations: declared, members, deployments: history,
+        } = crate::facts::infrastructure_environments(self).history(scope.as_deref()).await?;
         if actions {
             let pending = self.workflows.active_runs().await?;
             for deployment in &report.deployments {
@@ -509,17 +477,6 @@ impl Engine {
         Ok((req.scope, release))
     }
 
-    /// Per environment, what the metrics read: its SLA figures and DORA
-    /// keys, from the same report the tab draws.
-    pub(crate) async fn environment_cards(&self, scope: Option<&str>) -> Result<BTreeMap<String, env::EnvironmentCard>> {
-        Ok(self
-            .environment_report(scope.map(str::to_string), false)
-            .await?
-            .environments
-            .into_iter()
-            .map(|c| (c.name.clone(), c))
-            .collect())
-    }
 }
 
 /// When `commit` was made, asked of the scope's repository -- where lead

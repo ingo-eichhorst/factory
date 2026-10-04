@@ -11,6 +11,8 @@ level = 0
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
+croner.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 

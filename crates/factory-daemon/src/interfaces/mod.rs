@@ -4,31 +4,9 @@ pub mod socket;
 pub use http::HttpInterface;
 pub use socket::SocketInterface;
 
+pub(crate) use factory_infrastructure::interfaces::interface_facts;
+#[cfg(test)]
 use factory_core::config::InterfaceConfig;
-use factory_core::protocol::InterfaceFacts;
-
-/// `DaemonConfig.interfaces`, resolved into the facts payload both
-/// `Engine::infrastructure` (L1's `DaemonFacts.interfaces`) and
-/// `policies::daemon_facts` (L6's `http_loopback_only`) show -- one
-/// derivation of what each interface would actually bind to, not two
-/// (#193, phase 1, F8). `cli` is a socket with no address, shown on its own
-/// line rather than as `null`; `http` falls back to
-/// [`factory_core::config::DEFAULT_HTTP_BIND`] through
-/// [`InterfaceConfig::http_bind`] when `settings` names none; any other
-/// kind is shown only if it names its own `bind`.
-pub(crate) fn interface_facts(interfaces: &[InterfaceConfig]) -> Vec<InterfaceFacts> {
-    interfaces
-        .iter()
-        .map(|interface| InterfaceFacts {
-            kind: interface.kind.clone(),
-            bind: match interface.kind.as_str() {
-                "cli" => None,
-                "http" => Some(interface.http_bind()),
-                _ => interface.string("bind"),
-            },
-        })
-        .collect()
-}
 
 #[cfg(test)]
 mod tests {

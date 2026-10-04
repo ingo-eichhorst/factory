@@ -9,6 +9,9 @@ mod l5;
 pub(crate) use factory_process::facts::{
     NamedQuery, RecoveryQuery, ReleaseBuildQuery, TaskInventoryQuery,
 };
+pub(crate) use l1::{
+    backup_provider as infrastructure_backup, environment_provider as infrastructure_environments,
+};
 pub(crate) use l4::{import_recovery_journal, process_security_reports};
 pub(crate) use l5::{assurance_gate_facts, assurance_knowledge_tags};
 
@@ -21,14 +24,15 @@ use std::{
     marker::PhantomData,
 };
 
-pub(crate) use factory_process::measurements::{AttestedQuery, ProcessMetricsQuery, ProductionQuery};
+pub(crate) use factory_process::measurements::{
+    AttestedQuery, ProcessMetricsQuery, ProductionQuery,
+};
 
 pub(crate) struct ReleaseSbomQuery {
     pub scope: String,
     pub commit: String,
     pub version: Option<String>,
 }
-
 
 /// Registered producer, with a response constrained to its own fact type.
 /// No serialization, Any downcasts or string-keyed provider lookup.
@@ -85,7 +89,13 @@ macro_rules! port {
         }
     };
 }
-port!(DaemonConfigFact, l1, (), DaemonConfigFact);
+port!(
+    DaemonConfigFact,
+    factory_infrastructure::settings_facts::SettingsProvider,
+    (),
+    DaemonConfigFact,
+    l1::settings_provider
+);
 port!(
     InfrastructureExpiryFact,
     factory_infrastructure::expiry_store::ObservationStore,
@@ -93,7 +103,13 @@ port!(
     InfrastructureExpiryFact,
     l1::expiry_provider
 );
-port!(RenewalDeclarationsFact, l1, (), RenewalDeclarationsFact);
+port!(
+    RenewalDeclarationsFact,
+    factory_infrastructure::renewal_declarations::Provider<'a>,
+    (),
+    RenewalDeclarationsFact,
+    l1::renewal_provider
+);
 port!(CredentialExpiryFact, l2, (), CredentialExpiryFact);
 port!(
     ScheduledRunDatesFact,
@@ -102,7 +118,13 @@ port!(
     ScheduledRunDatesFact,
     l4::provider
 );
-port!(ProductionFact, factory_process::measurements::MeasurementProvider<'a>, ProductionQuery, ProductionFact, l4::measurement_provider);
+port!(
+    ProductionFact,
+    factory_process::measurements::MeasurementProvider<'a>,
+    ProductionQuery,
+    ProductionFact,
+    l4::measurement_provider
+);
 port!(ProcessMetricFact, factory_process::measurements::MeasurementProvider<'a>, ProcessMetricsQuery, BTreeMap<String, ProcessMetricFact>, l4::measurement_provider);
 port!(
     BenchResolutionFact,
@@ -111,9 +133,21 @@ port!(
     Option<BenchResolutionFact>,
     l5::provider
 );
-port!(BackupFact, l1, DateTime<Utc>, BackupFact);
-port!(ScopeCapacityFact, l1, (), ScopeCapacityFact);
-port!(EnvironmentMetricFact, l1, Option<String>, BTreeMap<String, EnvironmentMetricFact>);
+port!(
+    BackupFact,
+    factory_infrastructure::backup_facts::Provider<'a>,
+    DateTime<Utc>,
+    BackupFact,
+    l1::backup_provider
+);
+port!(
+    ScopeCapacityFact,
+    factory_infrastructure::settings_facts::SettingsProvider,
+    (),
+    ScopeCapacityFact,
+    l1::settings_provider
+);
+port!(EnvironmentMetricFact, factory_infrastructure::environment_facts::Provider<'a>, Option<String>, BTreeMap<String, EnvironmentMetricFact>, l1::environment_provider);
 port!(SecretsPresence, l2, BTreeSet<String>, BTreeMap<String, SecretsPresence>);
 port!(DependenciesFact, l2, String, DependenciesFact);
 port!(
@@ -149,9 +183,10 @@ port!(
 );
 port!(
     DeploymentPublicationFact,
-    l1,
+    factory_infrastructure::environment_facts::Provider<'a>,
     String,
-    Option<DeploymentPublicationFact>
+    Option<DeploymentPublicationFact>,
+    l1::environment_provider
 );
 port!(
     DeploymentMirrorFact,
@@ -168,7 +203,13 @@ port!(
     l4::provenance_provider
 );
 port!(ReleaseSbomFact, l2, ReleaseSbomQuery, Vec<ReleaseSbomFact>);
-port!(AttestedRun, factory_process::measurements::MeasurementProvider<'a>, AttestedQuery, Vec<AttestedRun>, l4::measurement_provider);
+port!(
+    AttestedRun,
+    factory_process::measurements::MeasurementProvider<'a>,
+    AttestedQuery,
+    Vec<AttestedRun>,
+    l4::measurement_provider
+);
 port!(
     ArtifactProvenance,
     factory_process::facts::ProvenanceProvider<'a>,
@@ -176,7 +217,13 @@ port!(
     Vec<ArtifactProvenance>,
     l4::provenance_provider
 );
-port!(CostReport, factory_process::measurements::MeasurementProvider<'a>, factory_core::usage::SpendQuery, CostReport, l4::measurement_provider);
+port!(
+    CostReport,
+    factory_process::measurements::MeasurementProvider<'a>,
+    factory_core::usage::SpendQuery,
+    CostReport,
+    l4::measurement_provider
+);
 port!(
     ConfirmedSecurityReport,
     factory_process::facts::Provider<'a>,
@@ -197,8 +244,89 @@ port!(
 mod tests {
     use super::*;
     fn registered<F: Port>() {}
+    #[tokio::test]
+    async fn l1_constructors_follow_configuration_reload_not_a_boot_roster() {
+        let (source, root) = crate::environments::tests::engine_with("  - name: prod\n");
+        let mut snapshot = source.factory_snapshot();
+        // This models a discovered scope, not the instance-file root alias
+        // that deliberately takes precedence over its duplicate in scopes.
+        snapshot.config.scope = None;
+        let engine = Engine::new(
+            snapshot,
+            factory_plugins::Registry::with_builtins(),
+            source.store.clone(),
+            std::path::PathBuf::from("factory"),
+            Vec::new(),
+        )
+        .with_environment_store(source.environments.clone());
+        let facts = Facts::<People>::new(&engine);
+        let mut scope = engine.factory_snapshot().config.scopes[0].clone();
+        let id = scope.id.clone();
+        assert!(facts
+            .get::<ScopeCapacityFact>(&())
+            .await
+            .unwrap()
+            .max_sessions
+            .is_empty());
+        assert!(facts
+            .get::<EnvironmentMetricFact>(&Some("company".into()))
+            .await
+            .unwrap()
+            .contains_key("prod"));
+        scope.max_sessions = Some(2);
+        scope.environments.clear();
+        engine.replace_scope(&id, scope);
+        assert_eq!(
+            facts
+                .get::<ScopeCapacityFact>(&())
+                .await
+                .unwrap()
+                .max_sessions["company"],
+            2
+        );
+        assert!(facts
+            .get::<EnvironmentMetricFact>(&Some("company".into()))
+            .await
+            .unwrap()
+            .is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn isolated_live_fact_wiring_uses_the_actual_physical_owner_types() {
+        let _: fn(
+            <DaemonConfigFact as Port>::Provider<'static>,
+        ) -> factory_infrastructure::settings_facts::SettingsProvider = |provider| provider;
+        let _: fn(
+            <ScopeCapacityFact as Port>::Provider<'static>,
+        ) -> factory_infrastructure::settings_facts::SettingsProvider = |provider| provider;
+        let _: fn(
+            <BackupFact as Port>::Provider<'static>,
+        ) -> factory_infrastructure::backup_facts::Provider<'static> = |provider| provider;
+        let _: fn(
+            <EnvironmentMetricFact as Port>::Provider<'static>,
+        ) -> factory_infrastructure::environment_facts::Provider<'static> = |provider| provider;
+        let _: fn(
+            <DeploymentPublicationFact as Port>::Provider<'static>,
+        ) -> factory_infrastructure::environment_facts::Provider<'static> = |provider| provider;
+        let _: fn(
+            <RenewalDeclarationsFact as Port>::Provider<'static>,
+        ) -> factory_infrastructure::renewal_declarations::Provider<'static> = |provider| provider;
+        let l1 = include_str!("l1.rs");
+        assert!(!l1.contains("impl Provide") && !l1.contains("async fn"));
+        for owner in [
+            include_str!("../../../factory-infrastructure/src/backup_facts.rs"),
+            include_str!("../../../factory-infrastructure/src/environment_facts.rs"),
+            include_str!("../../../factory-infrastructure/src/renewal_declarations.rs"),
+            include_str!("../../../factory-infrastructure/src/settings_facts.rs"),
+            include_str!("../../../factory-infrastructure/src/host.rs"),
+            include_str!("../../../factory-infrastructure/src/interfaces.rs"),
+        ] {
+            assert!(
+                !owner.contains("Engine")
+                    && !owner.contains("factory_core")
+                    && !owner.contains("dyn Fn")
+            );
+        }
         let _: fn(
             <CostReport as Port>::Provider<'static>,
         ) -> factory_process::measurements::MeasurementProvider<'static> = |provider| provider;
