@@ -87,22 +87,25 @@ function changeRow(change) {
 
 function renderCatalogue() {
   const env = state.environmentError ? null : state.environment;
-  const rows = (env && env.secrets) || [];
+  const rows = env?.secrets || [];
   const body = $("secrets-catalogue");
   if (body) body.innerHTML = rows.map(catalogueRow).join("");
   const empty = $("noCatalogue");
   if (empty) empty.hidden = rows.length !== 0 || !!state.environmentError;
   for (const button of document.querySelectorAll("[data-secret-edit]")) {
-    button.onclick = () => openSecretEditor(rows.find(r => r.name === button.dataset.secretEdit));
+    button.onclick = () => {
+      openSecretEditor(rows.find(r => r.name === button.dataset.secretEdit))
+        .catch(error => console.warn("Secret editor failed", error));
+    };
   }
 
-  const undeclared = visibleUndeclared(env && env.undeclared, inScope);
+  const undeclared = visibleUndeclared(env?.undeclared, inScope);
   const ubody = $("secrets-undeclared");
   if (ubody) ubody.innerHTML = undeclared.map(undeclaredRow).join("");
   const usection = $("secrets-undeclared-section");
   if (usection) usection.hidden = undeclared.length === 0;
 
-  const changes = (env && env.secret_changes) || [];
+  const changes = env?.secret_changes || [];
   const list = $("secrets-changes");
   if (list) list.innerHTML = changes.slice().reverse().map(changeRow).join("");
   const csection = $("secrets-changes-section");
@@ -161,7 +164,7 @@ async function saveSecret(name, closeModal) {
       body: JSON.stringify(metadataBody(form)),
     });
     closeModal();
-    if (state.environment && Array.isArray(state.environment.secrets)) {
+    if (Array.isArray(state.environment?.secrets)) {
       state.environment.secrets = state.environment.secrets.map(r => (r.name === name ? answer.secret : r));
     }
     renderSecrets();

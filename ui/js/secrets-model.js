@@ -14,7 +14,7 @@ export function expiryClass(state) {
 /// `expires 2027-10-04 (365 days)`, `expires today (2026-10-04)`,
 /// `expired on 2026-10-01 (3 days ago)`, `never`, `unknown`.
 export function expiryText(row) {
-  if (!row || !row.expires) return "unknown";
+  if (!row?.expires) return "unknown";
   if (row.expires === "never") return "never";
   const left = row.days_left;
   if (typeof left !== "number") return `expires ${row.expires}`;
@@ -59,12 +59,12 @@ export function visibleUndeclared(rows, contains) {
 
 /// What the edit form starts from.
 export function formValues(row) {
-  const expires = row && row.expires;
+  const expires = row?.expires;
   return {
     never: expires === "never",
     date: expires && expires !== "never" ? expires : "",
-    renew: (row && row.renew) || "",
-    note: (row && row.note) || "",
+    renew: row?.renew || "",
+    note: row?.note || "",
   };
 }
 
