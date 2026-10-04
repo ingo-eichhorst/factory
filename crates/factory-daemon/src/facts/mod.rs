@@ -12,6 +12,11 @@ pub(crate) use factory_process::facts::{
 pub(crate) use l1::{
     backup_provider as infrastructure_backup, environment_provider as infrastructure_environments,
 };
+pub(crate) use l2::{
+    credentials_provider as environment_credentials,
+    dependencies_provider as environment_dependencies,
+    provider_declarations as environment_provider_declarations,
+};
 pub(crate) use l4::{import_recovery_journal, process_security_reports};
 pub(crate) use l5::{assurance_gate_facts, assurance_knowledge_tags};
 
@@ -28,11 +33,7 @@ pub(crate) use factory_process::measurements::{
     AttestedQuery, ProcessMetricsQuery, ProductionQuery,
 };
 
-pub(crate) struct ReleaseSbomQuery {
-    pub scope: String,
-    pub commit: String,
-    pub version: Option<String>,
-}
+pub(crate) use factory_environment::dependency_inventory::ReleaseSbomQuery;
 
 /// Registered producer, with a response constrained to its own fact type.
 /// No serialization, Any downcasts or string-keyed provider lookup.
@@ -110,7 +111,13 @@ port!(
     RenewalDeclarationsFact,
     l1::renewal_provider
 );
-port!(CredentialExpiryFact, l2, (), CredentialExpiryFact);
+port!(
+    CredentialExpiryFact,
+    factory_environment::credential_expiry::Provider<'a>,
+    (),
+    CredentialExpiryFact,
+    l2::expiry_provider
+);
 port!(
     ScheduledRunDatesFact,
     factory_process::facts::Provider<'a>,
@@ -148,15 +155,28 @@ port!(
     l1::settings_provider
 );
 port!(EnvironmentMetricFact, factory_infrastructure::environment_facts::Provider<'a>, Option<String>, BTreeMap<String, EnvironmentMetricFact>, l1::environment_provider);
-port!(SecretsPresence, l2, BTreeSet<String>, BTreeMap<String, SecretsPresence>);
-port!(DependenciesFact, l2, String, DependenciesFact);
+port!(SecretsPresence, factory_environment::credentials::Provider, BTreeSet<String>, BTreeMap<String, SecretsPresence>, l2::credentials_provider);
+port!(
+    DependenciesFact,
+    factory_environment::dependency_inventory::Provider,
+    String,
+    DependenciesFact,
+    l2::dependencies_provider
+);
 port!(
     SandboxServiceEvidenceFact,
-    l2,
+    factory_environment::service_observations::Provider,
     String,
-    SandboxServiceEvidenceFact
+    SandboxServiceEvidenceFact,
+    l2::evidence_provider
 );
-port!(ExploitedFinding, l2, String, Vec<ExploitedFinding>);
+port!(
+    ExploitedFinding,
+    factory_environment::dependency_inventory::Provider,
+    String,
+    Vec<ExploitedFinding>,
+    l2::dependencies_provider
+);
 port!(AgentFact, l3, String, Vec<AgentFact>);
 port!(TaskFact, factory_process::facts::Provider<'a>, NamedQuery, BTreeMap<String, Vec<TaskFact>>, l4::provider);
 port!(
@@ -202,7 +222,13 @@ port!(
     Option<ReleaseBuildFact>,
     l4::provenance_provider
 );
-port!(ReleaseSbomFact, l2, ReleaseSbomQuery, Vec<ReleaseSbomFact>);
+port!(
+    ReleaseSbomFact,
+    factory_environment::dependency_inventory::Provider,
+    ReleaseSbomQuery,
+    Vec<ReleaseSbomFact>,
+    l2::dependencies_provider
+);
 port!(
     AttestedRun,
     factory_process::measurements::MeasurementProvider<'a>,
@@ -244,6 +270,33 @@ port!(
 mod tests {
     use super::*;
     fn registered<F: Port>() {}
+    #[tokio::test]
+    async fn l2_expiry_constructor_reads_an_edited_catalogue_on_the_next_read() {
+        let (engine, root) = crate::environments::tests::engine_with("  - name: prod\n");
+        let facts = Facts::<People>::new(&engine);
+        let declarations = serde_yaml_ng::from_str(
+            "- name: catalogue\n  kind: token\n  source: {from: command, run: no-such-credential-program}\n  expires: never"
+        ).unwrap();
+        engine.replace_instance_secrets(declarations);
+        let before = facts.get::<CredentialExpiryFact>(&()).await.unwrap();
+        assert!(
+            before
+                .observations
+                .iter()
+                .find(|o| o.id == "secret:catalogue")
+                .unwrap()
+                .no_expiry
+        );
+        engine.replace_instance_secrets(Vec::new());
+        assert!(!facts
+            .get::<CredentialExpiryFact>(&())
+            .await
+            .unwrap()
+            .observations
+            .iter()
+            .any(|o| o.id == "secret:catalogue"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn l1_constructors_follow_configuration_reload_not_a_boot_roster() {
         let (source, root) = crate::environments::tests::engine_with("  - name: prod\n");
@@ -293,6 +346,39 @@ mod tests {
     }
     #[test]
     fn isolated_live_fact_wiring_uses_the_actual_physical_owner_types() {
+        let _: fn(
+            <SecretsPresence as Port>::Provider<'static>,
+        ) -> factory_environment::credentials::Provider = |provider| provider;
+        let _: fn(
+            <DependenciesFact as Port>::Provider<'static>,
+        ) -> factory_environment::dependency_inventory::Provider = |provider| provider;
+        let _: fn(
+            <ExploitedFinding as Port>::Provider<'static>,
+        ) -> factory_environment::dependency_inventory::Provider = |provider| provider;
+        let _: fn(
+            <ReleaseSbomFact as Port>::Provider<'static>,
+        ) -> factory_environment::dependency_inventory::Provider = |provider| provider;
+        let _: fn(
+            <SandboxServiceEvidenceFact as Port>::Provider<'static>,
+        ) -> factory_environment::service_observations::Provider = |provider| provider;
+        let _: fn(
+            <CredentialExpiryFact as Port>::Provider<'static>,
+        ) -> factory_environment::credential_expiry::Provider<'static> = |provider| provider;
+        let l2 = include_str!("l2.rs");
+        assert!(!l2.contains("impl Provide") && !l2.contains("async fn"));
+        for owner in [
+            include_str!("../../../factory-environment/src/credentials.rs"),
+            include_str!("../../../factory-environment/src/credential_expiry.rs"),
+            include_str!("../../../factory-environment/src/dependency_inventory.rs"),
+            include_str!("../../../factory-environment/src/sandbox_runtime.rs"),
+            include_str!("../../../factory-environment/src/service_observations.rs"),
+        ] {
+            assert!(
+                !owner.contains("Engine")
+                    && !owner.contains("factory_core")
+                    && !owner.contains("dyn Fn")
+            );
+        }
         let _: fn(
             <DaemonConfigFact as Port>::Provider<'static>,
         ) -> factory_infrastructure::settings_facts::SettingsProvider = |provider| provider;
@@ -648,7 +734,9 @@ mod tests {
             .next()
             .unwrap();
         assert!(!producer.contains(".store") && !producer.contains("factory_core::policy"));
-        assert!(include_str!("l2.rs")
-            .contains("impl Provide<factory_kernel::SandboxServiceEvidenceFact> for Provider"));
+        assert!(
+            include_str!("../../../factory-environment/src/service_observations.rs")
+                .contains("impl factory_kernel::Provide<SandboxServiceEvidenceFact> for Provider")
+        );
     }
 }

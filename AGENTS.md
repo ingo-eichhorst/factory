@@ -312,6 +312,15 @@ something impossible.
   L4 stay outside L1. Native read-only host probes and interface/bind derivation
   live in L1 too. The sole shared calendar grid is L0; task misfire decisions
   remain with the scheduler. This is not completed timer/command/service isolation.
+  L2's credential presence/expiry, dependency inventory, exploited findings,
+  release SBOM and sandbox-evidence providers physically own their live reads
+  too. The OpenShell runtime/cleanup records and evidence collector share one
+  L2 implementation; daemon paths re-export it. Credentials are metadata-only
+  on these reads: never open values or run a source. Authored catalogue dates
+  and file changes count on the next read. Preserve exact-scope evidence,
+  immutable attachments, bounds, provenance and unknown/partial coverage.
+  Attachment authorization/journaling remains in the router until the adjacent
+  command migration; physical runtime ownership does not complete that ladder.
 - Wire envelopes, responses, observer events and the unchanged Interface seam
   live in `factory-interfaces`, outside the stack. Whole-instance config/scope
   loading and cross-level page projections live in `factory-composition`.

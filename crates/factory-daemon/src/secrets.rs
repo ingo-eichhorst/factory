@@ -19,7 +19,7 @@ use crate::engine::Engine;
 use chrono::{NaiveDate, Utc};
 use factory_core::config::Factory;
 use factory_core::error::Result;
-use factory_core::openshell::{self as os, CredentialSource, ProviderCredential, ProviderDecl};
+use factory_core::openshell::{self as os, CredentialSource, ProviderCredential};
 use factory_core::protocol::{SecretChange, SecretRow, SecretUse, UndeclaredCredential};
 use factory_core::secrets::{expiry_state, Expiry, SecretMetadata};
 use factory_core::task::TaskEntry;
@@ -60,34 +60,17 @@ fn file_presence(source: &CredentialSource) -> (Option<bool>, Option<bool>) {
     }
 }
 
-/// Every managed provider in every scope, with what its credential says:
-/// `(scope, agent, provider on the gateway, provider, credential)`.
+/// Every managed provider, canonically derived inside L2 from declarations.
 fn managed_providers(factory: &Factory) -> Vec<(String, String, String, os::ManagedProvider)> {
-    let suffix = os::instance_suffix(&factory.config.instance.id);
-    let mut out = Vec::new();
-    for name in factory.scope_names() {
-        let Ok(scope) = factory.scope(&name) else { continue };
-        for agent in scope.declared_agents() {
-            let Some(block) = &agent.openshell else { continue };
-            for provider in &block.providers {
-                if let ProviderDecl::Managed(managed) = provider {
-                    out.push((scope.name.clone(), agent.name(), provider.gateway_name(&suffix), managed.clone()));
-                }
-            }
-        }
-    }
-    out
+    factory_environment::credential_expiry::managed_providers(
+        &factory.config.instance.id, &crate::facts::environment_provider_declarations(factory),
+    )
 }
-
 /// Who names each secret: secret name -> its users.
 pub(crate) fn users(factory: &Factory) -> BTreeMap<String, Vec<SecretUse>> {
-    let mut out: BTreeMap<String, Vec<SecretUse>> = BTreeMap::new();
-    for (scope, agent, provider, managed) in managed_providers(factory) {
-        if let ProviderCredential::Secret(name) = &managed.credential {
-            out.entry(name.clone()).or_default().push(SecretUse { scope, agent, provider });
-        }
-    }
-    out
+    factory_environment::credential_expiry::users(
+        &factory.config.instance.id, &crate::facts::environment_provider_declarations(factory),
+    )
 }
 
 /// The tab's rows: the catalogue, and every inline credential still
@@ -145,61 +128,16 @@ pub(crate) fn rows(
     (secrets, undeclared)
 }
 
-/// One Important dates observation per declared secret (`#244`): the
-/// renewals ledger (`#236`) reads the catalogue rather than keeping a copy,
-/// and its milestones -- the 30-day lead, 7 days, 1 day, the day itself --
-/// are the secret's Inbox items, one per secret, naming every scope, agent
-/// and provider that uses it. Built from the live snapshot on every read, so
-/// an edited date counts at once.
+/// Live authored secret metadata, canonically derived in L2.
+#[cfg(test)]
 pub(crate) fn ledger_observations(
     factory: &Factory,
     now: chrono::DateTime<Utc>,
 ) -> Vec<factory_core::renewals::ExpiryObservation> {
-    use factory_core::renewals::{DateBasis, DateDependency, DateKind, DateSource};
-    let mut used = users(factory);
-    factory
-        .config
-        .secrets
-        .iter()
-        .map(|secret| {
-            let mut item = crate::renewals::probes::observation(
-                format!("secret:{}", secret.name),
-                format!("Secret {}", secret.name),
-                DateKind::Credential,
-                DateSource::Secret,
-                now,
-            );
-            match secret.expires {
-                Some(Expiry::On(date)) => {
-                    item.expires_at = date.and_hms_opt(0, 0, 0).map(|midnight| midnight.and_utc());
-                    item.basis = DateBasis::Declared;
-                    item.detail = "declared in the instance root's secrets:".into();
-                }
-                Some(Expiry::Never) => {
-                    item.no_expiry = true;
-                    item.basis = DateBasis::Declared;
-                    item.detail = "declared never to expire in the instance root's secrets:".into();
-                }
-                None => item.detail = "the instance root's secrets: gives no expires: for it".into(),
-            }
-            if let Some(renew) = &secret.renew {
-                item.renew = renew.clone();
-            }
-            item.affects = used
-                .remove(&secret.name)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|u| DateDependency {
-                    label: format!("{} / {} / {}", u.scope, u.agent, u.provider),
-                    scope: Some(u.scope),
-                    agent: Some(u.agent),
-                    environment: None,
-                    provider: Some(u.provider),
-                })
-                .collect();
-            item
-        })
-        .collect()
+    factory_environment::credential_expiry::ledger_observations(
+        &factory.config.instance.id, &factory.config.secrets,
+        &crate::facts::environment_provider_declarations(factory), now,
+    )
 }
 
 /// `"2027-10-04"`, `"never"`, or `"unset"`.

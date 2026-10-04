@@ -9,7 +9,11 @@ level = 2
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
+libc = "0.2"
+uuid.workspace = true
 factory-kernel = { path = "../factory-kernel" }
+factory-infrastructure = { path = "../factory-infrastructure" }
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -17,6 +21,3 @@ serde_yaml_ng.workspace = true
 sha2.workspace = true
 rusqlite.workspace = true
 tokio.workspace = true
-
-[dev-dependencies]
-uuid.workspace = true

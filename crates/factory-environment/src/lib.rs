@@ -2,8 +2,15 @@
 //!
 //! Configuration validation and planning do not reach into whole-instance
 //! configuration, adapter traits, process tasks, or the router.
+pub mod credential_expiry;
+pub mod credentials;
 pub mod declarations;
 pub mod dependencies;
+pub mod dependency_inventory;
 pub mod expiry_store;
 pub mod openshell;
+#[cfg(test)]
+mod provider_tests;
+pub mod sandbox_runtime;
 pub mod secrets;
+pub mod service_observations;

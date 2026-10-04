@@ -4,6 +4,36 @@ use factory_kernel::{LaunchKind, LaunchSpec, Schedule, Span};
 use serde_json::json;
 
 #[test]
+fn credential_metadata_is_canonical_l2_data_and_preserves_legacy_json() {
+    let row: factory_core::protocol::CredentialRow =
+        factory_environment::credentials::CredentialRow {
+            label: "demo .env".into(),
+            path: "/scratch/demo/.env".into(),
+            integration: "scope env".into(),
+            present: false,
+            scope: Some("demo".into()),
+        };
+    assert_eq!(
+        serde_json::to_value(&row).unwrap(),
+        json!({
+            "label":"demo .env","path":"/scratch/demo/.env","integration":"scope env",
+            "present":false,"scope":"demo"
+        })
+    );
+    let _: factory_environment::credentials::CredentialRow = row;
+    let usage: factory_core::protocol::SecretUse =
+        factory_environment::credential_expiry::SecretUse {
+            scope: "demo".into(),
+            agent: "curator".into(),
+            provider: "provider-id".into(),
+        };
+    assert_eq!(
+        serde_json::to_value(usage).unwrap(),
+        json!({"scope":"demo","agent":"curator","provider":"provider-id"})
+    );
+}
+
+#[test]
 fn native_host_and_configured_interfaces_are_canonical_l1_data_with_legacy_json() {
     let config: factory_core::config::InterfaceConfig =
         serde_yaml_ng::from_str("kind: http").unwrap();

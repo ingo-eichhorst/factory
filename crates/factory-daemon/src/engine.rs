@@ -1956,78 +1956,7 @@ impl Engine {
     /// tab shows -- one fact, read once, never a second copy of what
     /// "present" means.
     pub(crate) async fn credential_inventory(&self) -> Vec<CredentialRow> {
-        let mut rows = Vec::new();
-
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            let fixed = [
-                (
-                    "Claude Code credentials",
-                    home.join(".claude/.credentials.json"),
-                    "anthropic",
-                ),
-                (
-                    "GitHub CLI hosts",
-                    home.join(".config/gh/hosts.yml"),
-                    "github",
-                ),
-                ("AWS credentials", home.join(".aws/credentials"), "aws"),
-                ("netrc", home.join(".netrc"), "netrc"),
-            ];
-            for (label, path, integration) in fixed {
-                let present = tokio::fs::try_exists(&path).await.unwrap_or(false);
-                rows.push(CredentialRow {
-                    label: label.into(),
-                    path: path.display().to_string(),
-                    integration: integration.into(),
-                    present,
-                    scope: None,
-                });
-            }
-
-            // Presence only: an id_* file that is not a `.pub` is treated as
-            // a private key without ever being opened to check.
-            let ssh_dir = home.join(".ssh");
-            let mut ssh_present = false;
-            if let Ok(mut entries) = tokio::fs::read_dir(&ssh_dir).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with("id_") && !name.ends_with(".pub") {
-                        ssh_present = true;
-                        break;
-                    }
-                }
-            }
-            rows.push(CredentialRow {
-                label: "SSH private keys".into(),
-                path: ssh_dir.join("id_*").display().to_string(),
-                integration: "ssh".into(),
-                present: ssh_present,
-                scope: None,
-            });
-        }
-
-        let factory = self.factory_snapshot();
-        for scope in &factory.config.scopes {
-            let scope_dir = factory
-                .scope_path(&scope.name)
-                .unwrap_or_else(|_| scope.path.clone());
-            // A scope registered on the instance root has the path `<root>/.`,
-            // so joining onto it raw would print `<root>/./.env` on the page.
-            // Collecting the components drops the `.` without touching what
-            // the path means.
-            let env_path = scope_dir.components().collect::<PathBuf>().join(".env");
-            let present = tokio::fs::try_exists(&env_path).await.unwrap_or(false);
-            rows.push(CredentialRow {
-                label: format!("{} .env", scope.name),
-                path: env_path.display().to_string(),
-                integration: "scope env".into(),
-                present,
-                scope: Some(scope.name.clone()),
-            });
-        }
-
-        rows
+        crate::facts::environment_credentials(self).inventory().await
     }
 
     /// The agents page: scopes first, then the agents each one declares, then
