@@ -2391,8 +2391,10 @@ mod tests {
                 // Admission reserves the run row before patching round/feedback
                 // and launching it. Observe the launched retry, not that
                 // transient Dispatching row with default orchestration fields.
+                // QuietRuntime does not report an acknowledgement, so session
+                // attachment (not Running status) proves startup reached it.
                 if let Some(retry) = engine.store.active_run(&first_task).await.unwrap()
-                    .filter(|run| run.attempt == 2 && run.status == RunStatus::Running) {
+                    .filter(|run| run.attempt == 2 && run.session.is_some()) {
                     assert_eq!(node.round, 1);
                     assert_eq!(retry.workflow_round, 1);
                     assert!(retry.feedback.as_ref().unwrap().feedback.as_deref().unwrap().contains("tests exit 1"));
