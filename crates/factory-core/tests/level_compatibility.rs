@@ -29,3 +29,25 @@ fn dependency_config_is_the_same_l2_declaration_with_the_same_json() {
     let owned: factory_environment::declarations::DependenciesConfig = old;
     assert_eq!(serde_json::to_value(owned).unwrap(), wire);
 }
+
+#[test]
+fn old_agent_and_runtime_paths_are_canonical_l3_and_l0_types() {
+    let reference: task::SessionRef = factory_kernel::SessionRef {
+        runtime: "runtime".into(),
+        handle: "opaque".into(),
+        meta: Default::default(),
+    };
+    let _: factory_kernel::SessionRef = reference;
+    let health: factory_core::harness::HealthProbe =
+        factory_agents::harness::HealthProbe::version("shell");
+    assert_eq!(health.program(), "shell");
+    let role: factory_core::role::Role = factory_agents::role::Role::worker();
+    assert_eq!(role.as_str(), "worker");
+    let usage: factory_core::usage::SessionUsage =
+        factory_agents::usage::SessionUsage::parse("{\"schema\":1}").unwrap();
+    assert!(usage.sessions.is_empty());
+    // Trait-object coercion compiles only when both paths name the same seam.
+    let old: Option<&dyn factory_core::adapter::AgentRuntime> = None;
+    let canonical: Option<&dyn factory_agents::runtime::AgentRuntime> = old;
+    assert!(canonical.is_none());
+}

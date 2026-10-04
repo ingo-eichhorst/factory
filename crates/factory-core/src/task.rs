@@ -333,15 +333,7 @@ pub struct SlotWait {
     pub since: DateTime<Utc>,
 }
 
-/// The identity of a live agent session, as the runtime adapter that created it
-/// understands it. The daemon treats `handle` as opaque.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRef {
-    pub runtime: String,
-    pub handle: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub meta: BTreeMap<String, String>,
-}
+pub use factory_kernel::SessionRef;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {

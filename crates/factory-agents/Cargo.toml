@@ -1,0 +1,19 @@
+[package]
+name = "factory-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.factory]
+level = 3
+
+[dependencies]
+factory-kernel = { path = "../factory-kernel" }
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+serde_yaml_ng.workspace = true

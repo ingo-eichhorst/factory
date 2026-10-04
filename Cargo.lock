@@ -730,6 +730,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "factory-agents"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "factory-kernel",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tokio",
+]
+
+[[package]]
 name = "factory-cli"
 version = "0.1.0"
 dependencies = [
@@ -752,6 +765,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "csv",
+ "factory-agents",
  "factory-environment",
  "factory-infrastructure",
  "factory-kernel",

@@ -4,7 +4,7 @@
 //! learns a harness's file layout, and never talks to an observability tool
 //! directly (issue #117). Usage reaches it through one door only:
 //! `AgentRuntime::usage`, which answers with a [`SessionUsage`] -- the
-//! versioned contract below, schema 1, owned by #117. herdr answers it by
+//! versioned L3 contract re-exported below, schema 1, owned by #117. herdr answers it by
 //! invoking an Irrlicht plugin's `usage` action; a runtime with no such
 //! source answers `None`, and that is an honest "unknown", never a zero.
 //!
@@ -30,24 +30,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The contract version this Factory reads.
-pub const USAGE_SCHEMA: u32 = 1;
+pub use factory_agents::usage::{
+    HarnessUsage, RateLimit, RateLimitWindow, SessionUsage, SubagentUsage, TokenCounts, UsageCost,
+    USAGE_SCHEMA,
+};
 
-/// Tokens by type. Each count is `None` when the observer could not see it,
-/// never 0.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenCounts {
-    #[serde(default)]
-    pub input: Option<u64>,
-    #[serde(default)]
-    pub output: Option<u64>,
-    #[serde(default)]
-    pub cache_read: Option<u64>,
-    #[serde(default)]
-    pub cache_write: Option<u64>,
+trait TokenCountsRunExt {
+    fn fields(&self) -> [(&'static str, Option<u64>); 4];
+    fn from_fields(values: [Option<u64>; 4]) -> Self;
 }
 
-impl TokenCounts {
+impl TokenCountsRunExt for TokenCounts {
     /// The four counts with their contract names, in a fixed order -- what
     /// a note naming an unknown field, and every sum below, walk.
     fn fields(&self) -> [(&'static str, Option<u64>); 4] {
@@ -67,129 +60,6 @@ impl TokenCounts {
             cache_read,
             cache_write,
         }
-    }
-
-    /// Every token of every type, or `None` if any one type is unknown.
-    /// Cache reads and writes count: they are tokens the model processed and
-    /// the provider bills, if at a different rate.
-    pub fn total(&self) -> Option<u64> {
-        self.fields().iter().try_fold(0u64, |sum, (_, v)| v.map(|v| sum + v))
-    }
-}
-
-/// What the tokens cost, in API-equivalent US dollars, and the price table
-/// that said so.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct UsageCost {
-    #[serde(default)]
-    pub usd: Option<f64>,
-    /// e.g. `litellm@2026-09-01`. Kept with every number it priced, because a
-    /// price table changes and history must not be re-priced silently.
-    #[serde(default)]
-    pub pricing_source: Option<String>,
-}
-
-/// One subagent a harness session spawned. Listed apart from its parent,
-/// which is read as *excluding* it -- see [`run_usage`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SubagentUsage {
-    pub session_id: String,
-    #[serde(default)]
-    pub tokens: TokenCounts,
-    #[serde(default)]
-    pub cost: UsageCost,
-}
-
-/// One subscription rate-limit window, as the provider reports it. Stored
-/// with every snapshot and allocated across the runs active between readings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RateLimitWindow {
-    #[serde(default)]
-    pub window_minutes: Option<u32>,
-    #[serde(default)]
-    pub used_percent: Option<f64>,
-    #[serde(default)]
-    pub resets_at: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RateLimit {
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub plan_type: Option<String>,
-    /// How sure the observer is that this window belongs to this session's
-    /// account -- `confirmed`, or something weaker.
-    #[serde(default)]
-    pub attribution_quality: Option<String>,
-    #[serde(default)]
-    pub windows: Vec<RateLimitWindow>,
-}
-
-/// One harness session the runtime saw in a Factory session -- a Claude Code
-/// or Codex conversation running in a herdr pane, say. Cumulative since that
-/// harness session began.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HarnessUsage {
-    pub session_id: String,
-    /// Which harness: `claude-code`, `codex`, ...
-    #[serde(default)]
-    pub adapter: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub tokens: TokenCounts,
-    #[serde(default)]
-    pub cost: UsageCost,
-    #[serde(default)]
-    pub elapsed_seconds: Option<f64>,
-    #[serde(default)]
-    pub active_seconds: Option<f64>,
-    #[serde(default)]
-    pub subagents: Vec<SubagentUsage>,
-    #[serde(default)]
-    pub rate_limit: Option<RateLimit>,
-    /// Why a field is `null`, keyed by its dotted path (`tokens.cache_write`)
-    /// -- the contract's "null with a reason". Optional on the wire: a
-    /// `null` with no reason given is still unknown, just unexplained.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub unavailable: BTreeMap<String, String>,
-}
-
-/// The runtime's answer to "what has this session used?" -- the #117
-/// contract, schema 1.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionUsage {
-    pub schema: u32,
-    /// The runtime's own name for where it looked: herdr's pane id. Called
-    /// `pane_id` on the wire, since that is the contract's word; kept under
-    /// a runtime-neutral one here.
-    #[serde(default, alias = "pane_id", skip_serializing_if = "Option::is_none")]
-    pub handle: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sampled_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub sessions: Vec<HarnessUsage>,
-}
-
-impl SessionUsage {
-    /// Read a runtime's answer. Refuses a schema this Factory does not know
-    /// rather than guessing at what its fields mean; everything outside the
-    /// typed fields above is dropped, which is what keeps transcript text a
-    /// plugin might send from ever being stored.
-    pub fn parse(text: &str) -> std::result::Result<Self, String> {
-        let value: serde_json::Value =
-            serde_json::from_str(text.trim()).map_err(|e| format!("usage is not JSON: {e}"))?;
-        match value.get("schema").and_then(serde_json::Value::as_u64) {
-            Some(s) if s == u64::from(USAGE_SCHEMA) => {}
-            Some(s) => {
-                return Err(format!(
-                    "usage schema {s} is not one this Factory reads (it reads {USAGE_SCHEMA})"
-                ))
-            }
-            None => return Err("usage carries no schema version".into()),
-        }
-        serde_json::from_value(value).map_err(|e| format!("usage does not match schema {USAGE_SCHEMA}: {e}"))
     }
 }
 

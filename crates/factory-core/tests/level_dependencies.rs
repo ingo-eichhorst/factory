@@ -86,6 +86,7 @@ fn physical_level_crates_depend_only_on_kernel_and_the_directly_lower_level() {
         ("factory-kernel", 0),
         ("factory-infrastructure", 1),
         ("factory-environment", 2),
+        ("factory-agents", 3),
     ] {
         let owner = packages.iter().find(|p| p["name"] == name).unwrap();
         assert_eq!(owner["metadata"]["factory"]["level"], level);

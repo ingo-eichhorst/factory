@@ -34,6 +34,8 @@ mod schedule;
 pub use schedule::{CronSchedule, Schedule};
 mod span;
 pub use span::{parse_span, Span};
+mod session;
+pub use session::SessionRef;
 mod process_metrics;
 pub use process_metrics::{ProductionBin, ProductionBucket, ProductionFact, ProcessMetricFact, BenchResolutionFact};
 mod fact_vocabulary;

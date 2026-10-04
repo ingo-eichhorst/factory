@@ -23,7 +23,9 @@ the daemon cannot tell a built-in implementation from a plugin:
 | **Interface** | how the outside reaches the daemon | `cli` (unix socket), `http` (REST + WebSocket + UI) |
 | **Knowledge provider** | how the knowledge vault is searched — read side only | `keyword` |
 
-The traits are in `crates/factory-core/src/adapter/`. Nothing in core knows
+The public compatibility paths are in `crates/factory-core/src/adapter/`.
+The runtime trait is owned by L3's `factory-agents` and re-exported there;
+the other seams remain in core pending the level migration. Neither knows
 about sqlite, herdr, axum, or any other concrete choice.
 
 ## Quickstart
@@ -5016,9 +5018,19 @@ outside the ladder. Cargo metadata guards every normal, dev, build and
 target-specific edge by canonical package name, including renamed
 dependencies: a level may name only L0 or its directly lower level.
 
+L3's `factory-agents` owns standing-agent state, role resolution, harness
+health, the runtime adapter trait and its cumulative session-usage contract.
+The opaque session identifier is L0 vocabulary. Core's existing runtime,
+role, harness, agent and usage paths are canonical re-exports. Run usage
+snapshots, differences and provider-window allocation remain process code;
+they do not move into the runtime observer. Roles are still resolved from
+the live scope chain and checked by the one router authorization check.
+
 This is a partial physical migration: live providers, storage and runtime
-services remain in the daemon, and the rest of core has not moved. The
-remaining signpost reader move, L3–L6 and protocol/router migration, and
+services remain in the daemon. The agent prompt/reporting seam still
+carries L4's full task binding and needs a separate assignment-payload
+boundary; it is not pulled into L3 through a facade dependency. The
+remaining signpost reader move, L4–L6 and protocol/router migration, and
 strict command ladder are still ahead in #193.
 
 ## Layout
@@ -5026,6 +5038,7 @@ strict command ladder are still ahead in #193.
     crates/factory-kernel    L0: pure shared vocabulary and every live fact schema (Level/Fact, nested statuses, grants and evidence); no other factory-* dependency
     crates/factory-infrastructure L1: backup, running environments and renewal domain behaviour
     crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
+    crates/factory-agents         L3: standing agents, roles, harness health, runtime trait and session usage
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
