@@ -22,6 +22,8 @@
 //!   remain outside L0; [`FACT_CATALOGUE`] lists every wired live fact.
 //! - [`Provide`] -- a typed pull port, with producer ownership and
 //!   fact-only response shapes. The host supplies queries and errors.
+//! - [`Facts`] and [`Below`] -- strictly upward level reads; [`People`]
+//!   identifies page/API composition outside the six-level ladder.
 
 mod duration;
 mod fact_vocabulary;
@@ -38,7 +40,7 @@ pub use spend::{CostGroupBy, CostReport, CostRow, DailySpend, FinishedSpend, Spe
 pub use facts::{EnvironmentMetricFact, KnowledgeTags, ScopeCapacityFact};
 pub use facts::{EnvironmentRecoveryFact, RECOVERY_COMMIT_LABEL, RECOVERY_ENVIRONMENT_LABEL, RECOVERY_REASON_LABEL};
 pub use facts::{ReleaseBuildFact, ReleaseSbomFact};
-pub use ports::{FactProvider, FactValue, Provide};
+pub use ports::{Below, FactProvider, FactValue, Facts, People, Provide, Reader};
 
 pub use duration::Duration;
 pub use facts::{

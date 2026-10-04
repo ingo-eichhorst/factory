@@ -66,7 +66,10 @@ fn catalogue_is_complete_unique_and_has_readers() {
         assert!(!entry.note.is_empty());
         for reader in entry.readers {
             let level = reader.split_whitespace().next().unwrap();
-            assert!(["L1", "L2", "L3", "L4", "L5", "L6"].contains(&level));
+            assert!(["L1", "L2", "L3", "L4", "L5", "L6", "People"].contains(&level));
+            if level != "People" {
+                assert!(entry.producer < level, "{}: {} is not strictly below {level}", entry.fact, entry.producer);
+            }
         }
     }
 }

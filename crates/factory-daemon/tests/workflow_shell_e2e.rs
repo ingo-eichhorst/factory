@@ -389,6 +389,13 @@ fn release_evidence_matches_a_real_build_and_sbom_and_survives_git_changes_and_r
     assert_eq!(detail["build"]["run"]["id"], run_id);
     assert_eq!(detail["build"]["artifacts"][0]["artifact"]["source"]["commit"], commit);
     assert_eq!(detail["build"]["artifacts"][0]["artifact"]["source"]["dirty"], false);
+    // Router reads are people-side composition, not L4 reading its own fact.
+    let provenance_url = format!("{base}/api/runs/{run_id}/provenance");
+    assert_eq!(expect_ok(&provenance_url, &get(&provenance_url))["records"], detail["build"]["artifacts"]);
+    let costs_url = format!("{base}/api/costs?scope=demo&group_by=task");
+    let costs = expect_ok(&costs_url, &get(&costs_url))["report"].clone();
+    assert_eq!(costs["total"]["runs"], 1);
+    assert_eq!(costs["rows"][0]["key"], task_id);
     assert_eq!(detail["sboms"].as_array().unwrap().len(), 1, "wrong commit and operations lifecycle are not release build SBOMs");
     let document_url = format!("{base}/api/dependencies/documents/{}?scope=demo", detail["sboms"][0]["attachment"]["id"].as_str().unwrap());
     let document = expect_ok(&document_url, &get(&document_url));

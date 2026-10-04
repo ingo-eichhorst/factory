@@ -1,11 +1,69 @@
 //! Typed pull ports. Providers and queries belong to the producing level;
 //! L0 knows only the fact and the allowed shapes of a response.
-use crate::{Fact, Level};
+use crate::{Fact, Level, L1, L2, L3, L4, L5, L6};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
+
+/// A fact reader: one of the levels, or the interfaces beside the ladder.
+pub trait Reader {}
+impl<L: Level> Reader for L {}
+
+/// Page/API composition is outside the ladder, not an invented L7 or an
+/// exemption for an internal level. It may read any producer's facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct People;
+impl Reader for People {}
+
+/// A producer strictly below the reading level. Same-level calls stay
+/// inside their service; downward fact reads are forbidden.
+///
+/// The relation is sealed: consumers cannot grant themselves another edge.
+/// There are exactly fifteen level-to-level edges, plus six people-side reads.
+pub trait Below<R: Reader>: Level + sealed::Below<R> {}
+
+macro_rules! below {
+    ($producer:ty => $($reader:ty),+ $(,)?) => {
+        $(impl sealed::Below<$reader> for $producer {}
+          impl Below<$reader> for $producer {})+
+    };
+}
+below!(L1 => L2, L3, L4, L5, L6, People);
+below!(L2 => L3, L4, L5, L6, People);
+below!(L3 => L4, L5, L6, People);
+below!(L4 => L5, L6, People);
+below!(L5 => L6, People);
+below!(L6 => People);
+
+/// The compiler-checked read boundary, independent of a provider registry
+/// or host. The host supplies the producer; this handle neither gathers nor
+/// persists evidence and cannot change who owns the fact.
+pub struct Facts<R: Reader> {
+    reader: PhantomData<R>,
+}
+impl<R: Reader> Default for Facts<R> {
+    fn default() -> Self {
+        Self { reader: PhantomData }
+    }
+}
+impl<R: Reader> Facts<R> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn get<F, P>(&self, provider: &P, query: &P::Query) -> Result<P::Value, P::Error>
+    where
+        F: Fact,
+        F::Producer: Below<R>,
+        P: Provide<F>,
+    {
+        provider.get(query).await
+    }
+}
 
 mod sealed {
     use super::*;
+    pub trait Below<R: Reader> {}
     pub trait Value<F: Fact> {}
     impl<F: Fact> Value<F> for F {}
     impl<F: Fact> Value<F> for Option<F> {}

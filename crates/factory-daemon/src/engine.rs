@@ -1418,7 +1418,7 @@ impl Engine {
                 attestations: self.run_attestations(&id).await?,
             }),
             Request::RunProvenance { id } => Ok(Payload::RunProvenance {
-                records: crate::facts::Facts::<factory_kernel::L4>::new(self).get::<factory_kernel::ArtifactProvenance>(&id).await?,
+                records: crate::facts::Facts::<factory_kernel::People>::new(self).get::<factory_kernel::ArtifactProvenance>(&id).await?,
             }),
             Request::RunApprove { id, reason } => Ok(Payload::Run {
                 run: Box::pin(self.decide_approval(
@@ -1469,7 +1469,7 @@ impl Engine {
                 report: self.budget_report(scope.as_deref(), group_by, Utc::now()).await?,
             }),
             Request::Costs { group_by, from, to, scope } => Ok(Payload::Costs {
-                report: crate::facts::Facts::<factory_kernel::L4>::new(self)
+                report: crate::facts::Facts::<factory_kernel::People>::new(self)
                     .get::<factory_kernel::CostReport>(&factory_core::usage::SpendQuery { scope, from, to, group_by, ..Default::default() })
                     .await?,
             }),
