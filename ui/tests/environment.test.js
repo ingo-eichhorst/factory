@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { state } from "../js/core.js";
-import { sandboxTag, visibleSandboxes } from "../js/sandboxes.js";
+import { readinessDetail, readinessTag, sandboxTag, visibleSandboxes } from "../js/sandboxes.js";
 import { visibleCredentials } from "../js/secrets.js";
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
@@ -70,8 +70,7 @@ test("a failed fetch gets its own element and never takes the reachability note'
   state.environmentError = null;
 });
 
-test("an openshell row says whether its sandbox could be made now, and what it needs", async () => {
-  const { readinessTag, readinessDetail } = await import("../js/sandboxes.js");
+test("an openshell row says whether its sandbox could be made now, and what it needs", () => {
   assert.equal(readinessTag({ sandbox: "docker" }), "", "only openshell has prerequisites the daemon keeps");
   assert.match(readinessTag({ sandbox: "openshell" }), />checking</);
   const needs = {
