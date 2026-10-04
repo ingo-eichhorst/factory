@@ -209,6 +209,9 @@ pub struct Engine {
     pub(crate) workflows: crate::workflows::WorkflowStore,
     pub(crate) workflow_edit: tokio::sync::Mutex<()>,
     pub(crate) bench: crate::bench::BenchStore,
+    /// L4 owns run-step evidence and immutable artifact provenance separately
+    /// from L6's policy receipts. Both stores use the existing instance database.
+    pub(crate) run_evidence: factory_process::evidence_store::RunEvidenceStore,
     /// The attestations audit trail -- see `policies::PolicyStore`. Nothing
     /// else in a policy request is stateful: the catalogues are read fresh
     /// off disk on every call, like `.factory/knowledge/` and
@@ -427,6 +430,8 @@ impl Engine {
                 .expect("an in-memory bench store should open"),
             policies: crate::policies::PolicyStore::in_memory()
                 .expect("an in-memory policy store should open"),
+            run_evidence: factory_process::evidence_store::RunEvidenceStore::in_memory()
+                .expect("an in-memory run evidence store should open"),
             goals: crate::goals::GoalsStore::in_memory()
                 .expect("an in-memory goals store should open"),
             backups: crate::backup::BackupStore::in_memory()
@@ -492,6 +497,15 @@ impl Engine {
     /// The same, for policy attestations.
     pub fn with_policy_store(mut self, policies: crate::policies::PolicyStore) -> Self {
         self.policies = policies;
+        self
+    }
+
+    /// Install L4's persisted run evidence without replacing L6's receipts.
+    pub fn with_run_evidence_store(
+        mut self,
+        evidence: factory_process::evidence_store::RunEvidenceStore,
+    ) -> Self {
+        self.run_evidence = evidence;
         self
     }
 
@@ -3231,7 +3245,7 @@ impl Engine {
             .await;
         }
 
-        let approval_evidence = self.policies.step_attestations(&run.id).await?;
+        let approval_evidence = self.run_evidence.step_attestations(&run.id).await?;
         let pending_approval = run
             .required_steps
             .iter()

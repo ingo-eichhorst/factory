@@ -8,9 +8,9 @@ A daemon that gives tasks to coding agents and watches what happens.
     crates/factory-infrastructure L1: backup, running environments and renewal domain behaviour
     crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
-    crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy and TaskStore
+    crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy, TaskStore and run evidence/provenance store
     crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam (full live services still pending)
-    crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data and GoalsStore
+    crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data, GoalsStore and policy receipt store
     crates/factory-composition    outside stack: instance config/scope loading and dashboard/site/Line page projections
     crates/factory-interfaces     outside stack: wire protocol, observer event stream and Interface seam
     crates/factory-core      compatibility paths and remaining cross-level bridges
@@ -266,8 +266,12 @@ something impossible.
   subjects and plan sources; never import an L4 task or compiler API there.
   Policy report/export data and the live GoalsStore are owned there too,
   with canonical old Core/wire paths and unchanged JSON/SQLite schema.
-  PolicyStore still mixes process evidence with policy receipts in the daemon;
-  split those owners before claiming full service/storage isolation. The
+  The policy receipt store owns only `policy_attestations` in L6; L4's
+  `RunEvidenceStore` owns `run_attestations` and `artifact_provenance`.
+  The daemon opens both on the same existing instance database, with unchanged
+  tables, indexes, append-only records and JSON. Never make L6 store or read
+  process evidence directly; upward live reads still use its fact ports.
+  Splitting storage does not finish service/provider isolation. The
   signpost reader move and live adjacent command ports still remain in #193.
 - Wire envelopes, responses, observer events and the unchanged Interface seam
   live in `factory-interfaces`, outside the stack. Whole-instance config/scope

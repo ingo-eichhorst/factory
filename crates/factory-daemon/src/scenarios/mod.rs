@@ -1632,7 +1632,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .policies
+            .run_evidence
             .append_step_attestation(&StepAttestation {
                 id: uuid::Uuid::new_v4().to_string(),
                 run_id: run.id.clone(),

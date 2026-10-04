@@ -1,4 +1,5 @@
-//! L4 owns standing intent, attempts, workflows, intake and execution gates.
+//! L4 owns standing intent, attempts, workflows, intake, execution gates and
+//! the append-only run evidence/artifact provenance store.
 //! Only L0 and the directly lower L3 contract may be imported here. Live
 //! services and command routing remain separate migration work in #193.
 //!
@@ -8,6 +9,7 @@
 //! ```
 pub mod assignment;
 pub mod control_plan;
+pub mod evidence_store;
 pub mod intake;
 pub mod occupancy;
 pub mod origin;

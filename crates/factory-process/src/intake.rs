@@ -442,7 +442,7 @@ impl DuplicateKind {
 /// How a candidate was found: the same source reference -- the strongest
 /// evidence, the same GitHub issue or mail id -- or a text match, a
 /// normalised token overlap of title and instructions above
-/// [`TEXT_MATCH_THRESHOLD`], carried as a percentage in `score`.
+/// `TEXT_MATCH_THRESHOLD`, carried as a percentage in `score`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DuplicateMatch {
@@ -578,8 +578,8 @@ fn overlap(
 /// other for a reason that has nothing to do with the work.
 ///
 /// The same source reference is the strongest evidence; otherwise, a text
-/// match at or above [`TEXT_MATCH_THRESHOLD`] with at least
-/// [`MIN_SHARED_TOKENS`] in common. At most [`MAX_CANDIDATES`], ordered by
+/// match at or above `TEXT_MATCH_THRESHOLD` with at least
+/// `MIN_SHARED_TOKENS` in common. At most [`MAX_CANDIDATES`], ordered by
 /// score then reference, so the same input always gives the same list.
 ///
 /// The source match stays keyed on `(kind, reference)`, not
@@ -1915,7 +1915,7 @@ pub fn validate(a: &Assessment, definition: &ReadyDefinition) -> Result<(), Stri
 /// `reference` (`#168`) is the routed scope and category's reference class,
 /// already gathered by the caller (`factory-daemon` reads the store; a test
 /// passes [`ReferenceEstimate::empty`]) -- pure like `definition`, and used
-/// the same way: [`estimate_and_basis`] picks the assessor's own range over
+/// the same way: `estimate_and_basis` picks the assessor's own range over
 /// it, and it over the complexity table, purely from what it is handed.
 pub fn evaluate(
     a: &Assessment,

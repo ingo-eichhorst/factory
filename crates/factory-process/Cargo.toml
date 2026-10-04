@@ -19,3 +19,5 @@ serde_yaml_ng.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true
