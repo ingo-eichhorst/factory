@@ -5088,8 +5088,22 @@ stay outside L1. Renewal files retain their live bounded parser, distinct
 root/scope last-good keys and visible findings. Read-only native host probes
 and the canonical interface configuration/bind derivation belong to L1 too.
 L0 owns shared cron/timezone grid arithmetic, not task misfire decisions.
-The remaining L2/L3 providers, native command/timer services and strict
+The remaining L3 provider, native command/timer services and strict
 adjacent command ports still need migration.
+
+L2's six remaining live providers now physically belong to
+`factory-environment`: credential presence and expiry, dependency inventory,
+exploited findings, release SBOMs and sandbox enforcement evidence. They receive
+plain current identities/declarations, filesystem paths and their own expiry
+store, not an Engine/facade or upper-level callback. Presence uses metadata
+only; catalogue expiry never resolves a credential source. Dependency reports
+and facts share the same immutable-attachment reader and exact-scope selection.
+OpenShell execution/cleanup records and its evidence collector move together
+into L2, with canonical daemon re-exports. Their command argv, ownership checks,
+fail-closed behavior, evidence bounds/redaction and restart/cleanup contracts
+stay the same. Attachment authorization and task journaling still sit outside
+L2 pending the strict adjacent-command migration. L3's agent provider and the
+six-service, signpost and upper-level routing work remain unfinished.
 
 L3's `factory-agents` owns standing-agent state, role resolution, harness
 health, both agent adapter traits and the cumulative session-usage contract.

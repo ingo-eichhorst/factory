@@ -2177,19 +2177,7 @@ pub struct SandboxRow {
 /// One place on disk a credential might already sit, checked for existence
 /// only -- see `Payload::Environment`. The value itself is never read, held,
 /// or returned; `present` is the whole of what this says.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CredentialRow {
-    pub label: String,
-    pub path: String,
-    pub integration: String,
-    pub present: bool,
-    /// The scope this row belongs to, for the rows that belong to one at all.
-    /// `None` is the honest answer for a credential in the owner's home: it
-    /// sits outside every scope and is reachable from all of them, so the
-    /// page goes on showing it whichever scope the rail has selected.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-}
+pub use factory_environment::credentials::CredentialRow;
 
 /// One declared secret (`#244`), as the Secrets tab shows it. Everything
 /// here is metadata or a yes/no about the source; never a value, and never
@@ -2235,12 +2223,7 @@ pub struct SecretRow {
 
 /// One provider naming a secret: `scope / agent / provider`, the provider
 /// by its name on the gateway (this instance's suffix included).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SecretUse {
-    pub scope: String,
-    pub agent: String,
-    pub provider: String,
-}
+pub use factory_environment::credential_expiry::SecretUse;
 
 /// A managed OpenShell provider whose credential is written inline in a
 /// scope's config (`#234`) rather than declared in the catalogue: it works,

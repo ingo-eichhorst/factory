@@ -1,110 +1,75 @@
-//! Environment-owned fact providers. Presence only; never secret values.
+//! Constructors only: fresh plain inputs and own L2 capabilities, never callbacks.
 use crate::engine::Engine;
-use async_trait::async_trait;
-use factory_core::{
-    error::{FactoryError, Result},
-    protocol::CredentialRow,
-};
-use factory_kernel::{DependenciesFact, ExploitedFinding, Provide, SecretsPresence};
-use std::collections::{BTreeMap, BTreeSet};
-
-pub(crate) struct Provider<'a> {
-    pub(super) engine: &'a Engine,
-}
-impl factory_kernel::FactProvider for Provider<'_> {
-    type Level = factory_kernel::L2;
-}
-
-#[async_trait]
-impl Provide<factory_kernel::SandboxServiceEvidenceFact> for Provider<'_> {
-    type Query = String;
-    type Value = factory_kernel::SandboxServiceEvidenceFact;
-    type Error = FactoryError;
-    async fn get(&self, scope: &String) -> Result<Self::Value> {
-        crate::service_observations::read(self.engine, scope).await
+pub(crate) fn credentials_provider(engine: &Engine) -> factory_environment::credentials::Provider {
+    let snapshot = engine.factory_snapshot();
+    factory_environment::credentials::Provider {
+        root: snapshot.root.clone(),
+        scopes: snapshot.scope_tree(),
+        home: std::env::var_os("HOME").map(std::path::PathBuf::from),
     }
 }
-
-#[async_trait]
-impl Provide<factory_kernel::CredentialExpiryFact> for Provider<'_> {
-    type Query = ();
-    type Value = factory_kernel::CredentialExpiryFact;
-    type Error = FactoryError;
-    async fn get(&self, _: &()) -> Result<Self::Value> {
-        let mut observations = self.engine.credential_expiries.all().await?;
-        // The declared catalogue (#244), read from the live config rather
-        // than the probe cache: a date edited on the Secrets tab counts at once.
-        observations.extend(crate::secrets::ledger_observations(&self.engine.factory_snapshot(), chrono::Utc::now()));
-        Ok(factory_kernel::CredentialExpiryFact { observations })
-    }
-}
-#[async_trait]
-impl Provide<SecretsPresence> for Provider<'_> {
-    type Query = BTreeSet<String>;
-    type Value = BTreeMap<String, SecretsPresence>;
-    type Error = FactoryError;
-    async fn get(&self, scopes: &Self::Query) -> Result<Self::Value> {
-        if scopes.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        let snapshot = self.engine.factory_snapshot();
-        let scopes: Vec<_> = scopes
+pub(crate) fn dependencies_provider(
+    engine: &Engine,
+) -> factory_environment::dependency_inventory::Provider {
+    let snapshot = engine.factory_snapshot();
+    factory_environment::dependency_inventory::Provider {
+        root: snapshot.root.clone(),
+        scopes: snapshot.scope_tree(),
+        declarations: snapshot
+            .config
+            .scopes
             .iter()
-            .map(|s| snapshot.scope(s).map(|s| s.name.clone()))
-            .collect::<Result<_>>()?;
-        let rows = self.engine.credential_inventory().await;
-        Ok(scopes
-            .into_iter()
-            .map(|s| {
-                let fact = secrets_fact_map(&rows, &s).into();
-                (s, fact)
+            .map(|scope| factory_environment::dependency_inventory::Scope {
+                name: scope.name.clone(),
+                dependencies: scope.dependencies.clone(),
             })
-            .collect())
+            .collect(),
+        credentials: credentials_provider(engine),
     }
 }
-#[async_trait]
-impl Provide<DependenciesFact> for Provider<'_> {
-    type Query = String;
-    type Value = DependenciesFact;
-    type Error = FactoryError;
-    async fn get(&self, scope: &String) -> Result<Self::Value> {
-        Ok(crate::dependencies::fact(
-            &self.engine.dependencies_report(scope).await?,
-        ))
+pub(super) fn evidence_provider(
+    engine: &Engine,
+) -> factory_environment::service_observations::Provider {
+    let snapshot = engine.factory_snapshot();
+    factory_environment::service_observations::Provider {
+        root: snapshot.root.clone(),
+        instance: snapshot.config.instance.id.clone(),
+        scopes: snapshot.scope_tree(),
     }
 }
-#[async_trait]
-impl Provide<ExploitedFinding> for Provider<'_> {
-    type Query = String;
-    type Value = Vec<ExploitedFinding>;
-    type Error = FactoryError;
-    async fn get(&self, scope: &String) -> Result<Self::Value> {
-        self.engine.exploited_findings(scope).await
-    }
+pub(crate) fn provider_declarations(
+    snapshot: &factory_core::config::Factory,
+) -> Vec<factory_environment::credential_expiry::ScopedProviders> {
+    snapshot
+        .scope_names()
+        .into_iter()
+        .filter_map(|name| {
+            let scope = snapshot.scope(&name).ok()?;
+            Some(factory_environment::credential_expiry::ScopedProviders {
+                name: scope.name.clone(),
+                agents: scope
+                    .declared_agents()
+                    .into_iter()
+                    .filter_map(|agent| {
+                        let config = agent.openshell.clone()?;
+                        Some(factory_environment::credential_expiry::AgentProviders {
+                            name: agent.name(),
+                            config,
+                        })
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
 }
-
-#[async_trait]
-impl Provide<factory_kernel::ReleaseSbomFact> for Provider<'_> {
-    type Query = super::ReleaseSbomQuery;
-    type Value = Vec<factory_kernel::ReleaseSbomFact>;
-    type Error = FactoryError;
-    async fn get(&self, query: &Self::Query) -> Result<Self::Value> {
-        self.engine.release_sboms(&query.scope, &query.commit, query.version.as_deref()).await
+pub(super) fn expiry_provider(
+    engine: &Engine,
+) -> factory_environment::credential_expiry::Provider<'_> {
+    let snapshot = engine.factory_snapshot();
+    factory_environment::credential_expiry::Provider {
+        store: &engine.credential_expiries,
+        instance: snapshot.config.instance.id.clone(),
+        declarations: snapshot.config.secrets.clone(),
+        providers: provider_declarations(&snapshot),
     }
-}
-fn secrets_fact_map(rows: &[CredentialRow], scope: &str) -> BTreeMap<String, bool> {
-    let mut map = BTreeMap::new();
-    for row in rows {
-        let id = match (row.integration.as_str(), row.scope.as_deref()) {
-            ("anthropic", None) => "anthropic",
-            ("github", None) => "github",
-            ("aws", None) => "aws",
-            ("netrc", None) => "netrc",
-            ("ssh", None) => "ssh",
-            ("scope env", Some(s)) if s == scope => "scope_env",
-            _ => continue,
-        };
-        map.insert(id.to_string(), row.present);
-    }
-    map
 }

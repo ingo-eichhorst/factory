@@ -881,8 +881,11 @@ name = "factory-environment"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
+ "factory-infrastructure",
  "factory-kernel",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
