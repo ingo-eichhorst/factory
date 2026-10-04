@@ -2417,16 +2417,47 @@ pub struct SudoersRule {
     pub user_is_admin: bool,
 }
 
+/// One step of installing the rule: what to do, and the command to paste
+/// for it, if any -- each in a block of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallStep {
+    pub text: String,
+    pub command: Option<String>,
+}
+
 impl SudoersRule {
-    /// Who runs the install, in one line -- the same wording the L1 Mac
-    /// tab's `installStep` uses.
-    pub fn install_from(&self) -> String {
+    /// The administrator to switch to first, when the daemon's own user is
+    /// not one and one is known.
+    pub fn switch_to(&self) -> Option<&str> {
         if self.user_is_admin {
-            format!("from {}'s own account", self.user)
-        } else if let Some(first) = self.admins.first() {
-            format!("as an administrator ({}): su - {first}, then", self.admins.join(" or "))
+            None
         } else {
-            "from an administrator account".to_string()
+            self.admins.first().map(String::as_str)
+        }
+    }
+
+    /// The install as steps a person runs one at a time -- the same wording
+    /// the L1 Mac tab's `installSteps` uses. `su - <admin>` is a step of its
+    /// own: pasted together with the install, `su`'s password prompt
+    /// swallows the typed-ahead lines and opens a shell that ran nothing.
+    pub fn install_steps(&self) -> Vec<InstallStep> {
+        let step = |text: String, command: Option<String>| InstallStep { text, command };
+        match self.switch_to() {
+            Some(admin) => vec![
+                step(format!("Run this alone and enter {admin}'s password:"), Some(format!("su - {admin}"))),
+                step("Then, in that shell, paste:".into(), Some(self.install.clone())),
+                step("Then `exit`, and Refresh.".into(), None),
+            ],
+            None if self.user_is_admin => vec![step(
+                "This checks the rule with `visudo -cf` before installing it, root-owned and read-only:".into(),
+                Some(self.install.clone()),
+            )],
+            None => vec![step(
+                "This checks the rule with `visudo -cf` before installing it, root-owned and read-only. \
+                 Run it from an administrator account:"
+                    .into(),
+                Some(self.install.clone()),
+            )],
         }
     }
 }

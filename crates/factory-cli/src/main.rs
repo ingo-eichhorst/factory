@@ -2775,14 +2775,20 @@ fn power_mode_text(payload: &Payload) -> Option<String> {
         if report.can_change {
             out.push_str("  change      factory power-mode automatic|high-performance|energy-saving\n");
         } else {
+            let s = &report.sudoers;
             out.push_str(&format!(
-                "  read-only   Factory may not change it until {} holds:\n    {}\n  install     {}:\n    {}\n  check       {}\n",
-                report.sudoers.path,
-                report.sudoers.rule,
-                report.sudoers.install_from(),
-                report.sudoers.install,
-                report.sudoers.check
+                "  read-only   Factory may not change it until {} holds:\n    {}\n  install\n",
+                s.path, s.rule
             ));
+            for (n, step) in s.install_steps().iter().enumerate() {
+                out.push_str(&format!("    {}. {}\n", n + 1, step.text));
+                if let Some(command) = &step.command {
+                    out.push_str(&format!("         {command}\n"));
+                }
+            }
+            if s.switch_to().is_none() {
+                out.push_str(&format!("  check       {}\n", s.check));
+            }
         }
     }
     for note in &report.notes {
@@ -7141,7 +7147,13 @@ mod tests {
         assert!(text.contains("AC          High performance"), "{text}");
         assert!(text.contains("battery     Automatic"), "{text}");
         assert!(text.contains("factory ALL=(root) NOPASSWD: ..."), "{text}");
-        assert!(text.contains("install     as an administrator (ingo): su - ingo, then:\n    sudo visudo -cf ..."), "{text}");
+        assert!(
+            text.contains(
+                "  install\n    1. Run this alone and enter ingo's password:\n         su - ingo\n    \
+                 2. Then, in that shell, paste:\n         sudo visudo -cf ...\n    3. Then `exit`, and Refresh."
+            ),
+            "{text}"
+        );
 
         let with_identity = Cli::try_parse_from([
             "factory",

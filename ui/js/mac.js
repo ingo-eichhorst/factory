@@ -17,7 +17,7 @@ import {
   changeRows,
   headline,
   macFailure,
-  installStep,
+  installSteps,
   macState,
   modeLabel,
   needsRule,
@@ -26,6 +26,7 @@ import {
   setBody,
   sourceRows,
   stateText,
+  switchesAccount,
 } from "./mac-model.js";
 
 // ------------------------------------------------------------------ fetching
@@ -112,17 +113,22 @@ function hero(report) {
   </article>`;
 }
 
+/// Escaped text with its backticked spans drawn as code.
+function prose(text) {
+  return esc(text).replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
 function rule(report) {
   if (!needsRule(report)) return "";
   const s = report.sudoers;
-  const step = installStep(s);
-  const install = step.su
-    ? `<p class="infra-hint">${esc(step.lead)} First switch to that account:</p>
-      <pre class="infra-snippet mac-cmd"><code>${esc(step.su)}</code></pre>
-      <p class="infra-hint">then, as that administrator, run this. It checks the rule with <code>visudo -cf</code>
-        before installing it, root-owned and read-only:</p>`
-    : `<p class="infra-hint">This checks the rule with <code>visudo -cf</code> before installing it, root-owned and
-        read-only${step.lead ? `. ${esc(step.lead)}` : ":"}</p>`;
+  const steps = installSteps(s);
+  const numbered = steps.length > 1;
+  const body = steps.map((step, i) => `
+    <p class="infra-hint mac-step">${numbered ? `<span class="mac-step-n">${i + 1}.</span> ` : ""}${prose(step.text)}</p>
+    ${step.command ? `<pre class="infra-snippet mac-cmd"><code>${esc(step.command)}</code></pre>` : ""}`).join("");
+  const check = switchesAccount(s)
+    ? ""
+    : `<p class="infra-hint">Then <code>${esc(s.check)}</code> checks the whole configuration, and Refresh here.</p>`;
   return `<article class="infra-card mac-rule" aria-labelledby="mac-rule-title">
     <header class="infra-card-head">
       <h3 id="mac-rule-title">Let Factory change it</h3>
@@ -132,10 +138,8 @@ function rule(report) {
       <code>${esc(s.path)}</code> -- it lets <code>${esc(s.user)}</code> run exactly these three commands as root,
       and nothing else:</p>
     <pre class="infra-snippet mac-cmd"><code>${esc(s.rule)}</code></pre>
-    ${install}
-    <pre class="infra-snippet mac-cmd"><code>${esc(s.install)}</code></pre>
-    <p class="infra-hint">Then${step.su ? ", still as the administrator," : ""} <code>${esc(s.check)}</code> checks the
-      whole configuration, and Refresh here.</p>
+    ${body}
+    ${check}
   </article>`;
 }
 
