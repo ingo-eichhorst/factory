@@ -319,6 +319,8 @@ mod tests {
     fn task(id: &str, scope: &str, created_secs: i64) -> Task {
         let at = DateTime::from_timestamp(1_700_000_000 + created_secs, 0).unwrap();
         Task {
+            after: None,
+            after_condition: None,
             id: id.to_string(),
             title: id.to_string(),
             instructions: "do it".into(),

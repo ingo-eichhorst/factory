@@ -75,7 +75,7 @@ export function closeReason(t) {
 /// deliberately closed. A legacy `failed` row goes there too.
 export function columnFor(t) {
   if (t.status === "blocked" || t.status === "failed") return "blocked";
-  if (t.status === "pending") return (t.schedule || (t.depends_on || []).length) ? "scheduled" : "manual";
+  if (t.status === "pending") return (t.after != null || t.schedule || (t.depends_on || []).length) ? "scheduled" : "manual";
   // `verifying` is still in progress: the agent said done and the daemon is
   // running the steps its control plan requires (`#118`).
   if (t.status === "dispatching" || t.status === "running" || t.status === "verifying") return "active";
@@ -141,7 +141,7 @@ export function taskActions(t, activeRun) {
   const active = !!activeRun;
   const intakeWontfix = t?.intake?.stage === "wontfix";
   return {
-    run: !active,
+    run: !active && t?.after == null,
     cancel: active,
     close: !active && !!t && !isClosed(t) && t.status !== "intake",
     reopen: !active && isClosed(t) && !intakeWontfix,

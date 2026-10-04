@@ -1015,6 +1015,8 @@ mod tests {
     async fn task_and_run(engine: &Engine, scope: &str, agent_name: &str, sess: SessionRef) -> (Task, String) {
         let now = Utc::now();
         let task = Task {
+            after: None,
+            after_condition: None,
             id: "t1".into(),
             title: "t".into(),
             instructions: String::new(),
@@ -1445,6 +1447,8 @@ mod tests {
         );
         let now = Utc::now();
         let task = Task {
+            after: None,
+            after_condition: None,
             id: "legacy-task".into(),
             title: "legacy run".into(),
             instructions: "true".into(),

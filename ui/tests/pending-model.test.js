@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { isDue, notStarted, notStartedNote } from "../js/pending-model.js";
+import { isDue, notStarted, notStartedNote, waitingLabel } from "../js/pending-model.js";
 
 const NOW = Date.parse("2026-09-25T18:00:00Z");
 const every = { every: { seconds: 300 } };
@@ -66,4 +66,21 @@ test("a task waiting for a slot says which agent and since when (#179)", () => {
 test("a task that has been started gets no note", () => {
   assert.equal(notStartedNote(running), null);
   assert.equal(notStartedNote(null), null);
+});
+
+test("upstream waiting belongs to scheduled later, never manual, due or capacity queue", () => {
+  const task = { ...due, id: "child", after: ["parent"], slot_wait: slotWait };
+  assert.equal(isDue(task, NOW), false);
+  assert.deepEqual(notStarted([task], NOW), { waiting: [], due: [], later: [task], manual: [] });
+  assert.deepEqual(notStarted([{ ...manual, after: [] }], NOW).manual, []);
+});
+
+test("waiting labels resolve titles with an ID fallback and preserve conditional meaning", () => {
+  const task = { ...manual, after: ["parent", "outside-filter"], after_condition: "conditional: skipped if release is selected" };
+  const tasks = new Map([["parent", { title: "Implement #119" }]]);
+  assert.equal(waitingLabel(task, tasks), "waiting on Implement #119, outside-filter; conditional: skipped if release is selected");
+  assert.match(notStartedNote(task, tasks), /--override-wait --reason/);
+  assert.match(notStartedNote(task, tasks), /recorded in the journal/);
+  assert.equal(waitingLabel({ after: [] }), "waiting for workflow release");
+  assert.equal(waitingLabel(manual), null);
 });

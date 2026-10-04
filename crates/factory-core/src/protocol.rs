@@ -158,6 +158,9 @@ pub enum Request {
         reason: Option<String>,
         #[serde(default, rename = "continue", skip_serializing_if = "std::ops::Not::not")]
         continue_run: bool,
+        /// Deliberately bypass a waiting trigger, with a journaled reason.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        override_wait: bool,
     },
     /// Journaled with who asked, and `reason` when there is one (`#106`).
     #[serde(rename = "task.cancel")]

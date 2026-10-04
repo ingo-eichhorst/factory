@@ -1542,6 +1542,8 @@ struct RunTaskBody {
     reason: Option<String>,
     #[serde(default, rename = "continue")]
     continue_run: bool,
+    #[serde(default)]
+    override_wait: bool,
 }
 
 /// Read the same way `reason_of` reads `ReasonBody` -- an empty body is
@@ -1559,7 +1561,7 @@ async fn run_task(
     body: axum::body::Bytes,
 ) -> AxumResponse {
     match run_task_body_of(&body) {
-        Ok(body) => run(&engine, Request::TaskRun { id, reason: body.reason, continue_run: body.continue_run }).await,
+        Ok(body) => run(&engine, Request::TaskRun { id, reason: body.reason, continue_run: body.continue_run, override_wait: body.override_wait }).await,
         Err(why) => refused(why),
     }
 }
@@ -2269,6 +2271,15 @@ mod tests {
     //! the query string and the optional reason body are what this file
     //! adds, so they are what is checked here -- the report itself is
     //! `operations.rs`'s to test.
+
+    #[test]
+    fn run_body_keeps_overrides_explicit_and_backward_compatible() {
+        assert!(!super::run_task_body_of(b"").unwrap().override_wait);
+        assert!(!super::run_task_body_of(br#"{"continue":true}"#).unwrap().override_wait);
+        let body = super::run_task_body_of(br#"{"override_wait":true,"reason":"investigate"}"#).unwrap();
+        assert!(body.override_wait);
+        assert_eq!(body.reason.as_deref(), Some("investigate"));
+    }
 
     #[test]
     fn corrective_measure_http_requires_both_fields_and_valid_item() {

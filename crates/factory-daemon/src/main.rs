@@ -40,6 +40,7 @@ mod site;
 mod stores;
 mod ui;
 mod verification;
+mod waiting;
 mod worktree;
 mod workflows;
 

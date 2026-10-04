@@ -2830,8 +2830,12 @@ and `drivers`, defaulting to the whole instance for existing clients.
 
 A workflow is reusable Process-level intent: a scoped, finite DAG of ordinary
 task templates. A workflow run keeps an immutable snapshot of the definition
-revision it started with. Root nodes create and run tasks immediately; every
-other node waits until all incoming predecessors have reported `done`.
+revision it started with. Every executable task and review node has a real
+task from the start. Roots run immediately; downstream tasks remain pending
+under **Scheduled**, showing "waiting on <upstream title>". Gate, approval
+and expand nodes are daemon evaluators, not harness tasks. Their eligibility
+remains the graph's decision: a gate must pass, and a review is released by
+the subject's verifier rather than waiting for the subject to become Done.
 Fan-out starts every newly eligible node and fan-in waits for every parent.
 A failed or cancelled task stops the attempt and leaves downstream nodes
 `skipped` -- a task blocked by a failed run is a failed node, even though
@@ -2846,8 +2850,10 @@ Workflow definitions and runs are daemon orchestration state. They are stored
 in additive tables in the instance root's `.factory/factory.db`, never in a
 scope config or browser storage, even when that scope uses a plugin task store.
 Each spawned task carries `workflow_origin` with the definition, run, and node
-IDs. The run persists its chosen task ID before task creation, so restart
-reconciliation recreates that exact decision instead of spawning a duplicate.
+IDs. The run persists its chosen task IDs before task creation and records
+each successful creation, so restart reconciliation repairs an interrupted
+creation using that exact ID without regenerating a deliberately deleted task.
+Legacy IDs without receipts are conservatively treated as already created.
 A row neither table can decode is skipped (and named in a warning) rather than
 failing the whole list or recovery pass; fetching it directly is still an
 error, but only for that one id.
@@ -2858,9 +2864,26 @@ agent) and re-checks that actor's *current* role -- not a snapshot of what it
 could do at the moment it clicked Run -- against the same `task.create` and
 `task.run` authority a hand-typed request would need, every time a node
 spawns: the first preflight before anything is persisted, and again at every
-later spawn a downstream fan-out or a restart recovery makes. A role that has
+later release a downstream fan-out or a restart recovery makes. A role that has
 since lost the grant fails just that node (recorded as its error) rather than
 the run silently keeping the authority it started with.
+
+Waiting is a one-shot `after: [<task id>, ...]` trigger, exclusive with a
+time schedule. Outside workflows, `factory task create "<title>" --after
+<id>` (repeatable) starts once every upstream task is Done. Inside workflows,
+only the graph releases it, including named exits and required control steps;
+the generic dependency scheduler cannot bypass those decisions. Waiting
+tasks are not due and do not count in Operations' `flow.queue_depth`.
+Conditional tasks say which forward route may skip them. Untaken branches
+and all remaining waits at workflow cancellation or failure close as
+`not_planned`, including abandon-cancel (which leaves admitted children alone).
+
+`factory task run <id>` refuses a waiting task. An intentional early run needs
+`--override-wait --reason "<why>"` (`task.run` and HTTP use `override_wait`);
+the journal records the actor, reason and overridden upstream IDs. It does
+not override static dependencies outside workflows or the run's control plan.
+Parent outputs are still bound at dispatch, not upfront creation, and rebound
+for each feedback run.
 
 The web UI exposes **Workflows** beside **Tasks**. Its canvas supports moving,
 connecting, duplicating and deleting task nodes, with pan/zoom, zoom/fit

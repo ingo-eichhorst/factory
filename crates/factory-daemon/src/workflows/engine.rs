@@ -459,8 +459,11 @@ mod tests {
     }
 
     async fn wait_for_tasks(engine: &Arc<Engine>, count: usize) -> Vec<factory_core::Task> {
-        for _ in 0..100 {
-            let found = tasks(engine).await;
+        // These older progression tests count admitted tasks, not the new
+        // upfront waiting rows. Waiting-specific tests inspect the full store.
+        for _ in 0..500 {
+            let found: Vec<_> = tasks(engine).await.into_iter().filter(|task| task.after.is_none()
+                && !task.closure.as_ref().is_some_and(|closure| closure.reason == factory_core::task::CloseReason::NotPlanned)).collect();
             if found.len() == count {
                 return found;
             }
@@ -534,6 +537,148 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         panic!("no prompt captured for task {task_id}");
+    }
+
+    #[tokio::test]
+    async fn waiting_tasks_exist_upfront_and_are_released_once_without_scheduler_bypass() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a"), node("b"), node("c")], vec![edge("a", "b"), edge("b", "c")]).await;
+        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let all = tasks(&engine).await;
+        assert_eq!(all.len(), 3, "all executable nodes exist before start returns");
+        assert!(run.nodes.iter().all(|node| node.task_id.is_some() && node.task_created));
+        let a = of_node(&all, "a")[0].clone();
+        let b = of_node(&all, "b")[0].clone();
+        let c = of_node(&all, "c")[0].clone();
+        assert_eq!(b.after, Some(vec![a.id.clone()]));
+        assert_eq!(c.after, Some(vec![b.id.clone()]));
+        assert_eq!(b.status, TaskStatus::Pending);
+        assert!(engine.dependency_ready_tasks().await.unwrap().is_empty());
+        engine.start_run(&b.id, Trigger::Dependency).await;
+        assert!(engine.store.active_run(&b.id).await.unwrap().is_none());
+        let response = engine.handle_request(factory_core::protocol::Request::TaskRun {
+            id: b.id.clone(), reason: None, continue_run: false, override_wait: false,
+        }).await;
+        assert!(matches!(response, factory_core::protocol::Response::Error { .. }));
+        engine.recover_workflows().await;
+        assert_eq!(tasks(&engine).await.len(), 3);
+        assert!(engine.require(&b.id).await.unwrap().after.is_some());
+        finish(&engine, &a.id, RunStatus::Done).await;
+        let released = wait_for_tasks(&engine, 2).await;
+        assert_eq!(of_node(&released, "b")[0].id, b.id);
+        assert!(engine.require(&b.id).await.unwrap().after.is_none());
+        assert!(engine.require(&c.id).await.unwrap().after.is_some());
+        finish(&engine, &b.id, RunStatus::Done).await;
+        finish(&engine, &c.id, RunStatus::Done).await;
+        engine.recover_workflows().await;
+        assert_eq!(tasks(&engine).await.len(), 3);
+        assert_eq!(engine.store.runs(&b.id, 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn waiting_cancel_closes_unadmitted_tasks_as_not_planned() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let all = tasks(&engine).await;
+        let b = of_node(&all, "b")[0].clone();
+        engine.cancel_workflow(&run.id).await.unwrap();
+        let closed = engine.require(&b.id).await.unwrap();
+        assert_eq!(closed.status, TaskStatus::Cancelled);
+        assert_eq!(closed.closure.unwrap().reason, factory_core::task::CloseReason::NotPlanned);
+        assert!(closed.after.is_none());
+        assert!(engine.store.runs(&b.id, 10).await.unwrap().is_empty());
+        engine.recover_workflows().await;
+        assert_eq!(tasks(&engine).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn waiting_deleted_task_is_never_regenerated_by_recovery() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let id = node_run(&run, "b").task_id.clone().unwrap();
+        engine.store.delete(&id).await.unwrap();
+        engine.recover_workflows().await;
+        engine.recover_workflows().await;
+        assert!(engine.store.get(&id).await.unwrap().is_none());
+        assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn waiting_override_requires_a_reason_and_records_the_early_release() {
+        let engine = engine();
+        let parent = engine.create(node("parent").task).await.unwrap();
+        let mut new = node("child").task;
+        new.after = Some(vec![parent.id.clone()]);
+        let task = engine.create(new).await.unwrap();
+        let request = |reason| factory_core::protocol::Request::TaskRun {
+            id: task.id.clone(), reason, continue_run: false, override_wait: true,
+        };
+        assert!(matches!(engine.handle_request(request(None)).await, factory_core::protocol::Response::Error { .. }));
+        assert!(engine.require(&task.id).await.unwrap().after.is_some());
+        assert!(matches!(engine.handle_request(request(Some("manual investigation".into()))).await, factory_core::protocol::Response::Ok { .. }));
+        assert!(engine.require(&task.id).await.unwrap().after.is_none());
+        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entry = entries.iter().find(|entry| entry.kind == "waiting_override").unwrap();
+        assert!(entry.message.contains("manual investigation"));
+        assert_eq!(entry.source, "owner");
+        assert_eq!(entry.data.as_ref().unwrap()["after"], serde_json::json!([parent.id]));
+        finish(&engine, &task.id, RunStatus::Done).await;
+    }
+
+    #[tokio::test]
+    async fn waiting_standalone_after_fires_once_and_validates_trigger_edits() {
+        let engine = engine();
+        let parent = engine.create(node("parent").task).await.unwrap();
+        let mut new = node("child").task;
+        new.after = Some(vec![parent.id.clone()]);
+        let child = engine.create(new.clone()).await.unwrap();
+        assert!(engine.dependency_ready_tasks().await.unwrap().is_empty());
+        let invalid = engine.update(&parent.id, TaskPatch { after: Some(vec![child.id.clone()]), ..Default::default() }, None).await;
+        assert!(invalid.unwrap_err().to_string().contains("cycle"));
+        new.schedule = Some(factory_core::task::Schedule::Every { seconds: 1 });
+        assert!(engine.create(new).await.unwrap_err().to_string().contains("exclusive"));
+        engine.start_run(&parent.id, Trigger::Manual).await;
+        finish(&engine, &parent.id, RunStatus::Done).await;
+        let ready = engine.dependency_ready_tasks().await.unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, child.id);
+        engine.start_run(&child.id, Trigger::Dependency).await;
+        finish(&engine, &child.id, RunStatus::Done).await;
+        assert!(engine.require(&child.id).await.unwrap().after.is_none());
+        assert!(engine.dependency_ready_tasks().await.unwrap().is_empty());
+        assert_eq!(engine.store.runs(&child.id, 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn waiting_workflow_override_stays_released_and_cancelled_admission_is_refused() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let all = tasks(&engine).await;
+        let b = of_node(&all, "b")[0].clone();
+        engine.override_waiting(&b, &Caller::Owner, "inspect early").await.unwrap();
+        engine.advance_workflow(&run.id).await.unwrap();
+        assert!(engine.require(&b.id).await.unwrap().after.is_none());
+        assert!(engine.store.active_run(&b.id).await.unwrap().is_none(), "the graph does not automatically run an early override");
+        engine.cancel_workflow(&run.id).await.unwrap();
+        engine.start_run(&b.id, Trigger::Workflow).await;
+        assert!(engine.store.runs(&b.id, 10).await.unwrap().is_empty(), "a queued release cannot launch after cancellation");
+        assert_eq!(engine.require(&b.id).await.unwrap().closure.unwrap().reason, factory_core::task::CloseReason::NotPlanned);
+    }
+
+    #[tokio::test]
+    async fn waiting_trigger_edits_cannot_create_a_cycle_concurrently() {
+        let engine = engine();
+        let a = engine.create(node("a").task).await.unwrap();
+        let b = engine.create(node("b").task).await.unwrap();
+        let (left, right) = tokio::join!(
+            engine.update(&a.id, TaskPatch { after: Some(vec![b.id.clone()]), ..Default::default() }, None),
+            engine.update(&b.id, TaskPatch { after: Some(vec![a.id.clone()]), ..Default::default() }, None)
+        );
+        assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+        assert!(left.err().or_else(|| right.err()).unwrap().to_string().contains("cycle"));
     }
 
     #[tokio::test]
@@ -685,7 +830,7 @@ mod tests {
         engine.advance_workflow(&run.id).await.unwrap();
         assert_eq!(
             tasks(&engine).await.len(),
-            1,
+            2,
             "reconciliation does not duplicate the root"
         );
         finish(&engine, &first.id, RunStatus::Done).await;
@@ -722,7 +867,11 @@ mod tests {
             .find(|task| task.workflow_origin.as_ref().unwrap().node_id == "c")
             .unwrap();
         finish(&engine, &b.id, RunStatus::Done).await;
-        assert_eq!(tasks(&engine).await.len(), 3, "fan-in still waits for c");
+        let all = tasks(&engine).await;
+        assert_eq!(all.len(), 4);
+        let d = of_node(&all, "d")[0];
+        assert!(d.after.is_some(), "fan-in still waits for c");
+        assert_eq!(d.runs, 0);
         finish(&engine, &c.id, RunStatus::Done).await;
         wait_for_tasks(&engine, 4).await;
         let run = engine.workflow_run(&run.id).await.unwrap();
@@ -753,7 +902,9 @@ mod tests {
                 .status,
             WorkflowNodeStatus::Skipped
         );
-        assert_eq!(tasks(&engine).await.len(), 1);
+        let all = tasks(&engine).await;
+        assert_eq!(all.len(), 2);
+        assert_eq!(of_node(&all, "b")[0].closure.as_ref().unwrap().reason, factory_core::task::CloseReason::NotPlanned);
     }
 
     #[tokio::test]
@@ -768,9 +919,11 @@ mod tests {
         assert_eq!(paused.nodes[0].status, WorkflowNodeStatus::Blocked);
         assert_eq!(
             tasks(&engine).await.len(),
-            1,
-            "blocked never unlocks the child"
+            2,
+            "blocked preserves the child's upfront row"
         );
+        let all = tasks(&engine).await;
+        assert!(of_node(&all, "b")[0].after.is_some(), "blocked never unlocks the child");
 
         let cancelled = engine.cancel_workflow(&run.id).await.unwrap();
         assert_eq!(cancelled.status, WorkflowRunStatus::Cancelled);
@@ -790,7 +943,7 @@ mod tests {
                 .find(|node| node.node_id == "b")
                 .unwrap()
                 .status,
-            WorkflowNodeStatus::Skipped
+            WorkflowNodeStatus::Cancelled
         );
     }
 
@@ -898,7 +1051,9 @@ mod tests {
         assert_eq!(run.failure_node_id.as_deref(), Some("b"));
         let b = run.nodes.iter().find(|n| n.node_id == "b").unwrap();
         assert_eq!(b.status, WorkflowNodeStatus::Failed);
-        assert!(b.task_id.is_none(), "a denial never mints a task id");
+        let b_task = engine.require(b.task_id.as_ref().unwrap()).await.unwrap();
+        assert_eq!(b_task.runs, 0, "revoked authority never dispatches the upfront task");
+        assert_eq!(b_task.closure.as_ref().unwrap().reason, factory_core::task::CloseReason::NotPlanned);
         assert!(
             b.error.as_deref().unwrap_or("").contains("create tasks"),
             "{:?}",
@@ -906,8 +1061,8 @@ mod tests {
         );
         assert_eq!(
             tasks(&engine).await.len(),
-            1,
-            "no task is created for the denied node"
+            2,
+            "the denied upfront task is retained as not planned"
         );
     }
 
@@ -990,7 +1145,7 @@ mod tests {
             run.nodes.iter().find(|n| n.node_id == "b").unwrap().status,
             WorkflowNodeStatus::Skipped
         );
-        assert_eq!(tasks(&engine).await.len(), 0);
+        assert_eq!(tasks(&engine).await.len(), 1, "the upfront downstream row is closed, not deleted");
     }
 
     // -- B6: further execution coverage the issue asks for --------------------
@@ -1076,7 +1231,7 @@ mod tests {
         );
         assert_eq!(
             cancelled.nodes.iter().find(|n| n.node_id == "b").unwrap().status,
-            WorkflowNodeStatus::Skipped
+            WorkflowNodeStatus::Cancelled
         );
 
         let task = engine.store.get(&root.id).await.unwrap().unwrap();
@@ -1192,8 +1347,8 @@ mod tests {
         engine2.recover_workflows().await;
         assert_eq!(
             tasks(&engine2).await.len(),
-            1,
-            "recovery never recreates the root"
+            2,
+            "recovery keeps both upfront task IDs"
         );
 
         finish(&engine2, &root_task.id, RunStatus::Done).await;
@@ -1355,14 +1510,17 @@ mod tests {
         assert!(refused.contains("implement (concrete findings the implementer can fix alone)"), "{refused}");
         review_fails(&engine, &review.id, "the parser test is missing").await;
 
-        let routed_review = engine.store.get(&review.id).await.unwrap().unwrap();
+        let waiting_review = engine.require(&review.id).await.unwrap();
+        assert!(waiting_review.after.is_some(), "the next review round waits on rework");
+        assert_eq!(waiting_review.status, TaskStatus::Pending);
+        let routed_review = engine.store.runs(&review.id, 1).await.unwrap().pop().unwrap();
         assert_eq!(
             routed_review.status,
-            TaskStatus::Done,
+            RunStatus::Done,
             "sending work back is a successful review verdict"
         );
         assert_eq!(routed_review.routed_to.as_deref(), Some("implement"));
-        assert!(routed_review.failure.is_none());
+        assert!(routed_review.fail_kind.is_none());
         let review_entries = engine.store.entries(&review.id, 20).await.unwrap();
         assert!(review_entries.iter().any(|entry| {
             entry.kind == "routed_to"
@@ -1377,7 +1535,7 @@ mod tests {
         assert_eq!(again.title, "implement");
         assert_eq!(second_run.workflow_round, 1);
         assert!(second_run.feedback.as_ref().unwrap().feedback.as_deref().unwrap().contains("the parser test is missing"));
-        assert_eq!(tasks(&engine).await.len(), 2);
+        assert_eq!(tasks(&engine).await.len(), 3, "ship also exists upfront");
         let prompt = wait_for_prompt(&engine, &recorder, &again.id).await;
         assert!(prompt.contains("sent this work back -- rework round 1 of 5"), "{prompt}");
         assert!(prompt.contains("the parser test is missing"), "{prompt}");
@@ -1525,7 +1683,7 @@ mod tests {
         assert_eq!(node_run(&settled, "review").round, 0);
         assert_eq!(
             tasks(&engine).await.len(),
-            2,
+            3,
             "failure spawned no new implementation task"
         );
     }
@@ -1555,6 +1713,10 @@ mod tests {
         }
 
         let (engine, run) = setup("true").await;
+        let initial = tasks(&engine).await;
+        let conditional = of_node(&initial, "b")[0];
+        assert!(conditional.after_condition.as_deref().unwrap().contains("conditional"));
+        let conditional_id = conditional.id.clone();
         let a = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish(&engine, &a.id, RunStatus::Done).await;
         let all = wait_for_tasks(&engine, 2).await;
@@ -1573,6 +1735,10 @@ mod tests {
             node_run(&state, "b").skip_reason.as_deref(),
             Some("skipped (a -> c)")
         );
+        let closed = engine.require(&conditional_id).await.unwrap();
+        assert_eq!(closed.closure.unwrap().reason, factory_core::task::CloseReason::NotPlanned);
+        assert_eq!(closed.runs, 0);
+        assert!(closed.after.is_none());
         finish(&engine, &c.id, RunStatus::Done).await;
         assert_eq!(
             engine.workflow_run(&run.id).await.unwrap().status,
@@ -2105,6 +2271,13 @@ mod tests {
             estimate_seconds: Some(60),
             ..Default::default()
         }];
+        let mut parts = parts;
+        let mut waiting = parts[0].clone();
+        waiting.id = "later".into();
+        waiting.title = "later".into();
+        waiting.depends_on = vec!["child".into()];
+        waiting.owns = vec!["later.txt".into()];
+        parts.push(waiting);
         let routing = Routing { scope: "demo".into(), agent: Some("shell".into()), ..Default::default() };
         let mut run = engine
             .start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner)
@@ -2131,6 +2304,10 @@ mod tests {
         assert_eq!(cancelled.status, WorkflowRunStatus::Cancelled);
         assert!(engine.store.active_run(&child.id).await.unwrap().is_some());
         assert_ne!(engine.require(&child.id).await.unwrap().status, TaskStatus::Cancelled);
+        let waiting = tasks(&engine).await.into_iter().find(|task| task.decomposition_part.as_deref() == Some("later")).unwrap();
+        assert_eq!(waiting.runs, 0);
+        assert!(waiting.after.is_none());
+        assert_eq!(waiting.closure.unwrap().reason, factory_core::task::CloseReason::NotPlanned);
     }
 
     #[tokio::test]
@@ -2375,7 +2552,7 @@ impl Engine {
             })
         }) {
             node.task_id = Some(uuid::Uuid::new_v4().to_string());
-            node.status = WorkflowNodeStatus::Pending;
+            node.task_created = false;
         }
 
         if let Err(error) = self.workflows.put_definition(&definition).await {
@@ -2392,57 +2569,10 @@ impl Engine {
         self.workflows.put_run(&run).await?;
         self.bus
             .publish(Event::WorkflowRunUpdated { run: run.clone() });
-        for node in run.nodes.iter().filter(|node| node.task_id.is_some()) {
-            let task_id = node.task_id.clone().expect("filtered");
-            let mut template = definition
-                .nodes
-                .iter()
-                .find(|snapshot| snapshot.id == node.node_id)
-                .expect("run nodes come from the snapshot")
-                .task
-                .clone();
-            template.depends_on = definition
-                .edges
-                .iter()
-                .filter(|edge| edge.to == node.node_id)
-                .filter_map(|edge| {
-                    run.nodes
-                        .iter()
-                        .find(|candidate| candidate.node_id == edge.from)
-                        .and_then(|candidate| candidate.task_id.clone())
-                })
-                .collect();
-            let origin = WorkflowOrigin {
-                workflow_id: run.workflow_id.clone(),
-                workflow_run_id: run.id.clone(),
-                node_id: node.node_id.clone(),
-                workspace: run.integration.as_ref().map(|integration| {
-                    factory_core::task::WorkflowWorkspace {
-                        base_ref: integration.branch.clone(),
-                    }
-                }),
-            };
-            if let Err(error) = self.create_workflow_task(template, origin, task_id).await {
-                let mut failed = self.workflow_run(&run.id).await?;
-                if let Some(current) = failed
-                    .nodes
-                    .iter_mut()
-                    .find(|candidate| candidate.node_id == node.node_id)
-                {
-                    current.task_id = None;
-                    current.status = WorkflowNodeStatus::Failed;
-                    current.error = Some(error.to_string());
-                }
-                failed.status = WorkflowRunStatus::Failed;
-                failed.failure_node_id = Some(node.node_id.clone());
-                failed.error = Some(error.to_string());
-                failed.updated_at = Utc::now();
-                self.workflows.put_run(&failed).await?;
-                self.bus.publish(Event::WorkflowRunUpdated {
-                    run: failed.clone(),
-                });
-                return Ok(failed);
-            }
+        {
+            let _guard = self.workflow_edit.lock().await;
+            self.materialize_workflow_tasks(&mut run).await?;
+            self.close_workflow_waits(&run).await?;
         }
         self.advance_workflow(&run.id).await?;
         self.workflow_run(&run.id).await
@@ -2682,6 +2812,8 @@ impl Engine {
             }
         }
         let mut run = self.workflow_run(id).await?;
+
+        self.close_workflow_waits(&run).await?;
         for node in &mut run.nodes {
             if let Some(task_id) = &node.task_id {
                 if let Some(task) = self.store.get(task_id).await? {
@@ -3163,6 +3295,7 @@ impl Engine {
     pub(crate) async fn advance_workflow(self: &Arc<Self>, id: &str) -> Result<()> {
         let _guard = self.workflow_edit.lock().await;
         let mut run = self.workflow_run(id).await?;
+        self.materialize_workflow_tasks(&mut run).await?;
 
         // Mirror authoritative task state into every node that has one, even
         // once the run itself is terminal. A sibling still running when its
@@ -3175,6 +3308,10 @@ impl Engine {
             };
             match self.store.get(&task_id).await {
                 Ok(Some(task)) => {
+                    if (task.after.is_some() && task.status == TaskStatus::Pending) || (node.status.is_terminal()
+                        && task.closure.as_ref().is_some_and(|closure| closure.reason == factory_core::task::CloseReason::NotPlanned)) {
+                        continue;
+                    }
                     let attempts = self.store.runs(&task_id, u32::MAX).await?;
                     node.attempts = attempts.iter().rev().map(|attempt| factory_core::workflow::WorkflowAttempt {
                         run_id: attempt.id.clone(), attempt: attempt.attempt,
@@ -3233,6 +3370,7 @@ impl Engine {
             // A terminal run never spawns again, and nothing above may
             // rewrite its own status or failure node -- only the per-node
             // mirror does, and that alone is worth persisting and publishing.
+            self.close_workflow_waits(&run).await?;
             run.updated_at = Utc::now();
             self.workflows.put_run(&run).await?;
             self.bus.publish(Event::WorkflowRunUpdated { run });
@@ -3252,6 +3390,8 @@ impl Engine {
         {
             self.evaluate_node_exits(&mut run, &done).await?;
         }
+        self.materialize_workflow_tasks(&mut run).await?;
+        self.close_workflow_waits(&run).await?;
 
         let mut to_continue = self.integrate_ready_children(&mut run).await?;
         if to_continue.is_empty() {
@@ -3347,11 +3487,13 @@ impl Engine {
                 }
             }
             run.updated_at = Utc::now();
+            self.close_workflow_waits(&run).await?;
             self.workflows.put_run(&run).await?;
             self.bus.publish(Event::WorkflowRunUpdated { run });
             return Ok(());
         }
 
+        self.close_workflow_waits(&run).await?;
         let eligible: Vec<String> = run
             .nodes
             .iter()
@@ -3475,6 +3617,20 @@ impl Engine {
                     .await?
                     .is_some_and(|task| task.status == TaskStatus::Pending && task.runs == 0)
                 {
+                    let caller = self.caller_for_actor(&run.started_by).await;
+                    let template = &run.definition.nodes.iter().find(|node| node.id == node_id).expect("snapshot node").task;
+                    if let Err(denial) = self.authorize_workflow_spawn(&caller, template).await {
+                        let node = run.nodes.iter_mut().find(|node| node.node_id == node_id).expect("snapshot node");
+                        node.status = WorkflowNodeStatus::Failed;
+                        node.error = Some(denial.to_string());
+                        run.status = WorkflowRunStatus::Failed;
+                        run.failure_node_id = Some(node_id);
+                        run.error = Some(denial.to_string());
+                        continue;
+                    }
+                    self.store.update(&existing_id, &TaskPatch { clear_after: true, ..Default::default() }).await?;
+                    run.nodes.iter_mut().find(|node| node.node_id == node_id).expect("snapshot node").status = WorkflowNodeStatus::Pending;
+                    self.publish_task(&existing_id).await;
                     to_start.push(existing_id);
                 } else if run.nodes.iter().any(|node| node.node_id == node_id && node.round > 0) {
                     let caller = self.caller_for_actor(&run.started_by).await;
@@ -3492,6 +3648,7 @@ impl Engine {
                     }
                     self.store.update(&existing_id, &TaskPatch {
                         status: Some(TaskStatus::Pending),
+                        clear_after: true,
                         clear_result: true, clear_routed_to: true, clear_error: true,
                         clear_failure: true, clear_closure: true,
                         ..Default::default()
@@ -3597,6 +3754,7 @@ impl Engine {
                 }
             }
         }
+        self.close_workflow_waits(&run).await?;
         run.updated_at = Utc::now();
         self.workflows.put_run(&run).await?;
         self.bus
@@ -3943,6 +4101,8 @@ impl Engine {
                 return;
             }
         }
+        if (task.after.is_some() && task.status == TaskStatus::Pending) || (node.status.is_terminal()
+            && task.closure.as_ref().is_some_and(|closure| closure.reason == factory_core::task::CloseReason::NotPlanned)) { return; }
         node.status = node_status(&task);
         node.error = task.error;
         if let Ok(attempts) = self.store.runs(task_id, u32::MAX).await {
@@ -3965,14 +4125,17 @@ impl Engine {
             }
         }
         run.updated_at = Utc::now();
+        if self.close_workflow_waits(&run).await.is_err() {
+            tracing::warn!(workflow_run = run.id, "could not close unadmitted workflow tasks");
+        }
         if self.workflows.put_run(&run).await.is_ok() {
             self.bus.publish(Event::WorkflowRunUpdated { run });
         }
     }
 
     /// Restart recovery is a reconciliation, not a replay: persisted task ids
-    /// win. Missing tasks are recreated with those ids and pending tasks with
-    /// no attempt are dispatched once.
+    /// win. Only interrupted creations (no receipt) are repaired, never
+    /// deletions. Released pending tasks with no attempt are dispatched once.
     pub(crate) async fn recover_workflows(self: &Arc<Self>) {
         let runs = match self.workflows.active_runs().await {
             Ok(runs) => runs,
@@ -3981,119 +4144,7 @@ impl Engine {
                 return;
             }
         };
-        for mut run in runs {
-            // Repair a decision persisted just before task creation. This
-            // walks the run outside `workflow_edit` -- recovery runs once,
-            // sequentially, before anything else can be dispatching a report
-            // for a run it has not reached yet -- but always before this
-            // same run's own `advance_workflow` call below takes that lock,
-            // so nothing here can race the mirror it performs.
-            let mut repaired = false;
-            for node in run.nodes.clone() {
-                let Some(task_id) = &node.task_id else {
-                    continue;
-                };
-                match self.store.get(task_id).await {
-                    Ok(Some(_)) => continue, // already exists; nothing to repair
-                    Ok(None) => {}
-                    Err(error) => {
-                        // Not evidence the task is gone -- a transient read
-                        // failure must never spawn a duplicate (see B4/B3).
-                        tracing::warn!(
-                            workflow_run = run.id,
-                            node = node.node_id,
-                            task = task_id,
-                            "could not check for a recovered workflow task: {error}"
-                        );
-                        continue;
-                    }
-                }
-                let Some(mut template) = run
-                    .definition
-                    .nodes
-                    .iter()
-                    .find(|item| item.id == node.node_id)
-                    .map(|item| item.task.clone())
-                else {
-                    continue;
-                };
-                if run.integration.is_some() {
-                    template.depends_on = run
-                        .definition
-                        .edges
-                        .iter()
-                        .filter(|edge| edge.to == node.node_id)
-                        .filter_map(|edge| {
-                            run.nodes
-                                .iter()
-                                .find(|candidate| candidate.node_id == edge.from)
-                                .and_then(|candidate| candidate.task_id.clone())
-                        })
-                        .collect();
-                }
-                // Re-authorize exactly as a live spawn would: the actor
-                // recorded on the run may have lost the grant it started
-                // with while the daemon was down.
-                let caller = self.caller_for_actor(&run.started_by).await;
-                if let Err(denial) = self.authorize_workflow_spawn(&caller, &template).await {
-                    tracing::warn!(
-                        workflow_run = run.id,
-                        node = node.node_id,
-                        "denying recovered workflow spawn: {denial}"
-                    );
-                    if let Some(current) =
-                        run.nodes.iter_mut().find(|item| item.node_id == node.node_id)
-                    {
-                        // No task will ever exist at this id; leaving it set
-                        // would have this same repair retry forever.
-                        current.task_id = None;
-                        current.status = WorkflowNodeStatus::Failed;
-                        current.error = Some(denial.to_string());
-                    }
-                    repaired = true;
-                    continue;
-                }
-                let origin = WorkflowOrigin {
-                    workflow_id: run.workflow_id.clone(),
-                    workflow_run_id: run.id.clone(),
-                    node_id: node.node_id.clone(),
-                    workspace: run.integration.as_ref().map(|integration| {
-                        factory_core::task::WorkflowWorkspace {
-                            base_ref: integration.branch.clone(),
-                        }
-                    }),
-                };
-                if let Err(error) = self
-                    .create_workflow_task(template, origin, task_id.clone())
-                    .await
-                {
-                    tracing::warn!(
-                        workflow_run = run.id,
-                        node = node.node_id,
-                        "could not recover workflow task: {error}"
-                    );
-                    if let Some(current) =
-                        run.nodes.iter_mut().find(|item| item.node_id == node.node_id)
-                    {
-                        current.task_id = None;
-                        current.status = WorkflowNodeStatus::Failed;
-                        current.error = Some(error.to_string());
-                    }
-                    repaired = true;
-                }
-            }
-            if repaired {
-                run.updated_at = Utc::now();
-                if let Err(error) = self.workflows.put_run(&run).await {
-                    tracing::warn!(
-                        workflow_run = run.id,
-                        "could not persist a recovered workflow denial: {error}"
-                    );
-                } else {
-                    self.bus
-                        .publish(Event::WorkflowRunUpdated { run: run.clone() });
-                }
-            }
+        for run in runs {
             if let Err(error) = self.advance_workflow(&run.id).await {
                 tracing::warn!(workflow_run = run.id, "could not recover workflow: {error}");
             }
@@ -4106,6 +4157,7 @@ impl Engine {
                     };
                     if let Ok(Some(task)) = self.store.get(&task_id).await {
                         if task.status == TaskStatus::Pending
+                            && task.after.is_none()
                             && (task.runs == 0 || node.round > 0)
                             && self
                                 .store
@@ -4135,6 +4187,9 @@ impl Engine {
         match self.workflows.recent_terminal_runs(200).await {
             Ok(terminal_runs) => {
                 for run in terminal_runs {
+                    if let Err(error) = self.close_workflow_waits(&run).await {
+                        tracing::warn!(workflow_run = run.id, "could not close recovered workflow waits: {error}");
+                    }
                     let stale = run
                         .nodes
                         .iter()

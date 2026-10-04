@@ -786,6 +786,7 @@ impl Engine {
         self.authorize(
             caller,
             &Request::TaskRun {
+                override_wait: false,
                 id: uuid::Uuid::new_v4().to_string(),
                 reason: None,
                 continue_run: false,
@@ -1416,6 +1417,8 @@ mod tests {
     async fn task_in(engine: &Engine, id: &str, scope: &str, agent: &str) -> Task {
         let now = Utc::now();
         let task = Task {
+            after: None,
+            after_condition: None,
             id: id.into(),
             title: id.into(),
             instructions: String::new(),
@@ -1816,7 +1819,7 @@ mod tests {
         for request in [
             Request::TaskCreate(NewTask::default()),
             Request::TaskDelete { id: "t".into() },
-            Request::TaskRun { id: "t".into(), reason: None, continue_run: false },
+            Request::TaskRun { override_wait: false, id: "t".into(), reason: None, continue_run: false },
             Request::TaskCancel { id: "t".into(), reason: None, run: None },
             // Closing a task is a decision about it, not work on it (`#122`).
             Request::TaskClose {
@@ -1878,7 +1881,7 @@ mod tests {
                 reason: None,
             },
             Request::TaskDelete { id: "here".into() },
-            Request::TaskRun { id: "here".into(), reason: None, continue_run: false },
+            Request::TaskRun { override_wait: false, id: "here".into(), reason: None, continue_run: false },
             Request::TaskCancel { id: "here".into(), reason: None, run: None },
             Request::TaskSkipNext { id: "here".into(), reason: None, slot: None },
             Request::TaskReport {
@@ -1931,6 +1934,7 @@ mod tests {
                 id: "elsewhere".into(),
             },
             Request::TaskRun {
+                override_wait: false,
                 id: "elsewhere".into(),
                 reason: None,
                 continue_run: false,
@@ -2023,7 +2027,7 @@ mod tests {
             "roles:\n  runner:\n    grants: [task.run, task.cancel]\n    reach: scope\n",
         );
         task_in(&e, "here", "demo", "somebody").await;
-        assert!(allowed(&e, &wearing("runner"), Request::TaskRun { id: "here".into(), reason: None, continue_run: false }).await);
+        assert!(allowed(&e, &wearing("runner"), Request::TaskRun { override_wait: false, id: "here".into(), reason: None, continue_run: false }).await);
         assert!(allowed(&e, &wearing("runner"), Request::TaskCancel { id: "here".into(), reason: None, run: None }).await);
         // Not granted: it may look at the board, and start what is on it.
         assert!(allowed(&e, &wearing("runner"), Request::TaskList(Default::default())).await);
@@ -2304,7 +2308,7 @@ mod tests {
         assert!(
             !allowed(&e, &triager, Request::TaskUpdate { id: "t".into(), patch: titled("renamed"), reason: None }).await
         );
-        assert!(!allowed(&e, &triager, Request::TaskRun { id: "t".into(), reason: None, continue_run: false }).await);
+        assert!(!allowed(&e, &triager, Request::TaskRun { override_wait: false, id: "t".into(), reason: None, continue_run: false }).await);
         assert!(
             !allowed(
                 &e,
@@ -2528,7 +2532,7 @@ mod tests {
             allowed(&e, &critic, Request::TaskReport { id: "mine".into(), report: report() }).await,
             "demo-app is below projects on disk, so it has engineering's reviewer"
         );
-        assert!(!allowed(&e, &critic, Request::TaskRun { id: "mine".into(), reason: None, continue_run: false }).await);
+        assert!(!allowed(&e, &critic, Request::TaskRun { override_wait: false, id: "mine".into(), reason: None, continue_run: false }).await);
     }
 
     #[tokio::test]
@@ -2560,10 +2564,10 @@ mod tests {
             task_in(&e, id, scope, "somebody").await;
         }
         let lead = in_scope("demo-app", "boss", "lead");
-        assert!(allowed(&e, &lead, Request::TaskRun { id: "here".into(), reason: None, continue_run: false }).await);
+        assert!(allowed(&e, &lead, Request::TaskRun { override_wait: false, id: "here".into(), reason: None, continue_run: false }).await);
         for elsewhere in ["parent", "sibling", "child"] {
             assert!(
-                !allowed(&e, &lead, Request::TaskRun { id: elsewhere.into(), reason: None, continue_run: false }).await,
+                !allowed(&e, &lead, Request::TaskRun { override_wait: false, id: elsewhere.into(), reason: None, continue_run: false }).await,
                 "inheriting lead from projects gives no authority over {elsewhere}"
             );
             assert!(!allowed(&e, &lead, Request::TaskCancel { id: elsewhere.into(), reason: None, run: None }).await);

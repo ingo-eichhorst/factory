@@ -516,6 +516,8 @@ mod tests {
     fn sample_task() -> Task {
         let now = chrono::Utc::now();
         Task {
+            after: None,
+            after_condition: None,
             id: "t1".into(),
             title: "fix the flaky test".into(),
             instructions: "make it stop flaking".into(),

@@ -1477,7 +1477,7 @@ mod tests {
         assert!(engine.store.due(far).await.unwrap().is_empty(), "never due");
         let why = refused(
             engine
-                .handle_request(Request::TaskRun { id: item.id.clone(), reason: None, continue_run: false })
+                .handle_request(Request::TaskRun { override_wait: false, id: item.id.clone(), reason: None, continue_run: false })
                 .await,
         );
         assert!(why.contains("still in intake"), "{why}");
@@ -2277,7 +2277,9 @@ mod tests {
             .await
             .unwrap();
         let ready = engine.dependency_ready_tasks().await.unwrap();
-        assert_eq!(ready.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(), vec![surface.id.as_str()]);
+        assert!(ready.is_empty(), "workflow release is graph-owned, not the generic scheduler's");
+        engine.sync_workflow_for_task(&foundation.id).await;
+        assert!(engine.require(&surface.id).await.unwrap().after.is_none(), "the graph consumes the upstream wait");
     }
 
     #[tokio::test]

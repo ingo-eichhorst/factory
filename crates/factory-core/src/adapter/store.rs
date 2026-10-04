@@ -176,6 +176,8 @@ pub fn task_from_new(new: NewTask, scope: String, agent: String, runtime: String
         parent_task_id: new.parent_task_id,
         decomposition_part: new.decomposition_part,
         depends_on: new.depends_on,
+        after: new.after,
+        after_condition: new.after_condition,
         bench_origin: None,
         retry: new.retry,
         pending_retry: None,

@@ -1133,7 +1133,7 @@ impl Engine {
                 }
                 Ok(Payload::Deleted { deleted })
             }
-            Request::TaskRun { id, reason, continue_run } => {
+            Request::TaskRun { id, reason, continue_run, override_wait } => {
                 let task = self.require(&id).await?;
                 // The gate (`#119`): an item still in intake has not been
                 // released, and nothing but a decision releases it.
@@ -1143,10 +1143,16 @@ impl Engine {
                     ));
                 }
                 let blockers = self.dependency_blockers(&task).await?;
-                if !blockers.is_empty() {
-                    return Err(FactoryError::BadRequest(format!(
-                        "this task is waiting for: {}",
+                if (task.after.is_some() || !blockers.is_empty()) && !override_wait {
+                    let waiting = if task.after.is_some() {
+                        self.waiting_description(&task).await?
+                    } else {
                         blockers.join(", ")
+                    };
+                    return Err(FactoryError::BadRequest(format!(
+                        "this task is waiting for: {}{}",
+                        waiting,
+                        if task.after.is_some() { "; use --override-wait --reason to run early" } else { "" }
                     )));
                 }
                 // A task is a standing intent; a run is one attempt at it. Two
@@ -1210,6 +1216,17 @@ impl Engine {
                 // Stamped here, not inside the spawned dispatch: the queue
                 // wait of a manual run starts when it was asked for.
                 let due = Due::now();
+                if override_wait {
+                    let mut released = task.clone();
+                    released.after = None;
+                    if !self.dependency_blockers(&released).await?.is_empty() {
+                        return Err(FactoryError::BadRequest("--override-wait overrides after, not static decomposition dependencies".into()));
+                    }
+                    if reason.as_deref().is_none_or(|reason| reason.trim().is_empty()) {
+                        return Err(FactoryError::BadRequest("--override-wait requires a non-empty --reason".into()));
+                    }
+                    self.override_waiting(&task, caller, reason.as_deref().expect("checked reason")).await?;
+                }
                 // `queued_at` is what ties this entry to the run it starts,
                 // which does not exist yet: the Operations report leaves a
                 // run an agent asked for out of the interventions by it.
@@ -2251,8 +2268,27 @@ impl Engine {
         mut patch: TaskPatch,
         asked: Option<&crate::operations::Asked>,
     ) -> Result<Task> {
+        let _trigger_edit = if patch.after.is_some() || patch.clear_after || patch.schedule.is_some() || patch.clear_schedule {
+            Some(self.admission_lock.lock().await)
+        } else {
+            None
+        };
         let factory = self.factory_snapshot();
         let current = self.require(id).await?;
+        if current.workflow_origin.is_some() && (patch.after.is_some() || patch.clear_after || patch.after_condition.is_some()) {
+            return Err(FactoryError::BadRequest("workflow waits are released by the graph or an explicit --override-wait, not task edits".into()));
+        }
+        let after = patch.after.as_ref().or_else(|| (!patch.clear_after).then_some(current.after.as_ref()).flatten());
+        let scheduled = patch.schedule.is_some() || (!patch.clear_schedule && current.schedule.is_some());
+        if after.is_some() && scheduled {
+            return Err(FactoryError::BadRequest("after and schedule are exclusive triggers".into()));
+        }
+        if let Some(after) = &patch.after {
+            self.validate_after(Some(id), after).await?;
+            if current.status != TaskStatus::Pending || current.runs > 0 {
+                return Err(FactoryError::BadRequest("an after trigger can only be set on a never-started pending task".into()));
+            }
+        }
         // The bookkeeping is the daemon's, not a caller's.
         patch.runs = None;
         // So is the intake record, and the way out of intake is a decision
@@ -2506,6 +2542,17 @@ impl Engine {
         internal_review: bool,
     ) -> Result<Task> {
         let factory = self.factory_snapshot();
+        if new.after.is_some() && new.schedule.is_some() {
+            return Err(FactoryError::BadRequest("after and schedule are exclusive triggers".into()));
+        }
+        if workflow_origin.is_none() && new.after.as_ref().is_some_and(Vec::is_empty) {
+            return Err(FactoryError::BadRequest("after needs at least one upstream task".into()));
+        }
+        if workflow_origin.is_none() {
+            if let Some(after) = &new.after {
+                self.validate_after(id.as_deref(), after).await?;
+            }
+        }
         if new.title.trim().is_empty() {
             return Err(FactoryError::BadRequest("a task needs a title".into()));
         }
@@ -2603,7 +2650,13 @@ impl Engine {
     /// success would run work with an input it never received.
     async fn dependency_blockers(&self, task: &Task) -> Result<Vec<String>> {
         let mut blockers = Vec::new();
-        for id in &task.depends_on {
+        if task.workflow_origin.is_some() && task.after.is_some() {
+            return Ok(vec![self.waiting_description(task).await?]);
+        }
+        // The graph also owns decomposition merge/gate ordering. Its
+        // explicit release (or a journaled override) consumes that wait.
+        if task.workflow_origin.is_some() { return Ok(blockers); }
+        for id in task.depends_on.iter().chain(task.after.iter().flatten()) {
             match self.store.get(id).await? {
                 Some(parent) if parent.status == TaskStatus::Done => {}
                 Some(parent) => blockers.push(format!(
@@ -2629,19 +2682,9 @@ impl Engine {
             task.status == TaskStatus::Pending
                 && task.runs == 0
                 && task.slot_wait.is_none()
-                && task.parent_task_id.is_some()
-                && task.decomposition_part.is_some()
+                && (task.after.is_some() || (task.parent_task_id.is_some() && task.decomposition_part.is_some()))
         }) {
-            if let Some(origin) = &task.workflow_origin {
-                if self
-                    .workflows
-                    .get_run(&origin.workflow_run_id)
-                    .await?
-                    .is_some_and(|run| run.integration.is_some())
-                {
-                    continue;
-                }
-            }
+            if task.workflow_origin.is_some() { continue; }
             if self.dependency_blockers(&task).await?.is_empty() {
                 ready.push(task);
             }
@@ -2952,6 +2995,25 @@ impl Engine {
         // counted as occupying a slot until it resumes dispatch.
         let run = {
             let _admission = self.admission_lock.lock().await;
+            let admitted_task = self.require(task_id).await?;
+            if trigger == Trigger::Workflow && admitted_task.status != TaskStatus::Pending && !resumed {
+                return Err(FactoryError::DispatchSuperseded("this workflow task is no longer pending admission".into()));
+            }
+            if trigger == Trigger::Dependency && admitted_task.runs > 0 {
+                return Err(FactoryError::DispatchSuperseded("this one-shot dependency already has an attempt".into()));
+            }
+            if let Some(origin) = &admitted_task.workflow_origin {
+                if self.workflow_run(&origin.workflow_run_id).await?.status.is_terminal() {
+                    return Err(FactoryError::DispatchSuperseded("the workflow ended before admission".into()));
+                }
+            }
+            if admitted_task.after.is_some() {
+                if trigger != Trigger::Dependency || admitted_task.workflow_origin.is_some()
+                    || !self.dependency_blockers(&admitted_task).await?.is_empty() {
+                    return Err(FactoryError::DispatchSuperseded("the upstream trigger has not been released".into()));
+                }
+                self.store.update(task_id, &TaskPatch { clear_after: true, ..Default::default() }).await?;
+            }
             // The API's earlier active-run check is not an admission claim.
             // Recheck under the reservation lock before creating/launching,
             // including approval-held runs and stale continuation requests.
@@ -2971,7 +3033,7 @@ impl Engine {
                     return Err(FactoryError::DispatchSuperseded("a newer attempt replaced the requested continuation".into()));
                 }
             }
-            if trigger == Trigger::Workflow && feedback_round > 0 && !resumed
+            if trigger == Trigger::Workflow && !resumed
                 && self.store.runs(task_id, 1).await?.first().is_some_and(|latest| latest.workflow_round >= feedback_round) {
                 return Err(FactoryError::DispatchSuperseded("this feedback round already has an attempt".into()));
             }
@@ -9006,7 +9068,7 @@ edges: [{id: next, from: implement, to: review}]
             dispatched_then_failed(&engine, &task, FailKind::AgentFailed).await;
 
             let response = engine
-                .handle_request(Request::TaskRun { id: task.id.clone(), reason: None, continue_run: true })
+                .handle_request(Request::TaskRun { override_wait: false, id: task.id.clone(), reason: None, continue_run: true })
                 .await;
             let message = match response {
                 Response::Error { message, .. } => message,
@@ -9023,7 +9085,7 @@ edges: [{id: next, from: implement, to: review}]
             let task = task_for(&engine, false).await;
 
             let response = engine
-                .handle_request(Request::TaskRun { id: task.id.clone(), reason: None, continue_run: true })
+                .handle_request(Request::TaskRun { override_wait: false, id: task.id.clone(), reason: None, continue_run: true })
                 .await;
             let message = match response {
                 Response::Error { message, .. } => message,

@@ -448,6 +448,13 @@ pub struct Task {
     pub status: TaskStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
+    /// One-shot upstream trigger. `Some` is waiting until its owner releases
+    /// it; workflow gates/routes, not a clock, decide workflow eligibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Vec<String>>,
+    /// Human-readable workflow condition; descriptive, never evaluated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_condition: Option<String>,
     /// How long one run is expected to occupy its agent. Advisory only: this
     /// never stops a run or changes its status (`timeout_seconds` does that).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -608,7 +615,7 @@ impl Task {
     /// claimed, and firing it again would only re-hold it and reset nothing
     /// -- the wait it is already in is what will eventually dispatch it.
     pub fn fires(&self) -> bool {
-        self.slot_wait.is_none() && (self.status == TaskStatus::Pending || self.blocked_by_failure())
+        self.after.is_none() && self.slot_wait.is_none() && (self.status == TaskStatus::Pending || self.blocked_by_failure())
     }
 
     /// Did it end in failure? Blocked by one, or a legacy `Failed` row.
@@ -672,6 +679,10 @@ pub struct NewTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate: Option<Estimate>,
@@ -715,6 +726,12 @@ pub struct TaskPatch {
     pub status: Option<TaskStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_condition: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_after: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
