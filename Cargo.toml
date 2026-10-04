@@ -7,6 +7,7 @@ members = [
     "crates/factory-agents",
     "crates/factory-process",
     "crates/factory-assurance",
+    "crates/factory-direction",
     "crates/factory-core",
     "crates/factory-plugins",
     "crates/factory-daemon",

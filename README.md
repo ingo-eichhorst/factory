@@ -5087,8 +5087,20 @@ Only the small shared slug/identifier validator moves from dataset to L0;
 no task, run, intake, workflow, plan compilation or usage accounting enters
 the kernel.
 
-The remaining signpost reader move, L6 and protocol/router migration, and
-strict command ladder are still ahead in #193.
+L6's `factory-direction` now owns authored policy catalogues, applicability,
+classification/rollups, goals scoring, scenario overlays/forecasts, budget
+intent and reporting-clock arithmetic. It depends only on L0 and L5, with no
+Core/facade, skipped-level or plugin dev dependency. Declaration projection
+into L5 plan sources belongs to L6, and the sole plan compiler stays in L5.
+Policy report/export data is owned in L6 rather than importing the wire
+protocol; existing `protocol` and Core paths re-export canonical types with
+unchanged JSON. The live GoalsStore/check-in schema and its full tests move
+with the goal owner. The daemon's PolicyStore still mixes process attestations
+and provenance with policy receipts and needs that split, not an L6 label on
+the shared store.
+
+The remaining signpost reader move, protocol/router migration, six live
+services/providers/stores and strict command ladder are still ahead in #193.
 
 ## Layout
 
@@ -5098,6 +5110,7 @@ strict command ladder are still ahead in #193.
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy and TaskStore
     crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam (full live services still pending)
+    crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data and GoalsStore
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary

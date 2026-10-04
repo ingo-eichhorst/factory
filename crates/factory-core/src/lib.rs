@@ -20,6 +20,7 @@ pub mod environments;
 pub mod error;
 pub mod event;
 pub mod goals;
+pub use factory_direction::goals_store;
 pub mod harness;
 pub mod intake;
 pub mod knowledge;

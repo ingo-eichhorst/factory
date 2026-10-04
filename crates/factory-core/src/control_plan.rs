@@ -10,17 +10,7 @@ pub fn resolve(
     policy: &[Applied],
     quality: &[(String, Vec<Requirement>)],
 ) -> ControlPlan {
-    let sources: Vec<PlanSource> = policy
-        .iter()
-        .map(|applied| PlanSource {
-            source: applied.control.to_string(),
-            requires: applied.requires.clone(),
-            not_applicable: applied.not_applicable.as_ref().map(|na| PlanWaiver {
-                scope: na.scope.clone(),
-                rationale: na.rationale.clone(),
-            }),
-        })
-        .collect();
+    let sources = factory_direction::policy::plan_sources(policy);
     factory_assurance::control_plan::resolve(scope, category, &sources, quality)
 }
 

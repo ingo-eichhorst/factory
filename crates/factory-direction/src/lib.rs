@@ -1,0 +1,21 @@
+//! L6 authored direction: policy declarations, goals, scenarios and budgets.
+//! Domain behavior and owned check-in storage live here, not in the facade.
+//! Evaluation stays in L5; facts and shared receipts remain plain L0 data.
+//! Live service isolation and adjacent command ports are still being migrated.
+//!
+//! L6 cannot import the outside compatibility hub or skip L5 for commands:
+//! ```compile_fail
+//! use factory_core::config::Factory;
+//! ```
+//! ```compile_fail
+//! use factory_process::task::NewTask;
+//! ```
+
+pub mod budget;
+pub mod goals;
+pub mod goals_store;
+pub mod policy;
+pub mod policy_export;
+pub mod policy_report;
+pub mod reporting_clock;
+pub mod scenario;
