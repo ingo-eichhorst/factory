@@ -1,11 +1,13 @@
 use crate::dashboard::DashboardConfig;
 use factory_agents::agent::Lifetime;
-use factory_agents::role::{Role, RoleOrigin, RoleSpec, Roles};
+use factory_agents::role::{RoleSpec, Roles};
+#[cfg(test)]
+use factory_agents::role::{Role, RoleOrigin};
 use factory_assurance::quality::QualityLayer;
 use factory_direction::policy::{ControlRef, NotApplicable, PolicyLayer, Tighten};
 use factory_kernel::{FactoryError, Result};
 use factory_process::ready::IntakeLayer;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -170,23 +172,7 @@ impl Config {
     /// `projects/b`. And a definition inherited from above carries no
     /// authority from above -- reach is still the agent's own scope.
     pub fn roles_for_scope(&self, scope: &Scope) -> Result<Roles> {
-        let mut roles = self.roles()?;
-        for layer in self
-            .ancestors_of(scope)
-            .into_iter()
-            .chain(std::iter::once(scope))
-        {
-            if layer.roles.is_empty() {
-                continue;
-            }
-            roles = roles.layered(
-                RoleOrigin::Scope {
-                    scope: layer.name.clone(),
-                },
-                &layer.roles,
-            )?;
-        }
-        Ok(roles)
+        factory_agents::role_chain::roles_for_scope(&self.roles, &self.scopes, scope)
     }
 
     /// This instance's own resolved dashboard, with nothing below the root
@@ -1020,45 +1006,7 @@ impl Default for HarnessHealthConfig {
     }
 }
 
-/// A foreman per scope, synthesised rather than written out.
-///
-/// Off by default, and deliberately so: switching it on starts one real agent
-/// session per scope. An instance with ten scopes gets ten of them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ForemanConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    /// The name the synthesised agent gets in each scope.
-    #[serde(default = "default_foreman_name")]
-    pub name: String,
-    /// Which adapter it runs on. Unset means the instance's `default_agent` --
-    /// a synthesised foreman should not quietly run a different harness from
-    /// everything else in the instance.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness: Option<String>,
-    /// Scopes that get none. The instance root is the usual one: it is the
-    /// company, not a project.
-    #[serde(default = "default_foreman_exclude")]
-    pub exclude: Vec<String>,
-}
-
-fn default_foreman_name() -> String {
-    "foreman".into()
-}
-fn default_foreman_exclude() -> Vec<String> {
-    vec!["root".into()]
-}
-
-impl Default for ForemanConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            name: default_foreman_name(),
-            harness: None,
-            exclude: default_foreman_exclude(),
-        }
-    }
-}
+pub use factory_agents::roster::ForemanConfig;
 
 fn default_store() -> String {
     "sqlite".into()
@@ -1079,7 +1027,7 @@ fn default_blocked_timeout() -> u64 {
     86400
 }
 fn default_agent() -> String {
-    "claude-code".into()
+    factory_agents::roster::default_agent()
 }
 fn default_runtime() -> String {
     "herdr".into()
@@ -1132,54 +1080,7 @@ impl Default for DaemonConfig {
 
 pub use factory_infrastructure::interfaces::{InterfaceConfig, DEFAULT_HTTP_BIND};
 
-/// Where a run declared with this agent executes.
-///
-/// `openshell` is enforced (`#218`): a task run of an agent that declares it
-/// starts its harness inside an NVIDIA OpenShell sandbox -- created for the
-/// run, carrying the policy, image and providers its `openshell:` block
-/// names, and deleted when the run ends -- and a run that cannot get one
-/// fails with the reason rather than starting on the host. See
-/// `crate::openshell` and the daemon's `openshell` module.
-///
-/// `docker` and `srt` are still **declared only**: shown on the L2
-/// Environment page's Sandboxes tab and read by `factory_core::policy`'s
-/// `sandbox` check as evidence, but nothing in dispatch acts on them, so an
-/// agent declaring one starts exactly as `none` does. `none` is the default,
-/// today's behaviour, unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Sandbox {
-    #[default]
-    None,
-    Docker,
-    Srt,
-    Openshell,
-}
-
-impl Sandbox {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Docker => "docker",
-            Self::Srt => "srt",
-            Self::Openshell => "openshell",
-        }
-    }
-
-    /// Whether dispatch actually puts a run of this agent inside the
-    /// sandbox, as opposed to only recording that someone said so. The one
-    /// place that answer lives, so the L2 tab, L3's facts and the policy
-    /// check cannot disagree about it.
-    pub fn is_enforced(self) -> bool {
-        matches!(self, Self::Openshell)
-    }
-
-    /// So a config file nobody asked to change never grows a `sandbox: none`
-    /// line: see `skip_serializing_if` on every field that carries this.
-    pub fn is_none(&self) -> bool {
-        matches!(self, Self::None)
-    }
-}
+pub use factory_environment::sandbox::Sandbox;
 
 /// The root config's `infrastructure:` block: what the agents run on that
 /// Factory does not run itself: `providers`, the AI accounts that pay for
@@ -1406,178 +1307,7 @@ impl Infrastructure {
     }
 }
 
-/// How a scope names its agent.
-///
-/// `agent: pi` is what this daemon writes. Instances configured before the
-/// adapters existed spell it as a block with a `harness:` in it, and those
-/// files are still on disk in front of people -- so read both, and let the
-/// harness name be the adapter name, which is what it always was.
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-pub enum AgentRef {
-    Name(String),
-    Declared {
-        harness: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-        /// `permanent` or `temporary` here makes this a standing agent as well
-        /// as the scope's default for tasks -- which is how instances written
-        /// before standing agents existed already spell it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        lifetime: Option<Lifetime>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        autostart: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        role: Option<Role>,
-        /// Arguments added after the adapter's own defaults for this agent.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        args: Vec<String>,
-        /// See `Sandbox`'s doc comment.
-        #[serde(default, skip_serializing_if = "Sandbox::is_none")]
-        sandbox: Sandbox,
-        /// See `ScopeAgent::openshell`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        openshell: Option<factory_environment::openshell::OpenshellConfig>,
-        /// See `ScopeAgent::provider`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        provider: Option<String>,
-        /// See `ScopeAgent::max_sessions`. Instances written before `#179`
-        /// already carried this key; it just had no effect.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_sessions: Option<u32>,
-    },
-}
-
-impl<'de> Deserialize<'de> for AgentRef {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Declaration {
-            harness: String,
-            #[serde(default)]
-            name: Option<String>,
-            #[serde(default)]
-            lifetime: Option<Lifetime>,
-            #[serde(default)]
-            autostart: Option<bool>,
-            #[serde(default)]
-            role: Option<Role>,
-            #[serde(default)]
-            args: Vec<String>,
-            #[serde(default)]
-            sandbox: Sandbox,
-            #[serde(default)]
-            openshell: Option<factory_environment::openshell::OpenshellConfig>,
-            #[serde(default)]
-            provider: Option<String>,
-            // Older Factory configs wrote this in the singular declaration.
-            // It used to have no effect; `#179` makes it live.
-            #[serde(default)]
-            max_sessions: Option<u32>,
-        }
-
-        let value = serde_yaml_ng::Value::deserialize(deserializer)?;
-        match value {
-            serde_yaml_ng::Value::String(name) => Ok(Self::Name(name)),
-            serde_yaml_ng::Value::Mapping(_) => {
-                let declaration: Declaration =
-                    serde_yaml_ng::from_value(value).map_err(serde::de::Error::custom)?;
-                Ok(Self::Declared {
-                    harness: declaration.harness,
-                    name: declaration.name,
-                    lifetime: declaration.lifetime,
-                    autostart: declaration.autostart,
-                    role: declaration.role,
-                    args: declaration.args,
-                    sandbox: declaration.sandbox,
-                    openshell: declaration.openshell,
-                    provider: declaration.provider,
-                    max_sessions: declaration.max_sessions,
-                })
-            }
-            _ => Err(serde::de::Error::custom(
-                "agent must be an adapter name or a declaration",
-            )),
-        }
-    }
-}
-
-impl AgentRef {
-    pub fn adapter(&self) -> &str {
-        match self {
-            Self::Name(n) => n,
-            Self::Declared { harness, .. } => harness,
-        }
-    }
-}
-
-/// One agent a scope declares. Both spellings below land here:
-///
-/// ```yaml
-/// agent:                    # the scope's default for tasks
-///   harness: pi
-///   lifetime: permanent     # ... and a standing agent, if it says so
-/// agents:                   # any number of further agents
-///   - name: watcher
-///     harness: claude-code
-///     lifetime: permanent
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScopeAgent {
-    /// Unique within the scope. Defaults to the harness name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub harness: String,
-    #[serde(default)]
-    pub lifetime: Lifetime,
-    #[serde(default)]
-    pub role: Role,
-    /// Whether the daemon brings it up by itself. Permanent agents default to
-    /// yes, everything else to no.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub autostart: Option<bool>,
-    /// Arguments added after the adapter's own defaults for this agent.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub args: Vec<String>,
-    /// See `Sandbox`'s doc comment.
-    #[serde(default, skip_serializing_if = "Sandbox::is_none")]
-    pub sandbox: Sandbox,
-    /// How an `openshell` sandbox is made for this agent's runs: the image,
-    /// the providers attached by name, the policy, and what crosses in and
-    /// out. Present exactly when `sandbox: openshell` is -- either one alone
-    /// is refused at load (`refuse_bad_openshell`). Holds no secret: a
-    /// provider is named, and its credential stays in OpenShell's store.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub openshell: Option<factory_environment::openshell::OpenshellConfig>,
-    /// The AI account this agent's model calls go to, by the name
-    /// `infrastructure.providers` in the root config declares it under.
-    /// Absent means the provider that claims this agent's harness, if any
-    /// does -- see `Infrastructure::provider_for`. A name nothing declares
-    /// is refused at load.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    /// How many sessions of this agent may be open at once -- a run
-    /// `Dispatching` or holding a session, plus one for a live permanent
-    /// agent of this name (`#179`). Absent is unlimited, today's behaviour.
-    /// `0` is refused at load: it would never run anything.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_sessions: Option<u32>,
-}
-
-impl ScopeAgent {
-    pub fn name(&self) -> String {
-        self.name.clone().unwrap_or_else(|| self.harness.clone())
-    }
-
-    pub fn autostart(&self) -> bool {
-        self.autostart
-            .unwrap_or(self.lifetime == Lifetime::Permanent)
-    }
-}
+pub use factory_agents::roster::{AgentRef, ScopeAgent};
 
 /// A directory Factory can run agents in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1663,21 +1393,6 @@ pub struct Scope {
     pub renewals: Vec<factory_infrastructure::renewals::RenewalDecl>,
 }
 
-/// The last `/`-separated segment of `s`, or all of `s` when it has none.
-/// This is what a bare scope name -- one written before a scope's identity
-/// became its path -- is compared against: see `Factory::scope` and the
-/// `exclude` check in `agents_with`.
-fn last_segment(s: &str) -> &str {
-    s.rsplit('/').next().unwrap_or(s)
-}
-
-/// Whether `pattern` (an `exclude` entry, or a name somebody typed) means
-/// `scope_name`: exactly, or -- when `pattern` carries no `/` of its own --
-/// by matching just its last segment. A pattern that does name a path is
-/// never loosened this way, so a full path always means exactly itself.
-fn names_scope(pattern: &str, scope_name: &str) -> bool {
-    pattern == scope_name || (!pattern.contains('/') && last_segment(scope_name) == pattern)
-}
 
 impl Scope {
     fn validate_dependencies(&self) -> Result<()> {
@@ -1697,38 +1412,7 @@ impl Scope {
     /// Every agent this scope declares, plus the foreman the instance adds.
     /// Discovery admits only explicitly configured scope directories.
     pub fn agents_with(&self, foreman: &ForemanConfig) -> Vec<ScopeAgent> {
-        let mut out = self.declared_agents();
-        if !foreman.enabled {
-            return out;
-        }
-        if foreman.exclude.iter().any(|e| names_scope(e, &self.name)) {
-            return out;
-        }
-        // A scope that already has a foreman of its own keeps it.
-        if out.iter().any(|a| a.role.is(Role::FOREMAN)) {
-            return out;
-        }
-        out.push(ScopeAgent {
-            name: Some(foreman.name.clone()),
-            harness: foreman
-                .harness
-                .clone()
-                .or_else(|| self.agent_adapter().map(str::to_string))
-                .unwrap_or_else(default_agent),
-            lifetime: Lifetime::Permanent,
-            role: Role::foreman(),
-            autostart: Some(true),
-            args: Vec::new(),
-            // Synthesized, not declared: nothing names a sandbox for a
-            // foreman nobody wrote, so it gets today's default forever.
-            sandbox: Sandbox::None,
-            openshell: None,
-            // Likewise: its harness's default provider, if one claims it.
-            provider: None,
-            // And no cap of its own -- only the scope's, if it has one.
-            max_sessions: None,
-        });
-        out
+        factory_agents::roster::agents_with(&self.name, self.agent.as_ref(), &self.agents, foreman)
     }
 
     pub fn standing_agents_with(&self, foreman: &ForemanConfig) -> Vec<ScopeAgent> {
@@ -1741,43 +1425,7 @@ impl Scope {
     /// Every agent this scope declares, from either spelling, in the order a
     /// person wrote them.
     pub fn declared_agents(&self) -> Vec<ScopeAgent> {
-        let mut out = Vec::new();
-        if let Some(AgentRef::Declared {
-            harness,
-            name,
-            lifetime,
-            autostart,
-            role,
-            args,
-            sandbox,
-            openshell,
-            provider,
-            max_sessions,
-        }) = &self.agent
-        {
-            out.push(ScopeAgent {
-                name: name.clone(),
-                harness: harness.clone(),
-                lifetime: lifetime.unwrap_or_default(),
-                role: role.clone().unwrap_or_default(),
-                autostart: *autostart,
-                args: args.clone(),
-                sandbox: *sandbox,
-                openshell: openshell.clone(),
-                provider: provider.clone(),
-                max_sessions: *max_sessions,
-            });
-        }
-        for a in &self.agents {
-            // The same agent named twice is the config's business, not ours --
-            // but the same *name* twice would collide on the session id, so the
-            // first one wins and the rest are ignored.
-            if out.iter().any(|e| e.name() == a.name()) {
-                continue;
-            }
-            out.push(a.clone());
-        }
-        out
+        factory_agents::roster::declared_agents(self.agent.as_ref(), &self.agents)
     }
 
     /// Only the ones meant to exist between tasks.
@@ -4075,5 +3723,11 @@ impl factory_kernel::ScopeIdentity for Scope {
     }
     fn scope_path(&self) -> &Path {
         &self.path
+    }
+}
+
+impl factory_agents::role_chain::ScopeRoles for Scope {
+    fn role_specs(&self) -> &BTreeMap<String, RoleSpec> {
+        &self.roles
     }
 }

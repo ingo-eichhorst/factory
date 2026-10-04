@@ -5088,8 +5088,8 @@ stay outside L1. Renewal files retain their live bounded parser, distinct
 root/scope last-good keys and visible findings. Read-only native host probes
 and the canonical interface configuration/bind derivation belong to L1 too.
 L0 owns shared cron/timezone grid arithmetic, not task misfire decisions.
-The remaining L3 provider, native command/timer services and strict
-adjacent command ports still need migration.
+Native command/timer services and strict adjacent command ports still need
+migration; every registered live fact provider now has a physical level owner.
 
 L2's six remaining live providers now physically belong to
 `factory-environment`: credential presence and expiry, dependency inventory,
@@ -5102,8 +5102,8 @@ OpenShell execution/cleanup records and its evidence collector move together
 into L2, with canonical daemon re-exports. Their command argv, ownership checks,
 fail-closed behavior, evidence bounds/redaction and restart/cleanup contracts
 stay the same. Attachment authorization and task journaling still sit outside
-L2 pending the strict adjacent-command migration. L3's agent provider and the
-six-service, signpost and upper-level routing work remain unfinished.
+L2 pending the strict adjacent-command migration. The six-service, signpost and
+upper-level routing work remain unfinished.
 
 L3's `factory-agents` owns standing-agent state, role resolution, harness
 health, both agent adapter traits and the cumulative session-usage contract.
@@ -5112,6 +5112,16 @@ role, harness, agent and usage paths are canonical re-exports. Run usage
 snapshots, differences and provider-window allocation remain process code;
 they do not move into the runtime observer. Roles are still resolved from
 the live scope chain and checked by the one router authorization check.
+
+L3's live AgentFact provider owns declaration deduplication, synthesized
+foremen and sandbox/grant projection. The declaration models and foreman
+configuration live in L3, with canonical configuration re-exports; the sandbox
+declaration lives in L2. A single L3 role-chain implementation serves both
+configuration/authorization and facts, using L0 path ancestry and nearest
+whole-definition replacement. Constructors supply fresh plain declarations,
+never a resolved roster, role cache, Engine callback or higher-level object.
+Alias errors, ordering, foreman exclusions/harness defaults, unresolved versus
+empty grants and invalid-programmatic-config fallback remain unchanged.
 
 The agent prompt/reporting context and its guide now live in L3 too. Its
 `TaskBinding.task` is an `AssignedTask` dispatch snapshot: id, title,
@@ -5125,8 +5135,9 @@ references and knowledge hints are plain L0 command values, not live facts
 or search/evaluation logic. Core is only the compatibility/conversion bridge;
 L3 never depends on it. The trait methods, guide and reporting text are unchanged.
 
-This is a partial physical migration: live providers and runtime
-services remain in the daemon. `factory-process` (L4) now owns the actual
+This is a partial service migration: live provider implementations have left
+the daemon, but runtime service wiring and command routing remain there.
+`factory-process` (L4) now owns the actual
 task/run lifecycle model, workflow planning and state, intake/ready rules,
 run usage deltas and provider-window allocation, occupancy schemas and the
 complete TaskStore seam. Dispatch projection into L3 is owned by L4 too.

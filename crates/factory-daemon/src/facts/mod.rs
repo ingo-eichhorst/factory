@@ -79,16 +79,6 @@ macro_rules! port {
             }
         }
     };
-    ($fact:ty, $level:ident, $query:ty, $value:ty) => {
-        impl Port for $fact {
-            type Query = $query;
-            type Value = $value;
-            type Provider<'a> = $level::Provider<'a>;
-            fn provider(engine: &Engine) -> Self::Provider<'_> {
-                $level::Provider { engine }
-            }
-        }
-    };
 }
 port!(
     DaemonConfigFact,
@@ -177,7 +167,7 @@ port!(
     Vec<ExploitedFinding>,
     l2::dependencies_provider
 );
-port!(AgentFact, l3, String, Vec<AgentFact>);
+port!(AgentFact, factory_agents::roster::Provider, String, Vec<AgentFact>, l3::provider);
 port!(TaskFact, factory_process::facts::Provider<'a>, NamedQuery, BTreeMap<String, Vec<TaskFact>>, l4::provider);
 port!(
     TaskInventoryFact,
@@ -271,6 +261,42 @@ mod tests {
     use super::*;
     fn registered<F: Port>() {}
     #[tokio::test]
+    async fn l3_constructor_follows_scope_and_role_edits_and_shares_authorization_resolution() {
+        use factory_core::role::{Grant, Role};
+        let (engine, root) = crate::environments::tests::engine_with("  - name: prod\n");
+        let facts = Facts::<People>::new(&engine);
+        let mut scope = engine.factory_snapshot().config.scopes[0].clone();
+        let id = scope.id.clone();
+        scope.agents = serde_yaml_ng::from_str(
+            "- name: critic\n  harness: shell\n  role: reviewer\n  sandbox: docker"
+        ).unwrap();
+        engine.replace_scope(&id, scope.clone());
+        let before = facts.get::<AgentFact>(&"company".into()).await.unwrap();
+        assert_eq!(before[0].grants, None);
+        assert!(before[0].has_sandbox && !before[0].sandbox_enforced);
+        engine.replace_instance_roles(serde_yaml_ng::from_str(
+            "reviewer:\n  grants: [task.report]"
+        ).unwrap());
+        let root_roles = facts.get::<AgentFact>(&"company".into()).await.unwrap();
+        assert_eq!(root_roles[0].grants, Some(BTreeSet::from([Grant::TaskReport])));
+        assert_eq!(root_roles[0].grants,
+            Some(engine.roles_for("company").get(&Role::new("reviewer")).unwrap().grants.clone()));
+        scope.roles = serde_yaml_ng::from_str("reviewer:\n  grants: []").unwrap();
+        scope.agents[0].sandbox = factory_core::config::Sandbox::Openshell;
+        scope.name = "renamed".into();
+        scope.path = "projects/demo".into();
+        engine.replace_scope(&id, scope);
+        let edited = facts.get::<AgentFact>(&"demo".into()).await.unwrap();
+        assert_eq!(edited[0].grants, Some(BTreeSet::new()));
+        assert!(edited[0].has_sandbox && edited[0].sandbox_enforced);
+        assert_eq!(edited[0].grants,
+            Some(engine.roles_for("renamed").get(&Role::new("reviewer")).unwrap().grants.clone()));
+        assert!(matches!(facts.get::<AgentFact>(&"company".into()).await,
+            Err(FactoryError::NoSuchScope(_))));
+        assert_eq!(facts.get::<AgentFact>(&"projects/demo".into()).await.unwrap(), edited);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
     async fn l2_expiry_constructor_reads_an_edited_catalogue_on_the_next_read() {
         let (engine, root) = crate::environments::tests::engine_with("  - name: prod\n");
         let facts = Facts::<People>::new(&engine);
@@ -346,6 +372,21 @@ mod tests {
     }
     #[test]
     fn isolated_live_fact_wiring_uses_the_actual_physical_owner_types() {
+        let _: fn(
+            <AgentFact as Port>::Provider<'static>,
+        ) -> factory_agents::roster::Provider = |provider| provider;
+        let l3 = include_str!("l3.rs");
+        assert!(!l3.contains("impl Provide") && !l3.contains("async fn"));
+        assert!(!l3.contains("roles_for") && !l3.contains("agents_with"));
+        for owner in [
+            include_str!("../../../factory-agents/src/roster.rs"),
+            include_str!("../../../factory-agents/src/role_chain.rs"),
+        ] {
+            assert!(!owner.contains("Engine")
+                && !owner.contains("factory_core")
+                && !owner.contains("factory_composition")
+                && !owner.contains("dyn Fn"));
+        }
         let _: fn(
             <SecretsPresence as Port>::Provider<'static>,
         ) -> factory_environment::credentials::Provider = |provider| provider;

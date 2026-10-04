@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 factory-core = { path = "../factory-core" }
+factory-agents = { path = "../factory-agents" }
 factory-kernel = { path = "../factory-kernel" }
 factory-infrastructure = { path = "../factory-infrastructure" }
 factory-environment = { path = "../factory-environment" }

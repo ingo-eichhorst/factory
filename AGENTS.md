@@ -206,8 +206,9 @@ something impossible.
   providers own their live reads. Benchmark/knowledge providers now live in
   L5, the infrastructure expiry store supplies its L1 fact, and L4 supplies
   mirror receipts and Done-only provenance from its own stores. Their daemon
-  `facts/` modules only construct physical owner providers; remaining
-  Engine-backed gatherers still need migration.
+  `facts/` modules only construct physical owner providers. All registered
+  live providers now have physical level owners; live service and adjacent
+  command isolation still remain.
   L4 also owns inventory, scheduled dates, named task/workflow history,
   recovery evidence/import/journal, security reports and release selection.
   Its providers receive only own store capabilities, root and current plain
@@ -221,7 +222,7 @@ something impossible.
   Operations' run arithmetic canonically re-exports L4; hour measurements use
   authoritative run/blocked-journal unions, shared with the occupancy chart,
   never its inferred-liveness or planned-work view. This is not six-service
-  isolation; the other Engine-backed providers and command ports remain.
+  isolation; live service wiring and command ports remain.
   Policy and fact-backed metrics ask `Facts<Reader>::get`. A port returns
   only its fact or a collection of it, never another level's report. The
   kernel read boundary enforces a sealed `Producer: Below<Reader>` relation:
@@ -252,6 +253,13 @@ something impossible.
   Shared workflow references and knowledge hints are plain L0 command
   values, not new facts or knowledge-search logic. Live services and the
   strict command ladder remain separate unfinished requirements of #193.
+  L3 owns the live AgentFact provider and declaration/foreman roster models.
+  Configuration and authorization share its one role-chain implementation;
+  ancestry is L0 path components, nearest definitions replace whole. Never
+  pass a resolved roster or flat role cache into the provider. Constructors
+  capture fresh plain declarations per read; preserve order, duplicate-name
+  precedence, synthesized foremen, unknown versus empty grants and scope errors.
+  Sandbox declarations are canonical L2 data, re-exported by configuration.
 - Task/run/workflow/intake behavior, usage deltas and the TaskStore seam live
   in L4. Its generic plans/gates never import L5 requirements or L6 policy
   types. The sole execution-plan compiler is in L5; core's legacy `resolve`
