@@ -3381,7 +3381,7 @@ impl Engine {
             callback_url: openshell.as_ref().map(|(_, callback)| callback.url()),
             guides_dir: factory.guides_dir(),
             task: Some(TaskBinding {
-                task: task.clone(),
+                task: (&task).try_into()?,
                 run_id: run.id.clone(),
                 attempt: run.attempt,
                 token,

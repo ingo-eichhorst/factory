@@ -574,7 +574,7 @@ mod tests {
             callback_url: None,
             guides_dir: fresh_guides_dir(),
             task: Some(TaskBinding {
-                task: sample_task(),
+                task: (&sample_task()).try_into().unwrap(),
                 run_id: "r1".into(),
                 attempt: 1,
                 token: "tok".into(),

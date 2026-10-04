@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use factory_core::adapter::agent::{Agent, AgentContext, LaunchKind, LaunchSpec, UpstreamOutput};
+use factory_core::adapter::agent::{Agent, AgentContext, AssignedTask, LaunchKind, LaunchSpec, UpstreamOutput};
 use factory_core::adapter::store::TaskStore;
 use factory_core::error::{FactoryError, Result};
 use factory_core::agent::AgentSession;
@@ -27,7 +27,7 @@ struct WireContext {
     /// `null` when the agent is being started to stand there rather than to do
     /// something -- a plugin that only handles tasks should say so.
     #[serde(skip_serializing_if = "Option::is_none")]
-    task: Option<Task>,
+    task: Option<AssignedTask>,
     #[serde(skip_serializing_if = "Option::is_none")]
     run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -295,5 +295,45 @@ mod tests {
         let wire = WireContext::from(&ctx);
         assert_eq!(wire.factory_guide, ctx.factory_guide());
         assert!(!wire.factory_guide.is_empty(), "a plugin gets real text, not a placeholder");
+    }
+
+    #[test]
+    fn the_plugin_dispatch_keeps_legacy_task_json_and_reporting_commands() {
+        use factory_core::adapter::TaskBinding;
+        let task: Task = serde_json::from_value(json!({
+            "id":"t1", "title":"title", "instructions":"echo hello", "scope":"demo",
+            "agent":"shell", "runtime":"herdr", "status":"running",
+            "created_at":"2024-01-01T00:00:00Z", "updated_at":"2024-01-01T00:00:00Z",
+            "runs":2, "labels":{"goal":"g"}, "schedule":{"every":{"seconds":300}},
+            "parent_task_id":"parent", "worktree":true
+        })).unwrap();
+        let legacy = serde_json::to_value(&task).unwrap();
+        let ctx = AgentContext {
+            scope: "demo".into(), agent_name: "shell".into(), cwd: "/tmp/workspace".into(),
+            factory_bin: "/tmp/factory".into(), socket: "/tmp/factory.sock".into(),
+            callback_url: None, guides_dir: "/tmp/guides".into(), identity_token: None,
+            role: None, policy_frameworks: vec![], goal: None, quality: vec![],
+            task: Some(TaskBinding {
+                task: (&task).try_into().unwrap(), run_id: "r2".into(), attempt: 2,
+                token: "test-token".into(), worktree_branch: Some("task/t1".into()),
+                resumed_session: Some("conversation".into()), upstream: vec![UpstreamOutput {
+                    node_id: "upstream-node".into(), task_id: "upstream-task".into(),
+                    title: "upstream".into(), result: Some("result".into()),
+                }], knowledge: None, required_steps: vec![], agent_exits: vec![],
+            }),
+        };
+        let wire = serde_json::to_value(WireContext::from(&ctx)).unwrap();
+        assert_eq!(wire["task"], legacy);
+        assert_eq!(wire["run_id"], "r2");
+        assert_eq!(wire["attempt"], 2);
+        assert_eq!(wire["worktree_branch"], "task/t1");
+        assert_eq!(wire["upstream"][0]["result"], "result");
+        assert_eq!(wire["reporting_contract"], ctx.reporting_contract());
+        assert_eq!(wire["factory_guide"], ctx.factory_guide());
+        assert_eq!(wire["env"], serde_json::to_value(ctx.env()).unwrap());
+        // A plugin round trip retains the task metadata too, not only the
+        // fields consumed by built-in L3 renderers.
+        let decoded: WireContext = serde_json::from_value(wire).unwrap();
+        assert_eq!(serde_json::to_value(decoded.task.unwrap()).unwrap(), legacy);
     }
 }

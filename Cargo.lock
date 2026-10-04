@@ -733,6 +733,7 @@ dependencies = [
 name = "factory-agents"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
  "factory-kernel",
@@ -740,6 +741,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

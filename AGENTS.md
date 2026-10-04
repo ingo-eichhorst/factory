@@ -7,7 +7,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     crates/factory-kernel    L0: pure shared vocabulary and every live fact schema (Level/Fact, nested statuses, grants and evidence); no other factory-* dependency
     crates/factory-infrastructure L1: backup, running environments and renewal domain behaviour
     crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
-    crates/factory-agents         L3: standing agents, roles, harness health, runtime trait and session usage
+    crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
@@ -218,8 +218,15 @@ something impossible.
   data is parsed, never transcript text. Run baselines, deltas and allocation
   belong to the process layer. The runtime adapter seam remains available
   through its existing core path; its methods and default unknown/unsupported
-  answers do not change. The agent prompt/reporting seam still awaits a
-  proper assignment payload, not an upward import of the full L4 task.
+  answers do not change. The agent prompt/reporting seam is owned by L3 too:
+  `TaskBinding.task` takes `AssignedTask`, not the full L4 task. Project a
+  process task at dispatch with `AssignedTask::try_from(&task)`; only id,
+  title, instructions and workflow/parent identity are typed in L3. Other
+  task JSON stays private and opaque, forwarded only for existing plugins.
+  Do not add lifecycle accessors or a facade dependency to this payload.
+  Shared workflow references and knowledge hints are plain L0 command
+  values, not new facts or knowledge-search logic. Live services and the
+  strict command ladder remain separate unfinished requirements of #193.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's
   `scope.roles` down to that scope -- from the live snapshot, and `authorize`,

@@ -8,7 +8,7 @@ pub mod knowledge;
 pub mod runtime;
 pub mod store;
 
-pub use agent::{Agent, AgentContext, LaunchKind, LaunchSpec, TaskBinding, UpstreamOutput};
+pub use agent::{Agent, AgentContext, AssignedTask, LaunchKind, LaunchSpec, TaskBinding, UpstreamOutput};
 pub use interface::{Interface, InterfaceContext};
 pub use knowledge::{KnowledgeHints, KnowledgeHit, KnowledgeProvider, KnowledgeQuery};
 pub use runtime::{
