@@ -1130,43 +1130,7 @@ impl Default for DaemonConfig {
     }
 }
 
-/// The `http` interface's bind address when its own `settings` name none --
-/// the listener's fallback, and now the one place that fallback is written
-/// down (#193, phase 1, F8): `interfaces/http.rs`'s listener,
-/// `Engine::infrastructure` (`DaemonFacts.interfaces`), and
-/// `policies::daemon_facts` (`http_loopback_only`) all resolve an http
-/// interface's bind through [`InterfaceConfig::http_bind`] rather than each
-/// keeping its own copy of this constant.
-pub const DEFAULT_HTTP_BIND: &str = "127.0.0.1:8787";
-
-/// An interface adapter to mount. `kind` names the adapter; everything else is
-/// passed through untouched, so a plugin interface can carry its own settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InterfaceConfig {
-    pub kind: String,
-    #[serde(flatten, default)]
-    pub settings: BTreeMap<String, serde_yaml_ng::Value>,
-}
-
-impl InterfaceConfig {
-    pub fn string(&self, key: &str) -> Option<String> {
-        self.settings.get(key).and_then(|v| match v {
-            serde_yaml_ng::Value::String(s) => Some(s.clone()),
-            other => serde_yaml_ng::to_string(other)
-                .ok()
-                .map(|s| s.trim().to_string()),
-        })
-    }
-
-    /// The bind this interface would use as `http`: its own `settings.bind`
-    /// when it names one, else [`DEFAULT_HTTP_BIND`]. Every reader of a
-    /// configured http interface's address goes through this rather than
-    /// repeating the fallback.
-    pub fn http_bind(&self) -> String {
-        self.string("bind")
-            .unwrap_or_else(|| DEFAULT_HTTP_BIND.to_string())
-    }
-}
+pub use factory_infrastructure::interfaces::{InterfaceConfig, DEFAULT_HTTP_BIND};
 
 /// Where a run declared with this agent executes.
 ///

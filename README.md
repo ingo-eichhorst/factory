@@ -5077,6 +5077,20 @@ outside the ladder. Cargo metadata guards every normal, dev, build and
 target-specific edge by canonical package name, including renamed
 dependencies: a level may name only L0 or its directly lower level.
 
+L1's live backup, environment metrics/publication, renewal declaration,
+daemon-settings and scope-capacity providers now live physically in
+`factory-infrastructure`. They receive only own stores/cache and fresh plain
+declarations; no Engine, full-instance facade or callback enters the owner.
+Backup reports and facts share the same one history/destination gather, without
+repository or Time Machine probes in the fact. Environment history feeds both
+the page and metrics; upper-level recovery, mirror and promotion decorations
+stay outside L1. Renewal files retain their live bounded parser, distinct
+root/scope last-good keys and visible findings. Read-only native host probes
+and the canonical interface configuration/bind derivation belong to L1 too.
+L0 owns shared cron/timezone grid arithmetic, not task misfire decisions.
+The remaining L2/L3 providers, native command/timer services and strict
+adjacent command ports still need migration.
+
 L3's `factory-agents` owns standing-agent state, role resolution, harness
 health, both agent adapter traits and the cumulative session-usage contract.
 The opaque session identifier is L0 vocabulary. Core's existing runtime,

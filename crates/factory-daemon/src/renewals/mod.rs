@@ -1,7 +1,6 @@
 //! Important dates (#236). L1 and L2 own their read-only metadata caches;
 //! L6 supervises dates through lower fact ports and its existing policy
 //! clocks. People/UI composition does not turn this into an L1 upward read.
-pub(crate) mod declarations;
 pub(crate) mod probes;
 pub(crate) mod store;
 use crate::{engine::Engine, facts::Facts};

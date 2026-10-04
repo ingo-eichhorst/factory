@@ -352,7 +352,7 @@ pub struct Engine {
     pub(crate) infrastructure_expiries: crate::renewals::store::InfrastructureExpiryStore,
     pub(crate) credential_expiries: crate::renewals::store::CredentialExpiryStore,
     pub(crate) renewal_alerts: crate::renewals::store::AlertStore,
-    pub(crate) renewal_declaration_cache: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<factory_kernel::RenewalDecl>>>,
+    pub(crate) renewal_declaration_cache: factory_infrastructure::renewal_declarations::DeclarationCache,
     /// The fingerprint of what the last successful `Request::Quality`
     /// loaded -- every profile in `.factory/quality/` and every scope's
     /// quality chain -- with when it loaded them, so the next read can tell

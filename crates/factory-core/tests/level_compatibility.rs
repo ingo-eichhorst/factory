@@ -4,6 +4,30 @@ use factory_kernel::{LaunchKind, LaunchSpec, Schedule, Span};
 use serde_json::json;
 
 #[test]
+fn native_host_and_configured_interfaces_are_canonical_l1_data_with_legacy_json() {
+    let config: factory_core::config::InterfaceConfig =
+        serde_yaml_ng::from_str("kind: http").unwrap();
+    let canonical: factory_infrastructure::interfaces::InterfaceConfig = config;
+    assert_eq!(
+        canonical.http_bind(),
+        factory_core::config::DEFAULT_HTTP_BIND
+    );
+    let facts: Vec<factory_core::protocol::InterfaceFacts> =
+        factory_infrastructure::interfaces::interface_facts(&[
+            canonical,
+            serde_yaml_ng::from_str("kind: cli").unwrap(),
+        ]);
+    assert_eq!(
+        serde_json::to_value(facts).unwrap(),
+        json!([{"kind":"http","bind":"127.0.0.1:8787"},{"kind":"cli"}])
+    );
+    let old: Option<factory_core::protocol::HostFacts> = None;
+    let _: Option<factory_infrastructure::host::HostFacts> = old;
+    let old: Option<factory_core::protocol::DiskFacts> = None;
+    let _: Option<factory_infrastructure::host::DiskFacts> = old;
+}
+
+#[test]
 fn interface_seam_context_and_observer_stream_are_canonical_outside_stack_types() {
     let old: Option<&dyn factory_core::adapter::Interface<()>> = None;
     let canonical: Option<&dyn factory_interfaces::Interface<()>> = old;

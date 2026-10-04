@@ -2269,39 +2269,7 @@ pub struct SecretChange {
     pub message: String,
 }
 
-/// The machine the daemon runs on, read live on every request and never
-/// cached. Every field is its own fallible read: one that fails is `null` on
-/// the wire -- deliberately no `skip_serializing_if` anywhere here, so the
-/// page can tell "unreadable" from a field this daemon never heard of.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct HostFacts {
-    pub hostname: Option<String>,
-    /// The hardware model identifier, e.g. `Mac17,7`.
-    pub model: Option<String>,
-    /// The CPU brand string, e.g. `Apple M5 Max`.
-    pub chip: Option<String>,
-    /// Physical cores.
-    pub cores: Option<u32>,
-    pub memory_bytes: Option<u64>,
-    /// Product name and version, e.g. `macOS 26.6.1`.
-    pub os: Option<String>,
-    /// What this daemon was built for, e.g. `aarch64`.
-    pub arch: Option<String>,
-    /// Since boot, wall clock -- time asleep included.
-    pub uptime_seconds: Option<u64>,
-    /// The 1, 5 and 15 minute load averages.
-    pub load: Option<[f64; 3]>,
-    /// The filesystem mounted at `/`, or `null` when it could not be read.
-    pub disk: Option<DiskFacts>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DiskFacts {
-    pub mount: String,
-    pub total_bytes: u64,
-    /// Available to an unprivileged user, as `df` reports it.
-    pub free_bytes: u64,
-}
+pub use factory_infrastructure::host::{HostFacts, DiskFacts};
 
 /// The host's macOS power mode (`#260`), as System Settings calls it
 /// *Energy Mode*. Closed: these three are the only values the wire accepts,
@@ -2504,15 +2472,7 @@ pub struct StoreFacts {
     pub size_bytes: Option<u64>,
 }
 
-/// One interface the config mounts. `bind` is the one field on this page
-/// that is left out rather than `null`: the `cli` interface is a socket and
-/// has no address, which is not the same as one that could not be read.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct InterfaceFacts {
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bind: Option<String>,
-}
+pub use factory_infrastructure::interfaces::InterfaceFacts;
 
 /// One declared AI account and every agent it serves. Never a value: `env`
 /// is the name of the variable an api-key provider's key lives in, as the

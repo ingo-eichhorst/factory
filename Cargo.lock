@@ -896,9 +896,11 @@ dependencies = [
 name = "factory-infrastructure"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
  "factory-kernel",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
@@ -934,6 +936,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "chrono-tz",
+ "croner",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

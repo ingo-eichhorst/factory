@@ -9,6 +9,8 @@ level = 1
 
 [dependencies]
 async-trait.workspace = true
+anyhow.workspace = true
+libc = "0.2"
 factory-kernel = { path = "../factory-kernel" }
 chrono.workspace = true
 serde.workspace = true

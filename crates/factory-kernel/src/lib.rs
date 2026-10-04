@@ -36,6 +36,7 @@ pub use error::{FactoryError, Result};
 mod launch;
 pub use launch::{LaunchKind, LaunchSpec};
 mod schedule;
+pub mod schedule_grid;
 pub use schedule::{CronSchedule, Schedule};
 mod span;
 pub use span::{parse_span, Span};
