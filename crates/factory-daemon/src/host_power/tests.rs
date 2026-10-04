@@ -418,10 +418,18 @@ async fn the_install_step_names_an_administrator_when_the_daemon_user_is_not_one
     let s = &report.sudoers;
     assert_eq!(s.admins, vec!["ingo"]);
     assert!(!s.user_is_admin);
-    assert_eq!(
-        s.install_from(),
-        "as an administrator (ingo): su - ingo, then"
-    );
+    assert_eq!(s.switch_to(), Some("ingo"));
+    let steps = s.install_steps();
+    assert_eq!(steps.len(), 3, "{steps:?}");
+    // `su` alone, in a block of its own: pasted with the install, its
+    // password prompt swallows the rest and nothing runs.
+    assert_eq!(steps[0].text, "Run this alone and enter ingo's password:");
+    assert_eq!(steps[0].command.as_deref(), Some("su - ingo"));
+    assert_eq!(steps[1].text, "Then, in that shell, paste:");
+    assert_eq!(steps[1].command.as_deref(), Some(s.install.as_str()));
+    assert!(!steps[1].command.as_deref().unwrap().contains("su - "));
+    assert_eq!(steps[2].text, "Then `exit`, and Refresh.");
+    assert_eq!(steps[2].command, None);
     // The rule still names the daemon's own user, at the same path.
     assert!(
         s.rule.starts_with("factory ALL=(root) NOPASSWD: "),
@@ -439,7 +447,18 @@ async fn the_install_step_names_an_administrator_when_the_daemon_user_is_not_one
 
     let admin = HostPower::with_runner(FakeHost::mac(), "ingo").read().await;
     assert!(admin.sudoers.user_is_admin);
-    assert_eq!(admin.sudoers.install_from(), "from ingo's own account");
+    assert_eq!(admin.sudoers.switch_to(), None);
+    let steps = admin.sudoers.install_steps();
+    assert_eq!(steps.len(), 1);
+    assert!(
+        steps[0].text.ends_with("root-owned and read-only:"),
+        "{}",
+        steps[0].text
+    );
+    assert_eq!(
+        steps[0].command.as_deref(),
+        Some(admin.sudoers.install.as_str())
+    );
 
     let lonely = std::sync::Arc::new(FakeHost {
         cap: MAC_CAP.into(),
@@ -452,5 +471,14 @@ async fn the_install_step_names_an_administrator_when_the_daemon_user_is_not_one
     let none = HostPower::with_runner(lonely, "factory").read().await;
     assert!(none.sudoers.admins.is_empty());
     assert!(!none.sudoers.user_is_admin);
-    assert_eq!(none.sudoers.install_from(), "from an administrator account");
+    assert_eq!(none.sudoers.switch_to(), None);
+    let steps = none.sudoers.install_steps();
+    assert_eq!(steps.len(), 1);
+    assert!(
+        steps[0]
+            .text
+            .ends_with("Run it from an administrator account:"),
+        "{}",
+        steps[0].text
+    );
 }

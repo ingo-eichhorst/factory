@@ -129,30 +129,40 @@ export function needsRule(report) {
   return macState(report) === "read-only";
 }
 
-/// Who runs the install, worded for the three cases the daemon reports:
+/// The install as steps a person runs one at a time, `{ text, command }`,
+/// each command in a block of its own -- the same wording as the daemon's
+/// `SudoersRule::install_steps`, which the CLI prints. Three cases:
 ///
-/// - the daemon's own user is an administrator -- it installs the rule from
-///   its own account, as before;
-/// - it is not, and an administrator is known -- switch to one first
-///   (`su - ingo`), then run the same visudo-checked command;
-/// - no administrator was found -- "from an administrator account".
+/// - the daemon's own user is not an administrator and one is known:
+///   `su - <admin>` *alone*, then the install pasted in that shell, then
+///   `exit`. Pasted together, `su`'s password prompt swallows the typed-ahead
+///   lines and opens a shell that ran nothing, with no error;
+/// - the daemon's own user is an administrator: today's one step;
+/// - no administrator was found: the same step, "from an administrator
+///   account".
 ///
-/// `su` is `null` unless there is an account to switch to.
-export function installStep(sudoers) {
+/// Backticks in `text` mark code; `mac.js` draws them as `<code>`.
+export function installSteps(sudoers) {
   const s = sudoers || {};
   const admins = Array.isArray(s.admins) ? s.admins.filter(a => typeof a === "string" && a) : [];
-  if (s.user_is_admin) {
-    // Today's wording: the daemon's own account can install it.
-    return { kind: "self", su: null, lead: "" };
+  const checked = "This checks the rule with `visudo -cf` before installing it, root-owned and read-only";
+  if (!s.user_is_admin && admins.length) {
+    const admin = admins[0];
+    return [
+      { text: `Run this alone and enter ${admin}'s password:`, command: `su - ${admin}` },
+      { text: "Then, in that shell, paste:", command: s.install || "" },
+      { text: "Then `exit`, and Refresh.", command: null },
+    ];
   }
-  if (admins.length) {
-    return {
-      kind: "admin",
-      su: `su - ${admins[0]}`,
-      lead: `Run as an administrator (${admins.join(" or ")}): ${s.user || "the daemon's user"} cannot use sudo itself.`,
-    };
-  }
-  return { kind: "unknown", su: null, lead: "Run it from an administrator account:" };
+  if (s.user_is_admin) return [{ text: `${checked}:`, command: s.install || "" }];
+  return [{ text: `${checked}. Run it from an administrator account:`, command: s.install || "" }];
+}
+
+/// Whether the install starts by switching to another account -- the
+/// separate `su` step, after which the whole-configuration check line is
+/// left out (pasted after the install, a `sudo` prompt would swallow it).
+export function switchesAccount(sudoers) {
+  return installSteps(sudoers).length > 1;
 }
 
 /// The journaled changes, newest first, as `{ at, by, text }`.

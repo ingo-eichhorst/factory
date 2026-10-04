@@ -6,7 +6,7 @@ import {
   MODES,
   changeRows,
   headline,
-  installStep,
+  installSteps,
   macFailure,
   macState,
   modeLabel,
@@ -16,6 +16,7 @@ import {
   setBody,
   sourceRows,
   stateText,
+  switchesAccount,
 } from "../js/mac-model.js";
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
@@ -165,30 +166,37 @@ test("the view sends only setBody's answer and draws no confirm of its own", () 
   assert.doesNotMatch(view, /confirm\(|alert\(|scrim\(/, "the click is the confirmation");
 });
 
-test("the install step names an administrator when the daemon's user is not one", () => {
-  // This host: the daemon runs as `factory`, which cannot sudo; `ingo` is the admin.
-  const notAdmin = installStep({ ...SUDOERS, admins: ["ingo"], user_is_admin: false });
-  assert.equal(notAdmin.kind, "admin");
-  assert.equal(notAdmin.su, "su - ingo");
-  assert.match(notAdmin.lead, /^Run as an administrator \(ingo\)/);
-  assert.match(notAdmin.lead, /factory cannot use sudo itself/);
-  const two = installStep({ ...SUDOERS, admins: ["ingo", "ada"], user_is_admin: false });
-  assert.equal(two.su, "su - ingo");
-  assert.match(two.lead, /\(ingo or ada\)/);
+test("su is a step of its own, apart from the install, when the daemon's user is not an admin", () => {
+  // This host: `factory` cannot sudo; `ingo` is the admin. Pasting `su` and
+  // the install together runs nothing: su's password prompt eats the rest.
+  const steps = installSteps({ ...SUDOERS, admins: ["ingo"], user_is_admin: false });
+  assert.deepEqual(steps, [
+    { text: "Run this alone and enter ingo's password:", command: "su - ingo" },
+    { text: "Then, in that shell, paste:", command: SUDOERS.install },
+    { text: "Then `exit`, and Refresh.", command: null },
+  ]);
+  assert.ok(!steps[1].command.includes("su - "), "the install block never carries the su");
+  assert.ok(switchesAccount({ ...SUDOERS, admins: ["ingo", "ada"] }));
+  assert.equal(installSteps({ ...SUDOERS, admins: ["ingo", "ada"] })[0].command, "su - ingo");
 });
 
-test("the install step keeps today's wording when the daemon's user is an admin", () => {
-  const self = installStep({ ...SUDOERS, user: "ingo", admins: ["ingo"], user_is_admin: true });
-  assert.deepEqual(self, { kind: "self", su: null, lead: "" });
+test("the install keeps today's single step when the daemon's user is an admin", () => {
+  const s = { ...SUDOERS, user: "ingo", admins: ["ingo"], user_is_admin: true };
+  assert.deepEqual(installSteps(s), [
+    { text: "This checks the rule with `visudo -cf` before installing it, root-owned and read-only:", command: SUDOERS.install },
+  ]);
+  assert.ok(!switchesAccount(s));
 });
 
-test("with no administrator found the install step says from an administrator account", () => {
-  for (const s of [{ ...SUDOERS, admins: [], user_is_admin: false }, SUDOERS, null]) {
-    const step = installStep(s);
-    assert.equal(step.kind, "unknown");
-    assert.equal(step.su, null);
-    assert.match(step.lead, /from an administrator account/);
+test("with no administrator found the single step says from an administrator account", () => {
+  for (const s of [{ ...SUDOERS, admins: [], user_is_admin: false }, SUDOERS]) {
+    const steps = installSteps(s);
+    assert.equal(steps.length, 1);
+    assert.match(steps[0].text, /Run it from an administrator account:$/);
+    assert.equal(steps[0].command, SUDOERS.install);
+    assert.ok(!switchesAccount(s));
   }
+  assert.equal(installSteps(null).length, 1);
 });
 
 test("the rule card is an L1 card whose commands wrap inside it", () => {

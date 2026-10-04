@@ -1510,6 +1510,7 @@ button.linklike:hover { color: var(--signal); }
 .mac-rule .infra-hint + .infra-snippet { margin-top: 6px; }
 .mac-rule .infra-snippet + .infra-hint { margin-top: 10px; }
 .mac-cmd { max-width: 100%; }
+.mac-step-n { font-weight: 600; color: var(--ink); }
 .mac-cmd code { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ============================================================ L1 backup (#116):
