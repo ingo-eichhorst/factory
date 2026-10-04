@@ -327,6 +327,17 @@ async fn a_stopped_gateway_is_started_without_restarting_it_and_recorded() {
 }
 
 #[tokio::test]
+async fn a_gateway_that_went_down_since_the_last_pass_is_started_by_the_next_dispatch() {
+    let f = managed();
+    assert_eq!(f.pass().await.state, ReadinessState::Ready);
+    std::fs::write(f.dir.join("gateway"), "disconnected").unwrap();
+    let resolved = f.engine.sandbox_gate(&f.key(), &declared(&f.engine)[0].config).await;
+    assert!(resolved.is_ok(), "{resolved:?}");
+    assert!(f.file("launchctl.log").unwrap().contains("kickstart"));
+    assert_eq!(f.file("gateway").as_deref().map(str::trim), Some("connected"));
+}
+
+#[tokio::test]
 async fn a_gateway_that_stays_down_is_what_the_agent_needs() {
     let f = managed();
     std::fs::write(f.dir.join("gateway"), "disconnected").unwrap();

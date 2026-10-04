@@ -744,13 +744,32 @@ impl Engine {
     }
 
     /// What dispatch asks before it makes a run's sandbox: `Ok` with what
-    /// the run is made from, or the reason it must not start. An agent whose
-    /// block names nothing the daemon keeps is not asked about at all --
-    /// the run's own preflight checks it as it always has.
+    /// the run is made from, or the reason it must not start. The gateway is
+    /// checked (and started) for every sandboxed agent; beyond that, an
+    /// agent whose block names nothing the daemon keeps is not asked about
+    /// -- the run's own preflight checks it as it always has.
     pub(crate) async fn sandbox_gate(self: &Arc<Self>, key: &AgentKey, config: &OpenshellConfig) -> std::result::Result<Resolved, String> {
         let factory = self.factory_snapshot();
         let suffix = os::instance_suffix(&factory.config.instance.id);
         let providers: Vec<String> = config.providers.iter().map(|p| p.gateway_name(&suffix)).collect();
+        // A gateway that went down since the last pass -- a reboot, a
+        // crash -- is started now rather than failing this run. A missing
+        // CLI is left to the run's own preflight to name.
+        if let Ok(cli) = crate::openshell::resolve_cli(config.cli.as_deref()) {
+            if let Err(Unready::Needs { thing, command }) = self.ensure_gateway(&base_for(&cli, config)).await {
+                let r = Readiness {
+                    state: ReadinessState::Needs,
+                    thing: Some(thing),
+                    command,
+                    since: Utc::now(),
+                    checked_at: Utc::now(),
+                    image: None,
+                    notes: Vec::new(),
+                    expiring: Vec::new(),
+                };
+                return Err(r.reason());
+            }
+        }
         let managed = config.image.is_none() || config.providers.iter().any(|p| matches!(p, ProviderDecl::Managed(_)));
         if !managed {
             return Ok(Resolved { image: config.image.clone().unwrap_or_default(), providers });
