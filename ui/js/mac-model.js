@@ -129,6 +129,32 @@ export function needsRule(report) {
   return macState(report) === "read-only";
 }
 
+/// Who runs the install, worded for the three cases the daemon reports:
+///
+/// - the daemon's own user is an administrator -- it installs the rule from
+///   its own account, as before;
+/// - it is not, and an administrator is known -- switch to one first
+///   (`su - ingo`), then run the same visudo-checked command;
+/// - no administrator was found -- "from an administrator account".
+///
+/// `su` is `null` unless there is an account to switch to.
+export function installStep(sudoers) {
+  const s = sudoers || {};
+  const admins = Array.isArray(s.admins) ? s.admins.filter(a => typeof a === "string" && a) : [];
+  if (s.user_is_admin) {
+    // Today's wording: the daemon's own account can install it.
+    return { kind: "self", su: null, lead: "" };
+  }
+  if (admins.length) {
+    return {
+      kind: "admin",
+      su: `su - ${admins[0]}`,
+      lead: `Run as an administrator (${admins.join(" or ")}): ${s.user || "the daemon's user"} cannot use sudo itself.`,
+    };
+  }
+  return { kind: "unknown", su: null, lead: "Run it from an administrator account:" };
+}
+
 /// The journaled changes, newest first, as `{ at, by, text }`.
 export function changeRows(report) {
   return ((report && report.changes) || [])
