@@ -6044,6 +6044,15 @@ fn workflow_text(w: &factory_core::workflow::WorkflowDefinition) -> String {
     for input in &w.inputs {
         s.push_str(&format!("input {}  {}\n", input.name, input.description));
     }
+    if w.part.is_some() {
+        match w.part_shape() {
+            Ok(part) => s.push_str(&format!(
+                "part workflow: entry {}, deliverable {}, terminal {}\n",
+                part.entry, part.deliverable, part.terminal
+            )),
+            Err(error) => s.push_str(&format!("part workflow: {error}\n")),
+        }
+    }
     let order = w.validate().unwrap_or_else(|_| w.nodes.iter().map(|n| n.id.clone()).collect());
     for id in order {
         let Some(node) = w.nodes.iter().find(|n| n.id == id) else { continue };
@@ -6112,6 +6121,12 @@ fn lint_text(lint: &factory_core::workflow::WorkflowLint) -> String {
     let mut s = String::new();
     if !lint.subject.is_empty() {
         s.push_str(&format!("{}  (scope {})\n", lint.subject, lint.scope));
+    }
+    if let Some(part) = &lint.part {
+        s.push_str(&format!(
+            "part workflow: entry {}, deliverable {}, terminal {} -- shown as every part gets it, over two sample parts (b after a)\n",
+            part.entry, part.deliverable, part.terminal
+        ));
     }
     for plan in &lint.plans {
         s.push_str(&format!("\nplan for {} at {}:\n", plan.category, plan.scope));
@@ -7970,5 +7985,24 @@ mod tests {
         let text = intake_definitions_text(&[route]);
         assert_eq!(text.matches("could not be read").count(), 1, "{text}");
         assert!(!text.contains("finding ["), "an Unreadable finding restates the blocker sentence -- left out: {text}");
+    }
+
+    #[test]
+    fn a_part_workflow_says_which_node_plays_which_role() {
+        let draft: factory_core::workflow::WorkflowDraft =
+            serde_yaml_ng::from_str(include_str!("../../../workflows/epic-part.yaml")).unwrap();
+        let definition = factory_core::workflow::WorkflowDefinition::from_draft(draft);
+        let text = super::workflow_text(&definition);
+        assert!(text.contains("part workflow: entry implement, deliverable implement, terminal review"), "{text}");
+        let lint = factory_core::workflow::WorkflowLint {
+            subject: definition.id.clone(),
+            scope: "factory".into(),
+            plans: Vec::new(),
+            injections: Vec::new(),
+            violations: Vec::new(),
+            injected: None,
+            part: Some(definition.part_shape().unwrap()),
+        };
+        assert!(super::lint_text(&lint).contains("over two sample parts (b after a)"));
     }
 }

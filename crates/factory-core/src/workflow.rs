@@ -1500,6 +1500,67 @@ impl WorkflowDefinition {
             },
         }
     }
+
+    /// What a decomposition run of this part workflow looks like, for
+    /// `factory workflow lint` (`#235`): an expand node and two sample
+    /// parts, `b` after `a`, copied and joined the way
+    /// `start_decomposition_workflow` copies and joins real ones -- so the
+    /// control plan can be injected into it and seen on every copy. The
+    /// part values are placeholders such as `<part_instructions>`.
+    pub fn part_preview(&self, shape: &PartShape) -> WorkflowDefinition {
+        let mut nodes = vec![WorkflowNode {
+            session: SessionPolicy::default(),
+            id: "expand".into(),
+            position: CanvasPoint::default(),
+            kind: WorkflowNodeKind::Expand,
+            task: NewTask { title: format!("Decompose: {}", self.name), scope: Some(self.scope.clone()), ..Default::default() },
+            gate: None,
+            exits: Vec::new(),
+            expand: Some(ExpandSpec { max_rework_rounds: default_rework_rounds(), ..Default::default() }),
+        }];
+        let mut edges = Vec::new();
+        let mut ends = Vec::new();
+        for part in ["a", "b"] {
+            let values: BTreeMap<String, String> = PART_INPUTS
+                .iter()
+                .map(|name| {
+                    let value = match *name {
+                        "part_id" => part.to_string(),
+                        "part_title" => format!("part {part}"),
+                        other => format!("<{other}>"),
+                    };
+                    (name.to_string(), value)
+                })
+                .collect();
+            let copy = self.expand_part(shape, part, &values, "<the part's brief>");
+            for mut node in copy.nodes {
+                if node.kind == WorkflowNodeKind::Task {
+                    node.task.decomposition_part = Some(part.to_string());
+                }
+                nodes.push(node);
+            }
+            edges.extend(copy.edges);
+            ends.push(copy.shape);
+        }
+        edges.push(WorkflowEdge { id: format!("expand->{}", ends[0].entry), from: "expand".into(), to: ends[0].entry.clone() });
+        edges.push(WorkflowEdge {
+            id: format!("{}->{}", ends[0].terminal, ends[1].entry),
+            from: ends[0].terminal.clone(),
+            to: ends[1].entry.clone(),
+        });
+        let children = nodes.iter().filter(|n| n.kind == WorkflowNodeKind::Task).map(|n| n.id.clone()).collect();
+        if let Some(expand) = nodes[0].expand.as_mut() {
+            expand.children = children;
+        }
+        WorkflowDefinition {
+            name: format!("{} (two sample parts, b after a)", self.name),
+            inputs: Vec::new(),
+            part: None,
+            nodes,
+            edges,
+            ..self.clone()
+        }
+    }
 }
 
 /// An input's name: `[A-Za-z_][A-Za-z0-9_-]*`.
@@ -1564,9 +1625,14 @@ pub struct WorkflowLint {
     #[serde(default)]
     pub violations: Vec<String>,
     /// The definition as a run of it would start: authored nodes plus the
-    /// locked gates. Absent for a bare scope-and-category preview.
+    /// locked gates. Absent for a bare scope-and-category preview. For a
+    /// part workflow, its [`part_preview`](WorkflowDefinition::part_preview):
+    /// what every part's copy is injected with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub injected: Option<WorkflowDefinition>,
+    /// The linted workflow's roles, when it is a part workflow (`#235`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<PartShape>,
 }
 
 /// The one node of [`WorkflowDefinition::implicit`].

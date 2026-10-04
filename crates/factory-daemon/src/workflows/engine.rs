@@ -3074,7 +3074,7 @@ impl Engine {
             let ys: Vec<f64> = template.nodes.iter().map(|node| node.position.y).collect();
             let min_y = ys.iter().copied().fold(f64::INFINITY, f64::min);
             let max_y = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            (xs.fold(f64::INFINITY, f64::min), min_y, max_y - min_y + 260.0)
+            (xs.fold(f64::INFINITY, f64::min), min_y, max_y - min_y + 480.0)
         });
         for (index, part) in parts.iter().enumerate() {
             let acceptance = part.acceptance.as_deref().unwrap_or_default().trim();
@@ -3184,8 +3184,11 @@ impl Engine {
                         node.task.estimate = None;
                         node.task.estimate_seconds = part.estimate_seconds;
                     }
+                    // Planned as the template says -- the node's own
+                    // category, or the template's -- else as the item was
+                    // triaged.
                     if node.task.category.is_none() {
-                        node.task.category = category.clone();
+                        node.task.category = template.category.clone().or_else(|| category.clone());
                     }
                 }
                 nodes.push(node);

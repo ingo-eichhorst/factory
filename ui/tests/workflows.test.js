@@ -10,6 +10,7 @@ import {
   isDrag,
   nodeStatusClass,
   NODE_STATUSES,
+  partGroups,
   reachable,
   removeEdge,
   removeNode,
@@ -777,6 +778,31 @@ test("#185 saving a pinned release workflow keeps its revision even though the c
   assert.equal(saveDraft(workflow).workspace_ref, workflow.workspace_ref);
   delete workflow.workspace_ref;
   assert.equal(Object.hasOwn(saveDraft(workflow), "workspace_ref"), false, "legacy definitions retain default selection");
+});
+
+test("#235 each part's copy of its part workflow is boxed and named; single-node parts are not", () => {
+  const task = (id, part, x, y) => ({ id, kind: "task", position: { x, y }, task: { title: id, decomposition_part: part } });
+  const nodes = [
+    { id: "expand", kind: "expand", position: { x: 0, y: 0 }, task: { title: "Decompose" } },
+    task("a-implement", "a", 240, 140), task("a-review", "a", 560, 140),
+    { id: "a-review.tests", kind: "gate", position: { x: 600, y: 360 }, task: { title: "gate: tests" }, gate: { step: "tests", subject: "a-review" } },
+    task("b-implement", "b", 240, 620), task("b-review", "b", 560, 620),
+  ];
+  const groups = partGroups(nodes);
+  assert.deepEqual(groups.map(group => group.part), ["a", "b"]);
+  const [a] = groups;
+  assert.deepEqual([a.x, a.y], [240 - 18, 140 - 18 - 22]);
+  assert.equal(a.x + a.width, 600 + 184 + 18, "the box reaches the gate that judges the part's review");
+  assert.ok(a.y + a.height > 360, "and its depth");
+  assert.deepEqual(partGroups([task("a", "a", 240, 140), task("b", "b", 420, 140)]), [], "a plan without a part workflow draws nothing");
+  assert.deepEqual(partGroups(githubIssue().nodes), []);
+});
+
+test("#235 saving a part workflow from the canvas keeps which node plays which role", () => {
+  const workflow = { ...githubIssue(), part: { deliverable: "implement", terminal: "review" } };
+  assert.deepEqual(saveDraft(workflow).part, { deliverable: "implement", terminal: "review" });
+  delete workflow.part;
+  assert.equal(Object.hasOwn(saveDraft(workflow), "part"), false, "an ordinary workflow sends no part block");
 });
 
 test("#149 the page has the inputs list and ordered-exit editor", () => {
