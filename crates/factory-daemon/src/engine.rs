@@ -346,8 +346,8 @@ pub struct Engine {
     pub(crate) harness: crate::harness_health::HarnessHealth,
     /// `sandbox: openshell` prerequisites, kept in the background (`#234`).
     pub(crate) provision: crate::provision::Provisioner,
-    pub(crate) infrastructure_expiries: crate::renewals::store::ObservationStore<factory_kernel::L1>,
-    pub(crate) credential_expiries: crate::renewals::store::ObservationStore<factory_kernel::L2>,
+    pub(crate) infrastructure_expiries: crate::renewals::store::InfrastructureExpiryStore,
+    pub(crate) credential_expiries: crate::renewals::store::CredentialExpiryStore,
     pub(crate) renewal_alerts: crate::renewals::store::AlertStore,
     pub(crate) renewal_declaration_cache: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<factory_kernel::RenewalDecl>>>,
     /// The fingerprint of what the last successful `Request::Quality`
@@ -464,8 +464,8 @@ impl Engine {
             power,
             harness: crate::harness_health::HarnessHealth::new(),
             provision: crate::provision::Provisioner::default(),
-            infrastructure_expiries: crate::renewals::store::ObservationStore::in_memory().expect("expiry metadata store should open"),
-            credential_expiries: crate::renewals::store::ObservationStore::in_memory().expect("expiry metadata store should open"),
+            infrastructure_expiries: crate::renewals::store::InfrastructureExpiryStore::in_memory().expect("expiry metadata store should open"),
+            credential_expiries: crate::renewals::store::CredentialExpiryStore::in_memory().expect("expiry metadata store should open"),
             renewal_alerts: crate::renewals::store::AlertStore::in_memory().expect("renewal alert store should open"),
             renewal_declaration_cache: Default::default(),
             quality_seen: Default::default(),

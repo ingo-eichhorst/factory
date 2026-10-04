@@ -5,8 +5,8 @@ A daemon that gives tasks to coding agents and watches what happens.
 ## Layout
 
     crates/factory-kernel    L0: pure shared vocabulary and every live fact schema (Level/Fact, nested statuses, grants and evidence); no other factory-* dependency
-    crates/factory-infrastructure L1: backup, running environments and renewal domain behaviour
-    crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
+    crates/factory-infrastructure L1: backup, running environments, renewal behaviour and their SQLite stores
+    crates/factory-environment    L2: sandbox planning, secrets, dependencies and credential expiry store
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy, TaskStore and run evidence/provenance store
     crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam (full live services still pending)
@@ -241,6 +241,10 @@ something impossible.
   constructing it, and decode it only in the benchmark owner. Keep its legacy
   JSON stable; never add benchmark accessors to L4. This does not finish the
   live providers/services or command-ladder work.
+  Workflow definitions/runs, offline recovery action I/O/journal and deployment
+  mirror receipts are L4-owned too. The daemon/Core paths canonically re-export
+  those implementations; recovery receipts remain explicit operator evidence,
+  never invented task/run status or deployment success.
 - Check evaluation and Quality belong to L5, never L6. Project resolved
   policy declarations into `EvaluationSubject<Kind>`; L5 only echoes the
   producer's opaque classification. Quality supplies L5 subjects directly.
@@ -273,6 +277,15 @@ something impossible.
   process evidence directly; upward live reads still use its fact ports.
   Splitting storage does not finish service/provider isolation. The
   signpost reader move and live adjacent command ports still remain in #193.
+- L1 owns backup history, deployment/health history and infrastructure expiry
+  cache stores. L2 owns the credential expiry cache; L6 owns renewal push
+  attempt receipts. Each opens only its own existing tables on the instance
+  database. There is no public generic table selector across levels. Failed
+  or incomplete metadata discovery retains earlier evidence without freshening
+  it; interrupted push claims remain attempted, not delivered or retried as if
+  nothing happened. Current-cache retirement and health retention keep their
+  existing rules; append-only histories stay append-only. Native probes, timers
+  and the remaining fact gatherers still need their isolated level services.
 - Wire envelopes, responses, observer events and the unchanged Interface seam
   live in `factory-interfaces`, outside the stack. Whole-instance config/scope
   loading and cross-level page projections live in `factory-composition`.

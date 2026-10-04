@@ -56,8 +56,8 @@ fn engine(factory: Factory) -> Arc<Engine> {
             Vec::new(),
         )
         .with_renewal_stores(
-            store::ObservationStore::open(&database).unwrap(),
-            store::ObservationStore::open(&database).unwrap(),
+            store::InfrastructureExpiryStore::open(&database).unwrap(),
+            store::CredentialExpiryStore::open(&database).unwrap(),
             store::AlertStore::open(&database).unwrap(),
         ),
     )

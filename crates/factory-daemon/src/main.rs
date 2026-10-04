@@ -47,6 +47,8 @@ mod service_observations;
 mod schedule;
 mod site;
 mod stores;
+#[cfg(test)]
+mod storage_owner_tests;
 mod ui;
 mod verification;
 mod waiting;
@@ -319,8 +321,8 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let goals_store = goals::GoalsStore::open(&factory.database_path())?;
     let backup_store = backup::BackupStore::open(&factory.database_path())?;
     let environment_store = environments::EnvironmentStore::open(&factory.database_path())?;
-    let infrastructure_expiries = renewals::store::ObservationStore::open(&factory.database_path())?;
-    let credential_expiries = renewals::store::ObservationStore::open(&factory.database_path())?;
+    let infrastructure_expiries = renewals::store::InfrastructureExpiryStore::open(&factory.database_path())?;
+    let credential_expiries = renewals::store::CredentialExpiryStore::open(&factory.database_path())?;
     let renewal_alerts = renewals::store::AlertStore::open(&factory.database_path())?;
     let engine = Arc::new(
         Engine::new(factory.clone(), registry, store, factory_bin(), interface_names)

@@ -4,5 +4,6 @@
 //! configuration, adapter traits, process tasks, or the router.
 pub mod declarations;
 pub mod dependencies;
+pub mod expiry_store;
 pub mod openshell;
 pub mod secrets;
