@@ -207,6 +207,14 @@ something impossible.
   mirror receipts and Done-only provenance from its own stores. Their daemon
   `facts/` modules only construct physical owner providers; remaining
   Engine-backed gatherers still need migration.
+  L4 also owns inventory, scheduled dates, named task/workflow history,
+  recovery evidence/import/journal, security reports and release selection.
+  Its providers receive only own store capabilities, root and current plain
+  scope identities. The shared L0 scope tree is the canonical lookup/ancestry
+  algorithm for those identities and authored configuration: preserve name,
+  exact-path, unique-leaf precedence and ambiguity errors; ancestry is path
+  components, never name prefixes. A timer constructs a fresh provider per
+  tick; never freeze scope identities across configuration reloads.
   Policy and fact-backed metrics ask `Facts<Reader>::get`. A port returns
   only its fact or a collection of it, never another level's report. The
   kernel read boundary enforces a sealed `Producer: Below<Reader>` relation:

@@ -297,6 +297,7 @@ impl Engine {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn run_provenance(
         &self,
         id: &str,

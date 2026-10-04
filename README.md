@@ -5151,6 +5151,20 @@ not an Engine-backed forwarding provider. The daemon only constructs them;
 query windows, 200-run/receipt bounds, settlement rules, live file reads,
 unknown values and existing error identities are unchanged.
 
+L4 also owns the live task inventory, scheduled dates, named task/workflow
+history, environment-recovery evidence, offline receipt import/journal,
+confirmed security reports and release-build selection. The router passes
+only the task/workflow/evidence stores, instance root and current plain scope
+identities; no Engine, configuration facade or callback enters those providers.
+L0's shared scope tree now supplies the same configured-name/path/leaf lookup
+and path-component ancestry used by configuration and its consumers. Ambiguous
+legacy aliases still fail, removed identities still group under their old name,
+and exact selection never silently becomes a subtree. Stored-scope membership,
+20-run history bounds, receipt conflicts and clean Done-release filters remain
+unchanged. Spend/conformance/production gathering and six-service/command-port
+isolation are still pending; the recovery timer remains outside the stack and
+constructs a fresh provider on every tick.
+
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),
 with ADR 0004 amended to name the evidence channel. The remaining signpost

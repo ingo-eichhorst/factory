@@ -1167,26 +1167,7 @@ impl Engine {
         &self,
         scope: Option<&str>,
     ) -> Result<Vec<intake::ConfirmedSecurityReport>> {
-        let snapshot = self.factory_snapshot();
-        let members: Option<BTreeSet<String>> = match scope {
-            None => None,
-            Some(name) => {
-                let (asked, subtree) = factory_core::config::subtree_scopes(&snapshot, Some(name))?;
-                let mut members: BTreeSet<String> = subtree.into_iter().map(|s| s.name).collect();
-                if let Some(asked) = asked {
-                    members.insert(asked.name);
-                }
-                Some(members)
-            }
-        };
-        let all = self.store.list(&TaskFilter::default()).await?;
-        let mut reports: Vec<intake::ConfirmedSecurityReport> = all
-            .iter()
-            .filter(|t| members.as_ref().is_none_or(|m| m.contains(&t.scope)))
-            .filter_map(intake::confirmed_report)
-            .collect();
-        reports.sort_by(|a, b| a.awareness_at.cmp(&b.awareness_at).then(a.item.cmp(&b.item)));
-        Ok(reports)
+        crate::facts::process_security_reports(self, scope).await
     }
 
     /// Whether `caller` is the run of this item's own triage task -- the one
