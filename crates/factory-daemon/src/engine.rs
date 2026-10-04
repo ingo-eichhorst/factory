@@ -5425,6 +5425,33 @@ mod tests {
     use factory_core::task::Schedule;
     use factory_plugins::{Registry, SqliteStore};
 
+    #[tokio::test]
+    async fn isolated_process_fact_wiring_uses_a_fresh_scope_tree_after_configuration_changes() {
+        use crate::facts::{Facts, TaskInventoryQuery};
+        use factory_kernel::{ScheduledRunDatesFact, TaskInventoryFact, L6};
+        let engine = test_engine(PathBuf::from("projects/legacy"));
+        let mut task = factory_process::store::task_from_new(
+            NewTask { title: "scheduled".into(), ..Default::default() },
+            "legacy".into(), "shell".into(), "quiet".into(),
+        );
+        task.schedule = Some(Schedule::Cron("0 9 * * *".into()));
+        task.next_run_at = Some("2026-10-05T09:00:00Z".parse().unwrap());
+        engine.store.create(&task).await.unwrap();
+        let facts = Facts::<L6>::new(&engine);
+        let first = facts.get::<ScheduledRunDatesFact>(&()).await.unwrap();
+        assert_eq!(first.runs[0].scope, "demo");
+        engine.factory.write().unwrap().config.scopes[0].name = "renamed".into();
+        assert_eq!(facts.get::<ScheduledRunDatesFact>(&()).await.unwrap().runs[0].scope, "renamed");
+        let selected = facts.get::<TaskInventoryFact>(
+            &TaskInventoryQuery::Members(["legacy".into()].into_iter().collect()),
+        ).await.unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].scope, "legacy", "inventory never rewrites persisted identity");
+        engine.factory.write().unwrap().config.scopes.clear();
+        assert_eq!(facts.get::<ScheduledRunDatesFact>(&()).await.unwrap().runs[0].scope, "legacy");
+        assert!(facts.get::<TaskInventoryFact>(&TaskInventoryQuery::Exact("legacy".into())).await.is_err());
+    }
+
     #[test]
     fn request_future_stays_bounded_as_control_orchestration_grows() {
         let engine = test_engine(PathBuf::from("/tmp"));

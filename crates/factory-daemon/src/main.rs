@@ -50,6 +50,8 @@ mod site;
 mod stores;
 #[cfg(test)]
 mod storage_owner_tests;
+#[cfg(test)]
+mod provider_owner_tests;
 mod ui;
 mod verification;
 mod waiting;

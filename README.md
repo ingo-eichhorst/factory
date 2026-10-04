@@ -5172,8 +5172,36 @@ fact log. Concrete HTTP/socket mounts, the actual router and its single
 Moving page projections does not isolate their live gatherers or claim to
 finish the Operations signpost reader move.
 
-The remaining signpost reader move, router/six live services/providers/stores
-and strict command ladder are still ahead in #193.
+The live benchmark resolution, gate and knowledge-tag providers now live in
+L5's `factory-assurance`, holding only its benchmark store and instance root.
+The infrastructure expiry store itself provides its L1 fact, and L4's
+workflow store provides deployment mirror receipts. L4's provenance provider
+uses only the task-store seam and run-evidence store: only authoritative Done
+runs expose rows matching that run, task, finish time and captured artifact.
+Both upward fact reads and ordinary same-level reads use these actual owners,
+not an Engine-backed forwarding provider. The daemon only constructs them;
+query windows, 200-run/receipt bounds, settlement rules, live file reads,
+unknown values and existing error identities are unchanged.
+
+L4 also owns the live task inventory, scheduled dates, named task/workflow
+history, environment-recovery evidence, offline receipt import/journal,
+confirmed security reports and release-build selection. The router passes
+only the task/workflow/evidence stores, instance root and current plain scope
+identities; no Engine, configuration facade or callback enters those providers.
+L0's shared scope tree now supplies the same configured-name/path/leaf lookup
+and path-component ancestry used by configuration and its consumers. Ambiguous
+legacy aliases still fail, removed identities still group under their old name,
+and exact selection never silently becomes a subtree. Stored-scope membership,
+20-run history bounds, receipt conflicts and clean Done-release filters remain
+unchanged. Spend/conformance/production gathering and six-service/command-port
+isolation are still pending; the recovery timer remains outside the stack and
+constructs a fresh provider on every tick.
+
+The company decision is recorded in
+[ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),
+with ADR 0004 amended to name the evidence channel. The remaining signpost
+reader move, six live services and other Engine-backed providers, adjacent
+command ports and remediation/promotion routing are still ahead in #193.
 
 ## Layout
 

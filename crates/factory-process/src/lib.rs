@@ -10,6 +10,7 @@
 pub mod assignment;
 pub mod control_plan;
 pub mod evidence_store;
+pub mod facts;
 pub mod intake;
 pub mod occupancy;
 pub mod origin;

@@ -14,6 +14,7 @@ factory-kernel = { path = "../factory-kernel" }
 factory-infrastructure = { path = "../factory-infrastructure" }
 factory-environment = { path = "../factory-environment" }
 factory-process = { path = "../factory-process" }
+factory-assurance = { path = "../factory-assurance" }
 factory-direction = { path = "../factory-direction" }
 factory-plugins = { path = "../factory-plugins" }
 anyhow.workspace = true

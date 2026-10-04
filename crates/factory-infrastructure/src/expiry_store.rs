@@ -18,6 +18,23 @@ fn error(error: impl std::fmt::Display) -> FactoryError {
 pub struct ObservationStore {
     conn: Arc<Mutex<Connection>>,
 }
+
+impl factory_kernel::FactProvider for ObservationStore {
+    type Level = factory_kernel::L1;
+}
+
+#[async_trait::async_trait]
+impl factory_kernel::Provide<factory_kernel::InfrastructureExpiryFact> for ObservationStore {
+    type Query = ();
+    type Value = factory_kernel::InfrastructureExpiryFact;
+    type Error = FactoryError;
+    async fn get(&self, _: &()) -> Result<Self::Value> {
+        Ok(factory_kernel::InfrastructureExpiryFact {
+            observations: self.all().await?,
+        })
+    }
+}
+
 impl ObservationStore {
     pub fn open(path: &Path) -> Result<Self> {
         Self::from_connection(Connection::open(path).map_err(error)?)
@@ -157,6 +174,56 @@ mod owner_contracts {
             renew: "review expiry".into(),
             owner: "owner".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn expiry_fact_reads_use_the_own_live_cache_and_preserve_failed_probe_dates() {
+        use factory_kernel::{Facts, InfrastructureExpiryFact, L2};
+        let store = ObservationStore::in_memory().unwrap();
+        let reader = Facts::<L2>::new();
+        assert!(reader
+            .get::<InfrastructureExpiryFact, _>(&store, &())
+            .await
+            .unwrap()
+            .observations
+            .is_empty());
+        let old = observation("first");
+        store.replace(vec![old.clone()], true).await.unwrap();
+        assert_eq!(
+            reader
+                .get::<InfrastructureExpiryFact, _>(&store.clone(), &())
+                .await
+                .unwrap()
+                .observations,
+            [old.clone()]
+        );
+        let mut failed = old.clone();
+        failed.expires_at = None;
+        failed.observed_at = None;
+        failed.attempted_at += chrono::Duration::days(1);
+        failed.issue = Some("probe unavailable".into());
+        store.replace(vec![failed.clone()], false).await.unwrap();
+        let fact = reader
+            .get::<InfrastructureExpiryFact, _>(&store, &())
+            .await
+            .unwrap();
+        assert_eq!(fact.observations, store.all().await.unwrap());
+        assert_eq!(fact.observations[0].observed_at, old.observed_at);
+        assert_eq!(fact.observations[0].expires_at, old.expires_at);
+        assert_eq!(fact.observations[0].attempted_at, failed.attempted_at);
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TABLE infrastructure_expiries")
+            .unwrap();
+        let error = reader
+            .get::<InfrastructureExpiryFact, _>(&store, &())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, FactoryError::Adapter { ref adapter, .. } if adapter == "renewal metadata sqlite")
+        );
     }
 
     #[tokio::test]
