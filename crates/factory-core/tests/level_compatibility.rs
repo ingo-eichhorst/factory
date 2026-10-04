@@ -51,3 +51,57 @@ fn old_agent_and_runtime_paths_are_canonical_l3_and_l0_types() {
     let canonical: Option<&dyn factory_agents::runtime::AgentRuntime> = old;
     assert!(canonical.is_none());
 }
+
+#[test]
+fn the_agent_seam_and_shared_dispatch_values_are_canonical() {
+    let old: Option<&dyn factory_core::adapter::Agent> = None;
+    let canonical: Option<&dyn factory_agents::adapter::Agent> = old;
+    assert!(canonical.is_none());
+    let hints: factory_core::adapter::KnowledgeHints = factory_kernel::KnowledgeHints {
+        vault: "/tmp/vault".into(),
+        hits: vec![],
+    };
+    let _: factory_kernel::KnowledgeHints = hints;
+    let origin: task::WorkflowOrigin = factory_kernel::WorkflowOrigin {
+        workflow_id: "w".into(),
+        workflow_run_id: "wr".into(),
+        node_id: "n".into(),
+        workspace: Some(factory_kernel::WorkflowWorkspace {
+            base_ref: "integration".into(),
+        }),
+    };
+    let _: factory_kernel::WorkflowOrigin = origin;
+    let assignment: factory_core::adapter::AssignedTask =
+        factory_agents::assignment::AssignedTask::new("t", "title", "instructions");
+    let _: factory_agents::assignment::AssignedTask = assignment;
+}
+
+#[test]
+fn a_process_task_projects_to_an_independent_wire_compatible_dispatch_snapshot() {
+    let mut task: task::Task = serde_json::from_value(json!({
+        "id":"t1", "title":"title", "instructions":"instructions", "scope":"demo",
+        "agent":"shell", "runtime":"herdr", "status":"blocked",
+        "created_at":"2024-01-01T00:00:00Z", "updated_at":"2024-01-01T00:00:00Z",
+        "schedule":{"every":{"seconds":300}}, "runs":4, "result":"old result",
+        "error":"old error", "routed_to":"exit", "estimate_seconds":120,
+        "labels":{"goal":"g", "arbitrary":"value"}, "worktree":true, "knowledge_hints":true,
+        "after":["upstream"], "after_condition":"route", "depends_on":["dep"],
+        "decomposition_part":"part", "parent_task_id":"parent", "category":"feature",
+        "workflow_origin":{"workflow_id":"w", "workflow_run_id":"wr", "node_id":"n",
+            "workspace":{"base_ref":"integration"}},
+        "ack_timeout_seconds":30, "timeout_seconds":60, "blocked_timeout_seconds":90,
+        "schedule_paused":true, "last_run_at":"2024-01-01T00:00:00Z",
+        "next_run_at":"2024-01-02T00:00:00Z"
+    }))
+    .unwrap();
+    let original = serde_json::to_value(&task).unwrap();
+    let assignment = agent::AssignedTask::try_from(&task).unwrap();
+    assert_eq!(serde_json::to_value(&assignment).unwrap(), original);
+    task.title = "edited after dispatch".into();
+    task.status = task::TaskStatus::Done;
+    task.error = None;
+    assert_eq!(serde_json::to_value(&assignment).unwrap(), original);
+    let restored: task::Task =
+        serde_json::from_value(serde_json::to_value(assignment).unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(restored).unwrap(), original);
+}

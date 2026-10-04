@@ -8,6 +8,7 @@ license.workspace = true
 level = 3
 
 [dependencies]
+anyhow.workspace = true
 factory-kernel = { path = "../factory-kernel" }
 async-trait.workspace = true
 chrono.workspace = true
@@ -17,3 +18,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 serde_yaml_ng.workspace = true
+uuid.workspace = true

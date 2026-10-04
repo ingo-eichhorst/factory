@@ -24,7 +24,7 @@ the daemon cannot tell a built-in implementation from a plugin:
 | **Knowledge provider** | how the knowledge vault is searched — read side only | `keyword` |
 
 The public compatibility paths are in `crates/factory-core/src/adapter/`.
-The runtime trait is owned by L3's `factory-agents` and re-exported there;
+The Agent and runtime traits are owned by L3's `factory-agents` and re-exported there;
 the other seams remain in core pending the level migration. Neither knows
 about sqlite, herdr, axum, or any other concrete choice.
 
@@ -5019,17 +5019,27 @@ target-specific edge by canonical package name, including renamed
 dependencies: a level may name only L0 or its directly lower level.
 
 L3's `factory-agents` owns standing-agent state, role resolution, harness
-health, the runtime adapter trait and its cumulative session-usage contract.
+health, both agent adapter traits and the cumulative session-usage contract.
 The opaque session identifier is L0 vocabulary. Core's existing runtime,
 role, harness, agent and usage paths are canonical re-exports. Run usage
 snapshots, differences and provider-window allocation remain process code;
 they do not move into the runtime observer. Roles are still resolved from
 the live scope chain and checked by the one router authorization check.
 
+The agent prompt/reporting context and its guide now live in L3 too. Its
+`TaskBinding.task` is an `AssignedTask` dispatch snapshot: id, title,
+instructions, workflow identity/workspace ref and parent identity, not L4's
+task lifecycle or scheduler API. The producer's other task fields stay
+private and opaque to L3, forwarded only by serde to preserve the existing
+out-of-process plugin JSON. Rust callers constructing a binding project a
+core task with `AssignedTask::try_from(&task)` (or `(&task).try_into()?`);
+this is a field-type API change, not a new plugin protocol. Shared workflow
+references and knowledge hints are plain L0 command values, not live facts
+or search/evaluation logic. Core is only the compatibility/conversion bridge;
+L3 never depends on it. The trait methods, guide and reporting text are unchanged.
+
 This is a partial physical migration: live providers, storage and runtime
-services remain in the daemon. The agent prompt/reporting seam still
-carries L4's full task binding and needs a separate assignment-payload
-boundary; it is not pulled into L3 through a facade dependency. The
+services remain in the daemon. The
 remaining signpost reader move, L4–L6 and protocol/router migration, and
 strict command ladder are still ahead in #193.
 
@@ -5038,7 +5048,7 @@ strict command ladder are still ahead in #193.
     crates/factory-kernel    L0: pure shared vocabulary and every live fact schema (Level/Fact, nested statuses, grants and evidence); no other factory-* dependency
     crates/factory-infrastructure L1: backup, running environments and renewal domain behaviour
     crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
-    crates/factory-agents         L3: standing agents, roles, harness health, runtime trait and session usage
+    crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
