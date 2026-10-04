@@ -179,6 +179,10 @@ pub struct EnvironmentDecl {
     /// at its end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promotes_to: Option<String>,
+    /// Opt-in release recipe for promoting a verified release here. Executed
+    /// only as an approved category-release task, never by the health loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy: Option<ReleaseCommand>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckDecl>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -187,6 +191,35 @@ pub struct EnvironmentDecl {
     /// sampled -- a paused stretch neither spends nor earns error budget.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseCommand {
+    /// Declared shell agent, with deploy.record in this environment's scope.
+    pub agent: String,
+    pub command: String,
+    /// Build or prepare evidence before release policy gates judge it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepare: Option<String>,
+    /// Run timeout, 30 minutes unless declared; at most one hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<Span>,
+}
+
+impl ReleaseCommand {
+    pub fn timeout_seconds(&self) -> u64 {
+        self.timeout.as_ref().map(Span::seconds).unwrap_or(1800)
+    }
+}
+
+/// Select exactly the deployment shown on the source card, not a moving
+/// branch name. The daemon freezes its release and the target recipe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Promote {
+    pub environment: String,
+    pub deployment: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -341,6 +374,13 @@ pub fn validate<'a>(scopes: impl IntoIterator<Item = (&'a str, &'a [EnvironmentD
     for (scope, envs) in &scopes {
         for env in envs.iter() {
             let here = format!("scope {scope:?}, environment {:?}", env.name);
+            if let Some(deploy) = &env.deploy {
+                if deploy.agent.trim().is_empty() || deploy.command.trim().is_empty()
+                    || deploy.prepare.as_ref().is_some_and(|command| command.trim().is_empty())
+                    || deploy.timeout_seconds() > 3600 {
+                    return bad(format!("{here}: deploy needs agent and command, a nonempty prepare if declared, and timeout at most 1h"));
+                }
+            }
             if let Some(next) = &env.promotes_to {
                 if next == &env.name || !owner.contains_key(next.as_str()) {
                     return bad(format!(
@@ -536,6 +576,9 @@ pub struct Deployment {
     pub via: Option<String>,
     /// Done by a person with nothing in between: the owner, with no `via`.
     pub manual: bool,
+    /// Frozen on start: skipped, paused or removed checks cannot count as success.
+    #[serde(default)]
+    pub strict_verification: bool,
     pub started_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
@@ -895,6 +938,11 @@ pub struct EnvironmentCard {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promotes_to: Option<String>,
+    /// The owner may start the frozen promotion workflow. Rechecked on write.
+    #[serde(default)]
+    pub promotion_ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_reason: Option<String>,
     /// `false` for an environment only deployments name -- an ad-hoc one
     /// nobody declared. It has no checks and no SLO.
     pub declared: bool,
@@ -1019,6 +1067,8 @@ pub fn report(
             tier: decl.map(|d| d.tier).unwrap_or_default(),
             url: decl.and_then(|d| d.url.clone()),
             promotes_to: decl.and_then(|d| d.promotes_to.clone()),
+            promotion_ready: false,
+            promotion_reason: None,
             declared: decl.is_some(),
             paused,
             status,
@@ -1105,6 +1155,8 @@ fn releases(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeployStart {
     pub environment: String,
+    #[serde(default)]
+    pub strict_verification: bool,
     /// The scope it belongs to. A declared environment's own scope is used
     /// and this must agree; an undeclared one takes this, else the caller's
     /// scope, else the root scope.
@@ -1170,6 +1222,7 @@ mod tests {
             actor: Actor { kind: ActorKind::Person, name: "owner".into(), run_id: None, task_id: None },
             via: None,
             manual: true,
+            strict_verification: false,
             started_at: t(min),
             finished_at: (status != DeployStatus::Running).then(|| t(min + 2)),
             status,
@@ -1177,6 +1230,22 @@ mod tests {
             previous_commit: None,
             verification: None,
         }
+    }
+
+    #[test]
+    fn deploy_recipe_is_optional_bounded_and_round_trips() {
+        assert!(decls("- name: production\n")[0].deploy.is_none());
+        let envs = decls("- name: production\n  deploy: { agent: releaser, command: './deploy', prepare: './build', timeout: 20m }\n");
+        validate([("factory", envs.as_slice())]).unwrap();
+        assert_eq!(envs[0].deploy.as_ref().unwrap().timeout_seconds(), 1200);
+        assert_eq!(serde_yaml_ng::from_str::<Vec<EnvironmentDecl>>(&serde_yaml_ng::to_string(&envs).unwrap()).unwrap(), envs);
+        for recipe in ["{ agent: '', command: 'true' }", "{ agent: releaser, command: ' ' }", "{ agent: releaser, command: 'true', prepare: '' }", "{ agent: releaser, command: 'true', timeout: 61m }"] {
+            let invalid = decls(&format!("- name: production\n  deploy: {recipe}\n"));
+            assert!(validate([("factory", invalid.as_slice())]).is_err(), "{recipe}");
+        }
+        assert!(serde_json::from_value::<Promote>(serde_json::json!({"environment":"staging", "deployment":"selected", "commit":"moving"})).is_err());
+        let legacy: DeployStart = serde_json::from_value(serde_json::json!({"environment":"staging", "commit":"abc"})).unwrap();
+        assert!(!legacy.strict_verification);
     }
 
     #[test]

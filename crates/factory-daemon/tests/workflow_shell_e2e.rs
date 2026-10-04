@@ -355,6 +355,171 @@ fn missing_prerequisites() -> bool {
 }
 
 #[test]
+fn promotion_is_pinned_policy_gated_owner_approved_and_verified_after_restart() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let git = |args: &[&str]| {
+        let out = Command::new("git").current_dir(&daemon.root).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&["config", "user.email", "promotion@example.invalid"]);
+    git(&["config", "user.name", "Promotion QA"]);
+    std::fs::write(daemon.root.join(".gitignore"), ".factory/\ndaemon.log\n").unwrap();
+    std::fs::write(daemon.root.join("release-source"), "v1").unwrap();
+    git(&["add", ".gitignore", "release-source"]);
+    git(&["commit", "-q", "-m", "verified source"]);
+    let selected = git(&["rev-parse", "HEAD"]);
+    let marker = daemon.root.join(".factory/promoted");
+    let permit = daemon.root.join(".factory/gate-allowed");
+    let config_path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["scope"]["agents"] = serde_yaml_ng::from_str("[{ name: releaser, harness: shell, lifetime: task, role: foreman, max_sessions: 1 }]").unwrap();
+    config["policies"] = serde_yaml_ng::from_str("{ frameworks: [house] }").unwrap();
+    config["scope"]["environments"] = serde_yaml_ng::to_value(json!([
+        { "name": "staging", "promotes_to": "production", "checks": [{ "name": "source", "kind": "command", "command": "true", "every": "5s", "timeout": "2s" }] },
+        { "name": "production", "checks": [{ "name": "installed", "kind": "command", "command": format!("test -f '{}'", marker.display()), "every": "5s", "timeout": "2s" }],
+          "deploy": { "agent": "releaser", "prepare": "test \"$(cat release-source)\" = v1", "command": format!("printf '%s' \"$FACTORY_RELEASE_COMMIT\" > '{}'", marker.display()) } }
+    ])).unwrap();
+    std::fs::write(&config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    std::fs::create_dir_all(daemon.root.join(".factory/policies")).unwrap();
+    let policy = json!({ "framework": "house", "title": "Release policy", "kind": "best-practice", "controls": [
+        { "id": "tested", "title": "Selected release checked", "requires": [{ "applies_to": ["release"], "step": "tests",
+          "gate": format!("test \"$(cat release-source)\" = v1 && test -f '{}'", permit.display()) }] }
+    ] });
+    std::fs::write(daemon.root.join(".factory/policies/house.yaml"), serde_yaml_ng::to_string(&policy).unwrap()).unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let start = format!("{base}/api/deployments");
+    let receipt = expect_ok(&start, &post(&start, &json!({ "environment": "staging", "commit": selected })))["deployment"].clone();
+    let finish = format!("{base}/api/deployments/{}/finish", receipt["id"].as_str().unwrap());
+    let verified = expect_ok(&finish, &post(&finish, &json!({ "status": "succeeded" })));
+    assert_eq!(verified["deployment"]["verification"]["ok"], true);
+    // Moving the scope's HEAD after verification must not select another release.
+    std::fs::write(daemon.root.join("release-source"), "v2").unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git").current_dir(&daemon.root).args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&["add", "release-source"]);
+    git(&["commit", "-q", "-m", "next release, not selected"]);
+    assert_ne!(git(&["rev-parse", "HEAD"]), selected);
+    let promote = format!("{base}/api/environments/promote");
+    let selection = json!({ "environment": "staging", "deployment": receipt["id"] });
+    let started = expect_ok(&promote, &post(&promote, &selection))["run"].clone();
+    let workflow_run_id = started["id"].as_str().unwrap();
+    assert_eq!(started["definition"]["workspace_ref"], selected);
+    let initial = tasks(&base);
+    assert_eq!(initial.len(), 2, "gates are not extra tasks");
+    let preflight_id = initial.iter().find(|t| t["title"] == "Release preflight").unwrap()["id"].as_str().unwrap().to_owned();
+    let deploy_id = initial.iter().find(|t| t["title"].as_str().unwrap().starts_with("Deploy ")).unwrap()["id"].as_str().unwrap().to_owned();
+    wait_for("preflight fails its release policy gate", Duration::from_secs(30), || {
+        tasks(&base).into_iter().find(|t| t["id"] == preflight_id && t["status"] == "blocked")
+    });
+    assert_eq!(tasks(&base).into_iter().find(|t| t["id"] == deploy_id).unwrap()["runs"], 0,
+        "the approval node must not bypass the failed upstream gate");
+    assert!(!marker.exists());
+    let (_, duplicate) = raw_request("POST", &promote, Some(&selection)).unwrap();
+    assert!(duplicate.contains("already pending"), "{duplicate}");
+    let preflight_runs = format!("{base}/api/tasks/{preflight_id}/runs");
+    let first = expect_ok(&preflight_runs, &get(&preflight_runs))["runs"][0].clone();
+    std::fs::write(&permit, "allowed").unwrap();
+    let rework = format!("{base}/api/runs/{}/rework", first["id"].as_str().unwrap());
+    expect_ok(&rework, &post(&rework, &json!({})));
+    wait_for("deploy run waits for owner approval", Duration::from_secs(30), || {
+        tasks(&base).into_iter().find(|t| t["id"] == deploy_id && t["status"] == "blocked" && t["runs"] == 1)
+    });
+    assert!(!marker.exists(), "passing preflight is not owner approval");
+    daemon.sigterm();
+    daemon.spawn();
+    assert_eq!(run_status(&base, workflow_run_id)["definition"]["workspace_ref"], selected);
+    assert!(!marker.exists(), "restart must not approve a deployment");
+    let deploy_runs = format!("{base}/api/tasks/{deploy_id}/runs");
+    let held = expect_ok(&deploy_runs, &get(&deploy_runs))["runs"][0].clone();
+    assert_eq!(held["blocked_source"], "verification");
+    assert!(held.get("session").is_none(), "approval must hold the run before launching its shell");
+    assert!(held["required_steps"].as_array().unwrap().iter().any(|step| step["step"] == "environment-promotion" && step["kind"] == "approval"));
+    let approve = format!("{base}/api/runs/{}/approve", held["id"].as_str().unwrap());
+    expect_ok(&approve, &post(&approve, &json!({ "reason": "reviewed selected release and preflight evidence" })));
+    wait_for("verified promotion workflow completes", Duration::from_secs(30), || {
+        let run = run_status(&base, workflow_run_id);
+        (run["status"] == "done").then_some(run)
+    });
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), selected);
+    let report_url = format!("{base}/api/environments");
+    let report = expect_ok(&report_url, &get(&report_url))["report"].clone();
+    let current = &report["environments"].as_array().unwrap().iter().find(|c| c["name"] == "production").unwrap()["current"];
+    assert_eq!(current["release"]["commit"], selected);
+    assert_eq!(current["verification"]["ok"], true);
+    assert_eq!(current["strict_verification"], true);
+    assert_eq!(current["manual"], false);
+    assert_eq!(current["actor"]["kind"], "run");
+    assert_eq!(current["actor"]["task_id"], deploy_id);
+    assert_eq!(current["via"], "promotion");
+    let (_, redundant) = raw_request("POST", &promote, Some(&selection)).unwrap();
+    assert!(redundant.contains("already runs this release"), "{redundant}");
+}
+
+#[test]
+fn promotion_check_failure_is_not_a_successful_release_or_a_running_orphan() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision();
+    daemon.sigterm();
+    for args in [vec!["config", "user.email", "promotion@example.invalid"], vec!["config", "user.name", "Promotion QA"],
+        vec!["commit", "-q", "--allow-empty", "-m", "selected release"]] {
+        let output = Command::new("git").current_dir(&daemon.root).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let commit = Command::new("git").current_dir(&daemon.root).args(["rev-parse", "HEAD"]).output().unwrap();
+    let selected = String::from_utf8(commit.stdout).unwrap().trim().to_owned();
+    let path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["scope"]["agents"] = serde_yaml_ng::from_str("[{ name: releaser, harness: shell, lifetime: task, role: foreman }]").unwrap();
+    config["scope"]["environments"] = serde_yaml_ng::from_str(
+        "- name: staging\n  promotes_to: production\n  checks: [{ kind: command, name: source, command: 'true' }]\n- name: production\n  checks: [{ kind: command, name: installed, command: 'echo wrong-release >&2; exit 1' }]\n  deploy: { agent: releaser, command: 'printf deployed' }\n"
+    ).unwrap();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let url = format!("{base}/api/deployments");
+    let source = expect_ok(&url, &post(&url, &json!({ "environment": "staging", "commit": selected })))["deployment"].clone();
+    let finish = format!("{url}/{}/finish", source["id"].as_str().unwrap());
+    expect_ok(&finish, &post(&finish, &json!({ "status": "succeeded" })));
+    let promote = format!("{base}/api/environments/promote");
+    expect_ok(&promote, &post(&promote, &json!({ "environment": "staging", "deployment": source["id"] })));
+    let held_task = wait_for("promotion owner hold", Duration::from_secs(30), || {
+        tasks(&base).into_iter().find(|t| t["title"].as_str().unwrap().starts_with("Deploy ") && t["status"] == "blocked")
+    });
+    let runs = format!("{base}/api/tasks/{}/runs", held_task["id"].as_str().unwrap());
+    let held = expect_ok(&runs, &get(&runs))["runs"][0].clone();
+    let approve = format!("{base}/api/runs/{}/approve", held["id"].as_str().unwrap());
+    expect_ok(&approve, &post(&approve, &json!({ "reason": "reviewed release" })));
+    let report_url = format!("{base}/api/environments");
+    let failed = wait_for("mandatory post-deploy check fails", Duration::from_secs(30), || {
+        let report = expect_ok(&report_url, &get(&report_url))["report"].clone();
+        report["deployments"].as_array().unwrap().iter()
+            .find(|d| d["environment"] == "production" && d["status"] == "failed").cloned()
+    });
+    assert_eq!(failed["strict_verification"], true);
+    assert_eq!(failed["verification"]["ok"], false);
+    assert!(failed["reason"].as_str().unwrap().contains("wrong-release"));
+    let failed_task = wait_for("shell agent reports deploy command failure", Duration::from_secs(15), || {
+        tasks(&base).into_iter().find(|t| t["id"] == held_task["id"] && t["status"] == "blocked" && t["error"].is_string())
+    });
+    assert_eq!(failed_task["runs"], 1);
+    daemon.sigterm();
+    daemon.spawn();
+    let report = expect_ok(&report_url, &get(&report_url))["report"].clone();
+    let target = report["environments"].as_array().unwrap().iter().find(|c| c["name"] == "production").unwrap();
+    assert!(target.get("current").is_none());
+    assert!(target.get("running").is_none());
+    assert_eq!(report["deployments"][0]["id"], failed["id"]);
+    assert_eq!(report["deployments"][0]["status"], "failed");
+}
+
+#[test]
 fn waiting_tasks_exist_before_release_and_survive_a_real_restart() {
     if missing_prerequisites() { return; }
     let mut daemon = provision();
@@ -497,6 +662,16 @@ fn workspace_files_survive_fresh_shell_retry_restart_and_are_released_only_after
     assert_eq!(second["worktree_branch"], first["worktree_branch"]);
     assert!(second["resumed_session"].is_null(), "shell starts a fresh conversation, not a fake resume");
     assert!(path.exists(), "closed task with untracked work must be retained");
+    // The done mirror is published before the asynchronous finish path's
+    // workspace sweep. Wait for its retention decision before moving the
+    // file, or the sweep may correctly find it already clean and never leave
+    // the retention receipt this test asserts below.
+    wait_for("unsafe closed workspace is retained and journalled", Duration::from_secs(10), || {
+        let url = format!("{base}/api/tasks/{id}/entries");
+        let entries = expect_ok(&url, &get(&url));
+        entries["entries"].as_array().unwrap().iter()
+            .any(|entry| entry["kind"] == "workspace_retained").then_some(entries)
+    });
     let saved = daemon.root.join("saved-work");
     std::fs::rename(path.join("unfinished"), &saved).unwrap();
     daemon.sigterm();

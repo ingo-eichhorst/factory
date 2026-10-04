@@ -772,6 +772,13 @@ test("#143 a definition the server sent without inputs saves an empty list", () 
   assert.deepEqual(saveDraft(wf).inputs, []);
 });
 
+test("#185 saving a pinned release workflow keeps its revision even though the canvas does not edit it", () => {
+  const workflow = { ...githubIssue(), workspace_ref: "a".repeat(40) };
+  assert.equal(saveDraft(workflow).workspace_ref, workflow.workspace_ref);
+  delete workflow.workspace_ref;
+  assert.equal(Object.hasOwn(saveDraft(workflow), "workspace_ref"), false, "legacy definitions retain default selection");
+});
+
 test("#149 the page has the inputs list and ordered-exit editor", () => {
   assert.match(page, /id="workflow-inputs"/);
   assert.match(page, /id="workflow-input-add"/);

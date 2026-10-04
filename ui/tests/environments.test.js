@@ -19,6 +19,7 @@ import {
   incidentText,
   isEnvironmentsEvent,
   lastCheckText,
+  promotionChoices,
   releaseRows,
   releaseText,
   sloText,
@@ -32,7 +33,7 @@ import { readHash, setRouter } from "../js/scopes.js";
 
 const bare = { addEventListener() {}, getElementById: () => null };
 globalThis.document = bare;
-const { loadEnvironments, renderEnvironments } = await import("../js/environments.js");
+const { loadEnvironments, renderEnvironments, promoteEnvironment, wireEnvironments } = await import("../js/environments.js");
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
@@ -266,4 +267,74 @@ test("the rendered card and strip show recorded slowness and the threshold", () 
   assert.match(html, /200; slow: 1000ms exceeds 750ms/);
   const css = readFileSync(new URL("../app.css", import.meta.url), "utf8");
   assert.match(css, /\.sys-slot\[data-tone="warn"\]\s*\{\s*background: var\(--wait\)/);
+});
+
+function promotableReport() {
+  const report = structuredClone(REPORT);
+  report.environments[1].promotion_ready = true;
+  report.environments[1].current = { ...report.environments[2].current, id: "verified-source" };
+  return report;
+}
+
+test("catalogue promotion choices require daemon readiness and the exact source scope/commit", () => {
+  const report = promotableReport();
+  const release = report.releases.find(r => r.commit === report.environments[1].current.release.commit);
+  assert.deepEqual(promotionChoices(report, release), [{ source: "staging", target: "production", deployment: "verified-source" }]);
+  assert.deepEqual(promotionChoices(REPORT, release), [], "older daemon exposes no actionable promotion");
+  assert.deepEqual(promotionChoices(report, { ...release, scope: "elsewhere" }), []);
+  assert.deepEqual(promotionChoices(report, { ...release, commit: "another" }), []);
+  report.environments[1].promotion_ready = false;
+  assert.deepEqual(promotionChoices(report, release), []);
+});
+
+test("promotion posts a frozen deployment selection once and links the pending approval workflow", async () => {
+  const el = stubPage(IDS);
+  const report = promotableReport();
+  state.environments = report;
+  state.scope = "factory";
+  state.environmentsError = null;
+  state.environmentsUnavailable = false;
+  renderEnvironments();
+  wireEnvironments();
+  assert.equal(typeof el.environments.onclick, "function");
+  assert.equal((el.environments.innerHTML.match(/data-environment-promote="staging"/g) || []).length, 2, "card and catalogue");
+  const calls = [];
+  let finish;
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    if (options?.method === "POST") {
+      await new Promise(resolve => { finish = resolve; });
+      return { ok: true, json: async () => ({ status: "ok", data: { kind: "workflow_run", run: { scope: "factory", workflow_id: "promotion", id: "approval" } } }) };
+    }
+    return { ok: true, json: async () => ({ status: "ok", data: { kind: "environments", report } }) };
+  };
+  const pending = promoteEnvironment("staging", "verified-source");
+  assert.match(el.environments.innerHTML, /data-deployment="verified-source" disabled/);
+  await promoteEnvironment("staging", "verified-source");
+  await promoteEnvironment("staging", "stale");
+  assert.equal(calls.length, 1, "duplicate or stale clicks cannot submit another workflow");
+  assert.equal(calls[0].path, "/api/environments/promote");
+  assert.deepEqual(JSON.parse(calls[0].options.body), { environment: "staging", deployment: "verified-source" });
+  finish();
+  await pending;
+  assert.equal(calls[1].path, "/api/environments?scope=factory");
+  assert.match(el.environments.innerHTML, /#factory\/proc\/workflows\/promotion\/run\/approval/);
+  assert.match(el.environments.innerHTML, /Deployment waits for owner approval/);
+  state.scope = "another";
+  renderEnvironments();
+  assert.doesNotMatch(el.environments.innerHTML, /Promotion created/);
+  state.scope = null;
+});
+
+test("a refused promotion shows an escaped reason and does not claim success", async () => {
+  const el = stubPage(IDS);
+  state.environments = promotableReport();
+  state.scope = "refused-promotion";
+  globalThis.fetch = async (path, options) => ({ ok: true, json: async () => options?.method === "POST"
+    ? { status: "error", message: "source changed <refresh>" }
+    : { status: "ok", data: { kind: "environments", report: promotableReport() } } });
+  await promoteEnvironment("staging", "verified-source");
+  assert.match(el.environments.innerHTML, /source changed &lt;refresh&gt;/);
+  assert.doesNotMatch(el.environments.innerHTML, /Promotion created/);
+  state.scope = null;
 });

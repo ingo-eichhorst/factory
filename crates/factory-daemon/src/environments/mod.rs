@@ -14,6 +14,7 @@
 
 pub mod checks;
 pub mod store;
+mod promotion;
 
 pub use store::EnvironmentStore;
 
@@ -212,6 +213,11 @@ impl Engine {
     /// The Operations tab's report, narrowed to `scope`'s subtree when one
     /// is named.
     pub(crate) async fn environments_report(&self, scope: Option<String>) -> Result<EnvironmentsReport> {
+        self.environment_report(scope, true).await
+    }
+
+    /// Metric production reads L1 history only, not pending L4 workflows.
+    async fn environment_report(&self, scope: Option<String>, actions: bool) -> Result<EnvironmentsReport> {
         let factory = self.factory_snapshot();
         let now = Utc::now();
         let members: Option<BTreeSet<String>> = match scope.as_deref() {
@@ -242,11 +248,31 @@ impl Engine {
             .into_iter()
             .filter(|s| names.contains(s.environment.as_str()))
             .collect();
-        let deployments: Vec<Deployment> =
-            self.environments.deployments().await?.into_iter().filter(|d| within(&d.scope)).collect();
+        let history = self.environments.deployments().await?;
+        let deployments: Vec<Deployment> = history.iter().filter(|d| within(&d.scope)).cloned().collect();
         let added: Vec<(String, ReleaseFacts, DateTime<Utc>)> =
             self.environments.releases_added().await?.into_iter().filter(|(s, _, _)| within(s)).collect();
-        Ok(env::report(&declared, &samples, &deployments, &added, now))
+        let mut report = env::report(&declared, &samples, &deployments, &added, now);
+        if actions {
+            let pending = self.workflows.active_runs().await?;
+            for card in &mut report.environments {
+                if let Some((_, source)) = declared.iter().find(|(_, environment)| {
+                    environment.name == card.name && environment.promotes_to.is_some()
+                }) {
+                    let reason = match self.promotion_target(source, card.current.as_ref(), &history).await {
+                        Err(error) => Some(error.to_string()),
+                        Ok((_, target, _)) if pending.iter().any(|run| run.definition.nodes.iter()
+                            .any(|node| node.task.labels.get("factory.promotion.target") == Some(&target.name))) => {
+                            Some("a promotion to this target is already pending".into())
+                        }
+                        Ok(_) => None,
+                    };
+                    card.promotion_ready = reason.is_none();
+                    card.promotion_reason = reason;
+                }
+            }
+        }
+        Ok(report)
     }
 
     /// The scope a `deploy.start` belongs to: a declared environment's own,
@@ -305,6 +331,10 @@ impl Engine {
             return Err(FactoryError::BadRequest("a deployment names the commit it releases".into()));
         }
         let scope = self.deploy_scope(&req, caller)?;
+        if req.strict_verification && !self.factory_snapshot().config.environments().iter()
+            .any(|(_, environment)| environment.name == req.environment && !environment.paused && !environment.checks.is_empty()) {
+            return Err(FactoryError::BadRequest("strict verification needs declared, unpaused environment checks".into()));
+        }
         if req.release.committed_at.is_none() {
             let dir = self.factory_snapshot().scope_path(&scope).ok();
             req.release.committed_at = match dir {
@@ -324,6 +354,7 @@ impl Engine {
             environment: req.environment.clone(),
             release: req.release,
             manual: actor.kind == ActorKind::Person && req.via.is_none(),
+            strict_verification: req.strict_verification,
             actor,
             via: req.via,
             started_at: req.started_at.unwrap_or(now),
@@ -383,6 +414,10 @@ impl Engine {
                 finished.verification = Some(verification);
             }
         }
+        if req.status == DeployStatus::Succeeded && deployment.strict_verification && finished.verification.is_none() {
+            finished.status = DeployStatus::Failed;
+            finished.reason = Some("required post-deploy verification was skipped, paused or no longer declared".into());
+        }
         // Verification is part of the attempt; its time belongs in the
         // duration and the instant the release became verified/running.
         finished.at = Utc::now();
@@ -440,7 +475,7 @@ impl Engine {
     /// keys, from the same report the tab draws.
     pub(crate) async fn environment_cards(&self, scope: Option<&str>) -> Result<BTreeMap<String, env::EnvironmentCard>> {
         Ok(self
-            .environments_report(scope.map(str::to_string))
+            .environment_report(scope.map(str::to_string), false)
             .await?
             .environments
             .into_iter()
@@ -508,6 +543,7 @@ mod tests {
     fn start(environment: &str, commit: &str) -> DeployStart {
         DeployStart {
             environment: environment.into(),
+            strict_verification: false,
             scope: None,
             release: ReleaseFacts { commit: commit.into(), ..Default::default() },
             via: None,
@@ -553,6 +589,60 @@ mod tests {
         assert_eq!(card.current.as_ref().unwrap().release.commit, "abc123");
         assert_eq!(card.running.as_ref().unwrap().release.commit, "def456");
         assert!(card.uptime_24h.is_some(), "the verification's answer is a sample too");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_fails_an_unfinished_run_deploy_but_keeps_manual_deploys_running() {
+        use factory_core::{NewRun, Trigger};
+        let (engine, root) = engine_with("  - name: prod\n  - name: manual\n");
+        let task = factory_core::adapter::store::task_from_new(
+            factory_core::task::NewTask { title: "release".into(), ..Default::default() },
+            "company".into(), "shell".into(), "shell".into(),
+        );
+        engine.store.create(&task).await.unwrap();
+        let run = engine.store.create_run(&NewRun {
+            task_id: task.id, trigger: Trigger::Manual, agent: "shell".into(), adapter: "shell".into(),
+            runtime: "herdr".into(), token: "run-test-token".into(), queued_at: None, scheduled_for: None,
+        }).await.unwrap();
+        let actor = Caller::Agent { scope: "company".into(), name: "shell".into(), role: Role::foreman(), run_id: Some(run.id.clone()) };
+        let recorded = engine.deploy_start(&actor, start("prod", "abc")).await.unwrap();
+        let manual = engine.deploy_start(&Caller::Owner, start("manual", "abc")).await.unwrap();
+        engine.reconcile_run_deployments().await;
+        assert_eq!(engine.environments.deployment(&recorded.id).await.unwrap().unwrap().status, DeployStatus::Running);
+        engine.store.update_run(&run.id, &factory_core::run::RunPatch {
+            status: Some(factory_core::RunStatus::Cancelled), ..Default::default()
+        }).await.unwrap();
+        engine.reconcile_run_deployments().await;
+        let failed = engine.environments.deployment(&recorded.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, DeployStatus::Failed);
+        assert!(failed.reason.unwrap().contains("without a deploy finish receipt"));
+        assert_eq!(engine.environments.deployment(&manual.id).await.unwrap().unwrap().status, DeployStatus::Running);
+        engine.reconcile_run_deployments().await;
+        assert_eq!(engine.environments.deployments().await.unwrap().len(), 2);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn strict_verification_cannot_be_skipped_or_removed_during_a_deploy() {
+        let (engine, root) = engine_with("  - name: prod\n    checks: [{ kind: command, command: 'true', name: api }]\n");
+        let request = || DeployStart { strict_verification: true, ..start("prod", "abc") };
+        let first = engine.deploy_start(&Caller::Owner, request()).await.unwrap();
+        let skipped = engine.deploy_finish(DeployFinish { verify: false, ..finish(&first.id, DeployStatus::Succeeded) }).await.unwrap();
+        assert_eq!(skipped.status, DeployStatus::Failed);
+        assert!(skipped.reason.unwrap().contains("required post-deploy verification"));
+        let second = engine.deploy_start(&Caller::Owner, request()).await.unwrap();
+        let reopened = EnvironmentStore::open(&root.join(".factory/factory.sqlite")).unwrap();
+        assert!(reopened.deployment(&second.id).await.unwrap().unwrap().strict_verification);
+        let mut factory = engine.factory_snapshot();
+        factory.config.scopes[0].environments[0].paused = true;
+        factory.config.scope = None;
+        let paused = Engine::new(factory, factory_plugins::Registry::with_builtins(), engine.store.clone(), PathBuf::from("factory"), Vec::new())
+            .with_environment_store(reopened);
+        let ended = paused.deploy_finish(finish(&second.id, DeployStatus::Succeeded)).await.unwrap();
+        assert_eq!(ended.status, DeployStatus::Failed);
+        assert!(ended.verification.is_none());
+        assert!(paused.deploy_start(&Caller::Owner, request()).await.is_err());
         std::fs::remove_dir_all(root).ok();
     }
 

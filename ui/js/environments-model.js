@@ -222,6 +222,15 @@ export function releaseRows(report) {
   }));
 }
 
+/// Only the verified current release can be promoted; readiness is decided
+/// by the daemon, including targets outside the rail's selected subtree.
+export function promotionChoices(report, release) {
+  if (!release) return [];
+  return (report?.environments || []).filter(card => card.promotion_ready && card.promotes_to
+    && card.current?.release?.commit === release.commit && card.current?.scope === release.scope)
+    .map(card => ({ source: card.name, target: card.promotes_to, deployment: card.current.id }));
+}
+
 /// A strip slot's tone: `ok` all fast, `warn` any slow, `bad` any failure, `none` not
 /// checked in that half hour.
 export function bucketTone(bucket) {

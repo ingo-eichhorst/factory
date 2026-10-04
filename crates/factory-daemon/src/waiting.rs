@@ -214,11 +214,7 @@ impl Engine {
                 workflow_id: run.workflow_id.clone(),
                 workflow_run_id: run.id.clone(),
                 node_id: node.node_id.clone(),
-                workspace: run.integration.as_ref().map(|integration| {
-                    factory_core::task::WorkflowWorkspace {
-                        base_ref: integration.branch.clone(),
-                    }
-                }),
+                workspace: run.task_workspace(),
             };
             let created = if definition.kind == WorkflowNodeKind::Review {
                 self.create_review_task(template, Some(origin), task_id)

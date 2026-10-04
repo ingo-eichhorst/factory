@@ -284,6 +284,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_workflow_revision_is_resolved_before_tasks_exist_and_cannot_move_with_its_ref() {
+        let root = std::env::temp_dir().join(format!("factory-pinned-workflow-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-q"]).await;
+        git_ok(&repo, &["config", "user.name", "Pinned workflow QA"]).await;
+        git_ok(&repo, &["config", "user.email", "pinned@example.invalid"]).await;
+        git_ok(&repo, &["commit", "-q", "--allow-empty", "-m", "selected"]).await;
+        git_ok(&repo, &["branch", "selected"]).await;
+        let engine = engine_in_git_scope(root.clone(), repo.clone());
+        let mut task = node("pinned");
+        task.task.worktree = Some(true);
+        let mut draft = WorkflowDraft { name: "pinned".into(), scope: "demo".into(), workspace_ref: Some("selected".into()), nodes: vec![task], ..Default::default() };
+        let mut definition = WorkflowDefinition::from_draft(draft.clone());
+        engine.freeze_workflow_workspace(&mut definition).await.unwrap();
+        let selected = definition.workspace_ref.clone().unwrap();
+        assert_eq!(selected.len(), 40);
+        git_ok(&repo, &["commit", "-q", "--allow-empty", "-m", "later"]).await;
+        git_ok(&repo, &["branch", "-f", "selected", "HEAD"]).await;
+        engine.freeze_workflow_workspace(&mut definition).await.unwrap();
+        assert_eq!(definition.workspace_ref.as_deref(), Some(selected.as_str()));
+        let mut later = WorkflowDefinition::from_draft(draft.clone());
+        engine.freeze_workflow_workspace(&mut later).await.unwrap();
+        assert_ne!(later.workspace_ref, definition.workspace_ref);
+        draft.nodes[0].task.worktree = Some(false);
+        assert!(engine.freeze_workflow_workspace(&mut WorkflowDefinition::from_draft(draft.clone())).await.unwrap_err().to_string().contains("isolated"));
+        draft.nodes[0].task.worktree = Some(true);
+        draft.workspace_ref = Some("missing-ref".into());
+        assert!(engine.freeze_workflow_workspace(&mut WorkflowDefinition::from_draft(draft)).await.is_err());
+        assert!(engine.store.list(&TaskFilter::default()).await.unwrap().is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
     /// Like `engine()`, but the instance names its own roles and scope
     /// agents -- for the authorization tests, where the built-in presets
     /// grant more than the scenario wants to hold constant.
@@ -2522,6 +2556,7 @@ impl Engine {
             name: format!("Decomposition: {}", item.title),
             description: format!("Generated from approved intake task {}", item.id),
             scope: scope.name.clone(),
+            workspace_ref: None,
             category: item
                 .intake
                 .as_ref()
@@ -2804,6 +2839,7 @@ impl Engine {
         let plans = self.control_plans(&definition).await?;
         let (mut definition, _) = definition.inject(&plans);
         self.bind_functionaries(&mut definition)?;
+        self.freeze_workflow_workspace(&mut definition).await?;
         definition.validate().map_err(FactoryError::BadRequest)?;
         let mut run = WorkflowRun::new(definition, caller.as_workflow_actor());
         run.inputs = inputs;
@@ -2868,6 +2904,40 @@ impl Engine {
         self.bus
             .publish(Event::WorkflowRunUpdated { run: run.clone() });
         Ok(run)
+    }
+
+    /// Resolve revision selection before persisting or dispatching any task.
+    /// A multi-scope pinned workflow must name the same commit in every
+    /// task scope, not unrelated branches which happen to have the same name.
+    pub(crate) async fn freeze_workflow_workspace(&self, definition: &mut WorkflowDefinition) -> Result<()> {
+        let Some(reference) = definition.workspace_ref.clone() else { return Ok(()); };
+        if definition.nodes.iter().any(|node| node.kind == WorkflowNodeKind::Task && node.task.worktree == Some(false)) {
+            return Err(FactoryError::BadRequest("workspace_ref requires isolated task workspaces".into()));
+        }
+        let factory = self.factory_snapshot();
+        let scopes: std::collections::BTreeSet<&str> = definition.nodes.iter()
+            .filter(|node| node.kind == WorkflowNodeKind::Task)
+            .map(|node| node.task.scope.as_deref().unwrap_or(&definition.scope)).collect();
+        let mut frozen = None;
+        for scope in scopes {
+            let dir = factory.scope_path(scope)?;
+            let mut command = tokio::process::Command::new("git");
+            command.current_dir(&dir).args(["rev-parse", "--verify", "--end-of-options", &format!("{reference}^{{commit}}")])
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(std::time::Duration::from_secs(5), command.output()).await
+                .map_err(|_| FactoryError::BadRequest(format!("resolving workspace_ref in {scope} timed out")))?
+                .map_err(|error| FactoryError::BadRequest(format!("resolving workspace_ref in {scope}: {error}")))?;
+            let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !output.status.success() || !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|c| c.is_ascii_hexdigit()) {
+                return Err(FactoryError::BadRequest(format!("workspace_ref {reference:?} is not a commit in scope {scope}")));
+            }
+            if frozen.as_ref().is_some_and(|previous| previous != &commit) {
+                return Err(FactoryError::BadRequest("workspace_ref resolves to different commits across task scopes".into()));
+            }
+            frozen = Some(commit);
+        }
+        definition.workspace_ref = frozen;
+        Ok(())
     }
 
     fn integration_rework_limit(run: &WorkflowRun) -> u32 {
@@ -3498,9 +3568,8 @@ impl Engine {
             .filter(|node| {
                 run.integration.as_ref().is_none_or(|integration| {
                     run.definition
-                        .edges
-                        .iter()
-                        .filter(|edge| edge.to == node.node_id)
+                        .prerequisite_edges(&node.node_id)
+                        .into_iter()
                         .filter(|edge| {
                             run.definition.nodes.iter().any(|candidate| {
                                 candidate.id == edge.from
@@ -3512,9 +3581,8 @@ impl Engine {
             })
             .filter(|node| {
                 run.definition
-                    .edges
-                    .iter()
-                    .filter(|edge| edge.to == node.node_id)
+                    .prerequisite_edges(&node.node_id)
+                    .into_iter()
                     .all(|edge| {
                         let done = |id: &str| {
                             run.nodes
@@ -3535,10 +3603,6 @@ impl Engine {
                         // that then blocked on another step is not a
                         // verified run to build on.
                         match run.definition.nodes.iter().find(|n| n.id == edge.from) {
-                            // Approval is enforced by the subject run's
-                            // pre-dispatch hold. Let the task/run exist so
-                            // the Inbox has a concrete run to decide.
-                            Some(n) if n.kind == WorkflowNodeKind::Approval => true,
                             Some(n) if n.kind == WorkflowNodeKind::Gate => {
                                 finished(&edge.from)
                                     && (run
@@ -3558,12 +3622,7 @@ impl Engine {
                     })
             })
             .filter(|node| {
-                let parents: Vec<_> = run
-                    .definition
-                    .edges
-                    .iter()
-                    .filter(|edge| edge.to == node.node_id)
-                    .collect();
+                let parents = run.definition.prerequisite_edges(&node.node_id);
                 parents.is_empty()
                     || parents.iter().any(|edge| {
                         run.nodes
@@ -3701,11 +3760,7 @@ impl Engine {
                 workflow_id: run.workflow_id.clone(),
                 workflow_run_id: run.id.clone(),
                 node_id: node_id.clone(),
-                workspace: run.integration.as_ref().map(|integration| {
-                    factory_core::task::WorkflowWorkspace {
-                        base_ref: integration.branch.clone(),
-                    }
-                }),
+                workspace: run.task_workspace(),
             };
             match self
                 .create_workflow_task(template, origin, task_id.clone())

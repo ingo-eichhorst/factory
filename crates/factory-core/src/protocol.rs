@@ -414,6 +414,10 @@ pub enum Request {
         #[serde(default)]
         scope: Option<String>,
     },
+    /// Owner-only: create and start a revision-frozen, policy-gated promotion
+    /// workflow. Deployment still requires an explicit approval of its run.
+    #[serde(rename = "environment.promote")]
+    EnvironmentPromote(crate::environments::Promote),
     /// A deployment has begun (`#185`). `deploy.record`, checked against
     /// the environment's scope. Answers the recorded `Deployment`, whose
     /// `id` the matching `deploy.finish` names.

@@ -392,6 +392,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     engine.spawn_capacity_release_worker();
     // The same, for bench runs still `running` when the daemon last stopped.
     engine.recover_bench_runs().await;
+    engine.reconcile_run_deployments().await;
 
     let sched = tokio::spawn(scheduler::run(engine.clone(), shutdown_rx.clone()));
     // GitHub receipt is independent of dispatch: network or authentication

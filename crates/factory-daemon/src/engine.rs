@@ -370,6 +370,7 @@ pub struct Engine {
     /// fallible steps dispatch takes afterward (the worktree, the harness's
     /// own launch).
     pub(crate) admission_lock: tokio::sync::Mutex<()>,
+    pub(crate) promotion_lock: tokio::sync::Mutex<()>,
     pub(crate) workspaces: worktree::Owner,
     run_lifecycle_locks: std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     /// Serializes an intake receipt's identity lookup with its create
@@ -453,6 +454,7 @@ impl Engine {
             schedule_lock: tokio::sync::Mutex::new(()),
             signpost_cache: std::sync::Mutex::new(None),
             admission_lock: tokio::sync::Mutex::new(()),
+            promotion_lock: tokio::sync::Mutex::new(()),
             intake_receipt_lock: tokio::sync::Mutex::new(()),
             capacity_release_tx,
             capacity_release_rx: std::sync::Mutex::new(Some(capacity_release_rx)),
@@ -724,6 +726,9 @@ impl Engine {
             }),
             Request::Environments { scope } => Ok(Payload::Environments {
                 report: Box::new(self.environments_report(scope).await?),
+            }),
+            Request::EnvironmentPromote(req) => Ok(Payload::WorkflowRun {
+                run: self.promote_environment(caller, req).await?,
             }),
             // `deployment_updated` is published inside.
             Request::DeployStart(req) => Ok(Payload::Deployment {
@@ -4160,6 +4165,7 @@ impl Engine {
         }
         self.mirror_to_task(&run).await;
         self.settle_retry(&run).await;
+        self.settle_run_deployments(&run).await;
         self.sweep_workspaces().await;
         if status != RunStatus::Done {
             if let Ok(Some(task)) = self.store.get(&run.task_id).await {
