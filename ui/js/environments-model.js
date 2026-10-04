@@ -231,6 +231,33 @@ export function promotionChoices(report, release) {
     .map(card => ({ source: card.name, target: card.promotes_to, deployment: card.current.id }));
 }
 
+export function bucketHasIncident(bucket, check, incidents) {
+  const from = Date.parse(bucket.start);
+  const to = from + 30 * 60 * 1000;
+  return (incidents || []).some(incident => incident.checks.includes(check.name)
+    && Date.parse(incident.started_at) < to && (!incident.ended_at || Date.parse(incident.ended_at) > from));
+}
+
+export function samplesSelection(report, environment, check, start = null) {
+  const to = new Date(report.generated_at);
+  const from = start ? new Date(start) : new Date(to.getTime() - 24 * 60 * 60 * 1000);
+  const end = start ? new Date(Math.min(to.getTime(), from.getTime() + 30 * 60 * 1000)) : to;
+  return { environment, check, from: from.toISOString(), to: end.toISOString() };
+}
+
+export function samplesQuery(selection, scope, before = null) {
+  const query = new URLSearchParams({ ...selection, limit: "200" });
+  if (scope) query.set("scope", scope);
+  if (before != null) query.set("before", String(before));
+  return `/api/environments/samples?${query}`;
+}
+
+export function recoveryStatus(action) {
+  if (action.status === "done") return "completed";
+  if (action.status === "cancelled") return "cancelled";
+  return action.run?.status || action.status || "pending";
+}
+
 /// A strip slot's tone: `ok` all fast, `warn` any slow, `bad` any failure, `none` not
 /// checked in that half hour.
 export function bucketTone(bucket) {

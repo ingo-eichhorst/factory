@@ -1,5 +1,5 @@
 //! Process-owned providers. Ambiguous names never acquire run history.
-use super::{AttestedQuery, NamedQuery};
+use super::{AttestedQuery, NamedQuery, RecoveryQuery};
 use crate::engine::Engine;
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -20,6 +20,50 @@ use factory_kernel::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 const RUN_LOOKBACK: u32 = 20;
+
+#[async_trait]
+impl Provide<factory_kernel::EnvironmentRecoveryFact> for Provider<'_> {
+    type Query = RecoveryQuery;
+    type Value = Vec<factory_kernel::EnvironmentRecoveryFact>;
+    type Error = FactoryError;
+    async fn get(&self, query: &RecoveryQuery) -> Result<Self::Value> {
+        use factory_kernel::{RECOVERY_COMMIT_LABEL, RECOVERY_ENVIRONMENT_LABEL, RECOVERY_REASON_LABEL};
+        let limit = query.limit.clamp(1, 200);
+        let scopes: Vec<Option<&str>> = match &query.scopes {
+            Some(scopes) => scopes.iter().map(|scope| Some(scope.as_str())).collect(),
+            None => vec![None],
+        };
+        let mut workflows = Vec::new();
+        for scope in scopes {
+            workflows.extend(self.engine.workflows.tagged_runs(RECOVERY_ENVIRONMENT_LABEL, scope, limit).await?);
+        }
+        workflows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.id.cmp(&b.id)));
+        workflows.truncate(limit as usize);
+        let mut facts = Vec::new();
+        for workflow in workflows {
+            let Some(node) = workflow.definition.nodes.iter().find(|node| node.task.labels.contains_key(RECOVERY_ENVIRONMENT_LABEL)) else { continue; };
+            let task_id = workflow.nodes.iter().find(|run| run.node_id == node.id).and_then(|run| run.task_id.clone());
+            let run = match &task_id {
+                Some(id) => self.engine.store.runs(id, 1).await?.into_iter().next().map(|run| RunFact {
+                    id: run.id, status: run.status, started_at: run.started_at, ended_at: run.ended_at,
+                }),
+                None => None,
+            };
+            let requested_by = match workflow.started_by {
+                factory_core::workflow::WorkflowActor::Owner => "owner".into(),
+                factory_core::workflow::WorkflowActor::Agent { scope, name } => format!("{scope}/{name}"),
+            };
+            facts.push(factory_kernel::EnvironmentRecoveryFact {
+                scope: workflow.scope, environment: node.task.labels[RECOVERY_ENVIRONMENT_LABEL].clone(),
+                workflow_id: workflow.workflow_id, workflow_run_id: workflow.id, status: workflow.status,
+                requested_at: workflow.created_at, requested_by,
+                reason: node.task.labels.get(RECOVERY_REASON_LABEL).cloned().unwrap_or_default(),
+                expected_commit: node.task.labels.get(RECOVERY_COMMIT_LABEL).cloned(), task_id, run,
+            });
+        }
+        Ok(facts)
+    }
+}
 pub(crate) struct Provider<'a> {
     pub(super) engine: &'a Engine,
 }

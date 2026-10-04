@@ -267,12 +267,12 @@ impl Engine {
             // checked before the shared arm below: a role grant must never
             // become "read this key file".
             Request::BackupVerify { identity: Some(_), .. } => return Needs::Owner,
-            Request::EnvironmentPromote(_) => return Needs::Owner,
+            Request::EnvironmentPromote(_) | Request::EnvironmentRecover(_) => return Needs::Owner,
             // Checked against the root scope too: a backup is of the whole
             // instance's state (`#116`).
             Request::BackupRun | Request::BackupVerify { .. } => Grant::BackupRun,
             // Checked against the environment's own scope (`#185`).
-            Request::DeployStart(_) | Request::DeployFinish(_) | Request::ReleaseAdd(_) => Grant::DeployRecord,
+            Request::DeployStart(_) | Request::DeployFinish(_) | Request::ReleaseAdd(_) | Request::EnvironmentCheck { .. } => Grant::DeployRecord,
             // The same door `TaskCreate`/`PolicyRemediate` already open --
             // this is not a second one (`#100`).
             Request::ScenarioPromote { .. } => Grant::TaskCreate,
@@ -296,6 +296,7 @@ impl Engine {
             | Request::Backup
             // Samples and deployments folded on read; writes nothing.
             | Request::Environments { .. }
+            | Request::EnvironmentSamples(_)
             | Request::Knowledge
             | Request::KnowledgeSearch { .. }
             | Request::Benchmarks
@@ -727,6 +728,17 @@ impl Engine {
                     Reach::Scope => Ok(()),
                     Reach::Own if run_id.is_some() => Ok(()),
                     Reach::Own => Err(deny("record a deployment outside a run of its own")),
+                }
+            }
+            Request::EnvironmentCheck { environment } => {
+                let scope = self.factory_snapshot().config.environments().into_iter()
+                    .find(|(_, declaration)| declaration.name == *environment).map(|(scope, _)| scope)
+                    .ok_or_else(|| FactoryError::BadRequest(format!("no declared environment {environment}")))?;
+                in_scope(&scope)?;
+                match def.reach {
+                    Reach::Scope => Ok(()),
+                    Reach::Own if run_id.is_some() => Ok(()),
+                    Reach::Own => Err(deny("verify an environment outside a run of its own")),
                 }
             }
             Request::DeployFinish(req) => {
@@ -1206,6 +1218,27 @@ mod tests {
         let agent = Caller::Agent { scope: "demo".into(), name: "release".into(), role: Role::foreman(), run_id: None };
         assert!(!allowed(&e, &agent, request()).await);
         assert!(allowed(&e, &Caller::Owner, request()).await);
+    }
+
+    #[tokio::test]
+    async fn recovery_is_owner_only_and_checking_requires_deploy_record_in_the_environment_scope() {
+        let source = engine_with_roles_and_root_scope("company", "roles:\n  checker:\n    grants: [deploy.record]\n    reach: scope\n  own-checker:\n    grants: [deploy.record]\n    reach: own\n");
+        let mut factory = source.factory_snapshot();
+        factory.config.scopes[0].environments = serde_yaml_ng::from_str("[{ name: production, checks: [{ kind: command, command: 'true' }] }]").unwrap();
+        let e = Engine::new(factory, Registry::with_builtins(), source.store.clone(), PathBuf::from("factory"), vec![]);
+        let caller = |scope: &str, role: &str, run: Option<&str>| Caller::Agent {
+            scope: scope.into(), name: "operator".into(), role: Role::new(role), run_id: run.map(str::to_owned),
+        };
+        let recover = || Request::EnvironmentRecover(factory_core::environments::Recover { environment: "production".into(), reason: "restart".into() });
+        assert!(allowed(&e, &Caller::Owner, recover()).await);
+        assert!(!allowed(&e, &caller("demo", "foreman", None), recover()).await);
+        let check = || Request::EnvironmentCheck { environment: "production".into() };
+        assert!(allowed(&e, &caller("demo", "checker", None), check()).await);
+        assert!(!allowed(&e, &caller("other", "checker", None), check()).await);
+        assert!(!allowed(&e, &caller("demo", "own-checker", None), check()).await);
+        assert!(allowed(&e, &caller("demo", "own-checker", Some("r")), check()).await);
+        assert!(!allowed(&e, &worker("w"), check()).await);
+        assert!(!allowed(&e, &caller("demo", "checker", None), Request::EnvironmentCheck { environment: "missing".into() }).await);
     }
 
     #[tokio::test]

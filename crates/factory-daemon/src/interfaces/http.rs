@@ -120,6 +120,9 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/infrastructure", get(infrastructure))
         .route("/api/environments", get(environments))
         .route("/api/environments/promote", post(environment_promote))
+        .route("/api/environments/recover", post(environment_recover))
+        .route("/api/environments/check", post(environment_check))
+        .route("/api/environments/samples", get(environment_samples))
         .route("/api/deployments", post(deploy_start))
         .route("/api/deployments/{id}/finish", post(deploy_finish))
         .route("/api/releases", post(release_add))
@@ -399,6 +402,20 @@ async fn environment_promote(
     Json(body): Json<factory_core::environments::Promote>,
 ) -> AxumResponse {
     run(&engine, Request::EnvironmentPromote(body)).await
+}
+
+async fn environment_recover(State(engine): State<Arc<Engine>>, Json(body): Json<factory_core::environments::Recover>) -> AxumResponse {
+    run(&engine, Request::EnvironmentRecover(body)).await
+}
+
+#[derive(serde::Deserialize)]
+struct EnvironmentCheckBody { environment: String }
+async fn environment_check(State(engine): State<Arc<Engine>>, Json(body): Json<EnvironmentCheckBody>) -> AxumResponse {
+    run(&engine, Request::EnvironmentCheck { environment: body.environment }).await
+}
+
+async fn environment_samples(State(engine): State<Arc<Engine>>, Query(query): Query<factory_core::environments::SampleQuery>) -> AxumResponse {
+    run(&engine, Request::EnvironmentSamples(query)).await
 }
 
 /// `POST /api/deployments` with a `deploy.start` body.

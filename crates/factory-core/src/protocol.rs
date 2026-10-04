@@ -418,6 +418,12 @@ pub enum Request {
     /// workflow. Deployment still requires an explicit approval of its run.
     #[serde(rename = "environment.promote")]
     EnvironmentPromote(crate::environments::Promote),
+    #[serde(rename = "environment.recover")]
+    EnvironmentRecover(crate::environments::Recover),
+    #[serde(rename = "environment.check")]
+    EnvironmentCheck { environment: String },
+    #[serde(rename = "environment.samples")]
+    EnvironmentSamples(crate::environments::SampleQuery),
     /// A deployment has begun (`#185`). `deploy.record`, checked against
     /// the environment's scope. Answers the recorded `Deployment`, whose
     /// `id` the matching `deploy.finish` names.
@@ -1095,6 +1101,10 @@ pub enum Payload {
     /// The Operations tab -- see `environments::EnvironmentsReport`. Boxed
     /// for the same reason `Operations` is.
     Environments { report: Box<crate::environments::EnvironmentsReport> },
+    #[serde(rename = "environment_verification")]
+    EnvironmentVerification { verification: crate::environments::DeployVerification },
+    #[serde(rename = "environment_samples")]
+    EnvironmentSamples { page: crate::environments::SamplePage },
     /// A deployment as recorded: the answer to `deploy.start` and
     /// `deploy.finish`.
     Deployment { deployment: Box<crate::environments::Deployment> },

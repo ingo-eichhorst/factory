@@ -2,9 +2,7 @@
 //! commands run by the web handler. Policy gates judge a preflight workspace
 //! before a separate, mandatory owner approval can release the deploy task.
 use super::*;
-use factory_core::config::SHELL_HARNESS;
 use factory_core::environments::Promote;
-use factory_core::role::Grant;
 use factory_core::task::NewTask;
 use factory_core::workflow::{GateSpec, WorkflowDraft, WorkflowEdge, WorkflowNode, WorkflowNodeKind, WorkflowRun};
 
@@ -169,18 +167,7 @@ fn word(text: &str) -> String {
 impl Engine {
     async fn promotion_recipe(&self, scope: &str, environment: &EnvironmentDecl) -> Result<env::ReleaseCommand> {
         let recipe = environment.deploy.clone().ok_or_else(|| bad("the target has no deploy recipe"))?;
-        let (agent, harness, declared) = self.resolve_agent(scope, &recipe.agent)?;
-        if harness != SHELL_HARNESS || declared.is_none() {
-            return Err(bad("the deploy recipe must name a declared shell agent"));
-        }
-        let role = self.effective_role(scope, &agent).await;
-        if self
-            .roles_for(scope)
-            .get(&role)
-            .is_none_or(|role| !role.allows(Grant::DeployRecord) || !role.allows(Grant::TaskReport))
-        {
-            return Err(bad("the deploy agent needs task.report and deploy.record in the target scope"));
-        }
+        self.validate_environment_agent(scope, &recipe.agent).await?;
         Ok(recipe)
     }
 
@@ -259,9 +246,7 @@ impl Engine {
         }
         let current = current.expect("checked current deployment");
         let (scope, target, recipe) = self.promotion_target(&source, Some(current), &history).await?;
-        let pending = self.workflows.active_runs().await?.into_iter().any(|run| {
-            run.definition.nodes.iter().any(|node| node.task.labels.get(TARGET_LABEL) == Some(&target.name))
-        });
+        let pending = self.workflows.active_runs().await?.into_iter().any(|run| operation_targets(&run, &target.name));
         if pending {
             return Err(bad("a promotion to this target is already pending; finish or cancel it first"));
         }

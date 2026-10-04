@@ -15,6 +15,7 @@
 pub mod checks;
 pub mod store;
 mod promotion;
+mod recovery;
 
 pub use store::EnvironmentStore;
 
@@ -43,6 +44,13 @@ const PRUNE_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// How long `git show` may take to say when a commit was made.
 const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn operation_targets(run: &factory_core::workflow::WorkflowRun, environment: &str) -> bool {
+    run.definition.nodes.iter().any(|node| {
+        node.task.labels.get("factory.promotion.target").is_some_and(|target| target == environment)
+            || node.task.labels.get(factory_kernel::RECOVERY_ENVIRONMENT_LABEL).is_some_and(|target| target == environment)
+    })
+}
 
 /// One check the loop can run: which environment, where, and what.
 #[derive(Debug, Clone)]
@@ -255,14 +263,24 @@ impl Engine {
         let mut report = env::report(&declared, &samples, &deployments, &added, now);
         if actions {
             let pending = self.workflows.active_runs().await?;
+            report.recoveries = crate::facts::Facts::<factory_kernel::L6>::new(self).get::<factory_kernel::EnvironmentRecoveryFact>(
+                &crate::facts::RecoveryQuery { scopes: members.clone(), limit: 200 }
+            ).await?;
             for card in &mut report.environments {
+                if let Some((scope, environment)) = declared.iter().find(|(_, environment)| environment.name == card.name) {
+                    let mut reason = self.recovery_recipe(scope, environment).await.err().map(|error| error.to_string());
+                    if pending.iter().any(|run| operation_targets(run, &card.name)) || card.running.is_some() {
+                        reason = Some("an environment operation is already pending or running".into());
+                    }
+                    card.recovery_ready = reason.is_none();
+                    card.recovery_reason = reason;
+                }
                 if let Some((_, source)) = declared.iter().find(|(_, environment)| {
                     environment.name == card.name && environment.promotes_to.is_some()
                 }) {
                     let reason = match self.promotion_target(source, card.current.as_ref(), &history).await {
                         Err(error) => Some(error.to_string()),
-                        Ok((_, target, _)) if pending.iter().any(|run| run.definition.nodes.iter()
-                            .any(|node| node.task.labels.get("factory.promotion.target") == Some(&target.name))) => {
+                        Ok((_, target, _)) if pending.iter().any(|run| operation_targets(run, &target.name)) => {
                             Some("a promotion to this target is already pending".into())
                         }
                         Ok(_) => None,
@@ -439,6 +457,7 @@ impl Engine {
         if due.is_empty() {
             return None;
         }
+        let expected = due.len();
         let handles: Vec<_> = due.into_iter().map(|d| tokio::spawn(run_isolated(d))).collect();
         let mut samples = Vec::new();
         for h in handles {
@@ -451,7 +470,7 @@ impl Engine {
                 tracing::warn!("could not record a verification sample: {e}");
             }
         }
-        Some(DeployVerification { at: Utc::now(), ok: samples.iter().all(|s| s.ok), checks: samples })
+        Some(DeployVerification { at: Utc::now(), ok: samples.len() == expected && samples.iter().all(|s| s.ok), checks: samples })
     }
 
     pub(crate) async fn release_add(&self, req: ReleaseAdd) -> Result<(String, ReleaseFacts)> {

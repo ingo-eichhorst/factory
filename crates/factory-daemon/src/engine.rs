@@ -730,6 +730,9 @@ impl Engine {
             Request::EnvironmentPromote(req) => Ok(Payload::WorkflowRun {
                 run: self.promote_environment(caller, req).await?,
             }),
+            Request::EnvironmentRecover(req) => Ok(Payload::WorkflowRun { run: self.recover_environment(caller, req).await? }),
+            Request::EnvironmentCheck { environment } => Ok(Payload::EnvironmentVerification { verification: self.check_environment(&environment).await? }),
+            Request::EnvironmentSamples(query) => Ok(Payload::EnvironmentSamples { page: self.environment_samples(query).await? }),
             // `deployment_updated` is published inside.
             Request::DeployStart(req) => Ok(Payload::Deployment {
                 deployment: Box::new(self.deploy_start(caller, req).await?),

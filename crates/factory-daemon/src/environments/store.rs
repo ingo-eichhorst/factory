@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS health_samples (
     detail TEXT
 );
 CREATE INDEX IF NOT EXISTS health_samples_at ON health_samples(at);
+CREATE INDEX IF NOT EXISTS health_samples_check ON health_samples(environment, check_name);
 "#;
 
 /// Upgrade old instances without reclassifying any historical sample.
@@ -294,6 +295,35 @@ impl EnvironmentStore {
         .await
     }
 
+    /// Read only one check and page before its stable row cursor. The limit
+    /// is applied in SQLite, not after loading an instance-wide history.
+    pub async fn sample_page(
+        &self, environment: String, check: String, from: DateTime<Utc>, to: DateTime<Utc>, before: Option<i64>, limit: u32,
+    ) -> Result<factory_core::environments::SamplePage> {
+        self.with_conn(move |conn| {
+            use factory_core::environments::{SamplePage, SampleRecord};
+            let limit = limit.clamp(1, 500) as usize;
+            let mut statement = conn.prepare(
+                "SELECT rowid, at, ok, latency_ms, detail, slow FROM health_samples \
+                 WHERE environment = ?1 AND check_name = ?2 AND at >= ?3 AND at < ?4 \
+                 AND (?5 IS NULL OR rowid < ?5) ORDER BY rowid DESC LIMIT ?6"
+            ).map_err(error)?;
+            let mut rows = statement.query_map(params![environment, check, stamp(from), stamp(to), before, (limit + 1) as u32], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?, row.get::<_, bool>(5)?))
+            }).map_err(error)?.collect::<std::result::Result<Vec<_>, _>>().map_err(error)?;
+            let more = rows.len() > limit;
+            rows.truncate(limit);
+            let next_before = more.then(|| rows.last().expect("nonempty page").0);
+            let samples = rows.into_iter().filter_map(|(id, at, ok, latency_ms, detail, slow)| {
+                let at = DateTime::parse_from_rfc3339(&at).ok()?.with_timezone(&Utc);
+                Some(SampleRecord { id, sample: Sample { environment: environment.clone(), check: check.clone(), at,
+                    ok, latency_ms: latency_ms.max(0) as u64, detail, slow } })
+            }).collect();
+            Ok(SamplePage { environment, check, from, to, samples, next_before })
+        }).await
+    }
+
     /// Drop samples older than `before`; how many went.
     pub async fn prune_samples(&self, before: DateTime<Utc>) -> Result<usize> {
         self.with_conn(move |conn| {
@@ -335,6 +365,26 @@ fn fold(rows: Vec<Recorded>) -> Vec<Deployment> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sample_pages_are_bounded_scoped_and_stable_at_equal_timestamps() {
+        let store = EnvironmentStore::in_memory().unwrap();
+        let now = Utc::now();
+        for (environment, check, detail) in [("prod", "api", "first"), ("prod", "api", "second"), ("prod", "api", "third"), ("other", "api", "hidden"), ("prod", "disk", "different check")] {
+            store.append_sample(Sample { environment: environment.into(), check: check.into(), at: now, ok: true, latency_ms: 1, detail: Some(detail.into()), slow: false }).await.unwrap();
+        }
+        let first = store.sample_page("prod".into(), "api".into(), now - chrono::Duration::seconds(1), now + chrono::Duration::seconds(1), None, 2).await.unwrap();
+        assert_eq!(first.samples.len(), 2);
+        assert_eq!(first.samples[0].sample.detail.as_deref(), Some("third"));
+        assert_eq!(first.samples[1].sample.detail.as_deref(), Some("second"));
+        assert!(first.next_before.is_some());
+        store.append_sample(Sample { environment: "prod".into(), check: "api".into(), at: now, ok: false, latency_ms: 2, detail: Some("arrived after first page".into()), slow: false }).await.unwrap();
+        let second = store.sample_page("prod".into(), "api".into(), first.from, first.to, first.next_before, 2).await.unwrap();
+        assert_eq!(second.samples.len(), 1);
+        assert_eq!(second.samples[0].sample.detail.as_deref(), Some("first"));
+        assert!(second.next_before.is_none());
+        assert!(!first.samples.iter().any(|s| s.id == second.samples[0].id));
+    }
     use chrono::Duration;
     use factory_core::environments::{Actor, ActorKind};
 

@@ -354,6 +354,134 @@ fn missing_prerequisites() -> bool {
     false
 }
 
+fn provision_recovery(command: &str) -> (Daemon, serde_yaml_ng::Value) {
+    let mut daemon = provision();
+    daemon.sigterm();
+    let path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["scope"]["agents"] = serde_yaml_ng::from_str("[{ name: operator, harness: shell, lifetime: task, role: foreman }]").unwrap();
+    config["scope"]["environments"] = serde_yaml_ng::from_str(
+        "- name: production\n  checks: [{ name: api, kind: command, command: 'test -f healthy', every: 5s, timeout: 2s }]\n  recover: { agent: operator, command: 'touch healthy', timeout: 30s }\n"
+    ).unwrap();
+    config["scope"]["environments"][0]["recover"]["command"] = command.into();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    (daemon, config)
+}
+
+#[test]
+fn recovery_is_approved_journalled_verified_and_not_a_deployment() {
+    if missing_prerequisites() { return; }
+    let (mut daemon, mut config) = provision_recovery("touch healthy");
+    let path = daemon.root.join(".factory/config.yaml");
+    std::fs::write(daemon.root.join("healthy"), "installed release was healthy").unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let deployments_url = format!("{base}/api/deployments");
+    let installed = "a".repeat(40);
+    let deployed = expect_ok(&deployments_url, &post(&deployments_url, &json!({ "environment": "production", "commit": installed })))["deployment"].clone();
+    let finish = format!("{deployments_url}/{}/finish", deployed["id"].as_str().unwrap());
+    expect_ok(&finish, &post(&finish, &json!({ "status": "succeeded" })));
+    std::fs::remove_file(daemon.root.join("healthy")).unwrap();
+    let report_url = format!("{base}/api/environments");
+    let down = wait_for("continuous health sees the installed system fail", Duration::from_secs(15), || {
+        let report = expect_ok(&report_url, &get(&report_url))["report"].clone();
+        (report["environments"][0]["status"] == "down").then_some(report)
+    });
+    assert_eq!(down["environments"][0]["recovery_ready"], true);
+    let recover = format!("{base}/api/environments/recover");
+    let selection = json!({ "environment": "production", "reason": "restart installed system after failed health checks" });
+    let started = expect_ok(&recover, &post(&recover, &selection))["run"].clone();
+    let workflow_run_id = started["id"].as_str().unwrap();
+    let held = wait_for("recovery is held for the owner", Duration::from_secs(15), || {
+        tasks(&base).into_iter().find(|t| t["title"] == "Recover production" && t["status"] == "blocked")
+    });
+    assert_eq!(held["category"], "recovery");
+    assert!(!daemon.root.join("healthy").exists());
+    let (_, duplicate) = raw_request("POST", &recover, Some(&selection)).unwrap();
+    assert!(duplicate.contains("already pending"), "{duplicate}");
+    config["scope"]["environments"][0]["recover"]["command"] = "echo newer recipe must not run; exit 9".into();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    daemon.sigterm();
+    daemon.spawn();
+    assert!(!daemon.root.join("healthy").exists(), "restart is not approval");
+    let pending = expect_ok(&report_url, &get(&report_url))["report"].clone();
+    let action = &pending["recoveries"][0];
+    assert_eq!(action["reason"], selection["reason"]);
+    assert_eq!(action["requested_by"], "owner");
+    assert_eq!(action["expected_commit"], installed);
+    assert_eq!(action["run"]["status"], "blocked");
+    let approve = format!("{base}/api/runs/{}/approve", action["run"]["id"].as_str().unwrap());
+    expect_ok(&approve, &post(&approve, &json!({ "reason": "approved restart of the installed release" })));
+    wait_for("repaired system passes mandatory checks", Duration::from_secs(30), || {
+        let run = run_status(&base, workflow_run_id);
+        (run["status"] == "done").then_some(run)
+    });
+    let recovered = expect_ok(&report_url, &get(&report_url))["report"].clone();
+    assert_eq!(recovered["environments"][0]["status"], "up");
+    assert_eq!(recovered["environments"][0]["current"]["id"], deployed["id"]);
+    assert_eq!(recovered["deployments"].as_array().unwrap().len(), 1, "restart cannot inflate DORA deployments");
+    assert_eq!(recovered["recoveries"][0]["status"], "done");
+    assert_eq!(recovered["recoveries"][0]["run"]["status"], "done");
+    let journal = format!("{base}/api/tasks/{}/entries", held["id"].as_str().unwrap());
+    let entries = expect_ok(&journal, &get(&journal));
+    assert!(entries["entries"].as_array().unwrap().iter().any(|e| e["kind"] == "approved"));
+    let samples = format!("{base}/api/environments/samples?environment=production&check=api&scope=demo&limit=1");
+    let page = expect_ok(&samples, &get(&samples))["page"].clone();
+    assert_eq!(page["samples"].as_array().unwrap().len(), 1);
+    assert_eq!(page["samples"][0]["ok"], true);
+    let older = format!("{samples}&from={}&to={}&before={}", page["from"].as_str().unwrap(), page["to"].as_str().unwrap(), page["next_before"].as_i64().unwrap());
+    let earlier = expect_ok(&older, &get(&older))["page"].clone();
+    assert_ne!(earlier["samples"][0]["id"], page["samples"][0]["id"]);
+    daemon.sigterm();
+    daemon.spawn();
+    let persisted = expect_ok(&report_url, &get(&report_url))["report"].clone();
+    assert_eq!(persisted["recoveries"][0]["status"], "done");
+    assert_eq!(persisted["deployments"].as_array().unwrap().len(), 1);
+    assert_eq!(expect_ok(&older, &get(&older))["page"], earlier, "fixed sample page survives restart");
+}
+
+#[test]
+fn failed_recovery_commands_and_failed_or_paused_checks_never_report_success() {
+    if missing_prerequisites() { return; }
+    for (command, pause_before_approval) in [("exit 7", false), ("true", false), ("touch healthy", true)] {
+        let (mut daemon, mut config) = provision_recovery(command);
+        daemon.spawn();
+        let base = daemon.base_url();
+        let recover = format!("{base}/api/environments/recover");
+        let started = expect_ok(&recover, &post(&recover, &json!({ "environment": "production", "reason": "exercise failed recovery" })))["run"].clone();
+        let task = wait_for("failed-path recovery waits for approval", Duration::from_secs(15), || {
+            tasks(&base).into_iter().find(|t| t["title"] == "Recover production" && t["status"] == "blocked")
+        });
+        if pause_before_approval {
+            daemon.sigterm();
+            config["scope"]["environments"][0]["paused"] = true.into();
+            std::fs::write(daemon.root.join(".factory/config.yaml"), serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+            daemon.spawn();
+        }
+        let report_url = format!("{base}/api/environments");
+        let held = expect_ok(&report_url, &get(&report_url))["report"]["recoveries"][0].clone();
+        let approve = format!("{base}/api/runs/{}/approve", held["run"]["id"].as_str().unwrap());
+        expect_ok(&approve, &post(&approve, &json!({ "reason": "approve negative-path QA" })));
+        wait_for("command or mandatory health verification fails the reported task", Duration::from_secs(30), || {
+            let action = expect_ok(&report_url, &get(&report_url))["report"]["recoveries"][0].clone();
+            (action["run"]["status"] == "failed").then_some(action)
+        });
+        let failed_task = wait_for("failed attempt is mirrored to its standing task", Duration::from_secs(5), || {
+            tasks(&base).into_iter().find(|t| t["id"] == task["id"] && t["status"] == "blocked" && t["error"].is_string())
+        });
+        assert_eq!(failed_task["status"], "blocked", "failed attempts leave the standing task open");
+        assert!(failed_task["error"].is_string());
+        for restart in [false, true] {
+            if restart { daemon.sigterm(); daemon.spawn(); }
+            let report = expect_ok(&report_url, &get(&report_url))["report"].clone();
+            assert_eq!(report["recoveries"][0]["workflow_run_id"], started["id"]);
+            assert_eq!(report["recoveries"][0]["run"]["status"], "failed");
+            assert!(report["deployments"].as_array().unwrap().is_empty(), "recovery must not fabricate a deployment");
+            assert_ne!(report["recoveries"][0]["status"], "done");
+        }
+    }
+}
+
 #[test]
 fn promotion_is_pinned_policy_gated_owner_approved_and_verified_after_restart() {
     if missing_prerequisites() { return; }

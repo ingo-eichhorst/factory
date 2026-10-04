@@ -2556,6 +2556,52 @@ promotion is owner-only; `deploy.record` alone does not grant that action.
 Roles remain accidental-access bounds, not a security boundary against an
 agent running as the machine's owner.
 
+**Recovery** restarts or repairs the installed system; it is not a release or
+deployment. Declare an explicit recipe on the environment, for example:
+
+```yaml
+recover:
+  agent: release-shell
+  command: './restart-installed "$FACTORY_ENVIRONMENT"'
+  timeout: 5m                         # default 5m, maximum 1h
+```
+
+The named agent must be a declared shell agent with `task.report` and
+`deploy.record`. Use **Recover installed system** on its environment card or
+`factory recover production --reason 'repair after failed health checks'`.
+`POST /api/environments/recover` accepts `{ "environment": "production",
+"reason": "repair after failed health checks" }`. Initiation is owner-only,
+the reason is required, and an existing promotion, recovery or deployment
+blocks another operation on the same target. The resulting ordinary workflow
+freezes the command and reason and holds its `recovery` task for locked owner
+approval. Applicable `recovery` policy controls still apply. Editing a recipe
+or restarting the daemon does not replace or approve that held command.
+
+The task runs in the scope directory, without a new release worktree. Its
+command receives `FACTORY_ENVIRONMENT`, `FACTORY_RECOVERY_REASON` and
+`FACTORY_EXPECTED_RELEASE_COMMIT` (the recorded installed release, or empty
+when unknown). It must repair what is installed, not build or promote a new
+version. After it exits successfully, `factory environment-check <name>`
+runs and records the declared checks. Failed, absent or paused checks fail
+the task; a command's exit 0 alone is not recovery evidence. The task/run and
+its journal preserve the reason, approval and actual outcome across restarts.
+The Operations page reads that history through an L4-owned recovery fact,
+separate from L1's health metrics. Recovery never writes a deployment receipt,
+changes the current release, or increases deployment frequency. Health ticks
+never launch recovery automatically. Direct `ensure.sh` invocations are not
+yet integrated with this workflow and remain a separate migration.
+
+**Health drill-down.** Select a half-hour check-strip slot (incident overlap
+is marked on the strip) or **View latest samples** to inspect stored answers,
+including time, latency and failure/slow detail. `GET /api/environments/samples`
+accepts `environment`, `check`, optional selected `scope`, UTC `from` and `to`,
+`limit` (1–500, default 200), and an optional positive `before` record cursor.
+The query is bounded to retained history and one declared environment/check
+within the selected scope subtree. Pages are newest-recorded first; the next
+page uses `next_before` with the same returned time window, excluding new
+records rather than shifting an offset. No samples means no observations,
+not a healthy result.
+
 **SLA and release effectiveness** are computed from samples and deployments,
 never typed in, and are metrics in the registry like any other -- the Goals
 tab, the Scenarios drivers and dashboard tiles can read them:
