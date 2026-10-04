@@ -59,7 +59,7 @@ impl Engine {
     /// ahead. With both it is that window -- past, future, or across now --
     /// which is what lets a person pan and zoom. See [`window_bounds`].
     pub async fn occupancy(
-        self: &Arc<Self>,
+        &self,
         minutes: Option<u32>,
         from: Option<DateTime<Utc>>,
         to: Option<DateTime<Utc>>,

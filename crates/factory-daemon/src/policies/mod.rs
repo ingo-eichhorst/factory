@@ -140,36 +140,7 @@ fn attested_categories(
     (categories, widest)
 }
 
-/// Every scope in `snapshot.config.scopes` that is `scope` itself or a
-/// descendant of it (`Config::ancestors_of`), or every configured scope when
-/// `scope` is `None` -- the "roll up the subtree" resolution `policy_report`
-/// and `scenarios::Engine::scenarios_report` both need, extracted here since
-/// `policy_report` was its first caller but no longer its only one. A free
-/// function, not an `Engine` method: it is a pure read of an already-cloned
-/// `Factory` snapshot, nothing a caller could not do itself, just done once
-/// rather than twice. Refuses an unknown scope name the same way
-/// `Factory::scope` itself does.
-pub(crate) fn subtree_scopes(snapshot: &Factory, scope: Option<&str>) -> Result<(Option<Scope>, Vec<Scope>)> {
-    let asked = scope.map(|name| snapshot.scope(name)).transpose()?.cloned();
-    let target_scopes: Vec<Scope> = match &asked {
-        Some(asked) => snapshot
-            .config
-            .scopes
-            .iter()
-            .filter(|s| {
-                s.name == asked.name
-                    || snapshot
-                        .config
-                        .ancestors_of(s)
-                        .iter()
-                        .any(|ancestor| ancestor.name == asked.name)
-            })
-            .cloned()
-            .collect(),
-        None => snapshot.config.scopes.clone(),
-    };
-    Ok((asked, target_scopes))
-}
+pub(crate) use factory_core::config::subtree_scopes;
 
 impl Engine {
     /// Own catalogue read plus the L5 knowledge-tag port. Both filesystem

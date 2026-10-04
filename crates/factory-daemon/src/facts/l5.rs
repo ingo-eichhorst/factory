@@ -9,6 +9,25 @@ pub(crate) struct Provider<'a> {
 }
 
 #[async_trait]
+impl Provide<factory_kernel::BenchResolutionFact> for Provider<'_> {
+    type Query = String;
+    type Value = Option<factory_kernel::BenchResolutionFact>;
+    type Error = FactoryError;
+    async fn get(&self, dataset: &String) -> Result<Self::Value> {
+        let runs = self.engine.bench.runs(Some(dataset), 200).await?;
+        let Some(run) = runs.into_iter().find(|run| run.settled()) else { return Ok(None); };
+        let results = factory_core::bench::aggregate(&run.attempts);
+        let (passed, failed) = results.iter().fold((0, 0), |(passed, failed), result| {
+            (passed + result.pass, failed + result.fail)
+        });
+        Ok(Some(factory_kernel::BenchResolutionFact {
+            dataset: dataset.clone(), run_id: run.id, started_at: run.started_at,
+            ended_at: run.ended_at, passed, failed,
+        }))
+    }
+}
+
+#[async_trait]
 impl Provide<KnowledgeTags> for Provider<'_> {
     type Query = ();
     type Value = KnowledgeTags;

@@ -13,6 +13,9 @@ fn assert_producer<F: Fact<Producer = P>, P: Level>(name: &str, producer: &str) 
 
 #[test]
 fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
+    assert_producer::<ProductionFact, L4>("ProductionFact", "L4");
+    assert_producer::<ProcessMetricFact, L4>("ProcessMetricFact", "L4");
+    assert_producer::<BenchResolutionFact, L5>("BenchResolutionFact", "L5");
     assert_producer::<InfrastructureExpiryFact, L1>("InfrastructureExpiryFact", "L1");
     assert_producer::<RenewalDeclarationsFact, L1>("RenewalDeclarationsFact", "L1");
     assert_producer::<CredentialExpiryFact, L2>("CredentialExpiryFact", "L2");
@@ -67,6 +70,7 @@ fn renewal_fact_metadata_and_nested_dependencies_roundtrip_without_core() {
 #[test]
 fn catalogue_is_complete_unique_and_has_readers() {
     let mut expected = vec![
+        "ProductionFact", "ProcessMetricFact", "BenchResolutionFact",
         "InfrastructureExpiryFact", "CredentialExpiryFact", "ScheduledRunDatesFact",
         "RenewalDeclarationsFact",
         "DaemonConfigFact",
@@ -107,6 +111,33 @@ fn catalogue_is_complete_unique_and_has_readers() {
             }
         }
     }
+}
+
+#[test]
+fn production_and_measurements_preserve_plain_wire_defaults_and_unknowns() {
+    let stamp = "2026-10-04T10:00:00Z";
+    let production: ProductionFact = serde_json::from_value(serde_json::json!({
+        "bin": "day", "from": stamp, "to": stamp, "buckets": [],
+        "daily": [{"from": stamp, "to": stamp, "finished": 2,
+            "scrapped": 1, "reworked": 1, "partial": true}]
+    })).unwrap();
+    assert!(production.earliest_run.is_none());
+    assert_eq!(production.daily[0].first_pass, 0);
+    let wire = serde_json::to_value(production).unwrap();
+    assert!(wire.get("earliest_run").is_none());
+    assert_eq!(wire["daily"][0]["first_pass"], 0);
+    let measurement: ProcessMetricFact = serde_json::from_value(serde_json::json!({
+        "name": "fail_rate", "value": null, "as_of": stamp, "reason": "no finished runs"
+    })).unwrap();
+    assert_eq!(measurement.value, None);
+    let wire = serde_json::to_value(&measurement).unwrap();
+    assert_eq!(serde_json::from_value::<ProcessMetricFact>(wire).unwrap(), measurement);
+    let bench = BenchResolutionFact {
+        dataset: "fixture".into(), run_id: "actual-run".into(),
+        started_at: stamp.parse().unwrap(), ended_at: None, passed: 1, failed: 0,
+    };
+    let wire = serde_json::to_value(&bench).unwrap();
+    assert_eq!(serde_json::from_value::<BenchResolutionFact>(wire).unwrap(), bench);
 }
 
 #[test]

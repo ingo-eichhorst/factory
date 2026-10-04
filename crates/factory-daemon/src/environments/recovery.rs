@@ -313,7 +313,7 @@ impl Engine {
             return Err(bad("the check is not declared on this environment"));
         }
         if let Some(asked) = &query.scope {
-            let (root, children) = crate::policies::subtree_scopes(&snapshot, Some(asked))?;
+            let (root, children) = factory_core::config::subtree_scopes(&snapshot, Some(asked))?;
             if !root.iter().chain(&children).any(|member| member.name == scope) {
                 return Err(bad("the environment is outside the selected scope"));
             }

@@ -8,17 +8,16 @@
 //! ## Reuse, not reimplementation
 //!
 //! `throughput_week`/`first_pass_yield`/`scrap_rate` read `production.rs`'s
-//! own daily grid (`Engine::production`) rather than re-deriving "finished"/
+//! own daily grid through L4's `ProductionFact`, rather than re-deriving "finished"/
 //! "scrapped"/"reworked" a second time -- that module's own doc comment is
 //! the one place those words are defined, and this one only sums buckets it
 //! already produced. `compliance.<fw>`/`open_controls.<fw>` read
 //! `Engine::policy_report(scope)`'s subtree rollup. `bench.resolve_rate.<dataset>`
-//! reads the newest settled bench run through `bench::aggregate`, the same
-//! function `bench show`'s own results table uses.
-//! `goal_tasks_done.<objective>.<kr>` is the one metric with no existing
-//! aggregate to lean on: it counts tasks itself, off the `TaskStore` trait
-//! (`self.store`) so `ScopedStores` still shards correctly by scope --
-//! unscoped, the same way `production.rs` reads every run before narrowing.
+//! reads L5's `BenchResolutionFact`, whose producer uses `bench::aggregate`,
+//! the same function `bench show` uses. L4's `ProcessMetricFact` owns the
+//! run, occupancy, intake and goal-task measurements. Its goal counts remain
+//! instance-wide; its other scope-aware figures follow the requested path
+//! subtree. This module has no direct process or benchmark store access.
 //!
 //! The six operations metrics (`cycle_time_p50`/`_p85`, `queue_wait_p95`,
 //! `fail_rate`, `rework_rate`, `time_to_recover_p50`) are
@@ -39,18 +38,15 @@
 //! Every other metric is a single number with no time axis of its own to
 //! draw yet.
 //!
-//! `unit_cost`, `tokens_per_run` (#117) and `estimate_accuracy` (#168) are
-//! `factory_core::usage::usage_metric` over the same trailing 28 days of
-//! runs. The first two read the usage each run carries -- measured by the
-//! agent runtime, never guessed -- and leave a run whose usage is unknown
-//! out of both sides of the figure. `estimate_accuracy` instead reads each
+//! `unit_cost` and `tokens_per_run` read the finished cohort of L4's
+//! `CostReport`, with explicit unknown and partial usage. The L4
+//! `estimate_accuracy` measurement reads each
 //! run's own `original_estimate` and wall time, and leaves out a run with
-//! no estimate to compare against. With none left in any of the three, the
+//! no estimate to compare against. With none left, the
 //! value is `None` and the reason says how many finished runs there were.
 //!
-//! `cost_week` (#164) is `Engine::spend` itself, called directly rather than
-//! through the `needs_runs` prefetch above -- the trailing 7 days of runs
-//! *started* (`Engine::spend`'s own rule), not the `ended_at` rule the
+//! `cost_week` (#164) also reads L4's `CostReport` -- the trailing 7 days of runs
+//! *started*, not the `ended_at` rule the
 //! three metrics above use. `None`, with a reason naming the known sum and
 //! the counts, whenever any run in the window is unknown, cost-unknown or
 //! partial.
@@ -93,21 +89,17 @@ use std::sync::Arc;
 use chrono::{DateTime, NaiveDate, Utc};
 use factory_kernel::{EnvironmentMetricFact, BackupFact, AttestedRun, L6};
 use crate::facts::{Facts, AttestedQuery};
-use factory_core::config::Scope;
 use factory_core::error::{FactoryError, Result};
 use factory_core::goals::GoalsCatalogue;
-use factory_core::intake::IntakeDecisionFact;
 use factory_core::metrics::{
     self, MetricDef, MetricError, MetricId, MetricSeries, MetricValue, MetricsWindow,
 };
 use factory_core::protocol::{
-    MetricDefView, PolicyReport, Production, ProductionBin, ProductionBucket,
+    MetricDefView, PolicyReport, ProductionBin, ProductionBucket,
 };
 use factory_core::quality::ScenarioStatus;
-use factory_core::task::{TaskFilter, TaskStatus};
 
 use crate::engine::Engine;
-use crate::policies::subtree_scopes;
 
 /// `Request::Metrics`'s answer, and the same shape `#100`'s Scenarios tab
 /// calls `Engine::metrics` for directly -- a plain struct rather than
@@ -152,15 +144,6 @@ fn is_backup_metric(id: &str) -> bool {
 fn is_intake_metric(id: &str) -> bool {
     matches!(id, "ready_rate" | "needs_info_rate" | "duplicate_rate" | "intake_lead_time")
 }
-
-/// The four journal kinds an intake decision is ever recorded under --
-/// `factory_daemon::intake`'s own `TRIAGE_VERDICT_KIND` plus the three
-/// literals `intake_decide` journals directly. Kept here rather than
-/// imported, the same way `factory_core::intake::decision_event` treats
-/// them: a rename of any one is caught by the daemon metrics test driving
-/// the real `intake_decide`, not by the type system.
-const INTAKE_DECISION_KINDS: [&str; 4] =
-    [crate::intake::TRIAGE_VERDICT_KIND, "intake_needs_info", "intake_closed", "intake_split"];
 
 fn is_policy_metric(id: &str) -> bool {
     id.starts_with("compliance.") || id.starts_with("open_controls.")
@@ -208,7 +191,7 @@ impl Engine {
         // family: an unknown scope is a bad request, never an empty-looking
         // bench or goal value.
         let snapshot = self.factory_snapshot();
-        let (asked_scope, target_scopes) = subtree_scopes(&snapshot, scope)?;
+        let (asked_scope, target_scopes) = snapshot.subtree_scopes(scope)?;
         let canonical_scope = asked_scope.as_ref().map(|s| s.name.as_str());
         let target_scope_names: BTreeSet<String> = target_scopes.iter().map(|s| s.name.clone()).collect();
 
@@ -266,9 +249,6 @@ impl Engine {
 
         let needs_production = computing.iter().any(|(id, r)| r.is_ok() && is_production_metric(id.as_str()));
         let needs_policy = computing.iter().any(|(id, r)| r.is_ok() && is_policy_metric(id.as_str()));
-        let needs_runs = computing
-            .iter()
-            .any(|(id, r)| r.is_ok() && (is_operations_metric(id.as_str()) || is_usage_metric(id.as_str())));
         let needs_spend = computing.iter().any(|(id, r)| r.is_ok() && matches!(id.as_str(), "unit_cost" | "tokens_per_run"));
         let spend = if needs_spend {
             Some(crate::facts::Facts::<factory_kernel::L6>::new(self).get::<factory_kernel::CostReport>(&factory_core::usage::SpendQuery {
@@ -278,64 +258,35 @@ impl Engine {
                 to: Some(now), group_by: factory_core::usage::CostGroupBy::Scope,
             }).await?)
         } else { None };
-        let needs_hours = computing.iter().any(|(id, r)| r.is_ok() && is_hours_metric(id.as_str()));
-        let needs_intake = computing.iter().any(|(id, r)| r.is_ok() && is_intake_metric(id.as_str()));
         let needs_backup = computing.iter().any(|(id, r)| r.is_ok() && is_backup_metric(id.as_str()));
         let needs_attested = computing.iter().any(|(id, r)| r.is_ok() && is_attestation_metric(id.as_str()));
 
+        let facts = Facts::<L6>::new(self);
         let production = if needs_production {
-            Some(self.metric_production(canonical_scope, &target_scopes, window, now).await?)
-        } else {
-            None
-        };
-        // Twice the window: a recovery that ends inside it may have started
-        // failing before it, and cutting the history at the window's edge
-        // would shorten that streak rather than leave it out.
-        let runs = if needs_runs {
-            let run_window_days = window.map(MetricsWindow::days).unwrap_or(OPERATIONS_WINDOW_DAYS);
-            let mut runs = self.store
-                .runs_between(now - chrono::Duration::days(2 * run_window_days), now)
-                .await?;
-            if canonical_scope.is_some() {
-                let tasks = self.store.list(&TaskFilter::default()).await?;
-                let task_ids: BTreeSet<&str> = tasks
-                    .iter()
-                    .filter(|task| target_scope_names.contains(&snapshot.canonical_scope_name(&task.scope)))
-                    .map(|task| task.id.as_str())
-                    .collect();
-                runs.retain(|run| task_ids.contains(run.task_id.as_str()));
-            }
-            Some(runs)
-        } else {
-            None
+            Some(facts.get::<factory_kernel::ProductionFact>(&crate::facts::ProductionQuery {
+                scope: canonical_scope.map(str::to_string), now,
+                minutes: window.map(|window| (window.days() * 24 * 60) as u32).or(Some(5)),
+                bin: ProductionBin::Day,
+            }).await?)
+        } else { None };
+        let process_names: BTreeSet<String> = computing.iter().filter(|(id, result)| result.is_ok()
+            && (is_operations_metric(id.as_str()) || is_usage_metric(id.as_str())
+                || is_hours_metric(id.as_str()) || is_intake_metric(id.as_str())
+                || id.as_str().starts_with("goal_tasks_done.")))
+            .map(|(id, _)| id.to_string()).collect();
+        let process = if process_names.is_empty() { BTreeMap::new() } else {
+            facts.get::<factory_kernel::ProcessMetricFact>(&crate::facts::ProcessMetricsQuery {
+                scope: canonical_scope.map(str::to_string), now, window, names: process_names,
+            }).await?
         };
         let policy_report = if needs_policy {
             Some(self.policy_report(canonical_scope).await?)
         } else {
             None
         };
-        let hours = if needs_hours {
-            let days = window.map(MetricsWindow::days).unwrap_or(14);
-            let occupancy = self
-                .occupancy(None, Some(now - chrono::Duration::days(days)), Some(now))
-                .await?;
-            Some(HoursTotals::from_occupancy(
-                &occupancy,
-                canonical_scope.map(|_| &target_scope_names),
-            ))
-        } else {
-            None
-        };
-        let intake_input = if needs_intake {
-            let days = window.map(MetricsWindow::days).unwrap_or(OPERATIONS_WINDOW_DAYS);
-            Some(self.intake_facts(days, now, canonical_scope, &target_scope_names, &snapshot).await?)
-        } else {
-            None
-        };
         // `#154`: never spawns `git`/`tmutil` -- `Engine::backup_fact` shares
         // `capture` with `backup_report` but not its repository or Time
         // Machine probes.
-        let facts = Facts::<L6>::new(self);
         let backup_fact = if needs_backup { Some(facts.get::<BackupFact>(&now).await?) } else { None };
         // `#158`: one read shared by `conformance_rate.<category>` (any
         // number of distinct categories a request asks for) and
@@ -364,10 +315,8 @@ impl Engine {
             spend: spend.as_ref(),
             production: production.as_ref(),
             policy_report: policy_report.as_ref(),
-            runs: runs.as_deref(),
+            process: &process,
             attested: attested.as_deref(),
-            hours: hours.as_ref(),
-            intake: intake_input.as_ref(),
             backup: backup_fact.as_ref(),
             environments: environments.as_ref(),
         };
@@ -445,83 +394,6 @@ impl Engine {
         Ok(Metrics { values, series, registry })
     }
 
-    /// Production's public scope parameter is intentionally exact. Metrics
-    /// select a subtree, so read each exact scope and add the aligned daily
-    /// grids; this keeps production's one containment rule authoritative.
-    async fn metric_production(
-        self: &Arc<Self>,
-        scope: Option<&str>,
-        target_scopes: &[Scope],
-        window: Option<MetricsWindow>,
-        now: DateTime<Utc>,
-    ) -> Result<Production> {
-        let minutes = window
-            .map(|window| (window.days() * 24 * 60) as u32)
-            .or(Some(5));
-        if scope.is_none() {
-            return self
-                .production_at(minutes, Some(ProductionBin::Day), None, now)
-                .await;
-        }
-        let mut aggregate: Option<Production> = None;
-        for target in target_scopes {
-            let next = self
-                .production_at(minutes, Some(ProductionBin::Day), Some(target.name.clone()), now)
-                .await?;
-            match &mut aggregate {
-                None => aggregate = Some(next),
-                Some(total) => merge_production(total, next),
-            }
-        }
-        aggregate.ok_or_else(|| {
-            FactoryError::BadRequest(format!("scope {scope:?} has no configured subtree"))
-        })
-    }
-
-    /// The decision facts the four intake metrics read (#165): every
-    /// journal entry of one of the four decision kinds since `window_days`
-    /// ago (`TaskStore::entries_of_kinds`), turned into an
-    /// `IntakeDecisionFact` by `intake::decision_event`, narrowed to the
-    /// requested scope subtree by each entry's own task -- read once here
-    /// with `TaskStore::list`, the same "one list, one pass" shape
-    /// `occupancy.rs` and `operations.rs` use `entries_of_kinds` with. A
-    /// task `entries_of_kinds` names that this read no longer finds (or
-    /// that never carried an `intake` record) is simply left out, never
-    /// specially checked for: a deleted task's own journal is gone with it
-    /// (`store_sqlite.rs`'s cascading delete on `task.delete`).
-    async fn intake_facts(
-        &self,
-        window_days: i64,
-        now: DateTime<Utc>,
-        canonical_scope: Option<&str>,
-        target_scope_names: &BTreeSet<String>,
-        snapshot: &factory_core::config::Factory,
-    ) -> Result<IntakeInput> {
-        let since = now - chrono::Duration::days(window_days);
-        let entries = self.store.entries_of_kinds(&INTAKE_DECISION_KINDS, since).await?;
-        let tasks = self.store.list(&TaskFilter::default()).await?;
-        let tasks_by_id: BTreeMap<&str, &factory_core::task::Task> =
-            tasks.iter().map(|t| (t.id.as_str(), t)).collect();
-        let mut facts = Vec::new();
-        let mut skipped = 0usize;
-        for (task_id, entry) in &entries {
-            let Some(task) = tasks_by_id.get(task_id.as_str()) else { continue };
-            let Some(record) = &task.intake else { continue };
-            if canonical_scope.is_some()
-                && !target_scope_names.contains(&snapshot.canonical_scope_name(&task.scope))
-            {
-                continue;
-            }
-            match factory_core::intake::decision_event(&entry.kind, entry.data.as_ref(), entry.at, record.received_at)
-            {
-                Some(Ok(fact)) => facts.push(fact),
-                Some(Err(())) => skipped += 1,
-                None => {}
-            }
-        }
-        Ok(IntakeInput { facts, skipped, window_days })
-    }
-
     /// One available, non-`quality.*` metric's value, and its series when
     /// it has one, off the backing reads `sources` already gathered (each
     /// field `Some` exactly when some id needs it). `scope` is the request's
@@ -538,7 +410,12 @@ impl Engine {
     ) -> Result<(MetricValue, Option<MetricSeries>)> {
         let production = sources.production;
         let policy_report = sources.policy_report;
-        let runs = sources.runs;
+        if let Some(measurement) = sources.process.get(id.as_str()) {
+            return Ok((MetricValue {
+                id: id.clone(), value: measurement.value, as_of: measurement.as_of,
+                reason: measurement.reason.clone(),
+            }, None));
+        }
         let daily = || &production.expect("needs_production set").daily;
         Ok(if id.as_str() == "throughput_week" {
             let days = window.map(MetricsWindow::days).unwrap_or(7) as usize;
@@ -567,28 +444,12 @@ impl Engine {
             };
             align_series_end(&mut s, &value, now);
             (value, Some(s))
-        } else if is_operations_metric(id.as_str()) {
-            (
-                operations_value(id, runs.expect("needs_runs set"), now, window.map(MetricsWindow::days).unwrap_or(OPERATIONS_WINDOW_DAYS)),
-                None,
-            )
         } else if matches!(id.as_str(), "unit_cost" | "tokens_per_run") {
             let cohort = sources.spend.expect("needs_spend set").finished.as_ref().expect("finished spend query");
             let figure = if id.as_str() == "unit_cost" { &cohort.unit_cost } else { &cohort.tokens_per_run };
             (MetricValue { id: id.clone(), value: figure.value, as_of: figure.as_of.unwrap_or(now), reason: figure.reason.clone() }, None)
-        } else if is_usage_metric(id.as_str()) {
-            (
-                usage_value(id, runs.expect("needs_runs set"), now, window.map(MetricsWindow::days).unwrap_or(OPERATIONS_WINDOW_DAYS)),
-                None,
-            )
         } else if id.as_str() == "cost_week" {
             (self.cost_week_value(id, scope, now, window).await?, None)
-        } else if is_hours_metric(id.as_str()) {
-            let totals = sources.hours.expect("needs_hours set");
-            let seconds = if id.as_str() == "agent_hours" { totals.busy_seconds } else { totals.blocked_seconds };
-            (MetricValue { id: id.clone(), value: Some(seconds as f64 / 3600.0), as_of: now, reason: None }, None)
-        } else if is_intake_metric(id.as_str()) {
-            (intake_value(id, sources.intake.expect("needs_intake set"), now), None)
         } else if is_backup_metric(id.as_str()) {
             (backup_metric_value(id, sources.backup.expect("needs_backup set")), None)
         } else if let Some((name, env)) = environment_metric(id.as_str()) {
@@ -607,11 +468,6 @@ impl Engine {
             (figure_to_value(id, &figure, now), None)
         } else if let Some(dataset) = id.as_str().strip_prefix("bench.resolve_rate.") {
             (self.bench_resolve_rate_value(id, dataset, now).await?, None)
-        } else if let Some(rest) = id.as_str().strip_prefix("goal_tasks_done.") {
-            let (objective, kr) = rest
-                .split_once('.')
-                .ok_or_else(|| FactoryError::Other(anyhow::anyhow!("malformed goal_tasks_done id {id}")))?;
-            (self.goal_tasks_done_value(id, objective, kr, now).await?, None)
         } else {
             // Every family `metrics::resolve` returns `Ok` for today has
             // a branch above; a future metric added to the registry
@@ -741,17 +597,14 @@ impl Engine {
     }
 
     async fn bench_resolve_rate_value(&self, id: &MetricId, dataset: &str, now: DateTime<Utc>) -> Result<MetricValue> {
-        let runs = self.bench.runs(Some(dataset), 200).await?;
-        let Some(run) = runs.into_iter().find(|r| r.settled()) else {
+        let measured = Facts::<L6>::new(self).get::<factory_kernel::BenchResolutionFact>(&dataset.to_string()).await?;
+        let Some(run) = measured else {
             return Ok(MetricValue {
-                id: id.clone(),
-                value: None,
-                as_of: now,
+                id: id.clone(), value: None, as_of: now,
                 reason: Some(format!("no settled bench run for dataset {dataset:?}")),
             });
         };
-        let results = factory_core::bench::aggregate(&run.attempts);
-        let (pass, fail) = results.iter().fold((0u32, 0u32), |(p, f), r| (p + r.pass, f + r.fail));
+        let (pass, fail) = (run.passed, run.failed);
         if pass + fail == 0 {
             return Ok(MetricValue {
                 id: id.clone(),
@@ -819,26 +672,7 @@ impl Engine {
         Ok(MetricValue { id: id.clone(), value: Some(total.cost_usd), as_of: now, reason: None })
     }
 
-    /// Unscoped, like `production.rs`'s own read: a goal label names an
-    /// objective/key-result pair, not a scope, and the objective it belongs
-    /// to may itself carry any scope (or none). `ScopedStores::list` with no
-    /// `scope` in the filter fans out over every configured store and
-    /// merges the result, so this counts correctly regardless of where the
-    /// labelled tasks actually live.
-    async fn goal_tasks_done_value(&self, id: &MetricId, objective: &str, kr: &str, now: DateTime<Utc>) -> Result<MetricValue> {
-        let label = format!("{objective}/{kr}");
-        let tasks = self.store.list(&TaskFilter::default()).await?;
-        let count = tasks
-            .iter()
-            .filter(|t| t.labels.get("goal").map(String::as_str) == Some(label.as_str()) && t.status == TaskStatus::Done)
-            .count();
-        Ok(MetricValue {
-            id: id.clone(),
-            value: Some(count as f64),
-            as_of: now,
-            reason: None,
-        })
-    }
+
 }
 
 /// Every metric id `catalogue` itself names -- `direction.yaml`'s
@@ -872,71 +706,6 @@ pub(crate) fn push_if_known(ids: &mut Vec<MetricId>, id: &MetricId) {
     if !matches!(metrics::resolve(id), Err(MetricError::Unknown(_))) {
         ids.push(id.clone());
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct HoursTotals {
-    busy_seconds: i64,
-    blocked_seconds: i64,
-}
-
-impl HoursTotals {
-    fn from_occupancy(
-        occupancy: &factory_core::occupancy::Occupancy,
-        selected_scopes: Option<&BTreeSet<String>>,
-    ) -> Self {
-        let mut busy_seconds = 0;
-        let mut blocked_seconds = 0;
-        for scope in &occupancy.scopes {
-            if selected_scopes.is_some_and(|selected| !selected.contains(&scope.name)) {
-                continue;
-            }
-            for row in &scope.rows {
-                busy_seconds += row.busy_seconds;
-                blocked_seconds += row.blocked_seconds;
-            }
-        }
-        Self {
-            busy_seconds,
-            blocked_seconds,
-        }
-    }
-}
-
-fn merge_production(total: &mut Production, next: Production) {
-    total.from = total.from.min(next.from);
-    total.to = total.to.max(next.to);
-    total.earliest_run = match (total.earliest_run, next.earliest_run) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
-    merge_buckets(&mut total.buckets, next.buckets);
-    merge_buckets(&mut total.daily, next.daily);
-}
-
-fn merge_buckets(total: &mut Vec<ProductionBucket>, next: Vec<ProductionBucket>) {
-    let mut positions: BTreeMap<NaiveDate, usize> = total
-        .iter()
-        .enumerate()
-        .map(|(index, bucket)| (bucket.from.date_naive(), index))
-        .collect();
-    for bucket in next {
-        let day = bucket.from.date_naive();
-        if let Some(index) = positions.get(&day).copied() {
-            let target = &mut total[index];
-            target.from = target.from.min(bucket.from);
-            target.to = target.to.max(bucket.to);
-            target.finished += bucket.finished;
-            target.scrapped += bucket.scrapped;
-            target.reworked += bucket.reworked;
-            target.first_pass += bucket.first_pass;
-            target.partial |= bucket.partial;
-        } else {
-            positions.insert(day, total.len());
-            total.push(bucket);
-        }
-    }
-    total.sort_by_key(|bucket| bucket.from);
 }
 
 /// Sum `finished`/`scrapped`/`reworked`/`first_pass` over a `window`-day
@@ -1123,60 +892,6 @@ fn ratio_value(mut value: MetricValue, daily: &[factory_core::protocol::Producti
     value
 }
 
-/// One of the six operations metrics over the trailing
-/// `OPERATIONS_WINDOW_DAYS`, `as_of` the newest run behind it
-/// (`operations::registry_metric_as_of`) -- the rule `ratio_value` keeps
-/// for the production ratios: a percentile or a rate over a window is as
-/// old as the newest data in it, not the moment it was asked for, so a
-/// quality scenario's `max_age` reads a figure nothing has moved in weeks
-/// as stale. With no value, `now`, beside the reason -- the same as a
-/// production ratio with nothing finished.
-fn operations_value(id: &MetricId, runs: &[factory_core::run::Run], now: DateTime<Utc>, window_days: i64) -> MetricValue {
-    let window = factory_core::operations::Window::trailing(now, window_days);
-    match factory_core::operations::registry_metric(id.as_str(), runs, &window) {
-        Some(figure) => MetricValue {
-            id: id.clone(),
-            as_of: figure
-                .value
-                .and(factory_core::operations::registry_metric_as_of(id.as_str(), runs, &window))
-                .unwrap_or(now),
-            value: figure.value,
-            reason: figure.reason,
-        },
-        None => MetricValue {
-            id: id.clone(),
-            value: None,
-            as_of: now,
-            reason: Some("no computation wired for this metric yet".to_string()),
-        },
-    }
-}
-
-/// `unit_cost`/`tokens_per_run`, `as_of` the newest run end behind the
-/// value, like the operations metrics -- `now` beside a reason when there
-/// is none.
-fn usage_value(
-    id: &MetricId,
-    runs: &[factory_core::run::Run],
-    now: DateTime<Utc>,
-    window_days: i64,
-) -> MetricValue {
-    match factory_core::usage::usage_metric(id.as_str(), runs, now, window_days) {
-        Some(figure) => MetricValue {
-            id: id.clone(),
-            value: figure.value,
-            as_of: figure.as_of.unwrap_or(now),
-            reason: figure.reason,
-        },
-        None => MetricValue {
-            id: id.clone(),
-            value: None,
-            as_of: now,
-            reason: Some("no computation wired for this metric yet".to_string()),
-        },
-    }
-}
-
 /// Every backing read a `metrics_for` call may have gathered, bundled so
 /// `compute_one` takes one reference instead of one parameter per family --
 /// each field `Some` exactly when some asked id needed it.
@@ -1184,47 +899,12 @@ struct ComputeSources<'a> {
     spend: Option<&'a factory_kernel::CostReport>,
     production: Option<&'a factory_core::protocol::Production>,
     policy_report: Option<&'a PolicyReport>,
-    runs: Option<&'a [factory_core::run::Run]>,
-    hours: Option<&'a HoursTotals>,
-    intake: Option<&'a IntakeInput>,
+    process: &'a BTreeMap<String, factory_kernel::ProcessMetricFact>,
     backup: Option<&'a factory_core::backup::BackupFact>,
     environments: Option<&'a BTreeMap<String, EnvironmentMetricFact>>,
     /// `#158`: `Engine::attested_runs`'s finished runs, shared by
     /// `conformance_rate.<category>` and `gate_fail_rate`.
     attested: Option<&'a [factory_core::conformance::AttestedRun]>,
-}
-
-/// What `Engine::intake_facts` read for one call: the decision facts
-/// already narrowed to the requested scope subtree, how many decision-kind
-/// entries in that same read did not parse, and the window (in days) they
-/// were both read over -- shared by every intake id a single `metrics_for`
-/// call asks for, so the journal and task list are each read once however
-/// many of the four ids are wanted.
-struct IntakeInput {
-    facts: Vec<IntakeDecisionFact>,
-    skipped: usize,
-    window_days: i64,
-}
-
-/// `ready_rate`/`needs_info_rate`/`duplicate_rate`/`intake_lead_time`,
-/// `as_of` the newest decision behind the value, like the operations
-/// metrics -- `now` beside a reason when there is none.
-fn intake_value(id: &MetricId, intake: &IntakeInput, now: DateTime<Utc>) -> MetricValue {
-    let window = factory_core::operations::Window::trailing(now, intake.window_days);
-    match factory_core::intake::registry_metric(id.as_str(), &intake.facts, &window, intake.skipped, intake.window_days) {
-        Some(figure) => MetricValue {
-            id: id.clone(),
-            value: figure.value,
-            as_of: figure.as_of.unwrap_or(now),
-            reason: figure.reason,
-        },
-        None => MetricValue {
-            id: id.clone(),
-            value: None,
-            as_of: now,
-            reason: Some("no computation wired for this metric yet".to_string()),
-        },
-    }
 }
 
 /// One environment metric off the card the Operations tab draws, so the
@@ -1453,7 +1133,7 @@ mod tests {
     use factory_core::adapter::TaskStore;
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
     use factory_core::run::{NewRun, Run, RunPatch, RunStatus, Trigger};
-    use factory_core::task::{NewTask, TaskEntry, TaskPatch};
+    use factory_core::task::{NewTask, TaskEntry, TaskPatch, TaskStatus};
     use factory_core::usage::{RunUsage, TokenCounts, UsageState};
     use factory_plugins::{Registry, SqliteStore};
     use rusqlite::params;
@@ -2706,6 +2386,35 @@ mod tests {
     }
 
     // ---------------------------------------------------- unknown/unavailable
+
+    #[tokio::test]
+    async fn process_fact_ports_read_live_changes_and_do_not_make_unknown_figures_zero() {
+        let engine = test_engine(Vec::new());
+        let name = "goal_tasks_done.live.kr";
+        let query = crate::facts::ProcessMetricsQuery {
+            scope: Some("root".into()), now: Utc::now(), window: None,
+            names: BTreeSet::from([name.into(), "fail_rate".into(), "ready_rate".into()]),
+        };
+        let reader = Facts::<L6>::new(&engine);
+        let before = reader.get::<factory_kernel::ProcessMetricFact>(&query).await.unwrap();
+        assert_eq!(before[name].value, Some(0.0));
+        assert_eq!(before["fail_rate"].value, None);
+        assert!(before["fail_rate"].reason.is_some());
+        assert_eq!(before["ready_rate"].value, None);
+        let mut new = NewTask { title: "live evidence".into(), ..Default::default() };
+        new.labels.insert("goal".into(), "live/kr".into());
+        let task = engine.store.create(&task_from_new(new, "root".into(), "shell".into(), "herdr".into())).await.unwrap();
+        engine.store.update(&task.id, &TaskPatch { status: Some(TaskStatus::Done), ..Default::default() }).await.unwrap();
+        let after = reader.get::<factory_kernel::ProcessMetricFact>(&query).await.unwrap();
+        assert_eq!(after[name].value, Some(1.0));
+        assert_eq!(after[name].as_of, query.now);
+        assert_eq!(after["fail_rate"].value, None, "a task without a run does not invent a completed run");
+        let unknown = crate::facts::ProcessMetricsQuery {
+            names: BTreeSet::from(["compliance.cra".into()]), ..query
+        };
+        assert!(reader.get::<factory_kernel::ProcessMetricFact>(&unknown).await.is_err(),
+            "L4 cannot produce a policy measurement");
+    }
 
     #[tokio::test]
     async fn an_unknown_id_refuses_the_whole_call() {

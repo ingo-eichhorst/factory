@@ -31,7 +31,7 @@ impl Engine {
         scope: Option<&str>,
     ) -> Result<ImportantDatesReport> {
         let snapshot = self.factory_snapshot();
-        let (asked, targets) = crate::policies::subtree_scopes(&snapshot, scope)?;
+        let (asked, targets) = factory_core::config::subtree_scopes(&snapshot, scope)?;
         let mut names: BTreeSet<_> = targets.iter().map(|scope| scope.name.clone()).collect();
         if let Some(asked) = asked {
             names.insert(asked.name);
