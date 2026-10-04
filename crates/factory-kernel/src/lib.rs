@@ -41,6 +41,8 @@ mod span;
 pub use span::{parse_span, Span};
 mod session;
 pub use session::SessionRef;
+mod scope;
+pub use scope::{resolve_scope, scope_ancestors, scope_subtree, ScopeIdentity, ScopeNode, ScopeTree};
 mod slug;
 mod workflow_identity;
 pub use slug::is_slug;

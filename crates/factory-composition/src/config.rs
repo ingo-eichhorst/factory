@@ -7,7 +7,7 @@ use factory_kernel::{FactoryError, Result};
 use factory_process::ready::IntakeLayer;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// The directory that marks a Factory instance or a configured scope. Runtime
 /// state belongs to the instance root's directory; nested copies contain only
@@ -158,18 +158,7 @@ impl Config {
     /// Directories without a scope config are not in the list, so they are
     /// passed over without being asked.
     pub fn ancestors_of(&self, scope: &Scope) -> Vec<&Scope> {
-        let own = path_segments(&scope.path);
-        let mut above: Vec<(usize, &Scope)> = self
-            .scopes
-            .iter()
-            .filter_map(|candidate| {
-                let theirs = path_segments(&candidate.path);
-                (theirs.len() < own.len() && own.starts_with(&theirs))
-                    .then_some((theirs.len(), candidate))
-            })
-            .collect();
-        above.sort_by_key(|(depth, _)| *depth);
-        above.into_iter().map(|(_, s)| s).collect()
+        factory_kernel::scope_ancestors(&self.scopes, scope)
     }
 
     /// Every role in effect in `scope`: the built-in presets, the instance
@@ -762,16 +751,6 @@ fn refuse_zero_max_sessions(scope: &Scope) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// A scope's path as ancestry reads it: its components, with `.` dropped, so
-/// the root scope's `.` is the empty path and sits above every other. Whole
-/// components, so `projects/factory` is never above `projects/factory-x`.
-fn path_segments(path: &Path) -> Vec<String> {
-    path.components()
-        .filter(|c| !matches!(c, Component::CurDir))
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect()
 }
 
 /// Refuse a `roles:` block written at the top of a nested scope's own config.
@@ -1979,25 +1958,8 @@ impl Factory {
     /// Resolve a whole authored scope subtree by paths, never name prefixes.
     /// Shared by every level; policy is a consumer, not the owner of ancestry.
     pub fn subtree_scopes(&self, scope: Option<&str>) -> Result<(Option<Scope>, Vec<Scope>)> {
-        let asked = scope.map(|name| self.scope(name)).transpose()?.cloned();
-        let scopes = match &asked {
-            Some(asked) => self
-                .config
-                .scopes
-                .iter()
-                .filter(|child| {
-                    child.name == asked.name
-                        || self
-                            .config
-                            .ancestors_of(child)
-                            .iter()
-                            .any(|ancestor| ancestor.path == asked.path)
-                })
-                .cloned()
-                .collect(),
-            None => self.config.scopes.clone(),
-        };
-        Ok((asked, scopes))
+        let (asked, scopes) = factory_kernel::scope_subtree(&self.config.scopes, scope)?;
+        Ok((asked.cloned(), scopes.into_iter().cloned().collect()))
     }
 
     /// Every scope discovered from its own local configuration.
@@ -2013,42 +1975,22 @@ impl Factory {
     /// accepted; a leaf resolves only when one scope matches. More than one is
     /// refused rather than guessed at.
     pub fn scope(&self, name: &str) -> Result<&Scope> {
-        if let Some(s) = self.config.scopes.iter().find(|s| s.name == name) {
-            return Ok(s);
-        }
-        if let Some(s) = self.config.scopes.iter().find(|s| {
-            s.path
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/")
-                == name
-        }) {
-            return Ok(s);
-        }
-        if !name.contains('/') {
-            let matches: Vec<&Scope> = self
+        factory_kernel::resolve_scope(&self.config.scopes, name)
+    }
+
+    /// Plain identities for an isolated level's live fact read.
+    pub fn scope_tree(&self) -> factory_kernel::ScopeTree {
+        factory_kernel::ScopeTree {
+            scopes: self
                 .config
                 .scopes
                 .iter()
-                .filter(|s| {
-                    last_segment(&s.name) == name
-                        || s.path.file_name().map(|p| p == name).unwrap_or(false)
+                .map(|scope| factory_kernel::ScopeNode {
+                    name: scope.name.clone(),
+                    path: scope.path.clone(),
                 })
-                .collect();
-            match matches.len() {
-                0 => {}
-                1 => return Ok(matches[0]),
-                _ => {
-                    let candidates: Vec<&str> = matches.iter().map(|s| s.name.as_str()).collect();
-                    return Err(FactoryError::BadRequest(format!(
-                        "{name:?} could mean any of: {} -- name one of these instead",
-                        candidates.join(", ")
-                    )));
-                }
-            }
+                .collect(),
         }
-        Err(FactoryError::NoSuchScope(name.to_string()))
     }
 
     /// `name`'s canonical identity, for joining data written under the name a
@@ -4160,5 +4102,14 @@ mod tests {
 
         let typo = yaml.replace("max_age:", "max_gae:");
         assert!(serde_yaml_ng::from_str::<Scope>(&typo).is_err());
+    }
+}
+
+impl factory_kernel::ScopeIdentity for Scope {
+    fn scope_name(&self) -> &str {
+        &self.name
+    }
+    fn scope_path(&self) -> &Path {
+        &self.path
     }
 }
