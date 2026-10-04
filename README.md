@@ -569,13 +569,22 @@ session:
    token. The token is never on a command line, where it would sit in the
    host's process table, and the host copy of the env file is removed once
    it is uploaded.
-4. **Launch.** The herdr pane runs one short line, `sh '<state>/pane.sh'`,
+4. **Launch.** The herdr pane runs one short line, `bash '<state>/pane.sh'`,
    whose one command is `openshell sandbox exec --tty` of the in-sandbox
    launcher: it sources the env file and starts `claude` with the same
    arguments as on the host (guide, hook settings, declared args), with the
    prompt as its first message -- typed into a TUI through a pty, a
    multi-line prompt would submit at its first newline. The run is still
    visible in its pane, and `factory task output` still reads it.
+   `openshell` runs there under the harness's own argv0 (`exec -a claude`),
+   which is how herdr recognises an agent in a pane, so the herdr runtime
+   holds the session as the agent it is -- named like any run, listed by
+   `herdr agent list`, with herdr's working/idle status, `agent prompt` for
+   later input and `herdr agent attach` -- rather than as a shell. If herdr
+   never sees it, the run goes on as a shell pane, with a warning logged.
+   The image's managed settings switch off dynamic workflows and deny
+   `AskUserQuestion` and plan mode: each stops for an answer, and nobody is
+   at a sandboxed run's terminal to give one.
 
 When the run ends -- done, failed, cancelled -- `close_session`
 closes the pane, and then, in the background so the run's own status is

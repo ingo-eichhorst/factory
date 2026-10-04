@@ -136,6 +136,7 @@ impl Agent for HarnessAgent {
             kind: LaunchKind::Named(self.harness.clone()),
             args,
             env,
+            agent_kind: None,
         })
     }
 
@@ -374,6 +375,7 @@ impl Agent for ShellAgent {
             kind: LaunchKind::Command(Vec::new()),
             args: Vec::new(),
             env,
+            agent_kind: None,
         })
     }
 

@@ -111,6 +111,7 @@ impl Agent for PluginAgent {
                 kind: LaunchKind::Named(name.to_string()),
                 args: Vec::new(),
                 env: wire.env,
+                agent_kind: None,
             });
         }
         let mut spec: LaunchSpec = serde_json::from_value(reply).map_err(|e| {

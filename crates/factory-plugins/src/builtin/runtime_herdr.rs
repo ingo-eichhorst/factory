@@ -545,6 +545,35 @@ impl HerdrRuntime {
         })
     }
 
+    /// Wait for herdr to recognise `kind` in `pane`, then give it `name`.
+    /// herdr knows an agent by its foreground process, and a launcher that
+    /// runs under the harness's argv0 is seen as soon as it starts; the
+    /// wait is bounded by the same timeout `agent start` is.
+    async fn hold_as_agent(&self, pane: &str, kind: &str, name: &str) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + self.start_timeout;
+        loop {
+            let seen = match self.run(&[s("agent"), s("get"), s(pane)]).await {
+                Ok(got) => {
+                    let agent = got.get("agent").filter(|a| a.is_object()).unwrap_or(&got);
+                    agent.get("agent").and_then(Value::as_str) == Some(kind)
+                }
+                // `agent_not_found` until herdr has looked at the pane.
+                Err(_) => false,
+            };
+            if seen {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(FactoryError::adapter(
+                    ADAPTER,
+                    format!("pane {pane} never showed a {kind} agent"),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        self.run(&[s("agent"), s("rename"), s(pane), s(name)]).await.map(|_| ())
+    }
+
     fn pane_of(session: &SessionRef) -> &str {
         &session.handle
     }
@@ -1006,6 +1035,24 @@ impl AgentRuntime for HerdrRuntime {
                     }
                 }
                 meta.insert("mode".into(), "shell".into());
+                // `#218`: a command that brings up a known agent itself -- a
+                // harness inside a sandbox -- is held as that agent, under
+                // this session's name, like one `agent start` brought up. If
+                // herdr never sees it, the run still goes on as a shell: the
+                // agent is working either way, only unlabelled.
+                if let Some(kind) = &req.launch.agent_kind {
+                    match self.hold_as_agent(&pane, kind, &req.name).await {
+                        Ok(()) => {
+                            meta.insert("mode".into(), "agent".into());
+                            meta.insert("agent_name".into(), req.name.clone());
+                        }
+                        Err(e) => tracing::warn!(
+                            pane = %pane,
+                            name = %req.name,
+                            "herdr did not see the {kind} agent this launch brings up; the session stays a shell: {e}"
+                        ),
+                    }
+                }
             }
         }
 
@@ -1592,6 +1639,72 @@ fi
             !dir.join("explain-called").exists(),
             "a shell-mode pane must never trigger `agent explain`"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A herdr CLI whose `agent get <pane>` answers `agent_not_found` for
+    /// the first `misses` calls and then reports `kind` on that pane, and
+    /// which logs every `agent rename` it is asked for.
+    #[cfg(unix)]
+    fn fake_herdr_seeing(kind: &str, misses: u32) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("factory-herdr-hold-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("fake-herdr");
+        std::fs::write(
+            &bin,
+            format!(
+                r#"#!/bin/sh
+d='{dir}'
+if [ "$1" = agent ] && [ "$2" = get ]; then
+  n=$(cat "$d/gets" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/gets"
+  if [ $n -le {misses} ]; then
+    printf '%s\n' '{{"error":{{"code":"agent_not_found","message":"no agent"}}}}'; exit 1
+  fi
+  printf '%s\n' '{{"result":{{"agent":{{"agent":"{kind}","pane_id":"'"$3"'"}}}}}}'
+elif [ "$1" = agent ] && [ "$2" = rename ]; then
+  echo "$@" >> "$d/renames"
+  printf '%s\n' '{{"result":{{"agent":{{"agent":"{kind}","name":"'"$4"'"}}}}}}'
+else
+  exit 9
+fi
+"#,
+                dir = dir.display(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&bin).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&bin, permissions).unwrap();
+        (bin, dir)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sandboxed_harness_is_held_as_the_agent_herdr_sees_under_the_runs_name() {
+        let (bin, dir) = fake_herdr_seeing("claude", 2);
+        let runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+        runtime
+            .hold_as_agent("w1:p7", "claude", "factory-awesome-herdr-curator-7a24095b")
+            .await
+            .unwrap();
+        let renames = std::fs::read_to_string(dir.join("renames")).unwrap();
+        assert_eq!(renames.trim(), "agent rename w1:p7 factory-awesome-herdr-curator-7a24095b");
+        assert_eq!(std::fs::read_to_string(dir.join("gets")).unwrap().trim(), "3", "waited out two misses");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pane_never_seen_as_that_agent_is_refused_and_never_renamed() {
+        // herdr sees an agent there, but not the one the launch brings up.
+        let (bin, dir) = fake_herdr_seeing("codex", 0);
+        let mut runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+        runtime.start_timeout = Duration::from_millis(1200);
+        let e = runtime.hold_as_agent("w1:p7", "claude", "run-name").await.unwrap_err().to_string();
+        assert!(e.contains("never showed a claude agent"), "{e}");
+        assert!(!dir.join("renames").exists(), "nothing named that is not the agent");
         std::fs::remove_dir_all(dir).ok();
     }
 

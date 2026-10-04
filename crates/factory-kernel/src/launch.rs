@@ -25,4 +25,12 @@ pub struct LaunchSpec {
     /// as in the prompt, so an agent can read it instead of parsing prose.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// The agent kind a `Command` launch brings up itself, when it does --
+    /// a harness started inside a sandbox through a launcher (`#218`). A
+    /// runtime that detects agents can then hold that session as the agent
+    /// it is, under the session's name, exactly like one it started by
+    /// name. `None` for everything else, and absent from the wire then, so
+    /// a plugin that predates it sees the same launch it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<String>,
 }
