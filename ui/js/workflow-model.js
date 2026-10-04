@@ -341,9 +341,14 @@ export function openTaskAction(nodeRun, openTask) {
 
 /// Run data supplies completed/active rounds; the node also names a queued
 /// round that has not acquired its run yet. Legacy snapshots remain readable.
+/// #235: a part workflow's node also runs again when integration sends its
+/// part back, which spends none of a review's rounds -- the label says how
+/// many of the rounds were integration's.
 export function roundLabel(nodeRun) {
   const round = (nodeRun?.attempts ?? []).reduce((round, run) => Math.max(round, run.round || 0), nodeRun?.round || 0);
-  return round > 0 ? `rework ${round}` : "";
+  if (round <= 0) return "";
+  const integration = nodeRun?.integration_rounds || 0;
+  return integration > 0 ? `rework ${round} (${integration} from integration)` : `rework ${round}`;
 }
 
 export function roundRuns(nodeRun) {

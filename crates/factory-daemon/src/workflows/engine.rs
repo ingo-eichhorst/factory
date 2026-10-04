@@ -3047,6 +3047,12 @@ impl Engine {
             }
             None => None,
         };
+        // Named before anything is generated, so a part workflow can say it
+        // (`{{integration_branch}}`, #235); made further down.
+        let integration_branch = worktree_capable.then(|| match github.as_ref() {
+            Some((_, number)) => format!("factory/issue-{number}"),
+            None => format!("factory/task-{}", &item.id[..8.min(item.id.len())]),
+        });
         let mut labels = item.labels.clone();
         labels.insert(factory_core::intake::PARENT_LABEL.into(), item.id.clone());
         let category = item
@@ -3158,6 +3164,12 @@ impl Engine {
                 ("part_interface", interface),
                 ("parent_title", item.title.as_str()),
                 ("parent_instructions", item.instructions.trim()),
+                (
+                    "integration_branch",
+                    integration_branch
+                        .as_deref()
+                        .unwrap_or("(none: this scope cannot make worktrees, so nothing is integrated)"),
+                ),
             ]
             .into_iter()
             .map(|(name, value)| (name.to_string(), value.to_string()))
@@ -3288,17 +3300,15 @@ impl Engine {
             expand.exits_evaluated = true;
         }
         if worktree_capable {
-            let (base_ref, branch) = match github.as_ref() {
-                Some((_, number)) => {
+            let branch = integration_branch.clone().expect("named for every worktree-capable scope");
+            let base_ref = match github.as_ref() {
+                Some(_) => {
                     worktree::fetch(&scope_path, "origin", "main")
                         .await
                         .map_err(|error| FactoryError::adapter("git", error))?;
-                    ("origin/main".to_string(), format!("factory/issue-{number}"))
+                    "origin/main".to_string()
                 }
-                None => (
-                    "HEAD".to_string(),
-                    format!("factory/task-{}", &item.id[..8.min(item.id.len())]),
-                ),
+                None => "HEAD".to_string(),
             };
             let integration_dir = factory
                 .worktrees_dir()
@@ -3511,6 +3521,14 @@ impl Engine {
         caller: &Caller,
     ) -> Result<WorkflowRun> {
         let definition = self.workflow_definition(id).await?;
+        // `#235`: a part workflow is a template. Started as itself it would
+        // run once, for no part, with its `{{part_...}}` left in braces.
+        if definition.part.is_some() {
+            return Err(FactoryError::BadRequest(format!(
+                "workflow {} is a part workflow: it runs only inside an Intake decomposition, copied once per part; name it in an executable plan's routing.workflow",
+                definition.name
+            )));
+        }
         definition.validate().map_err(FactoryError::BadRequest)?;
         // `#140`: the run's inputs are written into its snapshot before
         // anything else looks at it, so what is authorized, injected and
@@ -4637,10 +4655,18 @@ impl Engine {
                     SendBack::Sent { round, max_rounds } => {
                         let feedback = task.as_ref().map(|task| [task.error.as_deref(), task.result.as_deref()]
                             .into_iter().flatten().collect::<Vec<_>>().join("\n\n"));
-                        for node in &mut run.nodes {
-                            if let Some(request) = node.rework_request.as_mut().filter(|request| request.round == round) {
-                                request.feedback = feedback.clone();
-                            }
+                        // Only the node this exit sent the work to. Another
+                        // loop in the same run -- another part's review
+                        // (#235), say -- can hold a request of the same
+                        // round number, and its findings are its own.
+                        if let Some(request) = run
+                            .nodes
+                            .iter_mut()
+                            .find(|node| node.node_id == exit.to)
+                            .and_then(|node| node.rework_request.as_mut())
+                            .filter(|request| request.from_node == from && request.round == round)
+                        {
+                            request.feedback = feedback;
                         }
                         if let Some(task_id) = &task_id {
                             self.entry(

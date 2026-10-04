@@ -500,10 +500,7 @@ impl Engine {
         // `owns`/`estimate_seconds` are the executable-plan marker. Old
         // assessments with only the legacy split shape remain proposals and
         // keep the explicit owner-approved `intake decide split` fallback.
-        let plan_shaped = assessment
-            .split
-            .iter()
-            .any(|part| !part.owns.is_empty() || part.estimate_seconds.is_some());
+        let plan_shaped = plan_shaped(&assessment);
         let executable_plan = decide && plan_shaped;
         if executable_plan {
             intake::validate_plan(&assessment.split)
@@ -542,7 +539,15 @@ impl Engine {
                     .map_err(|e| FactoryError::BadRequest(format!("part workflow {}: {e}", found.name)))?;
             } else {
                 // Refused now rather than at release: an input the run needs,
-                // or a step that is not there, is the assessor's to fix.
+                // or a step that is not there, is the assessor's to fix --
+                // and so is a part workflow, which only an executable plan
+                // can run.
+                if found.part.is_some() {
+                    return Err(FactoryError::BadRequest(format!(
+                        "workflow {} is a part workflow: it runs only for the parts of an executable plan (a split with owns and estimate_seconds); route this item to an ordinary workflow",
+                        found.name
+                    )));
+                }
                 found
                     .with_inputs(&assessment.routing.inputs)
                     .map_err(|e| FactoryError::BadRequest(format!("workflow {}: {e}", found.name)))?;
@@ -763,6 +768,15 @@ impl Engine {
                     );
                 }
                 let released_into = match &routing.workflow {
+                    // `#235`: on a plan the route is the part workflow every
+                    // part runs through. Released as one item it would run
+                    // once, for no part, and the plan would be dropped.
+                    Some(workflow) if plan_shaped(&triage.assessment) => {
+                        return Err(FactoryError::BadRequest(format!(
+                            "this assessment is a plan whose parts run through part workflow {workflow}; releasing it as one item would drop the plan. Expand it instead: `factory intake assess {} --file <assessment> --decide`",
+                            item.id
+                        )));
+                    }
                     // Routed to a workflow: the workflow run is the work, so
                     // the item is released by starting it and has nothing
                     // left to do itself. `start_workflow` checks the caller
@@ -1261,6 +1275,16 @@ impl Engine {
 }
 
 /// The item's record, if it is still inside the gate.
+/// Whether an assessment's split is an executable plan rather than a
+/// proposal: `owns`/`estimate_seconds` are the marker. Its
+/// `routing.workflow`, if any, is then the part workflow (`#235`).
+fn plan_shaped(assessment: &intake::Assessment) -> bool {
+    assessment
+        .split
+        .iter()
+        .any(|part| !part.owns.is_empty() || part.estimate_seconds.is_some())
+}
+
 fn open_record(task: &Task) -> Result<&Intake> {
     let record = task
         .intake

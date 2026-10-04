@@ -273,7 +273,10 @@ pub struct PartSpec {
 
 /// The reserved inputs a part workflow is filled with, once per part
 /// (`#235`). Nothing else may be written `{{...}}` in one.
-pub const PART_INPUTS: [&str; 8] = [
+/// `integration_branch` is the local branch every part is cut from and
+/// merged into, or a sentence saying there is none when the scope cannot
+/// make worktrees.
+pub const PART_INPUTS: [&str; 9] = [
     "part_id",
     "part_title",
     "part_instructions",
@@ -282,6 +285,7 @@ pub const PART_INPUTS: [&str; 8] = [
     "part_interface",
     "parent_title",
     "parent_instructions",
+    "integration_branch",
 ];
 
 /// A part workflow's three roles, resolved: the node `expand` and every
@@ -1201,18 +1205,21 @@ fn control_node(
 
 impl WorkflowDefinition {
     /// `before:` rules the graph breaks, in words (DECLARE's `precedence`):
-    /// a plan step that must run before a node named `X` -- by node id, or
-    /// by a gate's step -- while `X` can start with no gate for that step
-    /// upstream of it. Read off an *injected* definition, so it reports what
-    /// injection could not fix, e.g. a `publish` node with no work before
-    /// it for the scan to follow.
+    /// a plan step that must run before a node named `X` -- by node id, by
+    /// a part workflow's step id inside each part's copy (`a-X` for part
+    /// `a`, #235), or by a gate's step -- while `X` can start with no gate
+    /// for that step upstream of it. Read off an *injected* definition, so
+    /// it reports what injection could not fix, e.g. a `publish` node with
+    /// no work before it for the scan to follow.
     pub fn ordering_violations(&self, plans: &BTreeMap<String, ControlPlan>) -> Vec<String> {
         let mut out = BTreeSet::new();
         for plan in plans.values() {
             for step in plan.enforced() {
                 for target in &step.before {
                     for node in self.nodes.iter().filter(|n| {
-                        n.id == *target || n.gate.as_ref().is_some_and(|g| g.step == *target)
+                        n.id == *target
+                            || n.task.decomposition_part.as_deref().is_some_and(|part| n.id == part_node_id(part, target))
+                            || n.gate.as_ref().is_some_and(|g| g.step == *target)
                     }) {
                         let preceded = self.ancestors(&node.id).iter().any(|a| {
                             self.node(a)
@@ -1939,12 +1946,7 @@ impl WorkflowRun {
         else {
             return SendBack::NoExit;
         };
-        let Some((used, sequence)) = self
-            .nodes
-            .iter()
-            .find(|n| n.node_id == from)
-            .map(|n| (n.exit_rounds(), n.round))
-        else {
+        let Some(used) = self.nodes.iter().find(|n| n.node_id == from).map(|n| n.exit_rounds()) else {
             return SendBack::NoExit;
         };
         let max_rounds = spec.max_rounds.unwrap_or(0);
@@ -1953,12 +1955,13 @@ impl WorkflowRun {
         }
         let from_task = self.nodes.iter().find(|n| n.node_id == from).and_then(|n| n.task_id.clone()).unwrap_or_default();
         let downstream = self.definition.descendants(from);
-        // `round` counts this exit's rounds against its budget; `next` is
-        // the run sequence every node in the body moves to. They are the
-        // same number unless integration rework (#235) has sent this part
-        // round before, which never spends a review's budget.
+        // `round` counts this exit's rounds against its budget. Each node in
+        // the body moves one round past its own, rather than all to one
+        // number: a node can be ahead of `from` -- integration rework (#235)
+        // or a gate's own send-back moved it -- and a round it already ran
+        // in would be refused as superseded, or its old `done` read back as
+        // this round's.
         let round = used + 1;
-        let next = sequence + 1;
         for id in self.definition.route_back_body(from, to) {
             let Some(node) = self.nodes.iter_mut().find(|n| n.node_id == id) else {
                 continue;
@@ -1976,7 +1979,7 @@ impl WorkflowRun {
             // Leave legacy superseded ids untouched rather than rewriting history.
             node.status = WorkflowNodeStatus::Unstarted;
             node.error = None;
-            node.round = next;
+            node.round += 1;
             node.exits_evaluated = false;
             node.routed_to = None;
             node.skip_reason = None;
@@ -2067,8 +2070,13 @@ impl WorkflowRun {
                 node.skip_reason = None;
                 node.rework_request = None;
             } else if below_terminal.contains(&id) && node.task_id.is_none() {
+                // The terminal's gates move a round with it, so a gate that
+                // later sends the terminal back never lands on a round the
+                // terminal already ran.
                 node.status = WorkflowNodeStatus::Unstarted;
                 node.error = None;
+                node.round += 1;
+                node.integration_rounds += 1;
             }
         }
         self.updated_at = Utc::now();

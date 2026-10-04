@@ -3283,9 +3283,21 @@ impl Engine {
             }
         }
         if feedback_round > 0 {
+            // `#235`: a round is a run of this node's sequence, and a part
+            // workflow's node also runs again when integration sends its
+            // part back -- which spends no workflow exit's budget. Say which.
+            let integration_rounds = workflow_node.as_ref().map_or(0, |(node, _)| node.integration_rounds);
+            let title = if integration_rounds > 0 {
+                format!(
+                    "Workflow rework round {feedback_round} ({} sent back by a workflow step, {integration_rounds} by integration)",
+                    feedback_round.saturating_sub(integration_rounds)
+                )
+            } else {
+                format!("Workflow rework round {feedback_round}")
+            };
             upstream.push(UpstreamOutput {
                 node_id: "feedback-round".into(), task_id: task.id.clone(),
-                title: format!("Workflow rework round {feedback_round}"),
+                title,
                 result: Some("Feedback on the prior attempt is recorded as a new run of the same task.".into()),
             });
         }
