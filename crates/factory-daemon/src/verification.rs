@@ -1408,9 +1408,23 @@ impl Engine {
                 injections: Vec::new(),
                 violations: Vec::new(),
                 injected: None,
+                part: None,
             });
         };
         definition.validate().map_err(FactoryError::BadRequest)?;
+        // `#235`: a part workflow never runs as itself, only copied once per
+        // part into a decomposition run -- so that is what is injected and
+        // shown, over two sample parts.
+        let part = match &definition.part {
+            Some(_) => Some(definition.part_shape().map_err(FactoryError::BadRequest)?),
+            None => None,
+        };
+        let subject = definition.id.clone();
+        let scope = definition.scope.clone();
+        let definition = match &part {
+            Some(shape) => definition.part_preview(shape),
+            None => definition,
+        };
         let plans = self.control_plans(&definition).await?;
         let (mut injected, injections) = definition.inject(&plans);
         self.bind_functionaries(&mut injected)?;
@@ -1428,12 +1442,13 @@ impl Engine {
             }
         }
         Ok(WorkflowLint {
-            subject: definition.id.clone(),
-            scope: definition.scope.clone(),
+            subject,
+            scope,
             plans: plans.into_values().collect(),
             injections,
             violations,
             injected: Some(injected),
+            part,
         })
     }
 }
@@ -2308,6 +2323,80 @@ mod tests {
         let state = rejected_engine.workflow_run(&workflow.id).await.unwrap();
         let approval = state.definition.nodes.iter().find(|item| item.kind == WorkflowNodeKind::Approval).unwrap();
         assert_eq!(state.nodes.iter().find(|item| item.node_id == approval.id).unwrap().status, WorkflowNodeStatus::Blocked);
+    }
+
+    /// implement (a worktree) -> review, planned as `feature`: a part
+    /// workflow (`#235`).
+    async fn feature_part_workflow(engine: &Arc<Engine>) -> factory_core::WorkflowDefinition {
+        let mut implement = node("implement");
+        implement.task.worktree = Some(true);
+        engine
+            .create_workflow(WorkflowDraft {
+                name: "feature-part".into(),
+                scope: "demo".into(),
+                category: Some("feature".into()),
+                part: Some(factory_core::workflow::PartSpec::default()),
+                nodes: vec![implement, node("review")],
+                edges: vec![WorkflowEdge { id: "ir".into(), from: "implement".into(), to: "review".into() }],
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn lint_shows_a_part_workflow_as_every_part_gets_it() {
+        let (engine, _) = engine(TESTS_FOR_FEATURES);
+        let template = feature_part_workflow(&engine).await;
+        let lint = engine.workflow_lint(Some(template.id.clone()), None, None, None).await.unwrap();
+        let part = lint.part.clone().unwrap();
+        assert_eq!((part.entry.as_str(), part.deliverable.as_str(), part.terminal.as_str()), ("implement", "implement", "review"));
+        let mut gated: Vec<&str> = lint.injections.iter().map(|i| i.node_id.as_str()).collect();
+        gated.sort();
+        assert_eq!(gated, ["a-implement", "a-review", "b-implement", "b-review"], "every copied task node is injected");
+        let injected = lint.injected.unwrap();
+        assert!(injected.edges.iter().any(|e| e.from == "a-review.tests" && e.to == "b-implement"), "{:?}", injected.edges);
+        injected.validate().unwrap();
+
+        // The Policy tab's workflow enforcement reads the same lint.
+        let report = engine.policy_report(Some("demo")).await.unwrap();
+        let mut enforced: Vec<&str> = report
+            .workflow_enforcement
+            .iter()
+            .filter(|row| row.workflow == template.id)
+            .map(|row| row.node.as_str())
+            .collect();
+        enforced.sort();
+        assert_eq!(enforced, ["a-implement", "a-review", "b-implement", "b-review"]);
+    }
+
+    #[tokio::test]
+    async fn every_copied_task_node_of_a_decomposition_gets_its_locked_gate() {
+        let (engine, _) = engine(TESTS_FOR_FEATURES);
+        let template = feature_part_workflow(&engine).await;
+        let parent = task(&engine, None).await;
+        let parts = ["x", "y"].map(|id| factory_core::intake::SplitPart {
+            id: id.into(),
+            title: id.into(),
+            instructions: format!("build {id}"),
+            acceptance: Some("true".into()),
+            owns: vec![id.into()],
+            interface: Some(id.into()),
+            estimate_seconds: Some(60),
+            depends_on: if id == "y" { vec!["x".into()] } else { Vec::new() },
+        });
+        let routing = factory_core::intake::Routing {
+            scope: "demo".into(),
+            workflow: Some(template.id.clone()),
+            ..Default::default()
+        };
+        let run = engine.start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner).await.unwrap();
+        for work in ["x-implement", "x-review", "y-implement", "y-review"] {
+            let gate = run.definition.nodes.iter().find(|n| n.id == format!("{work}.tests")).unwrap_or_else(|| panic!("no gate after {work}"));
+            assert_eq!(gate.gate.as_ref().unwrap().subject.as_deref(), Some(work));
+            assert!(gate.gate.as_ref().unwrap().locked);
+        }
+        let _ = engine.cancel_workflow(&run.id).await;
     }
 
     #[tokio::test]

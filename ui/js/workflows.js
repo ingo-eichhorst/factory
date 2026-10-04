@@ -22,6 +22,7 @@ import {
   isDrag,
   nodeStatusClass,
   nodeTitle,
+  partGroups,
   reworkPath,
   reworkTargets,
   rootIds,
@@ -282,6 +283,11 @@ function renderCanvas() {
       <marker id="workflow-arrow-done" class="wf-edge-done" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker>
       <marker id="workflow-arrow-rework" class="wf-rework-marker" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker>
     </defs>` +
+    // #235: each part's copy of its part workflow, boxed and named.
+    partGroups(graph.nodes).map(group => `<g class="wf-part" data-part="${esc(group.part)}">
+        <rect class="wf-part-box" x="${group.x}" y="${group.y}" width="${group.width}" height="${group.height}" rx="12"/>
+        <text class="wf-part-label" x="${group.x + 12}" y="${group.y + 16}">part ${esc(group.part)}</text>
+      </g>`).join("") +
     graph.edges.map(edge => {
       const from = graph.nodes.find(node => node.id === edge.from), to = graph.nodes.find(node => node.id === edge.to);
       if (!from || !to) return "";
