@@ -145,17 +145,18 @@ impl Agent for HarnessAgent {
         Some(HealthProbe::version(self.harness.clone()))
     }
 
-    /// `#178`: only `claude` and `codex` ever get a `--continue` past
-    /// `resolve_continue`'s other checks -- `pi`, `opencode` and `shell`
-    /// declare none, which is what sends `--continue` straight to the
-    /// fresh-session fallback for them, journaled with this exact reason.
+    /// Recorded identities only; never an interactive picker or "latest".
     fn resume_spec(&self, session_id: &str) -> Option<ResumeSpec> {
+        if session_id.is_empty() || session_id.starts_with('-') || session_id.chars().any(char::is_control) {
+            return None;
+        }
         match self.harness.as_str() {
             "claude" => Some(ResumeSpec { args: vec!["--resume".into(), session_id.into()] }),
             // A subcommand, not a flag -- `Engine::dispatch` prepends this
             // ahead of everything else `launch_spec` and the scope's own
             // declared args add, which is what keeps it first.
             "codex" => Some(ResumeSpec { args: vec!["resume".into(), session_id.into()] }),
+            "pi" => Some(ResumeSpec { args: vec!["--session".into(), session_id.into()] }),
             _ => None,
         }
     }
@@ -498,6 +499,19 @@ mod tests {
     use factory_core::adapter::agent::TaskBinding;
     use factory_core::task::{Task, TaskStatus};
     use std::path::PathBuf;
+
+    #[test]
+    fn resume_specs_use_only_recorded_identities() {
+        for (harness, prefix) in [("claude", "--resume"), ("codex", "resume"), ("pi", "--session")] {
+            let agent = HarnessAgent::new(harness, harness, "test");
+            assert_eq!(agent.resume_spec("recorded-id").unwrap().args, vec![prefix, "recorded-id"]);
+            for invalid in ["", "--latest", "bad\nidentity"] {
+                assert!(agent.resume_spec(invalid).is_none());
+            }
+        }
+        let agent = HarnessAgent::new("opencode", "opencode", "test");
+        assert!(agent.resume_spec("recorded-id").is_none());
+    }
 
     fn sample_task() -> Task {
         let now = chrono::Utc::now();

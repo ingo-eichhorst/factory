@@ -336,11 +336,22 @@ export function openTaskAction(nodeRun, openTask) {
 
 // ------------------------------------------------------ #143: run-mode rework
 
-/// "rework 2" on a node run that work has been sent back through, "" on its
-/// first pass. The engine titles that round's task "<title> (rework 2)", so
-/// the canvas and the task list say the same thing.
+/// Run data supplies completed/active rounds; the node also names a queued
+/// round that has not acquired its run yet. Legacy snapshots remain readable.
 export function roundLabel(nodeRun) {
-  return nodeRun?.round > 0 ? `rework ${nodeRun.round}` : "";
+  const round = (nodeRun?.attempts ?? []).reduce((round, run) => Math.max(round, run.round || 0), nodeRun?.round || 0);
+  return round > 0 ? `rework ${round}` : "";
+}
+
+export function roundRuns(nodeRun) {
+  if (!nodeRun?.task_id) return [];
+  return (nodeRun.attempts ?? []).map(run => {
+    const round = run.round ? `rework ${run.round}` : "first pass";
+    return {
+      taskId: nodeRun.task_id, runId: run.run_id,
+      label: `${round} · attempt ${run.attempt} · ${run.status}`,
+    };
+  });
 }
 
 /// The tasks earlier rounds spawned on this node, oldest first.

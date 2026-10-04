@@ -31,6 +31,7 @@ mod policies;
 mod power;
 mod production;
 mod quality;
+mod resume;
 mod roles;
 mod scenarios;
 mod scheduler;

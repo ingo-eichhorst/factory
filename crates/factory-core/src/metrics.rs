@@ -297,7 +297,7 @@ fn first_pass_yield_def() -> MetricDef {
         "first_pass_yield",
         "First-pass yield",
         "Finished runs that ended done without being rework -- a re-attempt of work that did \
-         not succeed, not merely a repeat firing -- over finished, over the trailing 28 days. \
+         not succeed, including workflow feedback rounds, not merely a repeat firing -- over finished, over the trailing 28 days. \
          Not `1 - reworked/finished`: a run scrapped on every attempt is `0.0` here, whatever \
          `reworked` says.",
         Unit::Ratio,
@@ -371,7 +371,7 @@ fn rework_rate_def() -> MetricDef {
         "Rework rate",
         "reworked/finished, over the trailing 28 days -- production.rs's own reworked \
          bucket: a retry, or a manual or workflow run of a task whose previous attempt failed \
-         or was cancelled. A scheduled firing is never rework, however many came before it.",
+         or was cancelled, or a workflow feedback round even after a done verdict. A scheduled firing is never rework, however many came before it.",
         Unit::Ratio,
         Better::Lower,
         OPERATIONS_SOURCE,

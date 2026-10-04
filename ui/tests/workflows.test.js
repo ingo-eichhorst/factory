@@ -36,6 +36,7 @@ import {
   reworkRequestText,
   reworkSentence,
   roundLabel,
+  roundRuns,
   runInputs,
   saveDraft,
   setInputField,
@@ -813,6 +814,21 @@ test("#143 the superseded tasks are the earlier rounds', oldest first", () => {
   assert.deepEqual(supersededTasks(run.nodes[1]), ["i1"]);
   assert.deepEqual(supersededTasks(run.nodes[3]), []);
   assert.deepEqual(supersededTasks(null), []);
+});
+
+test("#178 feedback rounds link runs of one task, retaining legacy task history", () => {
+  const node = { task_id: "same-task", attempts: [
+    { run_id: "first", round: 0, attempt: 1, status: "done" },
+    { run_id: "second", round: 1, attempt: 2, status: "running" },
+  ] };
+  assert.equal(roundLabel(node), "rework 1");
+  assert.deepEqual(roundRuns(node).map(run => [run.taskId, run.runId]), [
+    ["same-task", "first"], ["same-task", "second"],
+  ]);
+  assert.match(roundRuns(node)[1].label, /rework 1.*attempt 2.*running/);
+  assert.equal(roundLabel({ ...node, round: 2 }), "rework 2", "a queued round is visible before dispatch");
+  assert.deepEqual(roundRuns(null), []);
+  assert.deepEqual(roundRuns({ attempts: node.attempts }), [], "no links without the standing task id");
 });
 
 test("#143 the target node says who sent the work back, by the run's own title, and which round", () => {

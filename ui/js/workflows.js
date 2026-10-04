@@ -43,6 +43,7 @@ import {
   reworkRequestText,
   reworkSentence,
   roundLabel,
+  roundRuns,
   runInputs,
   saveDraft,
   setInputField,
@@ -399,15 +400,22 @@ function paintRound(el, execution, nodes) {
   const earlier = el.querySelector('[data-role="earlier"]');
   if (!earlier) return;
   const ids = supersededTasks(execution);
-  if (earlier.dataset.ids !== ids.join(" ")) {
-    earlier.dataset.ids = ids.join(" ");
-    earlier.innerHTML = ids.length ? `earlier: ${ids.map((id, i) => `<button type="button" class="wf-open-task" data-earlier-task="${esc(id)}"
-      aria-label="Open the task of ${i ? `rework ${i}` : "the first pass"} (${esc(id)})">task ${esc(id.slice(0, 8))} ↗</button>`).join(" ")}` : "";
+  const runs = roundRuns(execution);
+  const key = JSON.stringify({ ids, runs });
+  if (earlier.dataset.ids !== key) {
+    earlier.dataset.ids = key;
+    const legacyButtons = ids.map(id => `<button type="button" class="wf-open-task" data-earlier-task="${esc(id)}">task ${esc(id.slice(0, 8))} ↗</button>`).join(" ");
+    const runButtons = runs.map(run => `<button type="button" class="wf-open-task" data-round-run="${esc(run.runId)}" data-round-task="${esc(run.taskId)}">${esc(run.label)} ↗</button>`).join(" ");
+    earlier.innerHTML = (ids.length ? `legacy tasks: ${legacyButtons} ` : "")
+      + (runs.length > 1 ? `runs: ${runButtons}` : "");
     for (const button of earlier.querySelectorAll("[data-earlier-task]")) {
-      button.onclick = event => { event.stopPropagation(); openTask(button.dataset.earlierTask); };
+      button.onclick = event => { event.stopPropagation(); void openTask(button.dataset.earlierTask); };
+    }
+    for (const button of earlier.querySelectorAll("[data-round-run]")) {
+      button.onclick = event => { event.stopPropagation(); void openTask(button.dataset.roundTask, button.dataset.roundRun); };
     }
   }
-  earlier.hidden = !ids.length;
+  earlier.hidden = !ids.length && runs.length < 2;
 }
 
 /// Each rework curve, drawn to the cards' rendered heights -- which a run can
@@ -486,7 +494,7 @@ function wireNode(element) {
     // pointer on the card first would swallow the port/open-task button's
     // own click. The port itself is hidden in Run mode (see app.css), so
     // this exclusion only ever matters in Design mode.
-    if (event.button !== 0 || event.target.closest('[data-role="open-task"], [data-port], [data-earlier-task]')) return;
+    if (event.button !== 0 || event.target.closest('[data-role="open-task"], [data-port], [data-earlier-task], [data-round-run]')) return;
     // Run mode never repositions a node -- there is nothing to drag -- but
     // a click there still selects it (R5), so pointer handling stays wired
     // rather than bailing out the way keyboard movement does.
@@ -591,7 +599,7 @@ function renderInspector() {
   $("workflow-node-fields").hidden = !node;
   const key = `${mode}:${graph.id}:${selectedNode || ""}:${graph.revision}:${currentRun?.id || ""}`;
   const selectionChanged = key !== inspectorRenderedFor;
-  for (const id of ["workflow-name", "workflow-description", "workflow-node-title", "workflow-node-instructions", "workflow-node-agent", "workflow-node-worktree", "workflow-node-estimate", "workflow-node-ack", "workflow-node-timeout", "workflow-node-blocked"]) {
+  for (const id of ["workflow-name", "workflow-description", "workflow-node-title", "workflow-node-instructions", "workflow-node-agent", "workflow-node-worktree", "workflow-node-session", "workflow-node-estimate", "workflow-node-ack", "workflow-node-timeout", "workflow-node-blocked"]) {
     $(id).disabled = readOnly;
   }
   $("workflow-scope").value = graph.scope;
@@ -619,6 +627,7 @@ function renderInspector() {
   $("workflow-node-instructions").value = node.task.instructions || "";
   $("workflow-node-agent").value = node.task.agent || "";
   $("workflow-node-worktree").checked = node.task.worktree !== false;
+  $("workflow-node-session").value = node.session || "resume";
   $("workflow-node-estimate").value = node.task.estimate_seconds ?? "";
   $("workflow-node-ack").value = node.task.ack_timeout_seconds ?? "";
   $("workflow-node-timeout").value = node.task.timeout_seconds ?? "";
@@ -798,6 +807,7 @@ function readEditor() {
     node.task.scope = current.scope;
     node.task.agent = $("workflow-node-agent").value || null;
     node.task.worktree = $("workflow-node-worktree").checked;
+    node.session = $("workflow-node-session").value;
     node.task.estimate_seconds = number("workflow-node-estimate");
     node.task.ack_timeout_seconds = number("workflow-node-ack");
     node.task.timeout_seconds = number("workflow-node-timeout");
@@ -1234,7 +1244,7 @@ export function wireWorkflows() {
   for (const button of $("workflow-mode").querySelectorAll("[data-mode]")) {
     button.onclick = () => setMode(button.dataset.mode);
   }
-  for (const id of ["workflow-name", "workflow-description", "workflow-node-title", "workflow-node-instructions", "workflow-node-agent", "workflow-node-worktree", "workflow-node-estimate", "workflow-node-ack", "workflow-node-timeout", "workflow-node-blocked"]) {
+  for (const id of ["workflow-name", "workflow-description", "workflow-node-title", "workflow-node-instructions", "workflow-node-agent", "workflow-node-worktree", "workflow-node-session", "workflow-node-estimate", "workflow-node-ack", "workflow-node-timeout", "workflow-node-blocked"]) {
     $(id).oninput = () => { readEditor(); markDirty(); renderCanvas(); renderSummary(); renderNodeUses(); };
   }
   const canvas = $("workflow-canvas");
