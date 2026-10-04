@@ -2008,7 +2008,10 @@ named workflow breaks the part-workflow contract, or when it gives
 `routing.inputs`: Factory fills each copy with the part's own values.
 `routing.agents` picks an agent per step of the template, for every part. The
 decision records which template was used (`decision.part_workflow`), and the
-release result names it. The contract, the reserved inputs and the per-part
+release result names it. A part workflow never runs as itself: an item that is
+not a plan cannot be routed to one, and `intake decide <id> ready` refuses a
+plan whose route is one, since releasing it as one item would drop the plan.
+Expand it with `intake assess --decide` instead. The contract, the reserved inputs and the per-part
 integration rule are described under [Workflows](#dynamic-expansion-and-integration-180).
 
 For a GitHub item, Factory fetches `origin/main` once and creates
@@ -3455,7 +3458,12 @@ edges:
 - **Reserved inputs.** Each copy's titles, instructions and label values get
   `{{part_id}}`, `{{part_title}}`, `{{part_instructions}}`,
   `{{part_acceptance}}`, `{{part_owns}}`, `{{part_interface}}`,
-  `{{parent_title}}` and `{{parent_instructions}}`. Underscores, not dots:
+  `{{parent_title}}`, `{{parent_instructions}}` and `{{integration_branch}}`
+  -- the local branch every part is cut from and merged into
+  (`factory/issue-<n>`, or `factory/task-<id>`), or a sentence saying there is
+  none in a scope that cannot make worktrees. A step that sends work back
+  names its target as it is in the copy: `--send-to {{part_id}}-implement`,
+  never the bare template id, which no longer exists. Underscores, not dots:
   an input name is `[A-Za-z_][A-Za-z0-9_-]*`, so `{{part.x}}` would not be a
   placeholder. A task node that uses none of them still learns its part. Its
   title gets `: <part title>` appended. The brief a part without a template is
@@ -3477,8 +3485,18 @@ edges:
   parts do. Control-plan injection runs after expansion, so every copied
   task node gets its locked gates. `factory workflow lint` on a part
   workflow shows exactly that, over two sample parts (`b` after `a`), and so
-  does the Policy tab's workflow enforcement. Each part is laid out as one
-  row, and the canvas draws a labelled box around each part's nodes.
+  does the Policy tab's workflow enforcement. A control plan's `before:` rule
+  naming a template step (`before: publish`) is checked against that step in
+  every copy (`a-publish`). Each part is laid out as one row, and the canvas
+  draws a labelled box around each part's nodes. A part workflow cannot be
+  started as itself (`factory workflow start` refuses it): it would run once,
+  for no part, with its placeholders still in braces.
+- **Worktrees a step shares.** Factory resumes a step's session in its
+  worktree, reuses that worktree for the next round, and releases it at the
+  end only while its HEAD is still on the branch Factory made for it. So a
+  step that needs another step's work, like `epic-part.yaml`'s review, points
+  its own branch at it (`git reset --hard <their branch>`) and diffs against
+  `{{integration_branch}}`. It never detaches HEAD or switches branch.
 - **Integration, per part.** `IntegrationPart.node_id` stays the
   **deliverable**: the newest run of that node supplies the worktree and
   branch to merge, `merged_nodes` is keyed by it, and a merge conflict or
@@ -3499,7 +3517,12 @@ edges:
   against `expand.max_rework_rounds` per part (`integration_rounds`), apart
   from the review's own `max_rounds`. A review loop never spends integration
   rework, and integration rework never spends the review's rounds. When the
-  budget is used up, the deliverable fails and the run fails, as before.
+  budget is used up, the deliverable fails and the run fails, as before. A
+  node's rework count says how many of its rounds were integration's:
+  `rework 2 (1 from integration)` on the canvas, and "Workflow rework round 2
+  (1 sent back by a workflow step, 1 by integration)" in the prompt. A
+  send-back's findings go to the one node that exit names, so two parts'
+  reviews sending back at once each reach their own implementer.
 - **Stored runs.** A run written before this change has no `terminal_node`.
   Each of its parts is the one node `node_id`, which plays all three roles,
   and it loads and integrates as it always did. A plan without a template
@@ -3557,8 +3580,11 @@ edges:
   nodes count as finished, and a child is eligible when every predecessor is
   done or skipped by route and at least one is done. A backward exit sends the
   path from `to` through the reporting node back to `unstarted`. Each node
-  keeps its task id and title and starts a new run: `workflow_round` records
-  the round, and the target run's `feedback` freezes the sender's findings.
+  keeps its task id and title and starts a new run. Each moves one round past
+  its own, so no node is sent back onto a round it already ran, even when a
+  gate or integration rework moved it ahead of the sender. `workflow_round`
+  records the round, and the target run's `feedback` freezes the sender's
+  findings, which reach that target only.
   The canvas links each attempt to that same task's run history. `to`'s next
   run is dispatched with the sender's `--result` as an extra upstream entry,
   "... sent this work back -- rework round k of N". Once every round is used,

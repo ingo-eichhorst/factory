@@ -2860,6 +2860,176 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    // --- #235 follow-up: QA of #238 -----------------------------------------
+
+    /// Report `done` for the task's active run without advancing its
+    /// workflow, so several reports can land before one advance does.
+    async fn report_only(engine: &Arc<Engine>, task_id: &str, result: &str, send_to: Option<&str>) {
+        let run = loop {
+            if let Some(run) = engine.store.active_run(task_id).await.unwrap() {
+                break run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        engine
+            .report(
+                task_id,
+                TaskReport {
+                    artifacts: Vec::new(),
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: Some(result.into()),
+                    send_to: send_to.map(str::to_string),
+                    error: None,
+                    token: run.token,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn each_parts_review_findings_reach_only_that_parts_implement() {
+        let engine = engine();
+        let template = part_workflow(&engine, 5).await;
+        let parent = engine
+            .create(NewTask { title: "Epic".into(), scope: Some("demo".into()), worktree: Some(false), ..Default::default() })
+            .await
+            .unwrap();
+        let parts = vec![epic_part("a", &[], "true"), epic_part("b", &[], "true")];
+        let routing = Routing {
+            scope: "demo".into(),
+            agent: Some("shell".into()),
+            workflow: Some(template.id.clone()),
+            ..Default::default()
+        };
+        let run = engine.start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner).await.unwrap();
+        let all = tasks(&engine).await;
+        let id = |node: &str| task_of(&all, node).id.clone();
+        for part in ["a", "b"] {
+            report_done(&engine, &id(&format!("{part}-implement")), "built", None).await;
+            wait_for_attempt(&engine, &id(&format!("{part}-review")), 1).await;
+        }
+
+        // Both reviews send back before one advance sees either: one
+        // advance evaluates both exits, at the same round number.
+        report_only(&engine, &id("a-review"), "FINDING FOR A", Some("a-implement")).await;
+        report_only(&engine, &id("b-review"), "FINDING FOR B", Some("b-implement")).await;
+        engine.advance_workflow(&run.id).await.unwrap();
+        for (part, mine, theirs) in [("a", "FINDING FOR A", "FINDING FOR B"), ("b", "FINDING FOR B", "FINDING FOR A")] {
+            let rework = wait_for_attempt(&engine, &id(&format!("{part}-implement")), 2).await;
+            let feedback = rework.feedback.as_ref().unwrap().feedback.clone().unwrap();
+            assert!(feedback.contains(mine) && !feedback.contains(theirs), "{part}-implement was dispatched with {feedback:?}");
+        }
+
+        // One after the other: the second send-back leaves the first
+        // part's stored request alone.
+        for part in ["a", "b"] {
+            report_done(&engine, &id(&format!("{part}-implement")), "fixed", None).await;
+            wait_for_attempt(&engine, &id(&format!("{part}-review")), 2).await;
+        }
+        report_done(&engine, &id("b-review"), "SECOND FOR B", Some("b-implement")).await;
+        wait_for_attempt(&engine, &id("b-implement"), 3).await;
+        report_done(&engine, &id("a-review"), "SECOND FOR A", Some("a-implement")).await;
+        let a_rework = wait_for_attempt(&engine, &id("a-implement"), 3).await;
+        assert!(a_rework.feedback.unwrap().feedback.unwrap().contains("SECOND FOR A"));
+        let after = engine.workflow_run(&run.id).await.unwrap();
+        let b_request = node_run(&after, "b-implement").rework_request.clone().unwrap();
+        assert_eq!(b_request.from_node, "b-review");
+        assert_eq!(b_request.feedback.as_deref(), Some("SECOND FOR B"), "A's send-back did not overwrite B's request");
+        let _ = engine.cancel_workflow(&run.id).await;
+    }
+
+    #[tokio::test]
+    async fn a_part_workflow_cannot_be_started_as_itself() {
+        let engine = engine();
+        let template = part_workflow(&engine, 5).await;
+        let refused = engine.start_workflow(&template.id, Default::default(), &Caller::Owner).await.unwrap_err().to_string();
+        assert!(refused.contains("is a part workflow: it runs only inside an Intake decomposition"), "{refused}");
+        assert!(tasks(&engine).await.is_empty(), "nothing titled \"Implement {{{{part_title}}}}\" exists");
+        assert!(engine.workflows.runs(Some(&template.id), None, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_epic_part_review_stays_on_its_own_branch_so_factory_can_resume_and_release_it() {
+        let draft: WorkflowDraft =
+            serde_yaml_ng::from_str(include_str!("../../../../workflows/epic-part.yaml")).unwrap();
+        let review = draft.nodes.iter().find(|node| node.id == "review").unwrap();
+        assert!(review.task.instructions.contains("git reset --hard <their branch>"), "{}", review.task.instructions);
+        assert!(!review.task.instructions.contains("switch --detach"));
+
+        // What the template tells the review to do, against the owner and
+        // resume checks a review's worktree has to pass.
+        let root = std::env::temp_dir().join(format!("factory-epic-review-{}", uuid::Uuid::new_v4()));
+        let repo = epic_repo(&root).await;
+        let owner = crate::worktree::Owner::new(root.join("worktrees"));
+        let spec = || factory_kernel::WorkspaceSpec {
+            task_id: uuid::Uuid::new_v4().to_string(),
+            workflow_run_id: None,
+            lifetime: factory_kernel::WorkspaceLifetime::Task,
+        };
+        let (kept, _) = owner
+            .provision(spec(), &repo, root.join("worktrees/review"), "factory/review-a".into(), Some("main"))
+            .await
+            .unwrap();
+        let (detached, _) = owner
+            .provision(spec(), &repo, root.join("worktrees/detached"), "factory/review-b".into(), Some("main"))
+            .await
+            .unwrap();
+        // The implementer's branch, whose work the integration branch -- here
+        // the scope's own HEAD -- already holds.
+        git_ok(&repo, &["switch", "-q", "-c", "factory/part-a"]).await;
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git_ok(&repo, &["add", "a.txt"]).await;
+        git_ok(&repo, &["commit", "-q", "-m", "part a"]).await;
+        git_ok(&repo, &["switch", "-q", "main"]).await;
+        git_ok(&repo, &["merge", "-q", "--ff-only", "factory/part-a"]).await;
+
+        git_ok(&kept.path, &["reset", "-q", "--hard", "factory/part-a"]).await;
+        assert!(kept.path.join("a.txt").exists(), "the review sees the part's work");
+        assert!(crate::resume::on_branch(&kept.path, &kept.branch).await, "resume and reuse accept it");
+        git_ok(&detached.path, &["switch", "-q", "--detach", "factory/part-a"]).await;
+        assert!(!crate::resume::on_branch(&detached.path, &detached.branch).await);
+
+        let outcomes = owner.release(&[kept.path.clone(), detached.path.clone()]).await.unwrap();
+        let outcome = |path: &Path| outcomes.iter().find(|(record, _)| record.path == path).unwrap().1.clone();
+        assert_eq!(outcome(&kept.path), Ok(()), "released like any finished worktree");
+        assert!(!kept.path.exists());
+        assert!(outcome(&detached.path).unwrap_err().contains("workspace branch changed"), "what the old template caused");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_rework_round_says_how_many_were_integrations() {
+        assert_eq!(crate::engine::feedback_round_title(2, 0), "Workflow rework round 2");
+        assert_eq!(
+            crate::engine::feedback_round_title(2, 1),
+            "Workflow rework round 2 (1 sent back by a workflow step, 1 by integration)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dependant_hears_its_prerequisites_result_once() {
+        let engine = engine();
+        let parent = engine
+            .create(NewTask { title: "Two slices".into(), scope: Some("demo".into()), worktree: Some(false), ..Default::default() })
+            .await
+            .unwrap();
+        let parts = vec![epic_part("a", &[], "true"), epic_part("b", &["a"], "true")];
+        let routing = Routing { scope: "demo".into(), agent: Some("shell".into()), ..Default::default() };
+        let run = engine.start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner).await.unwrap();
+        let all = tasks(&engine).await;
+        let a = task_of(&all, "a").clone();
+        let b = task_of(&all, "b").clone();
+        assert_eq!(b.depends_on, vec![a.id.clone()], "a is b's dependency");
+        assert!(run.definition.edges.iter().any(|edge| edge.from == "a" && edge.to == "b"), "and its workflow parent");
+        report_done(&engine, &a.id, "A RESULT", None).await;
+        let outputs = engine.upstream_outputs(&engine.require(&b.id).await.unwrap()).await;
+        assert_eq!(outputs.iter().filter(|output| output.task_id == a.id).count(), 1, "{outputs:?}");
+        assert_eq!(outputs[0].result.as_deref(), Some("A RESULT"));
+        let _ = engine.cancel_workflow(&run.id).await;
+    }
+
     #[tokio::test]
     async fn expand_join_can_tolerate_a_declared_number_of_failed_children() {
         let engine = engine();
@@ -3059,6 +3229,12 @@ impl Engine {
             }
             None => None,
         };
+        // Named before anything is generated, so a part workflow can say it
+        // (`{{integration_branch}}`, #235); made further down.
+        let integration_branch = worktree_capable.then(|| match github.as_ref() {
+            Some((_, number)) => format!("factory/issue-{number}"),
+            None => format!("factory/task-{}", &item.id[..8.min(item.id.len())]),
+        });
         let mut labels = item.labels.clone();
         labels.insert(factory_core::intake::PARENT_LABEL.into(), item.id.clone());
         let category = item
@@ -3170,6 +3346,12 @@ impl Engine {
                 ("part_interface", interface),
                 ("parent_title", item.title.as_str()),
                 ("parent_instructions", item.instructions.trim()),
+                (
+                    "integration_branch",
+                    integration_branch
+                        .as_deref()
+                        .unwrap_or("(none: this scope cannot make worktrees, so nothing is integrated)"),
+                ),
             ]
             .into_iter()
             .map(|(name, value)| (name.to_string(), value.to_string()))
@@ -3300,17 +3482,15 @@ impl Engine {
             expand.exits_evaluated = true;
         }
         if worktree_capable {
-            let (base_ref, branch) = match github.as_ref() {
-                Some((_, number)) => {
+            let branch = integration_branch.clone().expect("named for every worktree-capable scope");
+            let base_ref = match github.as_ref() {
+                Some(_) => {
                     worktree::fetch(&scope_path, "origin", "main")
                         .await
                         .map_err(|error| FactoryError::adapter("git", error))?;
-                    ("origin/main".to_string(), format!("factory/issue-{number}"))
+                    "origin/main".to_string()
                 }
-                None => (
-                    "HEAD".to_string(),
-                    format!("factory/task-{}", &item.id[..8.min(item.id.len())]),
-                ),
+                None => "HEAD".to_string(),
             };
             let integration_dir = factory
                 .worktrees_dir()
@@ -3523,6 +3703,14 @@ impl Engine {
         caller: &Caller,
     ) -> Result<WorkflowRun> {
         let definition = self.workflow_definition(id).await?;
+        // `#235`: a part workflow is a template. Started as itself it would
+        // run once, for no part, with its `{{part_...}}` left in braces.
+        if definition.part.is_some() {
+            return Err(FactoryError::BadRequest(format!(
+                "workflow {} is a part workflow: it runs only inside an Intake decomposition, copied once per part; name it in an executable plan's routing.workflow",
+                definition.name
+            )));
+        }
         definition.validate().map_err(FactoryError::BadRequest)?;
         // `#140`: the run's inputs are written into its snapshot before
         // anything else looks at it, so what is authorized, injected and
@@ -4649,10 +4837,18 @@ impl Engine {
                     SendBack::Sent { round, max_rounds } => {
                         let feedback = task.as_ref().map(|task| [task.error.as_deref(), task.result.as_deref()]
                             .into_iter().flatten().collect::<Vec<_>>().join("\n\n"));
-                        for node in &mut run.nodes {
-                            if let Some(request) = node.rework_request.as_mut().filter(|request| request.round == round) {
-                                request.feedback = feedback.clone();
-                            }
+                        // Only the node this exit sent the work to. Another
+                        // loop in the same run -- another part's review
+                        // (#235), say -- can hold a request of the same
+                        // round number, and its findings are its own.
+                        if let Some(request) = run
+                            .nodes
+                            .iter_mut()
+                            .find(|node| node.node_id == exit.to)
+                            .and_then(|node| node.rework_request.as_mut())
+                            .filter(|request| request.from_node == from && request.round == round)
+                        {
+                            request.feedback = feedback;
                         }
                         if let Some(task_id) = &task_id {
                             self.entry(

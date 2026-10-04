@@ -29,7 +29,10 @@ before it is merged:
 
     scripts/release.sh review-13 ../worktrees/hall-floor
 
-Release metadata lives under `~/factory-envs/<env>/`. Isolated environments
+Release metadata lives under `~/factory-envs/<env>/`, along with `src/<sha>/`, the
+exported tree a ref was built from (the newest three are kept). It is not a
+scratch copy: the daemon's OpenShell provisioner builds the sandbox image's
+`factory` CLI from it after the release has finished (`#234`). Isolated environments
 also keep their binary, root and log there. Staging deliberately uses the live
 `~/business-factory/.factory/` database and config so the UI shows the real
 company scopes and tasks; a release never replaces that state.
