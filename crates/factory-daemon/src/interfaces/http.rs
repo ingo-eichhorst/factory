@@ -154,6 +154,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/metrics", get(metrics))
         .route("/api/dashboard", get(dashboard).put(dashboard_set).delete(dashboard_reset))
         .route("/api/costs", get(costs))
+        .route("/api/budget", get(budget))
         .route("/api/goals", get(goals))
         .route("/api/goals/checkins", post(create_goals_checkin))
         .route("/api/scenarios", get(scenarios))
@@ -849,6 +850,21 @@ async fn costs(State(engine): State<Arc<Engine>>, Query(q): Query<CostsQuery>) -
 
 async fn task_usage(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
     run(&engine, Request::TaskUsage { id }).await
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BudgetQuery {
+    scope: Option<String>,
+    group_by: Option<String>,
+}
+
+async fn budget(State(engine): State<Arc<Engine>>, Query(q): Query<BudgetQuery>) -> AxumResponse {
+    let group_by = match q.group_by.as_deref().unwrap_or("scope").parse() {
+        Ok(value) => value,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e))).into_response(),
+    };
+    run(&engine, Request::Budget { scope: q.scope.filter(|s| !s.trim().is_empty()), group_by }).await
 }
 
 async fn run_usage(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
@@ -2412,6 +2428,27 @@ mod tests {
 
         let (status, _) = request(engine, "GET", "/api/tasks/nope/usage", None).await;
         assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
+    async fn budget_http_default_group_all_groups_and_strict_bad_queries() {
+        let engine = engine_with_quality();
+        for group in ["scope", "agent", "issue", "workflow", "provider"] {
+            let (status,json) = request(engine.clone(), "GET", &format!("/api/budget?group_by={group}"), None).await;
+            assert_eq!(status, 200, "{json}");
+            assert_eq!(json["data"]["kind"], "budget");
+            assert_eq!(json["data"]["report"]["group_by"], group);
+            assert_eq!(json["data"]["report"]["spend"]["total"]["runs"], 0);
+        }
+        let (status,json) = request(engine.clone(), "GET", "/api/budget", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["report"]["group_by"], "scope");
+        let (status,_) = request(engine.clone(), "GET", "/api/budget?scope=nope", None).await;
+        assert_eq!(status, 404);
+        for uri in ["/api/budget?group_by=bogus", "/api/budget?group_by=", "/api/budget?monthly_usd=500"] {
+            let (status, _) = request(engine.clone(), "GET", uri, None).await;
+            assert_eq!(status, 400, "{uri}");
+        }
     }
 
     #[tokio::test]

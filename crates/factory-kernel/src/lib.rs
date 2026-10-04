@@ -31,6 +31,8 @@ mod ports;
 mod provenance;
 pub use provenance::*;
 mod stats;
+mod spend;
+pub use spend::{CostGroupBy, CostReport, CostRow, DailySpend, TokenSums};
 pub use facts::{EnvironmentMetricFact, KnowledgeTags, ScopeCapacityFact};
 pub use ports::{FactProvider, FactValue, Provide};
 

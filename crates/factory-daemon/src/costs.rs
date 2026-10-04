@@ -24,14 +24,16 @@ use factory_core::event::Event;
 use factory_core::run::{Run, RunPatch};
 use factory_core::task::Task;
 use factory_core::usage::{
-    allocate_plan_share, run_usage, run_usage_with_prior, CostGroupBy, CostReport, CostRow, EstimateComparison,
-    HarnessUsage, ReEstimate, RunUsage, RunUsageEntry, SnapshotPoint, SpendQuery, TaskUsage, UsageSnapshot,
+    allocate_plan_share, run_usage, run_usage_with_prior, CostGroupBy, CostRow, CostRowExt, EstimateComparison,
+    HarnessUsage, ReEstimate, RunUsage, RunUsageEntry, SnapshotPoint, TaskUsage, UsageSnapshot,
 };
+#[cfg(test)]
+use factory_core::usage::{CostReport, SpendQuery};
 
 use crate::engine::Engine;
 
 /// What `factory cost` reads when no window is given.
-const DEFAULT_WINDOW_DAYS: i64 = 30;
+pub(crate) const DEFAULT_WINDOW_DAYS: i64 = 30;
 
 /// A run's `issue` when its task has no `issue=<n>` label.
 const NO_ISSUE: &str = "(no issue)";
@@ -389,142 +391,13 @@ impl Engine {
         })
     }
 
-    /// The only spend read (#164): usage and cost summed over the runs that
-    /// started in `q.from..q.to`, grouped by `q.group_by`, narrowed to
-    /// `q.scope`'s own subtree when given. Read on request from the runs
-    /// themselves -- there is no second store of costs to drift from them.
-    /// Not wrapped: every consumer calls this and nothing else --
-    /// `Request::Costs` and `cost_week` today; phase 2/3's Budget tab,
-    /// `budget_within` and the Scenario cost drivers must too, when they
-    /// arrive -- a wrapper would leave the inner function reachable too,
-    /// which is a second path. This is the future `Provide<Spend>` of #193
-    /// phase 3.
-    pub(crate) async fn spend(&self, q: &SpendQuery) -> Result<CostReport> {
-        let to = q.to.unwrap_or_else(Utc::now);
-        let from = q.from.unwrap_or(to - Duration::days(DEFAULT_WINDOW_DAYS));
-        if from >= to {
-            return Err(factory_core::FactoryError::BadRequest(format!(
-                "the window is empty: {from} is not before {to}"
-            )));
-        }
-        let snapshot = self.factory_snapshot();
-        // A scope means its whole subtree, the reading Operations, Policy
-        // and Scenarios give it; a name that resolves to nothing is refused.
-        let (scope_name, members) = match q.scope.as_deref() {
-            None => (None, None),
-            Some(name) => {
-                let (asked, subtree) = crate::policies::subtree_scopes(&snapshot, Some(name))?;
-                let asked = asked.expect("a named scope resolves or errors");
-                let mut members: BTreeSet<String> = subtree.into_iter().map(|s| s.name).collect();
-                members.insert(asked.name.clone());
-                (Some(asked.name), Some(members))
-            }
-        };
-
-        let runs: Vec<Run> = self
-            .store
-            .runs_between(from, to)
-            .await?
-            .into_iter()
-            .filter(|r| r.started_at >= from && r.started_at < to)
-            .collect();
-        let mut tasks: BTreeMap<String, Option<Task>> = BTreeMap::new();
-        for run in &runs {
-            if !tasks.contains_key(&run.task_id) {
-                let task = self.store.get(&run.task_id).await.ok().flatten();
-                tasks.insert(run.task_id.clone(), task);
-            }
-        }
-
-        // Every workflow definition a task in this window points to, looked
-        // up once per id and cached -- the `tasks` map's own pattern above.
-        // Only built for `CostGroupBy::Workflow`, so no other grouping pays
-        // for a workflow store round trip it never asked for. A deleted
-        // definition (`get_definition` answers `None`, or errors) caches as
-        // `None`: the group still keys by `workflow_id`, just unlabelled.
-        let mut workflow_names: BTreeMap<String, Option<String>> = BTreeMap::new();
-        if q.group_by == CostGroupBy::Workflow {
-            for task in tasks.values().flatten() {
-                let Some(origin) = &task.workflow_origin else { continue };
-                if workflow_names.contains_key(&origin.workflow_id) {
-                    continue;
-                }
-                let name = self
-                    .workflows
-                    .get_definition(&origin.workflow_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|def| def.name);
-                workflow_names.insert(origin.workflow_id.clone(), name);
-            }
-        }
-
-        let now = Utc::now();
-        let mut rows: BTreeMap<String, CostRow> = BTreeMap::new();
-        let mut total = CostRow::new("total", None);
-        // `median_actual_over_expected` (`#168`) needs every ratio at once
-        // (a nearest-rank median), so each group's own ratios are gathered
-        // here and folded into its `CostRow` after the loop, rather than
-        // carried on the row itself the way a running sum would be.
-        let mut ratios: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-        let mut total_ratios: Vec<f64> = Vec::new();
-        for run in &runs {
-            let task = tasks.get(&run.task_id).and_then(Option::as_ref);
-            if let Some(members) = &members {
-                // A deleted task's scope is unknown, so it is in no scope.
-                if !task.is_some_and(|t| members.contains(&snapshot.canonical_scope_name(&t.scope))) {
-                    continue;
-                }
-            }
-            let (key, label) = group_key(q.group_by, run, task, |s| snapshot.canonical_scope_name(s), &workflow_names);
-            let terminal_wall = run
-                .status
-                .is_terminal()
-                .then(|| (run.ended_at.unwrap_or(now) - run.started_at).num_seconds().max(0) as u64);
-            if let (Some(estimate), Some(wall)) = (run.original_estimate.as_ref(), terminal_wall) {
-                if estimate.time.expected > 0 {
-                    let ratio = wall as f64 / estimate.time.expected as f64;
-                    ratios.entry(key.clone()).or_default().push(ratio);
-                    total_ratios.push(ratio);
-                }
-            }
-            let row = rows.entry(key.clone()).or_insert_with(|| CostRow::new(key, label));
-            row.add(run.usage.as_ref());
-            row.add_estimate(run.original_estimate.as_ref(), terminal_wall);
-            total.add(run.usage.as_ref());
-            total.add_estimate(run.original_estimate.as_ref(), terminal_wall);
-        }
-        let median = |values: &mut [f64]| {
-            (!values.is_empty()).then(|| {
-                values.sort_by(f64::total_cmp);
-                values[factory_kernel::nearest_rank(values.len(), 0.5)]
-            })
-        };
-        for row in rows.values_mut() {
-            if let Some(values) = ratios.get_mut(&row.key) {
-                row.median_actual_over_expected = median(values);
-            }
-        }
-        total.median_actual_over_expected = median(&mut total_ratios);
-        let mut rows: Vec<CostRow> = rows.into_values().collect();
-        CostReport::sort_rows(&mut rows);
-        Ok(CostReport {
-            group_by: q.group_by,
-            from,
-            to,
-            scope: scope_name,
-            rows,
-            total,
-        })
-    }
 }
 
 /// Which group a run falls in, and a readable label when the key is an id.
 /// `workflow_names` is `spend`'s own memoised `workflow_id -> definition
 /// name` lookup -- empty, and never consulted, for every grouping but
 /// `Workflow`.
-fn group_key(
+pub(crate) fn group_key(
     group_by: CostGroupBy,
     run: &Run,
     task: Option<&Task>,
@@ -853,7 +726,7 @@ mod tests {
         (task, run)
     }
 
-    /// `Engine::spend`'s query, spelled the way `costs_report`'s old
+    /// The L4 spend fact's query, spelled the way `costs_report`'s old
     /// positional call used to read.
     fn spend_query(
         group_by: CostGroupBy,
@@ -1330,7 +1203,7 @@ mod tests {
         let (t2, r2) = dispatched(&engine, None).await;
         done(&engine, &t2, &r2).await;
 
-        let by_issue = engine.spend(&spend_query(CostGroupBy::Issue, None, None, None)).await.unwrap();
+        let by_issue = crate::facts::Facts::<factory_kernel::L6>::new(&engine).get::<CostReport>(&spend_query(CostGroupBy::Issue, None, None, None)).await.unwrap();
         assert_eq!(by_issue.rows.len(), 2);
         assert_eq!(by_issue.rows[0].key, "issue=117", "most expensive first");
         assert!((by_issue.rows[0].cost_usd - 1.25).abs() < 1e-9);
@@ -1340,16 +1213,16 @@ mod tests {
         assert_eq!(by_issue.total.runs_unknown, 1, "counted, never dropped");
         assert_eq!(by_issue.total.tokens.input, 1_000);
 
-        let by_agent = engine.spend(&spend_query(CostGroupBy::Agent, None, None, None)).await.unwrap();
+        let by_agent = crate::facts::Facts::<factory_kernel::L6>::new(&engine).get::<CostReport>(&spend_query(CostGroupBy::Agent, None, None, None)).await.unwrap();
         assert_eq!(by_agent.rows.len(), 1);
         assert_eq!(by_agent.rows[0].key, "demo/shell");
         assert_eq!(by_agent.rows[0].runs, 2);
 
-        let by_scope = engine.spend(&spend_query(CostGroupBy::Scope, None, None, Some("demo"))).await.unwrap();
+        let by_scope = crate::facts::Facts::<factory_kernel::L6>::new(&engine).get::<CostReport>(&spend_query(CostGroupBy::Scope, None, None, Some("demo"))).await.unwrap();
         assert_eq!(by_scope.rows[0].key, "demo");
         assert_eq!(by_scope.scope.as_deref(), Some("demo"));
 
-        let by_task = engine.spend(&spend_query(CostGroupBy::Task, None, None, None)).await.unwrap();
+        let by_task = crate::facts::Facts::<factory_kernel::L6>::new(&engine).get::<CostReport>(&spend_query(CostGroupBy::Task, None, None, None)).await.unwrap();
         assert_eq!(by_task.rows[0].key, t1.id);
         assert_eq!(by_task.rows[0].label.as_deref(), Some("costly"));
 
@@ -1358,18 +1231,18 @@ mod tests {
             .update_run(&r1.id, &RunPatch { provider_account: Some("claude-max".into()), ..Default::default() })
             .await
             .unwrap();
-        let by_provider = engine.spend(&spend_query(CostGroupBy::Provider, None, None, None)).await.unwrap();
+        let by_provider = crate::facts::Facts::<factory_kernel::L6>::new(&engine).get::<CostReport>(&spend_query(CostGroupBy::Provider, None, None, None)).await.unwrap();
         assert!(by_provider.rows.iter().any(|row| row.key == "claude-max"));
 
         // A window before any of it holds nothing; an empty one is refused.
         let past = Utc::now() - Duration::days(400);
-        let none = engine
-            .spend(&spend_query(CostGroupBy::Task, Some(past), Some(past + Duration::days(1)), None))
+        let none = crate::facts::Facts::<factory_kernel::L6>::new(&engine)
+            .get::<CostReport>(&spend_query(CostGroupBy::Task, Some(past), Some(past + Duration::days(1)), None))
             .await
             .unwrap();
         assert!(none.rows.is_empty());
-        assert!(engine.spend(&spend_query(CostGroupBy::Task, Some(past), Some(past), None)).await.is_err());
-        assert!(engine.spend(&spend_query(CostGroupBy::Task, None, None, Some("nope"))).await.is_err());
+        assert!(crate::facts::Facts::<factory_kernel::L6>::new(&engine).get::<CostReport>(&spend_query(CostGroupBy::Task, Some(past), Some(past), None)).await.is_err());
+        assert!(crate::facts::Facts::<factory_kernel::L6>::new(&engine).get::<CostReport>(&spend_query(CostGroupBy::Task, None, None, Some("nope"))).await.is_err());
     }
 
     #[tokio::test]
@@ -1475,7 +1348,7 @@ mod tests {
             .await
             .unwrap();
 
-        let report = engine.spend(&spend_query(CostGroupBy::Workflow, None, None, None)).await.unwrap();
+        let report = crate::facts::Facts::<factory_kernel::L6>::new(&engine).get::<CostReport>(&spend_query(CostGroupBy::Workflow, None, None, None)).await.unwrap();
         let by_key = |key: &str| report.rows.iter().find(|r| r.key == key);
 
         let wf_row = by_key(&definition.id).expect("the live workflow's own row");
@@ -1534,7 +1407,7 @@ mod tests {
         let wide_run = engine.store.active_run(&wide.id).await.unwrap().expect("dispatched");
         done(&engine, &wide, &wide_run).await;
 
-        let report = engine.spend(&spend_query(CostGroupBy::Task, None, None, None)).await.unwrap();
+        let report = crate::facts::Facts::<factory_kernel::L6>::new(&engine).get::<CostReport>(&spend_query(CostGroupBy::Task, None, None, None)).await.unwrap();
         let t1_row = report.rows.iter().find(|r| r.key == t1.id).expect("t1's own row");
         assert_eq!(t1_row.estimated_runs, 1);
         assert_eq!(t1_row.within_range, 0, "a real run is never exactly 900s long");

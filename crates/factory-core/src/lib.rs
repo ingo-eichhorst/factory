@@ -8,6 +8,7 @@ pub mod backup;
 pub mod bench;
 pub mod benchmark;
 pub mod building;
+pub mod budget;
 pub mod config;
 pub mod conformance;
 pub mod control_plan;

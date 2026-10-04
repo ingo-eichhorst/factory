@@ -344,6 +344,8 @@ impl Engine {
             | Request::RunUsage { .. }
             | Request::TaskUsage { .. }
             | Request::Costs { .. }
+            // Read-only authored intent and spend, like Costs and Goals.
+            | Request::Budget { .. }
             | Request::AgentOutput { .. }
             | Request::AgentScreen { .. }
             | Request::RunScreen { .. }

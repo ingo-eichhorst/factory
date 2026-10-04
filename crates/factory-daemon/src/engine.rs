@@ -1427,9 +1427,12 @@ impl Engine {
             Request::TaskUsage { id } => Ok(Payload::TaskUsage {
                 usage: self.task_usage(&id).await?,
             }),
+            Request::Budget { scope, group_by } => Ok(Payload::Budget {
+                report: self.budget_report(scope.as_deref(), group_by, Utc::now()).await?,
+            }),
             Request::Costs { group_by, from, to, scope } => Ok(Payload::Costs {
-                report: self
-                    .spend(&factory_core::usage::SpendQuery { scope, from, to, group_by })
+                report: crate::facts::Facts::<factory_kernel::L4>::new(self)
+                    .get::<factory_kernel::CostReport>(&factory_core::usage::SpendQuery { scope, from, to, group_by })
                     .await?,
             }),
             Request::RunEntries { id, limit } => Ok(Payload::Entries {

@@ -83,6 +83,7 @@ port!(TaskFact, l4, NamedQuery, BTreeMap<String, Vec<TaskFact>>);
 port!(WorkflowFact, l4, NamedQuery, BTreeMap<String, Vec<WorkflowFact>>);
 port!(AttestedRun, l4, AttestedQuery, Vec<AttestedRun>);
 port!(ArtifactProvenance, l4, String, Vec<ArtifactProvenance>);
+port!(CostReport, l4, factory_core::usage::SpendQuery, CostReport);
 port!(
     ConfirmedSecurityReport,
     l4,
@@ -110,6 +111,7 @@ mod tests {
         registered::<WorkflowFact>();
         registered::<AttestedRun>();
         registered::<ArtifactProvenance>();
+        registered::<CostReport>();
         registered::<ConfirmedSecurityReport>();
         registered::<GateFact>();
         registered::<KnowledgeTags>();
@@ -123,5 +125,17 @@ mod tests {
         wired.sort_unstable();
         catalogue.sort_unstable();
         assert_eq!(wired, catalogue);
+    }
+
+    #[test]
+    fn spend_consumers_have_no_second_aggregation_or_upward_l6_helper() {
+        let budget = include_str!("../budgets.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(budget.contains("get::<CostReport>"));
+        assert!(!budget.contains("runs_between") && !budget.contains("crate::costs"));
+        let costs = include_str!("../costs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!costs.contains("fn spend(") && !costs.contains("fn costs_report("));
+        let producer = include_str!("l4.rs");
+        assert!(!producer.contains("policies::subtree_scopes"));
+        assert!(producer.contains("impl Provide<CostReport> for Provider"));
     }
 }

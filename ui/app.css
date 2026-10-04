@@ -2482,3 +2482,20 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
 .estimate-meter { height: 5px; margin-top: 3px; overflow: hidden; border-radius: 3px; background: var(--line); }
 .estimate-meter span { display: block; height: 100%; background: var(--accent); }
 .estimate-actual[data-tone="outside"] .estimate-meter span { background: var(--bad); }
+/* L6 authored monthly caps, with explicit measured/unknown spend. */
+#view-budget .bar { flex-wrap: wrap; }
+.budget-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 16px; margin: 16px 0 24px; }
+.budget-card { border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+.budget-title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.budget-title h3 { margin: 0; overflow-wrap: anywhere; min-width: 0; }
+.budget-card .sub { overflow-wrap: anywhere; }
+.budget-card progress { width: 100%; }
+.budget-over .budget-title span { color: var(--fault); }
+.budget-unknown .budget-title span { color: var(--wait); }
+.budget-burn { display: block; width: 100%; height: 80px; margin-top: 12px; overflow: visible; }
+.budget-burn polyline { fill: none; stroke-width: 2; }
+.budget-plan { stroke: var(--muted); stroke-dasharray: 4 4; }
+.budget-observed { stroke: var(--signal); }
+.budget-spend { overflow-x: auto; }
+.budget-spend table { width: 100%; border-collapse: collapse; }
+.budget-spend td, .budget-spend th { text-align: left; padding: 10px; border-bottom: 1px solid var(--line); }

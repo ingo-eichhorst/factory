@@ -1,0 +1,12 @@
+# Copy to the instance root's .factory/budgets/limits.yaml, then replace
+# these example ids with scope.id from each scope's .factory/config.yaml
+# (also displayed on its Budget card).
+# Each cap covers its subtree; parent and child caps are independent and
+# their spend overlaps. USD, UTC calendar months. Zero is a real limit;
+# absent means unconfigured, never an inferred provider plan allowance.
+version: 1
+scopes:
+  company-stable-id:
+    monthly_usd: 500
+  project-stable-id:
+    monthly_usd: 75

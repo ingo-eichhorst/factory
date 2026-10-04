@@ -981,6 +981,15 @@ pub enum Request {
         #[serde(default)]
         scope: Option<String>,
     },
+    /// L6 authored monthly scope limits and the single L4 spend read.
+    /// UTC calendar month, with explicit unknown/partial amounts.
+    #[serde(rename = "budget")]
+    Budget {
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default = "crate::budget::default_group_by")]
+        group_by: crate::usage::CostGroupBy,
+    },
     /// Turn this connection into an event stream. Only the socket interface
     /// answers this; HTTP uses its WebSocket instead.
     #[serde(rename = "subscribe")]
@@ -1213,6 +1222,7 @@ pub enum Payload {
     UsageSnapshots { snapshots: Vec<crate::usage::UsageSnapshot> },
     /// `Request::Costs`' answer.
     Costs { report: crate::usage::CostReport },
+    Budget { report: crate::budget::Report },
 }
 
 /// A request plus who is making it.
@@ -2365,6 +2375,14 @@ pub struct Production {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn budget_wire_defaults_to_scope_and_remains_read_only() {
+        let env: Envelope = serde_json::from_str(r#"{"op":"budget","params":{}}"#).unwrap();
+        assert!(matches!(env.request, Request::Budget { scope: None, group_by: crate::usage::CostGroupBy::Scope }));
+        let env: Envelope = serde_json::from_str(r#"{"op":"budget","params":{"scope":"work","group_by":"workflow"}}"#).unwrap();
+        assert!(matches!(env.request, Request::Budget { scope: Some(_), group_by: crate::usage::CostGroupBy::Workflow }));
+    }
 
     // `flatten` over an adjacently tagged enum routes through a content buffer,
     // which is a rough edge in serde. Prove it round-trips before anything is

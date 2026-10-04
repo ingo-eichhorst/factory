@@ -1367,7 +1367,7 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met | the selected scope's quality subtree — see "Quality attributes" |
 | `unit_cost` | API-equivalent USD spent per run ended `done` (failed and cancelled runs' cost included), trailing 28 days | each run's measured usage (`Run.usage`, #117) |
 | `tokens_per_run` | mean tokens of every type per finished run, trailing 28 days | each run's measured usage (`Run.usage`, #117) |
-| `cost_week` | known API-equivalent USD spent over runs *started* (not ended) in the trailing 7 days; no value if any run in the window is unknown, cost-unknown or partial | `Engine::spend`, the same read `factory cost` and `GET /api/costs` answer from (#164) |
+| `cost_week` | known API-equivalent USD spent over runs *started* (not ended) in the trailing 7 days; no value if any run in the window is unknown, cost-unknown or partial | L4 `CostReport` fact port, the same read `factory cost`, Budget and `GET /api/costs` answer from (#164) |
 | `estimate_accuracy` | share of finished runs with an `original_estimate` whose terminal wall time fell inside its `[low, high]`, trailing 28 days | each run's `original_estimate` and wall time (`Run.original_estimate`, #168) |
 | `ready_rate` | ready decisions over every intake decision event (ready, needs-info, wontfix, split), trailing 28 days | the task journal's intake decision events (#165) |
 | `needs_info_rate` | needs-info decisions over every intake decision event, trailing 28 days -- the same shared denominator as `ready_rate` | the task journal's intake decision events (#165) |
@@ -2694,9 +2694,10 @@ task's `issue=<n>` label; grouping by `workflow` (#164) reads the task's own
 `workflow_origin.workflow_id`, labelled with that workflow definition's name
 -- `(no workflow)` for a standalone task, `(deleted task)` when the task
 itself is gone (its workflow is unknown, never "standalone"). Both
-`factory cost` and `GET /api/costs` read `Engine::spend`, the one path every
-consumer of spend -- the CLI, the HTTP endpoint, and the `cost_week` metric
-below -- calls. Sums are over the runs that knew the number, and beside them
+`factory cost` and `GET /api/costs` read the L4-owned `CostReport` fact port,
+the one path every consumer of spend -- CLI, HTTP, Budget and `cost_week` --
+calls. The plain schema lives in L0; aggregation lives in L4, with no second
+aggregate store. Sums are over the runs that knew the number, and beside them
 is how many did not: an unmeasured run is counted, never dropped and never
 free. The registry metrics `unit_cost`, `tokens_per_run`, `cost_week` and
 `estimate_accuracy` (#168) read the same usage and run data (see "Goals").
@@ -2744,8 +2745,60 @@ Intervals are bounded by when the runtime sampled each reading (the contract's
 to the runs active when it was sampled; a runtime that gives no sample time
 has the request time stand in.
 
-Not yet (v3 and later): budgets, Scenario cost drivers, the `budget_within`
+Not yet (v3 and later): Scenario cost drivers, the `budget_within`
 policy check, and runtime-specific observation work tracked outside Factory.
+
+### Monthly budgets (#164)
+
+L6 Direction's read-only **Budget** tab shows month-to-date spend per scope,
+agent, issue, workflow or provider account. Author limits in the instance
+root's `.factory/budgets/limits.yaml`, using stable scope **ids** from
+the scope's `.factory/config.yaml` (`scope.id`), not names or paths. The
+Budget cards also display each id:
+
+```yaml
+version: 1
+scopes:
+  company-stable-id: { monthly_usd: 500 }
+  project-stable-id: { monthly_usd: 75 }
+```
+
+Missing file or entry means **no authored limit**, never a guessed provider
+allowance. Zero is a real limit. Unknown fields, duplicate ids, unsupported
+versions, negative/nonfinite limits, nonregular files and files over 1 MiB
+are refused explicitly. Unrecognised scope ids remain authored and are
+reported as findings. Factory never creates or rewrites the catalogue;
+hand edits take effect on the next read, without restarting the daemon.
+See `examples/budgets/limits.yaml`.
+
+USD, UTC calendar months. A limit covers its scope and descendants by
+`Scope.path`, never a name prefix. A child limit is an additional independent
+cap, not a replacement for its parent's. Parent/child spend overlaps:
+**never sum the cards**. Selecting a subtree also shows any authored
+ancestor caps, explicitly including their spending outside that subtree.
+The separate selected-spend total has no such overlap.
+
+Runs are assigned to the month and UTC day they **started**, using the same
+`[from, to)` window as costs; historical frozen USD is never repriced. The
+observed burn-down is daily known remaining budget, with a disclosed linear
+plan; month-end pace extrapolates that measured spend, not an assumed token
+price. Unknown/partial/unpriced runs prevent a safe under-budget verdict,
+remaining amount or projection. Runs whose task/current scope cannot be
+recovered are explicitly unattributed: they might belong to the selected
+subtree, so that uncertainty also prevents a safe verdict. Known spend
+already above a cap is definitively over, even when the remainder is unknown.
+
+```sh
+factory budget --scope projects/demo --by scope
+factory budget --by workflow --json
+```
+
+`GET /api/budget?scope=&group_by=scope|agent|issue|workflow|provider` and the
+socket `budget` request return the same report (default grouping: scope).
+Like the existing cost read this is read-only, with an explicit authorization
+arm; it does not create a new role grant or imply agent roles are a security
+boundary. Authored budgets are included byte-for-byte in backup snapshots,
+loader verification and restore, not treated as daemon-owned runtime state.
 
 ## Workflows
 
@@ -3591,7 +3644,7 @@ A snapshot is one `factory-backup-<instance>-<utc>.tar.zst` holding:
   writes, and never a file copy, which WAL would make torn -- then checked with
   `PRAGMA integrity_check` before anything is archived;
 - the root `.factory/config.yaml` and every registered scope's own;
-- `.factory/{knowledge,datasets,policies,goals,scenarios,quality,vex}/`, whole;
+- `.factory/{knowledge,datasets,policies,goals,scenarios,quality,vex,intake,budgets}/`, whole;
 - a `manifest.json`, written last: instance, daemon version (there is no
   build commit compiled in, so none is claimed), the database's
   `user_version`, tables and integrity result, and the path, size and sha256
@@ -4141,6 +4194,7 @@ Below bounds, crate splitting and strict command ladder are still ahead.
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
     ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic
+    ui/js/{budget,budget-model}.js                               the L6 Budget tab and its pure shaping logic (#164)
     ui/js/{environments,environments-model}.js                   the L1 Operations tab (#185) and its pure shaping logic
     ui/js/{doctor,doctor-model}.js                               the L1 Doctor dependency view and its pure shaping logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
