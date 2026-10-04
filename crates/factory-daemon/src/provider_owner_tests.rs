@@ -47,6 +47,479 @@ fn insert_run(conn: &Connection, run: &Run) {
         params![run.id, run.task_id, run.attempt, serde_json::to_value(run.status).unwrap().as_str(), run.started_at.to_rfc3339(), run.ended_at.map(|at|at.to_rfc3339()), serde_json::to_string(run).unwrap()]).unwrap();
 }
 
+fn measurement_at(seconds: i64) -> chrono::DateTime<chrono::Utc> {
+    "2026-09-25T12:00:00Z"
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .unwrap()
+        + chrono::Duration::seconds(seconds)
+}
+
+fn measurement_run(id: &str, task: &str, start: i64, end: i64) -> Run {
+    serde_json::from_value(json!({"id":id,"task_id":task,"attempt":1,"status":"done",
+        "trigger":"manual","agent":"shell","runtime":"quiet",
+        "started_at":measurement_at(start),"ended_at":measurement_at(end)}))
+    .unwrap()
+}
+
+async fn measurement_task(
+    store: &SqliteStore,
+    id: &str,
+    scope: &str,
+) -> factory_process::task::Task {
+    let mut task = task_from_new(
+        NewTask {
+            title: id.into(),
+            category: Some("feature".into()),
+            ..Default::default()
+        },
+        scope.into(),
+        "shell".into(),
+        "quiet".into(),
+    );
+    task.id = id.into();
+    store.create(&task).await.unwrap()
+}
+
+#[tokio::test]
+async fn measurement_spend_is_live_scope_canonical_and_keeps_unattributed_runs() {
+    use factory_kernel::{CostGroupBy, CostReport, SpendBasis};
+    use factory_process::measurements::MeasurementProvider;
+    use factory_process::usage::{RunUsage, SnapshotPoint, SpendQuery, TokenCounts, UsageState};
+    let temp = TempRoot::new();
+    let path = temp.0.join("instance.sqlite");
+    let store = SqliteStore::open(&path).unwrap();
+    let workflows = WorkflowStore::open(&path).unwrap();
+    let evidence = RunEvidenceStore::open(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    for (id, scope) in [("parent", "old"), ("child", "child"), ("gone", "gone")] {
+        measurement_task(&store, id, scope).await;
+    }
+    for (id, task, cost) in [
+        ("one", "parent", Some(2.0)),
+        ("two", "child", Some(2.0)),
+        ("three", "gone", None),
+        ("four", "deleted", Some(3.0)),
+    ] {
+        let mut run = measurement_run(id, task, 0, 60);
+        run.usage = cost.map(|cost| RunUsage {
+            state: UsageState::Known,
+            reason: None,
+            cost_usd: Some(cost),
+            tokens: TokenCounts {
+                input: Some(10),
+                output: Some(0),
+                cache_read: Some(0),
+                cache_write: Some(0),
+            },
+            as_of_point: Some(SnapshotPoint::RunEnd),
+            ..RunUsage::unknown("", 2)
+        });
+        insert_run(&conn, &run);
+    }
+    let provider = MeasurementProvider::new(&store, &workflows, &evidence, scope_tree());
+    let reader = Facts::<People>::new();
+    let q = SpendQuery {
+        scope: Some("old".into()),
+        from: Some(measurement_at(-1)),
+        to: Some(measurement_at(3600)),
+        group_by: CostGroupBy::Scope,
+        basis: SpendBasis::Finished,
+    };
+    let scoped = reader.get::<CostReport, _>(&provider, &q).await.unwrap();
+    assert_eq!(scoped.scope.as_deref(), Some("engineering"));
+    assert_eq!(scoped.total.runs, 2);
+    assert_eq!(scoped.total.cost_usd, 4.0);
+    assert_eq!(
+        scoped.unattributed_runs, 2,
+        "removed scopes and deleted tasks are not free"
+    );
+    assert_eq!(scoped.daily[0].unattributed_runs, 2);
+    assert!(scoped
+        .finished
+        .unwrap()
+        .unit_cost
+        .reason
+        .unwrap()
+        .contains("unattributed"));
+    let all = reader
+        .get::<CostReport, _>(
+            &provider,
+            &SpendQuery {
+                scope: None,
+                group_by: CostGroupBy::Workflow,
+                ..q.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(all.total.runs, 4);
+    assert_eq!(all.total.runs_unknown, 1);
+    assert_eq!(all.total.cost_usd, 7.0);
+    assert!(all
+        .rows
+        .iter()
+        .any(|row| row.key == "(deleted task)" && row.label.is_none()));
+    let mut run: Run = serde_json::from_str(
+        &conn
+            .query_row("SELECT data FROM runs WHERE id='one'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    run.usage.as_mut().unwrap().cost_usd = Some(6.0);
+    update_run(&conn, &run);
+    assert_eq!(
+        reader
+            .get::<CostReport, _>(&provider, &q)
+            .await
+            .unwrap()
+            .total
+            .cost_usd,
+        8.0
+    );
+    assert!(matches!(
+        reader
+            .get::<CostReport, _>(
+                &provider,
+                &SpendQuery {
+                    scope: Some("missing".into()),
+                    ..q.clone()
+                }
+            )
+            .await
+            .unwrap_err(),
+        factory_kernel::FactoryError::NoSuchScope(_)
+    ));
+    assert!(reader
+        .get::<CostReport, _>(&provider, &SpendQuery { from: q.to, ..q })
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn measurement_production_keeps_exact_people_selection_distinct_from_subtrees() {
+    use factory_kernel::{ProductionBin, ProductionFact};
+    use factory_process::measurements::{MeasurementProvider, ProductionQuery};
+    let temp = TempRoot::new();
+    let path = temp.0.join("instance.sqlite");
+    let store = SqliteStore::open(&path).unwrap();
+    let workflows = WorkflowStore::open(&path).unwrap();
+    let evidence = RunEvidenceStore::open(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    measurement_task(&store, "parent", "old").await;
+    measurement_task(&store, "child", "child").await;
+    let mut failed = measurement_run("failed", "parent", 0, 10);
+    failed.status = RunStatus::Failed;
+    insert_run(&conn, &failed);
+    let mut retry = measurement_run("retry", "parent", 11, 20);
+    retry.attempt = 2;
+    retry.trigger = factory_process::run::Trigger::Retry;
+    insert_run(&conn, &retry);
+    insert_run(&conn, &measurement_run("child", "child", 21, 30));
+    insert_run(&conn, &measurement_run("ghost", "deleted", 31, 40));
+    let provider = MeasurementProvider::new(&store, &workflows, &evidence, scope_tree());
+    let reader = Facts::<People>::new();
+    let mut q = ProductionQuery {
+        scope: Some("engineering".into()),
+        now: measurement_at(60),
+        minutes: Some(5),
+        bin: ProductionBin::Day,
+        subtree: false,
+    };
+    let exact = reader
+        .get::<ProductionFact, _>(&provider, &q)
+        .await
+        .unwrap();
+    assert_eq!(exact.buckets.iter().map(|b| b.finished).sum::<u32>(), 2);
+    assert_eq!(exact.buckets.iter().map(|b| b.scrapped).sum::<u32>(), 1);
+    assert_eq!(exact.buckets.iter().map(|b| b.reworked).sum::<u32>(), 1);
+    q.subtree = true;
+    assert_eq!(
+        reader
+            .get::<ProductionFact, _>(&provider, &q)
+            .await
+            .unwrap()
+            .buckets
+            .iter()
+            .map(|b| b.finished)
+            .sum::<u32>(),
+        3
+    );
+    q.scope = None;
+    let all = reader
+        .get::<ProductionFact, _>(&provider, &q)
+        .await
+        .unwrap();
+    assert_eq!(
+        all.buckets.iter().map(|b| b.finished).sum::<u32>(),
+        4,
+        "unscoped includes deleted tasks"
+    );
+    assert_eq!(all.buckets.iter().map(|b| b.first_pass).sum::<u32>(), 2);
+    q.scope = Some("missing".into());
+    q.subtree = false;
+    assert_eq!(
+        reader
+            .get::<ProductionFact, _>(&provider, &q)
+            .await
+            .unwrap()
+            .buckets
+            .iter()
+            .map(|b| b.finished)
+            .sum::<u32>(),
+        0
+    );
+    q.subtree = true;
+    assert!(matches!(
+        reader
+            .get::<ProductionFact, _>(&provider, &q)
+            .await
+            .unwrap_err(),
+        factory_kernel::FactoryError::NoSuchScope(_)
+    ));
+}
+
+#[tokio::test]
+async fn measurement_conformance_uses_exact_canonical_selection_and_frozen_steps() {
+    use factory_kernel::{AttestedRun, StepAttestation};
+    use factory_process::measurements::{AttestedQuery, MeasurementProvider};
+    let temp = TempRoot::new();
+    let path = temp.0.join("instance.sqlite");
+    let store = SqliteStore::open(&path).unwrap();
+    let workflows = WorkflowStore::open(&path).unwrap();
+    let evidence = RunEvidenceStore::open(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    measurement_task(&store, "parent", "old").await;
+    measurement_task(&store, "child", "child").await;
+    let mut bench = task_from_new(
+        NewTask {
+            title: "bench".into(),
+            ..Default::default()
+        },
+        "engineering".into(),
+        "shell".into(),
+        "quiet".into(),
+    );
+    bench.id = "bench".into();
+    bench.bench_origin = Some(serde_json::from_value(json!({"opaque":"bench"})).unwrap());
+    store.create(&bench).await.unwrap();
+    let mut run = measurement_run("parent", "parent", 0, 10);
+    run.required_steps = vec![serde_json::from_value(
+        json!({"step":"tests","kind":"gate","command":"old command","required_by":["house/rule"]}),
+    )
+    .unwrap()];
+    insert_run(&conn, &run);
+    insert_run(&conn, &measurement_run("boundary", "parent", -10, 0));
+    insert_run(&conn, &measurement_run("child", "child", 11, 20));
+    insert_run(&conn, &measurement_run("bench", "bench", 11, 20));
+    let provider = MeasurementProvider::new(&store, &workflows, &evidence, scope_tree());
+    let reader = Facts::<People>::new();
+    let q = AttestedQuery {
+        scopes: Some(["engineering".into()].into_iter().collect()),
+        categories: Some(["feature".into()].into_iter().collect()),
+        window: factory_process::window::Window {
+            from: measurement_at(0),
+            to: measurement_at(30),
+        },
+    };
+    let before = reader.get::<AttestedRun, _>(&provider, &q).await.unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].required_steps, run.required_steps);
+    assert!(before[0].attestations.is_empty());
+    let receipt:StepAttestation=serde_json::from_value(json!({"id":"receipt","run_id":"parent","task_id":"parent","scope":"engineering","category":"feature","step":"tests","kind":"gate","actor":"factory-daemon","verdict":"pass","dir":"/throwaway","at":measurement_at(10)})).unwrap();
+    evidence.append_step_attestation(&receipt).await.unwrap();
+    let after = reader.get::<AttestedRun, _>(&provider, &q).await.unwrap();
+    assert_eq!(after[0].attestations, [receipt]);
+    assert_eq!(
+        after[0].required_steps[0].command.as_deref(),
+        Some("old command")
+    );
+}
+
+#[tokio::test]
+async fn measurement_hours_share_chart_unions_and_ignore_liveness_guesses() {
+    use factory_kernel::ProcessMetricFact;
+    use factory_process::measurements::{MeasurementProvider, ProcessMetricsQuery};
+    let temp = TempRoot::new();
+    let path = temp.0.join("instance.sqlite");
+    let store = SqliteStore::open(&path).unwrap();
+    let workflows = WorkflowStore::open(&path).unwrap();
+    let evidence = RunEvidenceStore::open(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    measurement_task(&store, "parent", "old").await;
+    measurement_task(&store, "child", "child").await;
+    for (id, task, start, end, agent) in [
+        ("a", "parent", 0, 600, "shell"),
+        ("b", "parent", 300, 900, "shell"),
+        ("c", "parent", 100, 700, "other"),
+        ("d", "child", 0, 300, "shell"),
+    ] {
+        let mut run = measurement_run(id, task, start, end);
+        run.agent = agent.into();
+        insert_run(&conn, &run);
+    }
+    for (run, kind, at) in [
+        ("a", "blocked", 100),
+        ("a", "unblocked", 200),
+        ("b", "blocked", 150),
+        ("b", "done", 450),
+        ("d", "blocked", 10),
+        ("d", "done", 50),
+    ] {
+        let task = if run == "d" { "child" } else { "parent" };
+        let mut entry = factory_process::task::TaskEntry::new("worker", kind, kind).in_run(run);
+        entry.at = measurement_at(at);
+        store.append_entry(task, &entry).await.unwrap();
+    }
+    store
+        .append_status(&factory_process::occupancy::StatusChange {
+            subject: "engineering/shell".into(),
+            scope: "engineering".into(),
+            agent: "shell".into(),
+            status: factory_core::adapter::RuntimeStatus::Blocked,
+            at: measurement_at(0),
+        })
+        .await
+        .unwrap();
+    let provider = MeasurementProvider::new(&store, &workflows, &evidence, scope_tree());
+    let reader = Facts::<People>::new();
+    let q = ProcessMetricsQuery {
+        scope: Some("old".into()),
+        now: measurement_at(3600),
+        window_days: Some(1),
+        names: ["agent_hours".into(), "blocked_hours".into()]
+            .into_iter()
+            .collect(),
+    };
+    let facts = reader
+        .get::<ProcessMetricFact, _>(&provider, &q)
+        .await
+        .unwrap();
+    assert_eq!(facts["agent_hours"].value, Some(1800.0 / 3600.0));
+    assert_eq!(facts["blocked_hours"].value, Some(390.0 / 3600.0));
+    assert_eq!(facts["blocked_hours"].as_of, q.now);
+    let unknown = ProcessMetricsQuery {
+        names: ["compliance.cra".into()].into_iter().collect(),
+        ..q
+    };
+    assert!(reader
+        .get::<ProcessMetricFact, _>(&provider, &unknown)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn measurement_metrics_keep_unknowns_and_instance_wide_goal_labels() {
+    use factory_kernel::ProcessMetricFact;
+    use factory_process::measurements::{MeasurementProvider, ProcessMetricsQuery};
+    let store = SqliteStore::in_memory().unwrap();
+    let workflows = WorkflowStore::in_memory().unwrap();
+    let evidence = RunEvidenceStore::in_memory().unwrap();
+    let task = measurement_task(&store, "goal", "sibling").await;
+    store
+        .update(
+            &task.id,
+            &TaskPatch {
+                status: Some(TaskStatus::Done),
+                labels: Some([("goal".into(), "obj/kr".into())].into_iter().collect()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let provider = MeasurementProvider::new(&store, &workflows, &evidence, scope_tree());
+    let reader = Facts::<People>::new();
+    let mut q = ProcessMetricsQuery {
+        scope: Some("child".into()),
+        now: measurement_at(3600),
+        window_days: None,
+        names: [
+            "goal_tasks_done.obj.kr".into(),
+            "fail_rate".into(),
+            "ready_rate".into(),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let facts = reader
+        .get::<ProcessMetricFact, _>(&provider, &q)
+        .await
+        .unwrap();
+    assert_eq!(facts["goal_tasks_done.obj.kr"].value, Some(1.0));
+    assert!(facts["fail_rate"].value.is_none() && facts["fail_rate"].reason.is_some());
+    assert!(facts["ready_rate"].value.is_none());
+    q.window_days = Some(i64::MAX);
+    assert!(matches!(
+        reader
+            .get::<ProcessMetricFact, _>(&provider, &q)
+            .await
+            .unwrap_err(),
+        factory_kernel::FactoryError::BadRequest(_)
+    ));
+}
+
+#[tokio::test]
+async fn measurement_store_read_failure_is_an_error_not_a_zero_fact() {
+    use factory_process::measurements::MeasurementProvider;
+    let temp = TempRoot::new();
+    let path = temp.0.join("instance.sqlite");
+    let store = SqliteStore::open(&path).unwrap();
+    let workflows = WorkflowStore::open(&path).unwrap();
+    let evidence = RunEvidenceStore::open(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute("DROP TABLE runs", []).unwrap();
+    let provider = MeasurementProvider::new(&store, &workflows, &evidence, scope_tree());
+    let query = factory_process::usage::SpendQuery {
+        scope: None,
+        from: Some(measurement_at(0)),
+        to: Some(measurement_at(60)),
+        group_by: factory_kernel::CostGroupBy::Scope,
+        basis: factory_kernel::SpendBasis::Started,
+    };
+    assert!(Facts::<People>::new()
+        .get::<factory_kernel::CostReport, _>(&provider, &query)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn measurement_hours_require_authoritative_journal_not_chart_liveness() {
+    use factory_process::measurements::{MeasurementProvider, ProcessMetricsQuery};
+    let temp = TempRoot::new();
+    let path = temp.0.join("instance.sqlite");
+    let store = SqliteStore::open(&path).unwrap();
+    let workflows = WorkflowStore::open(&path).unwrap();
+    let evidence = RunEvidenceStore::open(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    measurement_task(&store, "task", "engineering").await;
+    insert_run(&conn, &measurement_run("run", "task", 0, 60));
+    let provider = MeasurementProvider::new(&store, &workflows, &evidence, scope_tree());
+    let query = ProcessMetricsQuery {
+        scope: None,
+        now: measurement_at(3600),
+        window_days: Some(1),
+        names: ["agent_hours".into(), "blocked_hours".into()]
+            .into_iter()
+            .collect(),
+    };
+    conn.execute("DROP TABLE agent_status", []).unwrap();
+    let facts = Facts::<People>::new()
+        .get::<factory_kernel::ProcessMetricFact, _>(&provider, &query)
+        .await
+        .unwrap();
+    assert_eq!(facts["agent_hours"].value, Some(60.0 / 3600.0));
+    assert_eq!(facts["blocked_hours"].value, Some(0.0));
+    conn.execute("DROP TABLE task_entries", []).unwrap();
+    assert!(
+        Facts::<People>::new()
+            .get::<factory_kernel::ProcessMetricFact, _>(&provider, &query)
+            .await
+            .is_err(),
+        "a failed authoritative journal read must not fabricate zero blocked hours"
+    );
+}
+
 #[tokio::test]
 async fn process_inventory_schedule_and_named_history_are_live_and_selective() {
     let temp = TempRoot::new();

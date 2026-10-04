@@ -216,6 +216,12 @@ something impossible.
   exact-path, unique-leaf precedence and ambiguity errors; ancestry is path
   components, never name prefixes. A timer constructs a fresh provider per
   tick; never freeze scope identities across configuration reloads.
+  Spend, frozen run conformance, production and process metrics are L4-owned
+  providers too. Keep exact production selection distinct from metric subtrees.
+  Operations' run arithmetic canonically re-exports L4; hour measurements use
+  authoritative run/blocked-journal unions, shared with the occupancy chart,
+  never its inferred-liveness or planned-work view. This is not six-service
+  isolation; the other Engine-backed providers and command ports remain.
   Policy and fact-backed metrics ask `Facts<Reader>::get`. A port returns
   only its fact or a collection of it, never another level's report. The
   kernel read boundary enforces a sealed `Producer: Below<Reader>` relation:

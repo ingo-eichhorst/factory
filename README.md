@@ -5218,9 +5218,21 @@ and path-component ancestry used by configuration and its consumers. Ambiguous
 legacy aliases still fail, removed identities still group under their old name,
 and exact selection never silently becomes a subtree. Stored-scope membership,
 20-run history bounds, receipt conflicts and clean Done-release filters remain
-unchanged. Spend/conformance/production gathering and six-service/command-port
-isolation are still pending; the recovery timer remains outside the stack and
+unchanged. Six-service/command-port isolation is still pending;
+the recovery timer remains outside the stack and
 constructs a fresh provider on every tick.
+
+The live spend, frozen run conformance, production and process-metric providers
+now also belong to L4. They receive only its task, workflow and evidence stores
+and a fresh plain scope tree. The production endpoint preserves exact scope
+selection; metrics preserve subtree selection and their existing windows,
+freshness and unknown-value reasons. Process owns the run-history arithmetic
+that the outside-stack Operations page re-exports. Hour metrics read only
+authoritative run/blocked-journal history, using the same interval geometry as
+the occupancy chart, without coupling measurement availability to its planned
+work or inferred-liveness decorations. The chart's full view remains outside
+this provider. Original production fixtures moved with the implementation;
+there is no second metric evaluator or new status table.
 
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),

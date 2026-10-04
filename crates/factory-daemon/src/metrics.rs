@@ -267,6 +267,7 @@ impl Engine {
                 scope: canonical_scope.map(str::to_string), now,
                 minutes: window.map(|window| (window.days() * 24 * 60) as u32).or(Some(5)),
                 bin: ProductionBin::Day,
+                subtree: true,
             }).await?)
         } else { None };
         let process_names: BTreeSet<String> = computing.iter().filter(|(id, result)| result.is_ok()
@@ -276,7 +277,7 @@ impl Engine {
             .map(|(id, _)| id.to_string()).collect();
         let process = if process_names.is_empty() { BTreeMap::new() } else {
             facts.get::<factory_kernel::ProcessMetricFact>(&crate::facts::ProcessMetricsQuery {
-                scope: canonical_scope.map(str::to_string), now, window, names: process_names,
+                scope: canonical_scope.map(str::to_string), now, window_days: window.map(|window| window.days()), names: process_names,
             }).await?
         };
         let policy_report = if needs_policy {
@@ -2394,7 +2395,7 @@ mod tests {
         let engine = test_engine(Vec::new());
         let name = "goal_tasks_done.live.kr";
         let query = crate::facts::ProcessMetricsQuery {
-            scope: Some("root".into()), now: Utc::now(), window: None,
+            scope: Some("root".into()), now: Utc::now(), window_days: None,
             names: BTreeSet::from([name.into(), "fail_rate".into(), "ready_rate".into()]),
         };
         let reader = Facts::<L6>::new(&engine);

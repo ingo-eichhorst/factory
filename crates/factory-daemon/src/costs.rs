@@ -22,25 +22,19 @@ use chrono::{DateTime, Duration, Utc};
 use factory_core::error::Result;
 use factory_core::event::Event;
 use factory_core::run::{Run, RunPatch};
+#[cfg(test)]
 use factory_core::task::Task;
 use factory_core::usage::{
-    allocate_plan_share, run_usage, run_usage_with_prior, CostGroupBy, CostRow, CostRowExt, EstimateComparison,
+    allocate_plan_share, run_usage, run_usage_with_prior, CostRow, CostRowExt, EstimateComparison,
     HarnessUsage, ReEstimate, RunUsage, RunUsageEntry, SnapshotPoint, TaskUsage, UsageSnapshot,
 };
 #[cfg(test)]
-use factory_core::usage::{CostReport, SpendQuery};
+use factory_core::usage::{CostGroupBy, CostReport, SpendQuery};
 
 use crate::engine::Engine;
 
-/// What `factory cost` reads when no window is given.
-pub(crate) const DEFAULT_WINDOW_DAYS: i64 = 30;
-
-/// A run's `issue` when its task has no `issue=<n>` label.
-const NO_ISSUE: &str = "(no issue)";
-
-/// A run's `workflow` when its task carries no `workflow_origin` (#164): a
-/// standalone task, never a workflow run's own concern.
-const NO_WORKFLOW: &str = "(no workflow)";
+#[cfg(test)]
+use factory_process::measurements::{NO_ISSUE, NO_WORKFLOW};
 
 impl Engine {
     /// Ask the run's runtime what its session has used, keep the answer (or
@@ -393,56 +387,6 @@ impl Engine {
 
 }
 
-/// Which group a run falls in, and a readable label when the key is an id.
-/// `workflow_names` is `spend`'s own memoised `workflow_id -> definition
-/// name` lookup -- empty, and never consulted, for every grouping but
-/// `Workflow`.
-pub(crate) fn group_key(
-    group_by: CostGroupBy,
-    run: &Run,
-    task: Option<&Task>,
-    canonical: impl Fn(&str) -> String,
-    workflow_names: &BTreeMap<String, Option<String>>,
-) -> (String, Option<String>) {
-    match group_by {
-        CostGroupBy::Task => (
-            run.task_id.clone(),
-            Some(task.map(|t| t.title.clone()).unwrap_or_else(|| "(deleted task)".into())),
-        ),
-        CostGroupBy::Issue => (
-            task.and_then(|t| t.labels.get("issue"))
-                .map(|n| format!("issue={n}"))
-                .unwrap_or_else(|| NO_ISSUE.into()),
-            None,
-        ),
-        CostGroupBy::Scope => (
-            task.map(|t| canonical(&t.scope)).unwrap_or_else(|| "(deleted task)".into()),
-            None,
-        ),
-        CostGroupBy::Agent => (
-            format!(
-                "{}/{}",
-                task.map(|t| canonical(&t.scope)).unwrap_or_else(|| "?".into()),
-                run.agent
-            ),
-            None,
-        ),
-        CostGroupBy::Provider => (run.provider_account.clone().unwrap_or_else(|| "(unknown provider)".into()), None),
-        // A deleted task's workflow is unknown, so it is never `NO_WORKFLOW`
-        // -- that means "standalone", a positive fact a deleted task cannot
-        // offer.
-        CostGroupBy::Workflow => match task {
-            None => ("(deleted task)".into(), None),
-            Some(t) => match &t.workflow_origin {
-                None => (NO_WORKFLOW.into(), None),
-                Some(origin) => (
-                    origin.workflow_id.clone(),
-                    workflow_names.get(&origin.workflow_id).cloned().flatten(),
-                ),
-            },
-        },
-    }
-}
 
 /// The runs' snapshotted estimates, summed range by range. One run with no
 /// estimate makes the time sum unknown, and one with no cost range the cost

@@ -1,13 +1,13 @@
 //! L4 owns all process metric reads. L6 receives measurements and production
 //! buckets, never a task store, run objects or another level's wire report.
-use super::{l4::Provider, ProcessMetricsQuery, ProductionQuery};
+use crate::measurements::{MeasurementProvider, ProcessMetricsQuery, ProductionQuery};
+use crate::{
+    task::{TaskFilter, TaskStatus},
+    window::Window,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use factory_core::{
-    error::{FactoryError, Result},
-    operations::Window,
-    task::{TaskFilter, TaskStatus},
-};
+use factory_kernel::{FactoryError, Result};
 use factory_kernel::{ProcessMetricFact, ProductionBucket, ProductionFact, Provide};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,15 +47,23 @@ fn fact(
 }
 
 #[async_trait]
-impl Provide<ProcessMetricFact> for Provider<'_> {
+impl Provide<ProcessMetricFact> for MeasurementProvider<'_> {
     type Query = ProcessMetricsQuery;
     type Value = BTreeMap<String, ProcessMetricFact>;
     type Error = FactoryError;
     async fn get(&self, query: &Self::Query) -> Result<Self::Value> {
-        let snapshot = self.engine.factory_snapshot();
+        if query
+            .window_days
+            .is_some_and(|days| !matches!(days, 1 | 14 | 90))
+        {
+            return Err(FactoryError::BadRequest(
+                "unsupported process metric window".into(),
+            ));
+        }
+        let snapshot = &self.scopes;
         let (asked, scopes) = snapshot.subtree_scopes(query.scope.as_deref())?;
         let selected: BTreeSet<_> = scopes.iter().map(|scope| scope.name.clone()).collect();
-        let days = query.window.map(|window| window.days()).unwrap_or(28);
+        let days = query.window_days.unwrap_or(28);
         let now = query.now;
         let window = Window::trailing(now, days);
         let needs_runs = query
@@ -71,7 +79,7 @@ impl Provide<ProcessMetricFact> for Provider<'_> {
             .iter()
             .any(|name| name.starts_with("goal_tasks_done."));
         let tasks = if (needs_runs && asked.is_some()) || needs_intake || needs_goals {
-            self.engine.store.list(&TaskFilter::default()).await?
+            self.store.list(&TaskFilter::default()).await?
         } else {
             Vec::new()
         };
@@ -80,7 +88,6 @@ impl Provide<ProcessMetricFact> for Provider<'_> {
             // Recovery streaks may begin before the metric window. Preserve
             // the existing twice-window fetch and each evaluator's own cut.
             let mut runs = self
-                .engine
                 .store
                 .runs_between(now - chrono::Duration::days(2 * days), now)
                 .await?;
@@ -97,20 +104,19 @@ impl Provide<ProcessMetricFact> for Provider<'_> {
                 .iter()
                 .filter(|name| OPERATIONS.contains(&name.as_str()))
             {
-                let figure = factory_core::operations::registry_metric(name, &runs, &window)
+                let figure = crate::operations::registry_metric(name, &runs, &window)
                     .ok_or_else(|| FactoryError::BadRequest("unknown process metric".into()))?;
                 let at = figure
                     .value
-                    .and(factory_core::operations::registry_metric_as_of(
+                    .and(crate::operations::registry_metric_as_of(
                         name, &runs, &window,
                     ))
                     .unwrap_or(now);
                 values.insert(name.clone(), fact(name, figure.value, at, figure.reason));
             }
             if query.names.contains("estimate_accuracy") {
-                let figure =
-                    factory_core::usage::usage_metric("estimate_accuracy", &runs, now, days)
-                        .ok_or_else(|| FactoryError::BadRequest("unknown usage metric".into()))?;
+                let figure = crate::usage::usage_metric("estimate_accuracy", &runs, now, days)
+                    .ok_or_else(|| FactoryError::BadRequest("unknown usage metric".into()))?;
                 values.insert(
                     "estimate_accuracy".into(),
                     fact(
@@ -123,25 +129,27 @@ impl Provide<ProcessMetricFact> for Provider<'_> {
             }
         }
         if query.names.contains("agent_hours") || query.names.contains("blocked_hours") {
-            let hours_days = query.window.map(|window| window.days()).unwrap_or(14);
-            let occupancy = self
-                .engine
-                .occupancy(
-                    None,
-                    Some(now - chrono::Duration::days(hours_days)),
-                    Some(now),
-                )
-                .await?;
+            let hours_days = query.window_days.unwrap_or(14);
+            let observed_now = Utc::now();
+            let (from, to) = crate::occupancy_history::window_bounds(
+                None,
+                Some(now - chrono::Duration::days(hours_days)),
+                Some(now),
+                observed_now,
+            )?;
+            let blocks =
+                crate::occupancy_history::read_blocks(self.store, snapshot, from, to, observed_now)
+                    .await?;
             let mut busy = 0i64;
             let mut blocked = 0i64;
-            for scope in occupancy.scopes {
-                if asked.is_some() && !selected.contains(&scope.name) {
+            for ((scope, _agent), mut row) in blocks {
+                if asked.is_some() && !selected.contains(&scope) {
                     continue;
                 }
-                for row in scope.rows {
-                    busy += row.busy_seconds;
-                    blocked += row.blocked_seconds;
-                }
+                let (busy_seconds, blocked_seconds, _, _) =
+                    crate::occupancy_history::lay_out(&mut row, from, observed_now.min(to));
+                busy += busy_seconds;
+                blocked += blocked_seconds;
             }
             for (name, seconds) in [("agent_hours", busy), ("blocked_hours", blocked)] {
                 if query.names.contains(name) {
@@ -154,7 +162,6 @@ impl Provide<ProcessMetricFact> for Provider<'_> {
         }
         if needs_intake {
             let entries = self
-                .engine
                 .store
                 .entries_of_kinds(INTAKE_KINDS, window.from)
                 .await?;
@@ -173,7 +180,7 @@ impl Provide<ProcessMetricFact> for Provider<'_> {
                 {
                     continue;
                 }
-                match factory_core::intake::decision_event(
+                match crate::intake::decision_event(
                     &entry.kind,
                     entry.data.as_ref(),
                     entry.at,
@@ -190,7 +197,7 @@ impl Provide<ProcessMetricFact> for Provider<'_> {
                 .filter(|name| INTAKE.contains(&name.as_str()))
             {
                 let figure =
-                    factory_core::intake::registry_metric(name, &decisions, &window, skipped, days)
+                    crate::intake::registry_metric(name, &decisions, &window, skipped, days)
                         .ok_or_else(|| FactoryError::BadRequest("unknown intake metric".into()))?;
                 values.insert(
                     name.clone(),
@@ -233,24 +240,36 @@ impl Provide<ProcessMetricFact> for Provider<'_> {
 }
 
 #[async_trait]
-impl Provide<ProductionFact> for Provider<'_> {
+impl Provide<ProductionFact> for MeasurementProvider<'_> {
     type Query = ProductionQuery;
     type Value = ProductionFact;
     type Error = FactoryError;
     async fn get(&self, query: &Self::Query) -> Result<Self::Value> {
-        let snapshot = self.engine.factory_snapshot();
-        let (asked, scopes) = snapshot.subtree_scopes(query.scope.as_deref())?;
-        if asked.is_none() {
+        let snapshot = &self.scopes;
+        let (asked, scopes) = if query.subtree {
+            snapshot.subtree_scopes(query.scope.as_deref())?
+        } else {
+            (None, Vec::new())
+        };
+        if !query.subtree || asked.is_none() {
             return self
-                .engine
-                .production_at(query.minutes, Some(query.bin), None, query.now)
+                .production_at(
+                    query.minutes,
+                    Some(query.bin),
+                    query.scope.clone(),
+                    query.now,
+                )
                 .await;
         }
         let mut total = None;
         for scope in scopes {
             let next = self
-                .engine
-                .production_at(query.minutes, Some(query.bin), Some(scope.name), query.now)
+                .production_at(
+                    query.minutes,
+                    Some(query.bin),
+                    Some(scope.name.clone()),
+                    query.now,
+                )
                 .await?;
             match &mut total {
                 None => total = Some(next),
