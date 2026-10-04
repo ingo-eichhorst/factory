@@ -27,6 +27,7 @@ pub mod occupancy;
 pub mod openshell;
 pub mod operations;
 pub mod policy;
+pub use factory_assurance::checks;
 pub mod policy_export;
 pub mod protocol;
 pub mod provenance;

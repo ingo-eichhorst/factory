@@ -5053,8 +5053,17 @@ policy and quality sources into that plan; L4 imports no declaration or
 compiler from above. The old core `resolve` path is only the adaptation
 bridge from policy declarations to L5's plain command inputs, not a second
 compiler. Waivers, tightened timeouts, deterministic order and enforced
-findings keep their existing behavior. The policy/check evaluator is still
-to be migrated, separately from this execution-plan compiler.
+findings keep their existing behavior. L5 also owns the actual check evaluator,
+Quality loading/folding/judging, conformance evaluation, budget assessment and
+metric vocabulary. L6 retains authored policy declarations, classifications,
+budget catalogues and reporting-clock arithmetic. It projects resolved controls
+to L5's `EvaluationSubject<Kind>`; L5 echoes that opaque classification without
+interpreting it. Quality uses its own L5 subjects, never synthetic L6 controls.
+Core paths remain canonical re-exports/adapters, preserving stored and wire JSON.
+Shared identifiers and authored receipt values are L0 data, not new live facts.
+Lazy evaluation gathering reads lower facts as L5, with ordinary same-level
+calls for knowledge tags and benchmark gates. Provider/service isolation,
+benchmarks, signposts and remediation/promotion routing remain unfinished.
 
 `Task.bench_origin` is an L4 `OriginRef`, opaque to process. It has no
 benchmark-field API; the benchmark owner alone decodes its legacy object
@@ -5077,7 +5086,7 @@ strict command ladder are still ahead in #193.
     crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy and TaskStore
-    crates/factory-assurance      L5: requirement validation and the single execution-plan compiler (other assurance services still pending)
+    crates/factory-assurance      L5: plan compiler, check evaluator, Quality, conformance, budget assessment and metric vocabulary (live services still pending)
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary

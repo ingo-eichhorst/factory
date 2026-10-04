@@ -146,3 +146,66 @@ fn benchmark_owner_decodes_the_same_legacy_wire_reference_after_l4_roundtrip() {
     let unknown = factory_process::origin::OriginRef::opaque("unsupported-reference");
     assert!(BenchOrigin::try_from(&unknown).is_err());
 }
+
+#[test]
+fn checks_quality_and_receipts_are_canonical_owner_types() {
+    let evidence: factory_core::policy::Evidence = factory_assurance::checks::Evidence::default();
+    let _: factory_assurance::checks::Evidence = evidence;
+    let check: factory_core::policy::Check = factory_assurance::checks::Check::Sandbox;
+    let _: factory_assurance::checks::Check = check;
+    let receipt: Option<factory_core::policy::Attestation> = None;
+    let _: Option<factory_kernel::Attestation> = receipt;
+    let control: factory_core::policy::ControlRef =
+        factory_kernel::ControlRef::new("cra", "art-14");
+    let _: factory_kernel::ControlRef = control;
+    let mark: Option<factory_core::reporting_clock::ClockMark> = None;
+    let _: Option<factory_kernel::ClockMark> = mark;
+    let quality: Option<factory_core::quality::QualityTree> = None;
+    let _: Option<factory_assurance::quality::QualityTree> = quality;
+    let metric: factory_core::metrics::MetricId = "scrap_rate".parse().unwrap();
+    let _: factory_assurance::metrics::MetricId = metric;
+    let budget: Option<factory_core::budget::PolicyInput> = None;
+    let _: Option<factory_assurance::budget::PolicyInput> = budget;
+    let old: factory_core::policy::ControlStatus = factory_assurance::checks::EvaluationResult {
+        control: factory_kernel::ControlRef::new("cra", "a"),
+        title: "a".into(),
+        kind: factory_core::policy::Kind::Regulation,
+        refs: vec![],
+        status: factory_assurance::checks::Status::Open { reasons: vec![] },
+    };
+    assert_eq!(
+        serde_json::to_value(old).unwrap(),
+        json!({"control":"cra/a", "title":"a", "kind":"regulation", "status":"open", "reasons":[]})
+    );
+}
+
+#[test]
+fn legacy_quality_synthetic_control_api_only_adapts_the_l5_subjects() {
+    let catalogue: factory_core::quality::QualityCatalogue = factory_assurance::quality::QualityCatalogue {
+        profiles: std::collections::BTreeMap::from([("p".into(), serde_yaml_ng::from_str(
+            "attributes:\n  - id: reliability\n    importance: H\n    difficulty: M\n    scenarios:\n      - id: gate\n        measure: {check: task, task: nightly, max_age: 1d}\n"
+        ).unwrap())]), findings: vec![],
+    };
+    let (tree, _) = factory_core::quality::applicable(
+        &catalogue,
+        "demo",
+        &[factory_core::quality::QualityLayer {
+            scope: "demo".into(),
+            profiles: vec!["p".into()],
+        }],
+    );
+    let subjects = factory_assurance::quality::check_subjects(&tree);
+    let old = factory_core::quality::applied_checks(&tree);
+    assert_eq!(old.len(), subjects.len());
+    assert_eq!(old[0].kind, factory_core::policy::Kind::Standard);
+    assert!(old[0].remediation.is_none() && old[0].requires.is_empty());
+    assert_eq!(old[0].control, subjects[0].control);
+    assert_eq!(old[0].evidence, subjects[0].evidence);
+    assert_eq!(old[0].max_age, subjects[0].max_age);
+    assert_eq!(
+        factory_core::policy::evaluate(&old, &Default::default(), chrono::Utc::now())[0]
+            .status
+            .kind(),
+        factory_assurance::checks::StatusKind::Open
+    );
+}

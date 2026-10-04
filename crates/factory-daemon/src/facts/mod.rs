@@ -6,6 +6,7 @@ mod l2;
 mod l3;
 mod l4;
 mod l5;
+pub(crate) use l5::{assurance_gate_facts, assurance_knowledge_tags};
 mod process_metrics;
 
 use crate::engine::Engine;
