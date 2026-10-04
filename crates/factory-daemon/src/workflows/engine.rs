@@ -2602,7 +2602,7 @@ mod tests {
         let parts = vec![
             epic_part("a", &[], "test -f a.txt"),
             epic_part("b", &[], "test -f b.txt"),
-            epic_part("c", &["a"], "test -f c.txt && test -f a.txt"),
+            epic_part("c", &["a"], "test -f c.txt && test -f a.txt && test -f fixed.txt"),
         ];
         let routing = Routing {
             scope: "demo".into(),
@@ -2702,17 +2702,31 @@ mod tests {
             ["a-implement", "b-implement"]
         );
 
-        // C runs its own chain, and the combined checks hand off one branch.
+        // C runs its own chain. Its acceptance fails on the combined tree,
+        // which sends C's deliverable back, and C's review runs again before
+        // C is merged a second time.
         commit_in(&engine, &id("c-implement"), &[("c.txt", "c\n")]).await;
         report_done(&engine, &id("c-implement"), "branch with c", None).await;
         wait_for_attempt(&engine, &id("c-review"), 1).await;
         report_done(&engine, &id("c-review"), "passes", None).await;
+        let rework = wait_for_worktree_run(&engine, &id("c-implement")).await;
+        assert_eq!(rework.attempt, 2);
+        assert!(rework.feedback.as_ref().unwrap().feedback.as_deref().unwrap().contains("combined integration check for part c failed"));
+        let checking = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(checking.integration.as_ref().unwrap().merged_nodes, ["a-implement", "b-implement"]);
+        assert!(!checking.integration.as_ref().unwrap().checks_passed);
+        assert_eq!(node_run(&checking, "c-review").status, WorkflowNodeStatus::Unstarted);
+        commit_in(&engine, &id("c-implement"), &[("fixed.txt", "fixed\n")]).await;
+        report_done(&engine, &id("c-implement"), "combined check fixed", None).await;
+        wait_for_attempt(&engine, &id("c-review"), 2).await;
+        assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Running);
+        report_done(&engine, &id("c-review"), "passes again", None).await;
         let finished = engine.workflow_run(&run.id).await.unwrap();
         assert_eq!(finished.status, WorkflowRunStatus::Done, "{:?}", finished.error);
         let integration = finished.integration.unwrap();
         assert_eq!(integration.merged_nodes, ["a-implement", "b-implement", "c-implement"]);
         assert!(integration.checks_passed);
-        assert_eq!(merges_on(&integration_dir, &integration.branch).await, 3);
+        assert_eq!(merges_on(&integration_dir, &integration.branch).await, 4, "C was merged again after its fix");
         assert!(engine.require(&parent.id).await.unwrap().result.unwrap().contains("Integrated on"));
         let integration_dirs = std::fs::read_dir(engine.factory_snapshot().worktrees_dir())
             .unwrap()
