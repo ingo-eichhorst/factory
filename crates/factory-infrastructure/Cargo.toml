@@ -8,6 +8,7 @@ license.workspace = true
 level = 1
 
 [dependencies]
+async-trait.workspace = true
 factory-kernel = { path = "../factory-kernel" }
 chrono.workspace = true
 serde.workspace = true

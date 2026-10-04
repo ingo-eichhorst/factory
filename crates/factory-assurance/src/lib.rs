@@ -17,6 +17,7 @@ pub mod checks;
 pub mod conformance;
 pub mod control_plan;
 pub mod dataset;
+pub mod facts;
 pub mod knowledge;
 pub mod knowledge_provider;
 pub mod metrics;

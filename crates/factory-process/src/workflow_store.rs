@@ -71,6 +71,20 @@ pub struct WorkflowStore {
     conn: Arc<Mutex<Connection>>,
 }
 
+impl factory_kernel::FactProvider for WorkflowStore {
+    type Level = factory_kernel::L4;
+}
+
+#[async_trait::async_trait]
+impl factory_kernel::Provide<factory_kernel::DeploymentMirrorFact> for WorkflowStore {
+    type Query = String;
+    type Value = Vec<factory_kernel::DeploymentMirrorFact>;
+    type Error = FactoryError;
+    async fn get(&self, id: &String) -> Result<Self::Value> {
+        self.mirror_receipts(id, 200).await
+    }
+}
+
 impl WorkflowStore {
     pub async fn record_mirror(
         &self,

@@ -836,6 +836,7 @@ dependencies = [
  "chrono-tz",
  "clap",
  "croner",
+ "factory-assurance",
  "factory-core",
  "factory-direction",
  "factory-environment",
@@ -895,6 +896,7 @@ dependencies = [
 name = "factory-infrastructure"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "factory-kernel",
  "rusqlite",

@@ -105,6 +105,16 @@ impl<'a, R: Reader> Facts<'a, R> {
 }
 
 macro_rules! port {
+    ($fact:ty, $provider:ty, $query:ty, $value:ty, $construct:path) => {
+        impl Port for $fact {
+            type Query = $query;
+            type Value = $value;
+            type Provider<'a> = $provider;
+            fn provider(engine: &Engine) -> Self::Provider<'_> {
+                $construct(engine)
+            }
+        }
+    };
     ($fact:ty, $level:ident, $query:ty, $value:ty) => {
         impl Port for $fact {
             type Query = $query;
@@ -117,13 +127,13 @@ macro_rules! port {
     };
 }
 port!(DaemonConfigFact, l1, (), DaemonConfigFact);
-port!(InfrastructureExpiryFact, l1, (), InfrastructureExpiryFact);
+port!(InfrastructureExpiryFact, factory_infrastructure::expiry_store::ObservationStore, (), InfrastructureExpiryFact, l1::expiry_provider);
 port!(RenewalDeclarationsFact, l1, (), RenewalDeclarationsFact);
 port!(CredentialExpiryFact, l2, (), CredentialExpiryFact);
 port!(ScheduledRunDatesFact, l4, (), ScheduledRunDatesFact);
 port!(ProductionFact, l4, ProductionQuery, ProductionFact);
 port!(ProcessMetricFact, l4, ProcessMetricsQuery, BTreeMap<String, ProcessMetricFact>);
-port!(BenchResolutionFact, l5, String, Option<BenchResolutionFact>);
+port!(BenchResolutionFact, factory_assurance::facts::Provider<'a>, String, Option<BenchResolutionFact>, l5::provider);
 port!(BackupFact, l1, DateTime<Utc>, BackupFact);
 port!(ScopeCapacityFact, l1, (), ScopeCapacityFact);
 port!(EnvironmentMetricFact, l1, Option<String>, BTreeMap<String, EnvironmentMetricFact>);
@@ -138,11 +148,11 @@ port!(WorkflowFact, l4, NamedQuery, BTreeMap<String, Vec<WorkflowFact>>);
 port!(EnvironmentRecoveryFact, l4, RecoveryQuery, Vec<EnvironmentRecoveryFact>);
 port!(RecoveryJournalFact, l4, RecoveryQuery, RecoveryJournalFact);
 port!(DeploymentPublicationFact, l1, String, Option<DeploymentPublicationFact>);
-port!(DeploymentMirrorFact, l4, String, Vec<DeploymentMirrorFact>);
+port!(DeploymentMirrorFact, factory_process::workflow_store::WorkflowStore, String, Vec<DeploymentMirrorFact>, l4::mirror_provider);
 port!(ReleaseBuildFact, l4, ReleaseBuildQuery, Option<ReleaseBuildFact>);
 port!(ReleaseSbomFact, l2, ReleaseSbomQuery, Vec<ReleaseSbomFact>);
 port!(AttestedRun, l4, AttestedQuery, Vec<AttestedRun>);
-port!(ArtifactProvenance, l4, String, Vec<ArtifactProvenance>);
+port!(ArtifactProvenance, factory_process::facts::ProvenanceProvider<'a>, String, Vec<ArtifactProvenance>, l4::provenance_provider);
 port!(CostReport, l4, factory_core::usage::SpendQuery, CostReport);
 port!(
     ConfirmedSecurityReport,
@@ -150,13 +160,30 @@ port!(
     Option<String>,
     Vec<ConfirmedSecurityReport>
 );
-port!(GateFact, l5, BTreeSet<String>, BTreeMap<String, GateFact>);
-port!(KnowledgeTags, l5, (), KnowledgeTags);
+port!(GateFact, factory_assurance::facts::Provider<'a>, BTreeSet<String>, BTreeMap<String, GateFact>, l5::provider);
+port!(KnowledgeTags, factory_assurance::facts::Provider<'a>, (), KnowledgeTags, l5::provider);
 
 #[cfg(test)]
 mod tests {
     use super::*;
     fn registered<F: Port>() {}
+    #[test]
+    fn isolated_live_fact_wiring_uses_the_actual_physical_owner_types() {
+        let _: fn(<GateFact as Port>::Provider<'static>) -> factory_assurance::facts::Provider<'static> = |provider| provider;
+        let _: fn(<KnowledgeTags as Port>::Provider<'static>) -> factory_assurance::facts::Provider<'static> = |provider| provider;
+        let _: fn(<BenchResolutionFact as Port>::Provider<'static>) -> factory_assurance::facts::Provider<'static> = |provider| provider;
+        let _: fn(<InfrastructureExpiryFact as Port>::Provider<'static>) -> factory_infrastructure::expiry_store::ObservationStore = |provider| provider;
+        let _: fn(<DeploymentMirrorFact as Port>::Provider<'static>) -> factory_process::workflow_store::WorkflowStore = |provider| provider;
+        let _: fn(<ArtifactProvenance as Port>::Provider<'static>) -> factory_process::facts::ProvenanceProvider<'static> = |provider| provider;
+        let wiring = include_str!("l5.rs");
+        assert!(!wiring.contains("impl Provide") && !wiring.contains("BenchStore::runs") && !wiring.contains("knowledge::index"));
+        let l4 = include_str!("l4.rs");
+        assert!(!l4.contains("impl Provide<factory_kernel::ArtifactProvenance>") && !l4.contains("impl Provide<factory_kernel::DeploymentMirrorFact>"));
+        let owner = include_str!("../../../factory-assurance/src/facts.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!owner.contains("Engine") && !owner.contains("factory_core") && !owner.contains("dyn Fn"));
+        let artifact_owner = include_str!("../../../factory-process/src/facts.rs");
+        assert!(!artifact_owner.contains("Engine") && !artifact_owner.contains("factory_core") && !artifact_owner.contains("dyn Fn"));
+    }
     #[test]
     fn every_catalogued_fact_has_a_typed_producer_owned_port() {
         registered::<ProductionFact>();

@@ -202,8 +202,12 @@ something impossible.
   while receipt deduplication, task-status mapping and conformance evaluation
   stay outside L0.
   L0 never depends on a producing level or gathers evidence itself. Typed
-  providers in daemon `facts/l1.rs` through `l5.rs` own the live reads;
-  policy and fact-backed metrics ask `Facts<Reader>::get`. A port returns
+  providers own their live reads. Benchmark/knowledge providers now live in
+  L5, the infrastructure expiry store supplies its L1 fact, and L4 supplies
+  mirror receipts and Done-only provenance from its own stores. Their daemon
+  `facts/` modules only construct physical owner providers; remaining
+  Engine-backed gatherers still need migration.
+  Policy and fact-backed metrics ask `Facts<Reader>::get`. A port returns
   only its fact or a collection of it, never another level's report. The
   kernel read boundary enforces a sealed `Producer: Below<Reader>` relation:
   strictly upward reads only, including adjacent levels. Same-level calls

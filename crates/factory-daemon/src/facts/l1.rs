@@ -15,14 +15,8 @@ impl factory_kernel::FactProvider for Provider<'_> {
     type Level = factory_kernel::L1;
 }
 
-#[async_trait]
-impl Provide<factory_kernel::InfrastructureExpiryFact> for Provider<'_> {
-    type Query = ();
-    type Value = factory_kernel::InfrastructureExpiryFact;
-    type Error = FactoryError;
-    async fn get(&self, _: &()) -> Result<Self::Value> {
-        Ok(factory_kernel::InfrastructureExpiryFact { observations: self.engine.infrastructure_expiries.all().await? })
-    }
+pub(super) fn expiry_provider(engine: &Engine) -> factory_infrastructure::expiry_store::ObservationStore {
+    engine.infrastructure_expiries.clone()
 }
 
 #[async_trait]

@@ -69,14 +69,12 @@ impl Provide<factory_kernel::ScheduledRunDatesFact> for Provider<'_> {
     }
 }
 
-#[async_trait]
-impl Provide<factory_kernel::DeploymentMirrorFact> for Provider<'_> {
-    type Query = String;
-    type Value = Vec<factory_kernel::DeploymentMirrorFact>;
-    type Error = FactoryError;
-    async fn get(&self, id: &String) -> Result<Self::Value> {
-        self.engine.workflows.mirror_receipts(id, 200).await
-    }
+pub(super) fn mirror_provider(engine: &Engine) -> factory_process::workflow_store::WorkflowStore {
+    engine.workflows.clone()
+}
+
+pub(super) fn provenance_provider(engine: &Engine) -> factory_process::facts::ProvenanceProvider<'_> {
+    factory_process::facts::ProvenanceProvider::new(engine.store.as_ref(), &engine.run_evidence)
 }
 
 #[async_trait]
@@ -578,15 +576,6 @@ impl Provide<AttestedRun> for Provider<'_> {
     }
 }
 
-#[async_trait]
-impl Provide<factory_kernel::ArtifactProvenance> for Provider<'_> {
-    type Query = String;
-    type Value = Vec<factory_kernel::ArtifactProvenance>;
-    type Error = FactoryError;
-    async fn get(&self, id: &String) -> Result<Self::Value> {
-        self.engine.run_provenance(id).await
-    }
-}
 #[async_trait]
 impl Provide<ConfirmedSecurityReport> for Provider<'_> {
     type Query = Option<String>;

@@ -4,7 +4,7 @@ use crate::engine::Engine;
 use factory_core::{
     control_plan,
     error::{FactoryError, Result},
-    run::{Run, RunStatus},
+    run::Run,
     task::Task,
 };
 use factory_kernel::{ArtifactSnapshot, ArtifactSource};
@@ -301,20 +301,10 @@ impl Engine {
         &self,
         id: &str,
     ) -> Result<Vec<factory_kernel::ArtifactProvenance>> {
-        let run = self.require_run(id).await?;
-        if run.status != RunStatus::Done {
-            return Ok(Vec::new());
-        }
-        let records = self.run_evidence.provenance(id).await?;
-        Ok(records
-            .into_iter()
-            .filter(|p| {
-                p.run_id == run.id
-                    && p.task_id == run.task_id
-                    && Some(p.statement.predicate.run_details.metadata.finished_on) == run.ended_at
-                    && run.artifacts.iter().any(|a| a == &p.artifact)
-            })
-            .collect())
+        factory_kernel::Provide::<factory_kernel::ArtifactProvenance>::get(
+            &factory_process::facts::ProvenanceProvider::new(self.store.as_ref(), &self.run_evidence),
+            &id.to_owned(),
+        ).await
     }
 }
 
