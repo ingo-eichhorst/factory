@@ -323,6 +323,16 @@ const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../../ui/js/backup-model.js"),
     ),
     (
+        "js/mac.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/mac.js"),
+    ),
+    (
+        "js/mac-model.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../../ui/js/mac-model.js"),
+    ),
+    (
         "js/environments.js",
         "text/javascript; charset=utf-8",
         include_str!("../../../ui/js/environments.js"),

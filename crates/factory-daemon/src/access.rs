@@ -233,6 +233,10 @@ impl Engine {
             // A declared secret's metadata in the instance root's config
             // (`#244`); never a value.
             Request::SecretSet { .. } => Grant::SecretsEdit,
+            // The host's power mode (`#260`): a change to the machine every
+            // run shares. Its own grant, never swept in by a wildcard, and
+            // checked against the root scope -- see `authorize` below.
+            Request::HostPowerModeSet { .. } => Grant::HostPower,
             Request::AgentStop { .. } => Grant::AgentStop,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
@@ -296,6 +300,9 @@ impl Engine {
             | Request::DependenciesVex { .. }
             | Request::Doctor
             | Request::Infrastructure
+            // `pmset -g` and `sudo -n -l`, which lists and never runs: the
+            // mode is read, nothing is changed (`#260`).
+            | Request::HostPowerMode
             | Request::ImportantDates { .. }
             // Lists the destination and reads the history; writes nothing.
             | Request::Backup
@@ -456,7 +463,7 @@ impl Engine {
                 Some(root) if root.name == *scope => Ok(()),
                 Some(root) => Err(FactoryError::Denied(format!(
                     "{} works in {scope}; the knowledge base, datasets, bench runs, policy \
-                     attestations, goals check-ins, backups and the secrets catalogue are company-wide and belong to the \
+                     attestations, goals check-ins, backups, the secrets catalogue and the host's power mode are company-wide and belong to the \
                      root scope ({:?}) alone",
                     caller.describe(),
                     root.name
@@ -731,6 +738,11 @@ impl Engine {
             Request::SecretSet { .. } => match def.reach {
                 Reach::Scope => in_root_scope(),
                 Reach::Own => Err(deny("change a declared secret's metadata; that requires scope reach")),
+            },
+            // There is one host, and it is the instance's, like a backup.
+            Request::HostPowerModeSet { .. } => match def.reach {
+                Reach::Scope => in_root_scope(),
+                Reach::Own => Err(deny("change the host's power mode; that requires scope reach")),
             },
             // A deployment belongs to its environment's scope. Own reach
             // covers what the caller's own run deploys and nothing else: it
@@ -1222,6 +1234,34 @@ mod tests {
         assert!(!allowed(&e, &worker("w"), set()).await);
         assert!(allowed(&e, &worker("w"), Request::Environment).await, "reading the tab is open");
         assert!(allowed(&e, &Caller::Owner, set()).await);
+    }
+
+    /// `#260`: `host.power` changes the one host, so it is checked against
+    /// the root scope like `secrets.edit` -- and like it, `*` never grants
+    /// it. Reading the mode is open to every agent.
+    #[tokio::test]
+    async fn host_power_is_the_root_scopes_and_never_granted_by_a_wildcard() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  keeper:\n    grants: [host.power]\n    reach: scope\n  \
+             own-keeper:\n    grants: [host.power]\n    reach: own\n  \
+             everything:\n    grants: ['*']\n    reach: scope\n",
+        );
+        let caller = |scope: &str, role: &str| Caller::Agent {
+            scope: scope.into(),
+            name: "w".into(),
+            role: Role::new(role),
+            run_id: None,
+        };
+        let set = || Request::HostPowerModeSet { mode: factory_core::protocol::PowerMode::HighPerformance };
+        assert!(allowed(&e, &caller("demo", "keeper"), set()).await, "named exactly, in the root scope");
+        assert!(!allowed(&e, &caller("other", "keeper"), set()).await, "outside the root scope");
+        assert!(!allowed(&e, &caller("demo", "own-keeper"), set()).await, "own reach never covers the host");
+        assert!(!allowed(&e, &caller("demo", "everything"), set()).await, "`*` does not include host.power");
+        assert!(!allowed(&e, &caller("demo", "foreman"), set()).await, "foreman does not get it for free");
+        assert!(!allowed(&e, &worker("w"), set()).await);
+        assert!(allowed(&e, &worker("w"), Request::HostPowerMode).await, "reading the mode is open");
+        assert!(allowed(&e, &Caller::Owner, set()).await, "a person through the UI or CLI");
     }
 
     /// `#152`: verifying an encrypted snapshot decrypts it, so an `identity`

@@ -4644,6 +4644,38 @@ special case here: an encrypted newest snapshot counts toward
 `backup_verified` only once an owner has actually verified it with its
 identity, exactly as a plaintext one does.
 
+### The host's power mode (#260)
+
+The L1 **Mac** tab shows the Mac's energy mode -- *Automatic*, *High
+performance*, *Energy saving*, which `pmset` numbers `powermode 0`, `2` and
+`1` -- as a three-way segmented control. `GET /api/host/power-mode` (the
+`host.power_mode` request, `factory power-mode`) reads `pmset -g custom` for
+AC and battery separately, `pmset -g cap` for whether the host offers the
+modes (`lowpowermode` / `highpowermode`), and asks `sudo -n -l /usr/bin/pmset
+-a powermode N` -- which lists whether the command is permitted and never runs
+it -- for each offered mode. AC and battery that disagree read *mixed*. Off
+macOS the answer is "not applicable", never an error.
+
+`POST /api/host/power-mode` with `{"mode": "automatic" | "high_performance" |
+"energy_saving"}` (the `host.power_mode.set` request, `factory power-mode
+high-performance`) runs `sudo -n /usr/bin/pmset -a powermode N` for every
+power source, then reads it back. Any other body -- a number, an unknown name,
+an extra field, nothing -- is a 400 before the engine is asked; the number
+comes from a `match` over the closed enum, and the command runner takes only
+`&'static str` arguments, so nothing a caller sent reaches a command. The
+daemon is a launchd job with no TTY, so `sudo -n` never prompts: setting works
+only once the owner installs a drop-in scoped to exactly the three commands,
+which the tab shows (with the user the daemon runs as) until it is there:
+
+    factory ALL=(root) NOPASSWD: /usr/bin/pmset -a powermode 0, /usr/bin/pmset -a powermode 1, /usr/bin/pmset -a powermode 2
+
+at `/etc/sudoers.d/factory-pmset`, checked with `visudo -cf` before it is
+installed `0440` root-owned. The write needs `host.power`, the root scope's
+and never part of a `*` or a `foreman`: only a person changes the mode, and
+the click is the confirmation. Each change is journaled under `factory:host`
+with who, from and to. Tests never run a real `pmset` or `sudo`: under
+`cfg(test)` there is no runner unless a test injects a fake.
+
 ## Writing a plugin
 
 A plugin is any program that reads one JSON object per line on stdin and writes
