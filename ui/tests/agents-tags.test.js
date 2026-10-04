@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 globalThis.document = { addEventListener() {}, getElementById: () => null };
+globalThis.window = {};
 const { agentTags } = await import("../js/agents.js");
 
 test("roster tags keep readiness and omit empty tags without changing spacing", () => {
