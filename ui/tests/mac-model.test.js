@@ -82,6 +82,13 @@ test("read-only disables every segment even with partial or stale permissions", 
   }
 });
 
+test("unreadable modes do not ask to reinstall an already permitted rule", () => {
+  const unread = { ...TODAY, ac: null, battery: null, permitted: TODAY.supported };
+  assert.equal(needsRule(unread), false);
+  assert.match(stateText(unread), /current mode must be readable/);
+  assert.ok(segments(unread).every(s => s.disabled));
+});
+
 test("prototype names are not modes and cannot reach the POST body", () => {
   for (const mode of ["constructor", "toString", "__proto__", "hasOwnProperty", null, {}, 2]) {
     assert.equal(modeLabel(mode), "--");

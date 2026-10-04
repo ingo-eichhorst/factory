@@ -75,7 +75,9 @@ export function stateText(report) {
         ? "The power mode is a macOS setting; this host is not macOS."
         : "This Mac offers no energy mode: pmset -g cap lists neither lowpowermode nor highpowermode.";
     case "read-only":
-      return "Read-only: Factory may not change the power mode until the sudoers rule below is installed.";
+      return needsRule(report)
+        ? "Read-only: Factory may not change the power mode until the sudoers rule below is installed."
+        : "Read-only: every power source's current mode must be readable before changing it. Check the notes and Refresh.";
     case "editable":
       return "Choosing a mode sets it at once for every power source (pmset -a powermode).";
     default:
@@ -127,7 +129,8 @@ export function setBody(mode) {
 /// Whether the rule and its install command belong on the page: whenever
 /// the host offers a mode the rule does not yet permit.
 export function needsRule(report) {
-  return macState(report) === "read-only";
+  return macState(report) === "read-only"
+    && (report.supported ?? []).some(mode => !(report.permitted ?? []).includes(mode));
 }
 
 /// The install as steps a person runs one at a time, `{ text, command }`,
