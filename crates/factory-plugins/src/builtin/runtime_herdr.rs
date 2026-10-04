@@ -550,28 +550,30 @@ impl HerdrRuntime {
     /// runs under the harness's argv0 is seen as soon as it starts; the
     /// wait is bounded by the same timeout `agent start` is.
     async fn hold_as_agent(&self, pane: &str, kind: &str, name: &str) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + self.start_timeout;
-        loop {
-            let seen = match self.run(&[s("agent"), s("get"), s(pane)]).await {
-                Ok(got) => {
-                    let agent = got.get("agent").filter(|a| a.is_object()).unwrap_or(&got);
-                    agent.get("agent").and_then(Value::as_str) == Some(kind)
+        // The deadline covers the child calls and rename too, not just sleeps
+        // between calls. run()'s kill_on_drop stops a hung Herdr client when
+        // the deadline expires. No detection failure becomes a shell launch.
+        let hold = async {
+            loop {
+                let seen = match self.run(&[s("agent"), s("get"), s(pane)]).await {
+                    Ok(got) => {
+                        let agent = got.get("agent").filter(|a| a.is_object()).unwrap_or(&got);
+                        agent.get("agent").and_then(Value::as_str) == Some(kind)
+                            && agent.get("pane_id").and_then(Value::as_str) == Some(pane)
+                    }
+                    // `agent_not_found` until herdr has looked at the pane.
+                    Err(_) => false,
+                };
+                if seen {
+                    break;
                 }
-                // `agent_not_found` until herdr has looked at the pane.
-                Err(_) => false,
-            };
-            if seen {
-                break;
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(FactoryError::adapter(
-                    ADAPTER,
-                    format!("pane {pane} never showed a {kind} agent"),
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        self.run(&[s("agent"), s("rename"), s(pane), s(name)]).await.map(|_| ())
+            self.run(&[s("agent"), s("rename"), s(pane), s(name)]).await.map(|_| ())
+        };
+        tokio::time::timeout(self.start_timeout, hold).await.map_err(|_| {
+            FactoryError::adapter(ADAPTER, format!("pane {pane} never showed a {kind} agent that could be named within {}ms", self.start_timeout.as_millis()))
+        })?
     }
 
     fn pane_of(session: &SessionRef) -> &str {
@@ -1037,21 +1039,16 @@ impl AgentRuntime for HerdrRuntime {
                 meta.insert("mode".into(), "shell".into());
                 // `#218`: a command that brings up a known agent itself -- a
                 // harness inside a sandbox -- is held as that agent, under
-                // this session's name, like one `agent start` brought up. If
-                // herdr never sees it, the run still goes on as a shell: the
-                // agent is working either way, only unlabelled.
+                // this session's name, like one `agent start` brought up.
+                // Never fall back to shell mode: submit() would then run the
+                // prompt as shell text if the sandbox launcher had exited.
                 if let Some(kind) = &req.launch.agent_kind {
-                    match self.hold_as_agent(&pane, kind, &req.name).await {
-                        Ok(()) => {
-                            meta.insert("mode".into(), "agent".into());
-                            meta.insert("agent_name".into(), req.name.clone());
-                        }
-                        Err(e) => tracing::warn!(
-                            pane = %pane,
-                            name = %req.name,
-                            "herdr did not see the {kind} agent this launch brings up; the session stays a shell: {e}"
-                        ),
+                    if let Err(e) = self.hold_as_agent(&pane, kind, &req.name).await {
+                        let _ = self.close_tab_or_pane(&tab, &pane).await;
+                        return Err(e);
                     }
+                    meta.insert("mode".into(), "agent".into());
+                    meta.insert("agent_name".into(), req.name.clone());
                 }
             }
         }
@@ -1686,11 +1683,11 @@ fi
         let (bin, dir) = fake_herdr_seeing("claude", 2);
         let runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
         runtime
-            .hold_as_agent("w1:p7", "claude", "factory-awesome-herdr-curator-7a24095b")
+            .hold_as_agent("w1:p7", "claude", "factory-218-curator-7a24095b")
             .await
             .unwrap();
         let renames = std::fs::read_to_string(dir.join("renames")).unwrap();
-        assert_eq!(renames.trim(), "agent rename w1:p7 factory-awesome-herdr-curator-7a24095b");
+        assert_eq!(renames.trim(), "agent rename w1:p7 factory-218-curator-7a24095b");
         assert_eq!(std::fs::read_to_string(dir.join("gets")).unwrap().trim(), "3", "waited out two misses");
         std::fs::remove_dir_all(dir).ok();
     }
@@ -1705,6 +1702,109 @@ fi
         let e = runtime.hold_as_agent("w1:p7", "claude", "run-name").await.unwrap_err().to_string();
         assert!(e.contains("never showed a claude agent"), "{e}");
         assert!(!dir.join("renames").exists(), "nothing named that is not the agent");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hung_detection_or_rename_is_bounded_by_the_whole_start_deadline() {
+        for operation in ["get", "rename"] {
+            let (bin, dir) = fake_herdr_seeing("claude", 0);
+            let script = std::fs::read_to_string(&bin).unwrap().replace(
+                &format!("[ \"$2\" = {operation} ]; then"),
+                &format!("[ \"$2\" = {operation} ]; then\n  exec sleep 10"),
+            );
+            std::fs::write(&bin, script).unwrap();
+            let mut runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+            runtime.start_timeout = Duration::from_millis(100);
+            let began = tokio::time::Instant::now();
+            let result = tokio::time::timeout(Duration::from_secs(2), runtime.hold_as_agent("w1:p7", "claude", "run-name"))
+                .await.expect("even a stuck child must finish within the deadline");
+            assert!(result.is_err());
+            assert!(began.elapsed() < Duration::from_secs(2));
+            std::fs::remove_dir_all(dir).ok();
+        }
+    }
+
+    /// Full start/submit fake, so failure tests cover the branch that used to
+    /// swallow detection errors and return a shell SessionRef, not only the
+    /// detection helper. No real terminal or command is started here.
+    #[cfg(unix)]
+    fn fake_command_harness(detection: &str) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("factory-herdr-command-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("fake-herdr");
+        let (kind, pane) = match detection {
+            "wrong-kind" => ("codex", "w1:p7"),
+            "wrong-pane" => ("claude", "w2:p8"),
+            _ => ("claude", "w1:p7"),
+        };
+        std::fs::write(&bin, format!(r#"#!/bin/sh
+d='{dir}'
+echo "$@" >> "$d/calls"
+case "$1 $2" in
+  'status ') printf '%s\n' '{{"result":{{"server":{{"session":"qa-stub"}}}}}}' ;;
+  'workspace create') printf '%s\n' '{{"result":{{"root_pane":{{"pane_id":"w1:p7","tab_id":"w1:t7"}},"workspace":{{"workspace_id":"w1"}}}}}}' ;;
+  'agent get')
+    if [ '{detection}' = missing ]; then printf '%s\n' '{{"error":{{"code":"agent_not_found"}}}}'; exit 1; fi
+    printf '%s\n' '{{"result":{{"agent":{{"agent":"{kind}","pane_id":"{pane}"}}}}}}' ;;
+  'agent rename')
+    if [ '{detection}' = rename-fails ]; then printf '%s\n' '{{"error":{{"code":"agent_name_taken"}}}}'; exit 1; fi
+    printf '%s\n' '{{"result":{{}}}}' ;;
+  'agent prompt'|'pane run'|'tab close') printf '%s\n' '{{"result":{{}}}}' ;;
+  *) exit 9 ;;
+esac
+"#, dir = dir.display())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (bin, dir)
+    }
+
+    #[cfg(unix)]
+    fn command_harness_request(cwd: &Path) -> StartRequest {
+        StartRequest {
+            id: "qa-run".into(), scope: String::new(), name: "factory-218-qa-run".into(),
+            label: "QA sandbox harness".into(), cwd: cwd.into(),
+            launch: factory_core::adapter::agent::LaunchSpec {
+                kind: LaunchKind::Command(vec!["launcher".into()]), args: Vec::new(),
+                env: BTreeMap::new(), agent_kind: Some("claude".into()),
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unseen_command_harness_never_falls_back_to_shell_and_closes_only_its_tab() {
+        for detection in ["missing", "wrong-kind", "wrong-pane", "rename-fails"] {
+            let (bin, dir) = fake_command_harness(detection);
+            let mut runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+            runtime.start_timeout = Duration::from_millis(50);
+            let result = runtime.start(&command_harness_request(&dir)).await;
+            assert!(result.is_err(), "must never return a shell session for {detection}: {result:?}");
+            let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+            assert!(calls.contains("tab close w1:t7"), "{calls}");
+            assert!(!calls.contains("workspace close") && !calls.contains("agent prompt"), "{calls}");
+            assert_eq!(calls.contains("agent rename"), detection == "rename-fails", "{calls}");
+            assert_eq!(calls.lines().filter(|c| c.starts_with("pane run")).count(), 1, "only the launcher, never a prompt: {calls}");
+            std::fs::remove_dir_all(dir).ok();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_detected_command_harness_gets_agent_metadata_attach_and_agent_prompt_not_shell_input() {
+        let (bin, dir) = fake_command_harness("seen");
+        let runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+        let session = runtime.start(&command_harness_request(&dir)).await.unwrap();
+        assert_eq!(session.meta.get("mode").map(String::as_str), Some("agent"));
+        assert_eq!(session.meta.get("agent_name").map(String::as_str), Some("factory-218-qa-run"));
+        assert!(runtime.attach_command(&session).unwrap().contains("agent attach factory-218-qa-run"));
+        runtime.submit(&session, "task text").await.unwrap();
+        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+        assert!(calls.contains("agent rename w1:p7 factory-218-qa-run"));
+        assert!(calls.contains("agent prompt factory-218-qa-run task text"));
+        assert_eq!(calls.lines().filter(|c| c.starts_with("pane run")).count(), 1, "{calls}");
+        runtime.stop(&session).await.unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
 

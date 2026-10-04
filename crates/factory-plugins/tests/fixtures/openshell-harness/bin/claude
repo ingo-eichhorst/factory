@@ -1,0 +1,9 @@
+#!/bin/bash
+# No model, credentials or API: exercise the VM's interactive terminal only.
+stty -echo
+printf '\033[?2004hQA_INITIAL:%s\n' "$1"
+while IFS= read -r line; do
+    case "$line" in
+        *QA_FOLLOWUP*) printf 'QA_RECEIVED:QA_FOLLOWUP\n' ;;
+    esac
+done

@@ -18,7 +18,7 @@
 //!    a staging directory of the run's own files -- the guide, the hook
 //!    settings, the prompt, an env file and the launcher -- to
 //!    `/sandbox/.factory-run`.
-//! 4. The herdr pane runs `sh '<host launcher>'`, a short line, whose one
+//! 4. The herdr pane runs `bash '<host launcher>'`, a short line, whose one
 //!    command is `openshell sandbox exec --tty` of the in-sandbox launcher.
 //!    The pane is still where the run is visible, and what `factory task
 //!    output` reads.
