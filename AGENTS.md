@@ -9,7 +9,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy and TaskStore
-    crates/factory-assurance      L5: plan compiler, check evaluator, Quality, conformance, budget assessment and metric vocabulary (live services still pending)
+    crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam (full live services still pending)
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
@@ -236,7 +236,7 @@ something impossible.
   task's origin is opaque: `.into()` a producer-owned `BenchOrigin` when
   constructing it, and decode it only in the benchmark owner. Keep its legacy
   JSON stable; never add benchmark accessors to L4. This does not finish the
-  benchmark timer, live providers/services or command-ladder work.
+  live providers/services or command-ladder work.
 - Check evaluation and Quality belong to L5, never L6. Project resolved
   policy declarations into `EvaluationSubject<Kind>`; L5 only echoes the
   producer's opaque classification. Quality supplies L5 subjects directly.
@@ -245,7 +245,17 @@ something impossible.
   are same-level calls. L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.
   L6 still owns authored policy and budget intent. Signposts, remediation,
-  benchmarks and live service isolation remain separate #193 requirements.
+  live service isolation remain separate #193 requirements.
+- Benchmark/dataset/knowledge behavior and the KnowledgeProvider seam belong
+  to L5. Core's configuration adapter projects resolved agents into L5's
+  `ConfigurationInput`; it must never serialize or debug-print raw arguments.
+  Group by full arguments, not redacted flags; only model, redacted flags and
+  the configuration hash leave the owner. The benchmark store owns its same
+  schema in L5, with cross-adapter integration tests outside the ladder. L5
+  owns the independent benchmark timer; never add its sweep back to L4's
+  task/watchdog tick. Keep immediate startup, cadence, no overlapping sweeps,
+  missed-tick delay and shutdown behavior. Full live service/command-port
+  isolation still remains in #193; the daemon callback is transitional wiring.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's
   `scope.roles` down to that scope -- from the live snapshot, and `authorize`,

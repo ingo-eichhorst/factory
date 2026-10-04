@@ -25,8 +25,9 @@ the daemon cannot tell a built-in implementation from a plugin:
 
 The public compatibility paths are in `crates/factory-core/src/adapter/`.
 The Agent and runtime traits are owned by L3's `factory-agents`, and the
-TaskStore trait by L4's `factory-process`; core re-exports them. The other
-seams remain in core pending the level migration. None knows
+TaskStore trait by L4's `factory-process`, and KnowledgeProvider by L5's
+`factory-assurance`; core re-exports them. The Interface seam remains in
+core pending the level migration. None knows
 about sqlite, herdr, axum, or any other concrete choice.
 
 ## Quickstart
@@ -5062,16 +5063,26 @@ interpreting it. Quality uses its own L5 subjects, never synthetic L6 controls.
 Core paths remain canonical re-exports/adapters, preserving stored and wire JSON.
 Shared identifiers and authored receipt values are L0 data, not new live facts.
 Lazy evaluation gathering reads lower facts as L5, with ordinary same-level
-calls for knowledge tags and benchmark gates. Provider/service isolation,
-benchmarks, signposts and remediation/promotion routing remain unfinished.
+calls for knowledge tags and benchmark gates. L5 also owns benchmark runs,
+result aggregation/configuration hashing and argument redaction, datasets,
+knowledge indexing/writes and the unchanged KnowledgeProvider seam. Its live
+benchmark store owns the same SQLite schema. Core projects scope/foreman
+declarations into L5's private-argument `ConfigurationInput`; no full config
+hub or agent-lifecycle dependency enters L5. Stored and wire JSON is unchanged.
+The benchmark progress backstop has an independent L5 timer: immediate first
+tick, the same startup cadence, delayed missed ticks, one sweep at a time and
+explicit shutdown. L4's process scheduler no longer sweeps benchmark runs.
+Full provider/service isolation, signposts and remediation/promotion routing
+remain unfinished.
 
 `Task.bench_origin` is an L4 `OriginRef`, opaque to process. It has no
 benchmark-field API; the benchmark owner alone decodes its legacy object
 reference. Serde preserves existing stored/plugin JSON (and can carry future
 string ids). Rust callers assigning a `BenchOrigin` convert with `.into()`;
 this field-type change does not change the plugin protocol. Opacity is an
-ownership API, not a security boundary. Benchmark scheduling, resets/base
-selection and its own timer still await the service/command-ladder migration.
+ownership API, not a security boundary. L5 owns origin decoding and its timer;
+live dispatch, reset/base selection and the service/command-ladder migration
+still need their isolated services and adjacent command ports.
 Only the small shared slug/identifier validator moves from dataset to L0;
 no task, run, intake, workflow, plan compilation or usage accounting enters
 the kernel.
@@ -5086,7 +5097,7 @@ strict command ladder are still ahead in #193.
     crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy and TaskStore
-    crates/factory-assurance      L5: plan compiler, check evaluator, Quality, conformance, budget assessment and metric vocabulary (live services still pending)
+    crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam (full live services still pending)
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary

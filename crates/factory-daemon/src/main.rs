@@ -410,6 +410,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     engine.reconcile_run_deployments().await;
 
     let sched = tokio::spawn(scheduler::run(engine.clone(), shutdown_rx.clone()));
+    let benchmarks = tokio::spawn(bench::run(engine.clone(), shutdown_rx.clone()));
     // GitHub receipt is independent of dispatch: network or authentication
     // trouble must never hold up the scheduler.
     let github_intake = tokio::spawn(github_intake::run(engine.clone(), shutdown_rx.clone()));
@@ -462,6 +463,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
         }
     }
     sched.abort();
+    benchmarks.abort();
     github_intake.abort();
     backups.abort();
     health.abort();

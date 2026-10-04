@@ -7,6 +7,7 @@ pub mod agent;
 pub mod backup;
 pub mod bench;
 pub mod benchmark;
+pub use factory_assurance::{bench_store, bench_timer};
 pub mod building;
 pub mod budget;
 pub mod config;

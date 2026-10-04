@@ -768,6 +768,20 @@ impl Engine {
         Ok(run)
     }
 
+    /// L5 periodic progress backstop, independent of the process scheduler.
+    pub(crate) async fn sweep_bench_runs(self: &Arc<Self>) {
+        match self.bench.active_runs().await {
+            Ok(runs) => {
+                for run in runs {
+                    if let Err(e) = self.advance_bench_run(&run.id).await {
+                        tracing::warn!(bench_run = run.id, "could not advance bench run: {e}");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("could not list active bench runs: {e}"),
+        }
+    }
+
     // -- recovery ------------------------------------------------------
 
     /// Reconcile every bench run still `running` after a restart. Settled
@@ -885,6 +899,52 @@ mod tests {
         }.into();
         assert!(engine.bench_case_base(&known).await.unwrap().is_none());
         assert!(engine.bench_case_reset(&known).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn l5_timer_settles_a_run_without_starting_the_process_scheduler() {
+        let engine = test_engine(std::env::temp_dir().join("factory-bench-timer-no-dispatch"));
+        let mut attempt = BenchAttempt::pending("attempt".into(), "case".into(), "shell".into(), 1);
+        attempt.verdict = Some(Verdict::Error);
+        attempt.ended_at = Some(Utc::now());
+        let run = BenchRun {
+            id: "timer-run".into(),
+            dataset: "demo".into(),
+            dataset_revision: 1,
+            cases: vec![],
+            case_bases: Default::default(),
+            agents: vec!["shell".into()],
+            attempts_per_case: 1,
+            concurrency: 1,
+            status: BenchRunStatus::Running,
+            attempts: vec![],
+            started_at: Utc::now(),
+            ended_at: None,
+        };
+        engine.bench.put_run(&run).await.unwrap();
+        engine.bench.put_attempt(&run.id, &attempt).await.unwrap();
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        // No scheduler::run, startup recovery, or task report can drive this.
+        let timer = tokio::spawn(crate::bench::run(engine.clone(), rx));
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let observed = engine.bench.get_run(&run.id).await.unwrap().unwrap();
+                if observed.status != BenchRunStatus::Running {
+                    break observed;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the independent L5 timer must advance the run");
+        assert_eq!(settled.status, BenchRunStatus::Done);
+        assert!(settled.ended_at.is_some());
+        assert_eq!(settled.attempts[0].verdict, Some(Verdict::Error));
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), timer)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
