@@ -10,6 +10,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy and TaskStore
     crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam (full live services still pending)
+    crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data and GoalsStore
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
@@ -206,7 +207,8 @@ something impossible.
   strictly upward reads only, including adjacent levels. Same-level calls
   stay in their service. The router and page composition use `Facts<People>`
   outside the ladder, not an internal level's identity. L1 infrastructure,
-  L2 environment, L3 agent/runtime, L4 process and L5 plan-compiler domain owners live in physical crates; core keeps
+  L2 environment, L3 agent/runtime, L4 process, L5 assurance and L6 direction
+  domain owners live in physical crates; core keeps
   compatibility re-exports. A physical owner declares
   `package.metadata.factory.level` and may depend on L0 or only the level
   directly below. The Cargo metadata guard includes aliases, target tables
@@ -256,6 +258,15 @@ something impossible.
   task/watchdog tick. Keep immediate startup, cadence, no overlapping sweeps,
   missed-tick delay and shutdown behavior. Full live service/command-port
   isolation still remains in #193; the daemon callback is transitional wiring.
+- L6's `factory-direction` owns authored policy applicability/rollups, goals,
+  scenarios, budget intent and reporting-clock arithmetic. It depends only on
+  L0 and L5, including in tests. It projects declarations to L5 evaluation
+  subjects and plan sources; never import an L4 task or compiler API there.
+  Policy report/export data and the live GoalsStore are owned there too,
+  with canonical old Core/wire paths and unchanged JSON/SQLite schema.
+  PolicyStore still mixes process evidence with policy receipts in the daemon;
+  split those owners before claiming full service/storage isolation. The
+  signpost reader move and live adjacent command ports still remain in #193.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's
   `scope.roles` down to that scope -- from the live snapshot, and `authorize`,

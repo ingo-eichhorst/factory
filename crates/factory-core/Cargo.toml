@@ -11,6 +11,7 @@ factory-environment = { path = "../factory-environment" }
 factory-agents = { path = "../factory-agents" }
 factory-process = { path = "../factory-process" }
 factory-assurance = { path = "../factory-assurance" }
+factory-direction = { path = "../factory-direction" }
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

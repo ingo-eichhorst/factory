@@ -790,6 +790,7 @@ dependencies = [
  "csv",
  "factory-agents",
  "factory-assurance",
+ "factory-direction",
  "factory-environment",
  "factory-infrastructure",
  "factory-kernel",
@@ -831,6 +832,23 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "factory-direction"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "factory-assurance",
+ "factory-kernel",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

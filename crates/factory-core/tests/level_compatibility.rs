@@ -4,6 +4,46 @@ use factory_kernel::{LaunchKind, LaunchSpec, Schedule, Span};
 use serde_json::json;
 
 #[test]
+fn direction_domains_and_goals_store_keep_their_canonical_core_paths() {
+    let policy: Option<factory_core::policy::Catalogue> = None;
+    let _: Option<factory_direction::policy::Catalogue> = policy;
+    let cycle: Option<factory_core::goals::Cycle> = None;
+    let _: Option<factory_direction::goals::Cycle> = cycle;
+    let scenario: Option<factory_core::scenario::Scenario> = None;
+    let _: Option<factory_direction::scenario::Scenario> = scenario;
+    let budget: Option<factory_core::budget::Catalogue> = None;
+    let _: Option<factory_direction::budget::Catalogue> = budget;
+    let clock: Option<factory_core::reporting_clock::ReportingClock> = None;
+    let _: Option<factory_direction::reporting_clock::ReportingClock> = clock;
+    let export: Option<factory_core::policy_export::PolicyExport> = None;
+    let _: Option<factory_direction::policy_export::PolicyExport> = export;
+    let store: Option<factory_core::goals_store::GoalsStore> = None;
+    let _: Option<factory_direction::goals_store::GoalsStore> = store;
+}
+
+#[test]
+fn wire_policy_report_is_the_l6_report_with_identical_legacy_json() {
+    let wire = json!({
+        "scope":"demo", "rows":[{
+            "scope":"demo", "statuses":[{
+                "control":"cra/a", "title":"A", "kind":"regulation",
+                "status":"open", "reasons":["Missing evidence"]
+            }], "rollup":[]
+        }], "rollup":[], "not_applicable":[], "findings":[], "catalogues":[]
+    });
+    let old: factory_core::protocol::PolicyReport = serde_json::from_value(wire.clone()).unwrap();
+    let canonical: factory_direction::policy_report::PolicyReport = old;
+    assert_eq!(serde_json::to_value(&canonical).unwrap(), wire);
+    let response = factory_core::protocol::Payload::Policy { report: canonical };
+    let round_trip: factory_core::protocol::Payload =
+        serde_json::from_value(serde_json::to_value(response).unwrap()).unwrap();
+    assert!(matches!(
+        round_trip,
+        factory_core::protocol::Payload::Policy { .. }
+    ));
+}
+
+#[test]
 fn compatibility_values_are_the_canonical_kernel_types() {
     let launch: agent::LaunchSpec = LaunchSpec {
         kind: LaunchKind::Named("shell".into()),
