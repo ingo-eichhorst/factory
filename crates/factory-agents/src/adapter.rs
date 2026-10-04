@@ -771,6 +771,12 @@ impl AgentContext {
                      PUT /api/secrets/<name>, not this CLI; the catalogue is company-wide, not scoped"
                         .to_string()
                 }
+                Grant::HostPower => format!(
+                    "host.power -> {bin} power-mode automatic|high-performance|energy-saving; sets the host's \
+                     macOS power mode for every power source (also the web UI's L1 Mac tab, or POST \
+                     /api/host/power-mode); a person's decision about the machine every run shares, so \
+                     only when you were explicitly asked -- the host is the instance's, not scoped to {scope}"
+                ),
                 Grant::DashboardEdit => {
                     "dashboard.edit -> save or reset the dashboard layout for a scope; today that is the \
                      web UI's Dashboard > Customise, or PUT/DELETE /api/dashboard?scope=, not this CLI"

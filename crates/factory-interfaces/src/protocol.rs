@@ -399,6 +399,20 @@ pub enum Request {
     /// only ever what the config says it is.
     #[serde(rename = "infrastructure")]
     Infrastructure,
+    /// The L1 Mac tab (`#260`): the host's macOS power mode for AC and for
+    /// battery, which modes the host offers, and whether Factory may change
+    /// it -- found out without changing anything. Read-only; off macOS the
+    /// answer is "not applicable", never an error.
+    #[serde(rename = "host.power_mode")]
+    HostPowerMode,
+    /// Set the host's power mode for every power source (`pmset -a
+    /// powermode 0|1|2`), through `sudo -n` and a sudoers rule scoped to
+    /// exactly those three commands. `mode` is one of three closed values;
+    /// nothing else deserializes, so no free string reaches a command.
+    /// Journaled with who changed it, from what, to what. Needs
+    /// `host.power`, checked against the root scope.
+    #[serde(rename = "host.power_mode.set")]
+    HostPowerModeSet { mode: PowerMode },
     /// Read-only important-date metadata and native policy/CRA projections.
     #[serde(rename = "important-dates")]
     ImportantDates {
@@ -1193,6 +1207,11 @@ pub enum Payload {
         /// the config names no harness with a probe.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         harnesses: Vec<factory_agents::harness::HarnessRow>,
+    },
+    /// The L1 Mac tab's power mode (`#260`) -- the answer to both
+    /// `Request::HostPowerMode` and `Request::HostPowerModeSet`.
+    HostPowerMode {
+        report: PowerModeReport,
     },
     /// The L1 Backup page -- see `backup::BackupReport`. Boxed for the same
     /// reason `Operations` is.
@@ -2282,6 +2301,121 @@ pub struct DiskFacts {
     pub total_bytes: u64,
     /// Available to an unprivileged user, as `df` reports it.
     pub free_bytes: u64,
+}
+
+/// The host's macOS power mode (`#260`), as System Settings calls it
+/// *Energy Mode*. Closed: these three are the only values the wire accepts,
+/// and the daemon maps each to its `pmset powermode` number itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PowerMode {
+    /// `powermode 0`: macOS decides.
+    Automatic,
+    /// `powermode 2`: High Power.
+    HighPerformance,
+    /// `powermode 1`: Low Power.
+    EnergySaving,
+}
+
+impl PowerMode {
+    /// In the order the segmented control draws them.
+    pub const ALL: [PowerMode; 3] = [Self::Automatic, Self::HighPerformance, Self::EnergySaving];
+
+    /// The wire name: `automatic`, `high_performance`, `energy_saving`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::HighPerformance => "high_performance",
+            Self::EnergySaving => "energy_saving",
+        }
+    }
+
+    /// What a person reads.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Automatic => "Automatic",
+            Self::HighPerformance => "High performance",
+            Self::EnergySaving => "Energy saving",
+        }
+    }
+}
+
+impl std::fmt::Display for PowerMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+impl std::str::FromStr for PowerMode {
+    type Err = String;
+
+    /// The wire name, with `-` accepted for `_` so a CLI argument reads
+    /// naturally. Nothing else: not a number, not a near miss.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.replace('-', "_").as_str() {
+            "automatic" => Ok(Self::Automatic),
+            "high_performance" => Ok(Self::HighPerformance),
+            "energy_saving" => Ok(Self::EnergySaving),
+            _ => Err(format!("{s:?} is not a power mode; use automatic, high-performance or energy-saving")),
+        }
+    }
+}
+
+/// The L1 Mac tab's answer (`#260`). Read fresh on every request; every
+/// reading that fails is `null` or empty with a line in `notes`, never a
+/// failed request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PowerModeReport {
+    /// `false` off macOS: nothing here applies, and nothing below is read.
+    pub applicable: bool,
+    /// The modes this host offers, in `PowerMode::ALL` order -- empty when
+    /// `pmset -g cap` lists neither `lowpowermode` nor `highpowermode`.
+    pub supported: Vec<PowerMode>,
+    /// The mode set for AC power, `null` when unreadable or not reported.
+    pub ac: Option<PowerMode>,
+    /// The mode set for battery power, `null` on a Mac with no battery.
+    pub battery: Option<PowerMode>,
+    /// The modes the sudoers rule lets this daemon set right now, found
+    /// with `sudo -n -l` -- which lists, and never runs, the command.
+    pub permitted: Vec<PowerMode>,
+    /// Every supported mode is permitted: the control is live.
+    pub can_change: bool,
+    /// The one step that stays a person's: the rule to install.
+    pub sudoers: SudoersRule,
+    /// Why a reading is missing, in words.
+    #[serde(default)]
+    pub notes: Vec<String>,
+    /// The newest changes, oldest first.
+    #[serde(default)]
+    pub changes: Vec<PowerModeChange>,
+}
+
+/// The sudoers drop-in that lets the daemon run exactly the three
+/// `pmset -a powermode` commands as root, and nothing else.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SudoersRule {
+    /// Where it goes: `/etc/sudoers.d/factory-pmset`.
+    pub path: String,
+    /// The user the daemon runs as, which the rule names.
+    pub user: String,
+    /// The rule's one line.
+    pub rule: String,
+    /// A shell command that checks the rule with `visudo -cf` and only then
+    /// installs it, root-owned and `0440`.
+    pub install: String,
+    /// The whole-configuration check to run afterwards.
+    pub check: String,
+}
+
+/// One journaled power-mode change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PowerModeChange {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub by: String,
+    pub from_ac: Option<PowerMode>,
+    pub from_battery: Option<PowerMode>,
+    pub to: PowerMode,
+    pub message: String,
 }
 
 /// The daemon answering, and where it keeps its state.

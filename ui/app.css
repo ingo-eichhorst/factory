@@ -1488,6 +1488,21 @@ button.linklike:hover { color: var(--signal); }
   .infra-on span { grid-column: 1; }
 }
 
+/* ============================================================ L1 Mac (#260):
+   the power mode's hero reuses the Infrastructure card; its left edge and
+   badge say whether the control is live, and the segmented control is the
+   shared `.seg`, a little larger because it is the page's one action. */
+.mac-hero[data-state="editable"] { border-left-color: var(--run); }
+.mac-hero[data-state="read-only"] { border-left-color: var(--wait); }
+.mac-hero[data-state="unsupported"] { border-left-color: var(--faint); }
+.tag.mac-badge[data-state="editable"] { color: var(--run); border-color: var(--run); }
+.tag.mac-badge[data-state="read-only"] { color: var(--wait); border-color: var(--wait); }
+.mac-seg { margin: 4px 0 12px; flex-wrap: wrap; }
+.mac-seg button { padding: 8px 14px; font-size: 12px; }
+.mac-seg button:disabled { cursor: not-allowed; opacity: .55; }
+.mac-seg button.on:disabled { opacity: .8; }
+.mac-hero .env-note { margin: 10px 0 0; }
+
 /* ============================================================ L1 backup (#116):
    a status hero whose left edge and badge carry the age level -- green,
    amber, red from the shared `--run`/`--wait`/`--fault` -- then the warning

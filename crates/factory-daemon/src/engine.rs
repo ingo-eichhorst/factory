@@ -341,6 +341,9 @@ pub struct Engine {
     /// (`dispatch`), released for every run `close_session` ever sees,
     /// terminal outcome or not.
     pub(crate) power: crate::power::PowerAssertions,
+    /// The host's macOS power mode -- see `crate::host_power` and issue
+    /// #260. No runner at all in tests or off macOS.
+    pub(crate) host_power: crate::host_power::HostPower,
     /// Whether each harness binary starts, probed before a dispatch and
     /// cached -- see `crate::harness_health` and issue #131.
     pub(crate) harness: crate::harness_health::HarnessHealth,
@@ -462,6 +465,7 @@ impl Engine {
             worktree_caps: Default::default(),
             site_memory: Default::default(),
             power,
+            host_power: crate::host_power::HostPower::new(),
             harness: crate::harness_health::HarnessHealth::new(),
             provision: crate::provision::Provisioner::default(),
             infrastructure_expiries: crate::renewals::store::InfrastructureExpiryStore::in_memory().expect("expiry metadata store should open"),
@@ -761,6 +765,13 @@ impl Engine {
             // request future's stack frame. Every request variant shares that
             // frame even when Infrastructure was not the one selected.
             Request::Infrastructure => Ok(Box::pin(self.infrastructure()).await),
+            // Boxed like `Infrastructure`: a handful of awaited commands.
+            Request::HostPowerMode => Ok(Payload::HostPowerMode {
+                report: Box::pin(self.host_power_report()).await,
+            }),
+            Request::HostPowerModeSet { mode } => Ok(Payload::HostPowerMode {
+                report: Box::pin(self.set_host_power_mode(caller, mode)).await?,
+            }),
             Request::ImportantDates { scope } => Ok(Payload::ImportantDates { report: Box::new(self.important_dates(scope.as_deref()).await?) }),
             Request::Backup => Ok(Payload::Backup {
                 report: Box::new(self.backup_report().await?),

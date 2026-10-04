@@ -80,6 +80,17 @@ enum Command {
     /// account each agent's model calls go to. Read-only; never reads a
     /// credential.
     Infra,
+    /// L1 Mac (`#260`): the host's macOS power mode for AC and battery, and
+    /// whether Factory may change it. With a mode -- automatic,
+    /// high-performance or energy-saving -- sets it for every power source
+    /// (`pmset -a powermode`), which works once the sudoers rule it prints is
+    /// installed. Needs `host.power` when an agent asks.
+    #[command(name = "power-mode")]
+    PowerMode {
+        /// automatic, high-performance or energy-saving.
+        #[arg(value_parser = parse_power_mode)]
+        mode: Option<factory_core::protocol::PowerMode>,
+    },
     /// Important dates: expiry metadata, dependencies, renewal lines and native clocks.
     Dates { #[arg(long)] scope: Option<String> },
     /// L1 Backup: whether the instance's own state -- the database, the
@@ -1760,6 +1771,15 @@ async fn main() -> Result<()> {
             print(&payload, cli.json, infrastructure_text)
         }
 
+        Command::PowerMode { mode } => {
+            let request = match mode {
+                Some(mode) => Request::HostPowerModeSet { mode },
+                None => Request::HostPowerMode,
+            };
+            let payload = client.send(request).await?;
+            print(&payload, cli.json, power_mode_text)
+        }
+
         Command::Dates { scope } => {
             let payload = client.send(Request::ImportantDates { scope }).await?;
             print(&payload, cli.json, |payload| match payload {
@@ -2726,6 +2746,50 @@ fn intake_item_text(task: &Task) -> String {
 /// `factory infra`, for a person: the host, the daemon on it, then each
 /// declared provider with the agents it serves, then the model agents none
 /// claims. A fact the daemon could not read prints as `--`.
+fn parse_power_mode(s: &str) -> std::result::Result<factory_core::protocol::PowerMode, String> {
+    s.parse()
+}
+
+/// `factory power-mode`: the mode per source, what is offered, and -- until
+/// the daemon may change it -- the rule that would let it.
+fn power_mode_text(payload: &Payload) -> Option<String> {
+    let Payload::HostPowerMode { report } = payload else { return None };
+    let mut out = String::new();
+    if !report.applicable {
+        out.push_str("power mode: not applicable (this host is not macOS)\n");
+        return Some(out.trim_end().to_string());
+    }
+    if report.supported.is_empty() {
+        out.push_str("power mode: not supported (pmset -g cap lists neither lowpowermode nor highpowermode)\n");
+    }
+    let shown = |m: Option<factory_core::protocol::PowerMode>| m.map(|m| m.label()).unwrap_or("--");
+    match (report.ac, report.battery) {
+        (a, b) if b.is_some() && a != b => {
+            out.push_str(&format!("power mode: mixed\n  AC          {}\n  battery     {}\n", shown(a), shown(b)))
+        }
+        (a, b) => out.push_str(&format!("power mode: {}\n", shown(a.or(b)))),
+    }
+    if !report.supported.is_empty() {
+        let offered: Vec<&str> = report.supported.iter().map(|m| m.label()).collect();
+        out.push_str(&format!("  offered     {}\n", offered.join(", ")));
+        if report.can_change {
+            out.push_str("  change      factory power-mode automatic|high-performance|energy-saving\n");
+        } else {
+            out.push_str(&format!(
+                "  read-only   Factory may not change it until {} holds:\n    {}\n  install     {}\n  check       {}\n",
+                report.sudoers.path, report.sudoers.rule, report.sudoers.install, report.sudoers.check
+            ));
+        }
+    }
+    for note in &report.notes {
+        out.push_str(&format!("  note        {note}\n"));
+    }
+    if let Some(last) = report.changes.last() {
+        out.push_str(&format!("  last change {} · {}\n", last.at.format("%Y-%m-%d %H:%M"), last.message));
+    }
+    Some(out.trim_end().to_string())
+}
+
 fn infrastructure_text(payload: &Payload) -> Option<String> {
     let Payload::Infrastructure { host, daemon, providers, unassigned, harnesses } = payload else {
         return None;
@@ -7032,6 +7096,46 @@ mod tests {
             } if snapshot.ends_with(".tar.zst") && into == PathBuf::from("/tmp/restored factory")
         ));
         assert!(Cli::try_parse_from(["factory", "backup", "restore", "snapshot"]).is_err());
+
+        // `#260`: three names, nothing else.
+        assert!(matches!(
+            Cli::try_parse_from(["factory", "power-mode"]).unwrap().command,
+            Command::PowerMode { mode: None }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["factory", "power-mode", "high-performance"]).unwrap().command,
+            Command::PowerMode { mode: Some(factory_core::protocol::PowerMode::HighPerformance) }
+        ));
+        for bad in ["3", "auto; rm", "", "high"] {
+            assert!(Cli::try_parse_from(["factory", "power-mode", bad]).is_err(), "{bad:?}");
+        }
+
+        // Read-only until the rule is installed: the rule and its install
+        // command are printed; mixed sources are both shown.
+        use factory_core::protocol::{PowerMode, PowerModeReport, SudoersRule};
+        let report = PowerModeReport {
+            applicable: true,
+            supported: PowerMode::ALL.to_vec(),
+            ac: Some(PowerMode::HighPerformance),
+            battery: Some(PowerMode::Automatic),
+            permitted: Vec::new(),
+            can_change: false,
+            sudoers: SudoersRule {
+                path: "/etc/sudoers.d/factory-pmset".into(),
+                user: "factory".into(),
+                rule: "factory ALL=(root) NOPASSWD: ...".into(),
+                install: "sudo visudo -cf ...".into(),
+                check: "sudo visudo -c".into(),
+            },
+            notes: Vec::new(),
+            changes: Vec::new(),
+        };
+        let text = power_mode_text(&Payload::HostPowerMode { report }).unwrap();
+        assert!(text.starts_with("power mode: mixed"), "{text}");
+        assert!(text.contains("AC          High performance"), "{text}");
+        assert!(text.contains("battery     Automatic"), "{text}");
+        assert!(text.contains("factory ALL=(root) NOPASSWD: ..."), "{text}");
+        assert!(text.contains("install     sudo visudo -cf ..."), "{text}");
 
         let with_identity = Cli::try_parse_from([
             "factory",

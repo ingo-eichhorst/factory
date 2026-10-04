@@ -25,6 +25,7 @@ mod github_outbound;
 mod github_deployments;
 mod harness_health;
 mod host;
+mod host_power;
 mod intake;
 mod interfaces;
 mod metrics;

@@ -30,6 +30,7 @@ import { loadInfrastructure, renderInfrastructure } from "./infrastructure.js";
 import { refreshDoctor, renderDoctor, wireDoctor } from "./doctor.js";
 import { refreshBackup, renderBackup, wireBackup } from "./backup.js";
 import { isBackupEvent } from "./backup-model.js";
+import { refreshMac, renderMac, wireMac } from "./mac.js";
 import { refreshDates, wireDates, loadDateBadges } from "./dates.js";
 import { refreshEnvironments, wireEnvironments } from "./environments.js";
 import { isEnvironmentsEvent } from "./environments-model.js";
@@ -151,6 +152,10 @@ const VIEWS = {
   // unplugged, which fires no event -- and refetched on every `backup_*`
   // event (`onEvent` below), which the daemon's own job publishes too.
   backup: { onShow: startBackup, onHide: stopAgentPoll },
+  // Not polled (`#260`): every read asks `sudo -n -l`, which the host may
+  // log. Fetched when shown and on Refresh; a change answers with the
+  // report itself.
+  mac: { onShow: startMac, onHide: stopAgentPoll },
   dates: { onShow: startDates, onHide: stopAgentPoll },
 };
 
@@ -241,7 +246,7 @@ const LEVEL_VIEWS = {
   // Quality closes the row: benchmarks and knowledge are how the work gets
   // better, quality attributes whether it has got good enough.
   imp: ["benchmarks", "knowledge", "quality"],
-  infra: ["infrastructure", "doctor", "environments", "backup", "dates"],
+  infra: ["infrastructure", "doctor", "environments", "backup", "mac", "dates"],
 };
 
 /// The live level that claims `tab`, for backfilling `state.level` before any
@@ -380,6 +385,8 @@ function rerender(route) {
   else if (state.tab === "doctor") renderDoctor();
   // A backup is of the whole instance: no rail selection narrows it.
   else if (state.tab === "backup") renderBackup();
+  // The host is the whole instance's, too.
+  else if (state.tab === "mac") renderMac();
   else if (state.tab === "dates") refreshDates();
 }
 
@@ -556,6 +563,11 @@ function startBackup() {
   state.agentPoll = setInterval(refreshBackup, 30000);
 }
 
+function startMac() {
+  stopAgentPoll();
+  refreshMac();
+}
+
 function startDates() {
   stopAgentPoll();
   refreshDates();
@@ -644,6 +656,7 @@ async function boot() {
   $("infrastructure-refresh").onclick = () => refreshInfrastructure();
   wireDoctor();
   wireBackup();
+  wireMac();
   wireDates();
   wireEnvironments();
   wireOccupancy();

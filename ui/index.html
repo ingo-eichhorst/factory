@@ -61,7 +61,7 @@
     <span class="lv-n">L2</span><span class="lv-name">Environment</span><span class="lv-sub">Sandboxes, secrets and dependencies</span>
   </button>
   <button id="lv-infra" class="lvl" data-level="infra" data-lv="1">
-    <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Host, daemon, Doctor, operations and backup</span>
+    <span class="lv-n">L1</span><span class="lv-name">Infrastructure</span><span class="lv-sub">Host, daemon, Doctor, operations, backup and Mac</span>
   </button>
 </nav>
 
@@ -96,6 +96,7 @@
   <button id="tab-doctor" hidden>Doctor</button>
   <button id="tab-environments" hidden>Operations</button>
   <button id="tab-backup" hidden>Backup</button>
+  <button id="tab-mac" hidden>Mac</button>
   <button id="tab-dates" hidden>Important dates</button>
 </nav>
 </div>
@@ -1068,6 +1069,27 @@
       <code>/api/backup</code> existed. Rebuild and restart the daemon to see backups here.</p>
     <p class="env-note bad" id="backup-error" hidden></p>
     <div class="bk-page" id="backup" hidden></div>
+  </div>
+  <div id="view-mac" hidden>
+    <div class="bar">
+      <h2>Mac</h2>
+      <span class="sub">This host's power mode</span>
+      <span class="sp"></span>
+      <button class="btn" id="mac-refresh">Refresh</button>
+    </div>
+    <!-- In the markup, not the fetched answer, so it goes on being said when
+         the request fails. -->
+    <p class="env-note">The energy mode (System Settings &rarr; Battery &rarr; Energy Mode) sets how fast every
+      agent's build and test runs. Reading it needs nothing; changing it runs
+      <code>sudo -n /usr/bin/pmset -a powermode 0|1|2</code> for every power source, which works only once a sudoers
+      rule scoped to exactly those three commands is installed. Only a person changes it -- no task, schedule or run
+      does on its own.</p>
+    <!-- A daemon built before this page existed answers a bare 404: said
+         calmly, apart from the red error element. -->
+    <p class="env-note" id="mac-unavailable" hidden>The Mac tab is not available on this daemon: it was built before
+      <code>/api/host/power-mode</code> existed. Rebuild and restart the daemon to see the power mode here.</p>
+    <p class="env-note bad" id="mac-error" hidden></p>
+    <div class="bk-page" id="mac" hidden></div>
   </div>
   </div>
 </main>
