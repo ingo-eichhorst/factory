@@ -84,6 +84,7 @@ case "$1 $2" in
     printf '%s{{"id":"%s","credentials":[{{"env_vars":["%s"]}}]}}' "$sep" "$(basename "$f")" "$(cat "$f")"; sep=','; done
   printf ']\n' ;;
 'profile import'|'profile update')
+  if [ "$2" = update ] && [ "$5" != "$(sed -n 's/^id: //p' "$4")" ]; then echo 'error: the following required arguments were not provided: <ID>' >&2; exit 2; fi
   id=$(sed -n 's/^id: //p' "$4"); env=$(grep -o 'env_vars: \[[A-Z_]*' "$4" | sed 's/.*\[//')
   printf '%s' "$env" > "$d/profiles/$id" ;;
 'sandbox create') echo '{{}}' ;;
@@ -229,6 +230,15 @@ async fn declared_providers_are_made_from_their_sources_and_the_values_go_only_t
     assert!(calls.contains("sandbox create"), "{calls}");
     assert!(!calls.contains("rotated-secret-789"));
     assert_eq!(f.file("given-CLAUDE_CODE_OAUTH_TOKEN").as_deref(), Some("rotated-secret-789"));
+}
+
+#[tokio::test]
+async fn a_profile_left_by_an_earlier_daemon_is_updated_by_its_id() {
+    let f = managed();
+    std::fs::write(f.dir.join(format!("profiles/claude-code-oauth-{SUFFIX}")), "OLD").unwrap();
+    assert_eq!(f.pass().await.state, ReadinessState::Ready, "{:?}", f.readiness());
+    assert!(f.calls().lines().any(|l| l.starts_with("profile update -f ") && l.ends_with(&format!(" claude-code-oauth-{SUFFIX}"))), "{}", f.calls());
+    assert_eq!(f.file(&format!("profiles/claude-code-oauth-{SUFFIX}")).as_deref(), Some("CLAUDE_CODE_OAUTH_TOKEN"));
 }
 
 #[tokio::test]

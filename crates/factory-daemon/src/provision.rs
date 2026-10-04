@@ -674,7 +674,7 @@ impl Engine {
         let path = file.0.display().to_string();
         let mut argv = base.to_vec();
         if present {
-            argv.extend(["profile", "update", "-f", &path].map(String::from));
+            argv.extend(["profile", "update", "-f", &path, &id].map(String::from));
         } else {
             argv.extend(["profile", "import", "-f", &path].map(String::from));
         }
