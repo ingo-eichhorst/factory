@@ -252,6 +252,10 @@ pub struct DependenciesReport {
     pub documents: Vec<LifecycleDocuments>,
     pub findings: Vec<DependencyFinding>,
     pub services: Vec<DependencyServiceView>,
+    /// L2 sandbox enforcement evidence, composed by the people-side router.
+    /// Old responses omit it: that is unknown, never a proof of no access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_evidence: Option<factory_kernel::SandboxServiceEvidenceFact>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

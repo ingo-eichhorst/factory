@@ -3,7 +3,7 @@
 //! and behavior. Provide defines live ports; Below enforces reader direction.
 
 use crate::fact_vocabulary::*;
-use crate::{ArtifactProvenance, CostReport, ProductionFact, ProcessMetricFact, BenchResolutionFact};
+use crate::{ArtifactProvenance, CostReport, ProductionFact, ProcessMetricFact, BenchResolutionFact, SandboxServiceEvidenceFact};
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,10 @@ impl Fact for ProcessMetricFact {
 }
 impl Fact for BenchResolutionFact {
     type Producer = L5;
+}
+
+impl Fact for SandboxServiceEvidenceFact {
+    type Producer = L2;
 }
 
 // ============================================================ daemon (L1)
@@ -750,6 +754,13 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         readers: &["L5 quality", "L6 policy (the `dependencies` check)"],
         lives_in_kernel: true,
         note: "moved with its nested shared vocabulary in phase 2",
+    },
+    FactCatalogueEntry {
+        fact: "SandboxServiceEvidenceFact",
+        producer: "L2",
+        readers: &["People (dependency services and enforcement observations)"],
+        lives_in_kernel: true,
+        note: "live and preserved sandbox observations; absence is not evidence of no access",
     },
     FactCatalogueEntry {
         fact: "ExploitedFinding",

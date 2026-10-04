@@ -21,6 +21,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/{sandboxes,secrets,dependencies}.js                    L2's three tabs
     ui/js/secrets-model.js                                       the Secrets tab's declared catalogue (#244), pure
     ui/js/dependencies-model.js                                  Dependencies' pure shaping logic
+    ui/js/service-observations-model.js                           Dependencies' partial enforcement evidence and endpoint joins (#157), pure
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
     ui/js/{datasets,bench-runs}.js                               Benchmarks' Datasets and Runs segments

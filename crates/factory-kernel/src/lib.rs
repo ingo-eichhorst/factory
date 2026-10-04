@@ -47,6 +47,8 @@ pub use facts::{DeploymentMirrorFact, DeploymentMirrorPlan, DeploymentMirrorPhas
 pub use facts::DeploymentPublicationFact;
 pub mod renewals;
 pub use renewals::*;
+mod service_evidence;
+pub use service_evidence::*;
 pub use ports::{Below, FactProvider, FactValue, Facts, People, Provide, Reader};
 
 pub use duration::Duration;
