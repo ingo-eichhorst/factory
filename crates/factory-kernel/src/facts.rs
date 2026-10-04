@@ -1,6 +1,6 @@
 //! Live fact vocabulary for the six-level ladder (#193 phases 2-3).
 //! All schemas are defined in L0; producing levels retain their providers
-//! and behavior. Provide defines live ports; Below bounds follow in phase 4.
+//! and behavior. Provide defines live ports; Below enforces reader direction.
 
 use crate::fact_vocabulary::*;
 use crate::{ArtifactProvenance, CostReport};
@@ -15,8 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// zero-sized marker -- never constructed, only named as a [`Fact`]'s
 /// `Producer`. Nothing about a level's behaviour lives here, only its
 /// identity: the marker is what lets the compiler tell L1's facts apart
-/// from L6's once `Below`/`Provide` (phases 3-4) start bounding who may read
-/// what.
+/// from L6's. `Below`/`Provide` bound who may read what; the people-side
+/// interfaces are readers outside this six-level identity.
 pub trait Level {}
 
 /// Infrastructure: the daemon's own process, configuration and mounted
@@ -57,7 +57,7 @@ impl Level for L6 {}
 
 /// A fact type one level's own state produces, for a level above it to read.
 /// The producer owns a `Provide<F>` implementation; readers use a typed
-/// Facts handle. Phase 4 adds Below bounds and level-crate enforcement.
+/// Facts handle with a strict Below bound. Level-crate enforcement is separate.
 pub trait Fact: Serialize + DeserializeOwned {
     /// The level that derives this fact fresh, live, on every read (ADR
     /// 0004: "status is computed on every read") -- never the level that
@@ -521,21 +521,21 @@ pub struct FactCatalogueEntry {
 /// Every fact behind `policy::Evidence`, whatever module its type actually
 /// lives in -- the catalogue the issue's guardrails ask for ("a catalogue
 /// test lists fact, producer and readers"). `readers` is documentation, not
-/// a compiled reference: phase 4's Below bound is what will make
-/// a wrong reader a compile error instead of a comment. All listed schemas
+/// a compiled reference: the Facts read boundary's Below bound makes
+/// a wrong level reader a compile error instead of a comment. All listed schemas
 /// and their nested vocabulary now live in L0.
 pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
     FactCatalogueEntry {
         fact: "CostReport",
         producer: "L4",
-        readers: &["L6 Budget, policy, Scenarios and cost metrics", "L4 router"],
+        readers: &["L6 Budget, policy, Scenarios and cost metrics", "People router"],
         lives_in_kernel: true,
         note: "single live spend read with explicit unknown/partial counts (#164)",
     },
     FactCatalogueEntry {
         fact: "ArtifactProvenance",
         producer: "L4",
-        readers: &["L4 router (run provenance)"],
+        readers: &["People router (run provenance)"],
         lives_in_kernel: true,
         note: "append-only release artifact evidence (#158)",
     },
@@ -623,21 +623,21 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
     FactCatalogueEntry {
         fact: "EnvironmentRecoveryFact",
         producer: "L4",
-        readers: &["L6 Operations page facade"],
+        readers: &["People Operations page facade"],
         lives_in_kernel: true,
         note: "reported recovery workflow/run evidence; never an L1 deployment or metric input",
     },
     FactCatalogueEntry {
         fact: "ReleaseBuildFact",
         producer: "L4",
-        readers: &["L6 Operations release-detail facade"],
+        readers: &["People Operations release-detail facade"],
         lives_in_kernel: true,
         note: "explicitly selected completed producing run with exact scope/source artifact provenance",
     },
     FactCatalogueEntry {
         fact: "ReleaseSbomFact",
         producer: "L2",
-        readers: &["L6 Operations release-detail facade"],
+        readers: &["People Operations release-detail facade"],
         lives_in_kernel: true,
         note: "immutable build SBOM attachments selected by their exact product commit and optional version",
     },
@@ -651,10 +651,7 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
     FactCatalogueEntry {
         fact: "GateFact",
         producer: "L5",
-        readers: &[
-            "L5 quality (same-level evaluation)",
-            "L6 policy (the `gate` check)",
-        ],
+        readers: &["L6 policy (the `gate` check)"],
         lives_in_kernel: true,
         note: "moved with its nested shared vocabulary in phase 2",
     },

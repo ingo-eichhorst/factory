@@ -392,7 +392,7 @@ impl Engine {
         // A selected attempt's version/build identity must agree with its evidence,
         // even when the catalogue aggregates other attempts at the same commit.
         release.facts = facts.clone();
-        let reader = Facts::<factory_kernel::L6>::new(self);
+        let reader = Facts::<factory_kernel::People>::new(self);
         let mut build = None;
         let build_reason = if let Some(run_id) = &facts.build_run {
             let asked = ReleaseBuildQuery {

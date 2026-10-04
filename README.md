@@ -4446,8 +4446,19 @@ providers assemble policy evidence, and metrics read backup, conformance
 and environment figures through the same channel. Line reads its capacity
 configuration through a port. Queries preserve selective names and windows;
 responses can contain only the selected fact or a collection of it. No
-status table or fact log is introduced. The remaining signpost reader move,
-Below bounds, crate splitting and strict command ladder are still ahead.
+status table or fact log is introduced.
+
+The live read API now enforces `Producer: Below<Reader>` in L0 and in the
+daemon's typed wiring. The sealed relation allows exactly the fifteen
+strictly upward pairs among L1–L6, including adjacent reads. Downward and
+same-level fact reads fail to compile; ordinary same-level calls stay inside
+their service. Page/API composition uses `Facts<People>` outside the ladder,
+which can read all six producers and cannot itself be a producing level.
+An external-crate compiler test checks every pair against the actual `get`
+method, including rejection of attempts to extend the relation. This is a
+read-direction constraint, not authorization or completed service isolation.
+The remaining signpost reader move, level-crate split, protocol/router
+migration and strict command ladder are still ahead in #193.
 
 ## Layout
 

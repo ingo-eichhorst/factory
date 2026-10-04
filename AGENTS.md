@@ -192,8 +192,13 @@ something impossible.
   L0 never depends on a producing level or gathers evidence itself. Typed
   providers in daemon `facts/l1.rs` through `l5.rs` own the live reads;
   policy and fact-backed metrics ask `Facts<Reader>::get`. A port returns
-  only its fact or a collection of it, never another level's report. Below
-  bounds, crate splitting and the strict command ladder follow in #193.
+  only its fact or a collection of it, never another level's report. The
+  kernel read boundary enforces a sealed `Producer: Below<Reader>` relation:
+  strictly upward reads only, including adjacent levels. Same-level calls
+  stay in their service. The router and page composition use `Facts<People>`
+  outside the ladder, not an internal level's identity. Crate splitting and
+  the strict command ladder remain in #193; the bound alone is not service
+  isolation or an authorization boundary.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's
   `scope.roles` down to that scope -- from the live snapshot, and `authorize`,

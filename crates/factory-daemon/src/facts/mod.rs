@@ -57,21 +57,25 @@ pub(crate) trait Port: Fact + Sized {
     fn provider(engine: &Engine) -> Self::Provider<'_>;
 }
 
-/// Reader identity is explicit now. Below bounds and level-crate dependency
-/// enforcement are phase 4; this handle does not claim to enforce them yet.
-pub(crate) struct Facts<'a, R: Level> {
+/// Host wiring for the kernel's checked read boundary. A level must name
+/// itself; page/API composition names People rather than borrowing a level.
+/// Crate dependency enforcement and service isolation remain separate work.
+pub(crate) struct Facts<'a, R: Reader> {
     engine: &'a Engine,
     reader: PhantomData<R>,
 }
-impl<'a, R: Level> Facts<'a, R> {
+impl<'a, R: Reader> Facts<'a, R> {
     pub(crate) fn new(engine: &'a Engine) -> Self {
         Self {
             engine,
             reader: PhantomData,
         }
     }
-    pub(crate) async fn get<F: Port>(&self, query: &F::Query) -> Result<F::Value> {
-        F::provider(self.engine).get(query).await
+    pub(crate) async fn get<F: Port>(&self, query: &F::Query) -> Result<F::Value>
+    where
+        F::Producer: Below<R>,
+    {
+        factory_kernel::Facts::<R>::new().get::<F, _>(&F::provider(self.engine), query).await
     }
 }
 
@@ -147,6 +151,23 @@ mod tests {
         wired.sort_unstable();
         catalogue.sort_unstable();
         assert_eq!(wired, catalogue);
+    }
+
+    #[test]
+    fn live_reads_use_the_kernel_boundary_and_router_facades_are_not_levels() {
+        let wiring = include_str!("mod.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(wiring.contains("F::Producer: Below<R>"));
+        assert!(wiring.contains("factory_kernel::Facts::<R>::new().get::<F, _>"));
+        assert!(!wiring.contains("F::provider(self.engine).get(query)"));
+        let router = include_str!("../engine.rs").split("#[cfg(test)]").next().unwrap();
+        let provenance = router.split("Request::RunProvenance { id } =>").nth(1).unwrap().split("Request::RunApprove").next().unwrap();
+        assert!(provenance.contains("Facts::<factory_kernel::People>"));
+        let costs = router.split("Request::Costs { group_by, from, to, scope } =>").nth(1).unwrap().split("Request::RunEntries").next().unwrap();
+        assert!(costs.contains("Facts::<factory_kernel::People>"));
+        let release = include_str!("../environments/releases.rs");
+        assert!(release.contains("let reader = Facts::<factory_kernel::People>"));
+        let environments = include_str!("../environments/mod.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(environments.contains("Facts::<factory_kernel::People>::new(self).get::<factory_kernel::EnvironmentRecoveryFact>"));
     }
 
     #[test]
