@@ -281,6 +281,32 @@ async fn a_credential_file_others_can_read_is_refused_and_nothing_is_created() {
 }
 
 #[tokio::test]
+async fn a_source_removed_or_rotated_since_the_last_pass_is_found_at_dispatch() {
+    let f = managed();
+    let config = declared(&f.engine)[0].config.clone();
+    assert_eq!(f.pass().await.state, ReadinessState::Ready);
+    assert!(f.engine.sandbox_gate(&f.key(), &config).await.is_ok());
+
+    // Rotated: the dispatch waits for the pass that gives the new value.
+    let engine = f.engine.clone();
+    let looping = tokio::spawn(async move {
+        loop {
+            engine.provision.wake.notified().await;
+            engine.provision_pass().await;
+        }
+    });
+    private_file(&f.root.join("secrets/claude"), "rotated-before-dispatch", 0o600);
+    assert!(f.engine.sandbox_gate(&f.key(), &config).await.is_ok());
+    assert_eq!(f.file("given-CLAUDE_CODE_OAUTH_TOKEN").as_deref(), Some("rotated-before-dispatch"));
+    looping.abort();
+
+    // Removed: the run fails closed now, with the one thing and its command.
+    std::fs::remove_file(f.root.join("secrets/claude")).unwrap();
+    let e = f.engine.sandbox_gate(&f.key(), &config).await.unwrap_err();
+    assert!(e.contains("needs the credential for factory-claude") && e.contains("cannot be read") && e.contains("claude setup-token"), "{e}");
+}
+
+#[tokio::test]
 async fn a_failing_command_source_never_puts_what_it_printed_in_the_reason() {
     let f = fixture(&MANAGED.replace("cat ROOT/secrets/gh", "sh ROOT/leak.sh"), no_build);
     std::fs::write(f.root.join("leak.sh"), "printf leaked-secret-1; echo leaked-secret-1 >&2; exit 3\n").unwrap();

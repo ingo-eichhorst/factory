@@ -755,19 +755,10 @@ impl Engine {
         // A gateway that went down since the last pass -- a reboot, a
         // crash -- is started now rather than failing this run. A missing
         // CLI is left to the run's own preflight to name.
-        if let Ok(cli) = crate::openshell::resolve_cli(config.cli.as_deref()) {
-            if let Err(Unready::Needs { thing, command }) = self.ensure_gateway(&base_for(&cli, config)).await {
-                let r = Readiness {
-                    state: ReadinessState::Needs,
-                    thing: Some(thing),
-                    command,
-                    since: Utc::now(),
-                    checked_at: Utc::now(),
-                    image: None,
-                    notes: Vec::new(),
-                    expiring: Vec::new(),
-                };
-                return Err(r.reason());
+        let base = crate::openshell::resolve_cli(config.cli.as_deref()).ok().map(|cli| base_for(&cli, config));
+        if let Some(base) = &base {
+            if let Err(Unready::Needs { thing, command }) = self.ensure_gateway(base).await {
+                return Err(needs_reason(thing, command));
             }
         }
         let managed = config.image.is_none() || config.providers.iter().any(|p| matches!(p, ProviderDecl::Managed(_)));
@@ -779,6 +770,21 @@ impl Engine {
             let settled = self.provision.settled.notified();
             match self.provision.readiness(key) {
                 Some(r) if r.state == ReadinessState::Ready => {
+                    // `ready` was true at the last pass. A source removed or
+                    // rotated since then is found now, not five minutes on.
+                    match self.sources_current(base.as_deref().unwrap_or_default(), config, &suffix).await {
+                        Err((thing, command)) => {
+                            self.provision.wake.notify_one();
+                            return Err(needs_reason(thing, Some(command)));
+                        }
+                        Ok(false) if Instant::now() < deadline => {
+                            self.provision.wake.notify_one();
+                            let _ = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), settled).await;
+                            continue;
+                        }
+                        Ok(false) => return Err("the sandbox is not ready yet: a credential changed and is being given to its provider".into()),
+                        Ok(true) => {}
+                    }
                     let image = config.image.clone().or(r.image.clone()).unwrap_or_default();
                     return Ok(Resolved { image, providers });
                 }
@@ -795,6 +801,45 @@ impl Engine {
             }
         }
     }
+}
+
+impl Engine {
+    /// Whether every managed provider's source still gives the value last
+    /// handed to its provider: `Ok(false)` when one changed, `Err` with the
+    /// thing and command when one no longer resolves.
+    async fn sources_current(&self, base: &[String], config: &OpenshellConfig, suffix: &str) -> std::result::Result<bool, (String, String)> {
+        let mut current = true;
+        for provider in &config.providers {
+            let ProviderDecl::Managed(managed) = provider else { continue };
+            let value = resolve(&managed.credential).await.map_err(|reason| {
+                (
+                    format!("the credential for {} from {} ({reason})", managed.name, managed.credential.describe()),
+                    supply_hint(managed),
+                )
+            })?;
+            let name = os::managed_name(&managed.name, suffix);
+            let digest = self.provision.digest(base, &name, &value);
+            if lock(&self.provision.given).get(&(base.to_vec(), name)) != Some(&digest) {
+                current = false;
+            }
+        }
+        Ok(current)
+    }
+}
+
+fn needs_reason(thing: String, command: Option<String>) -> String {
+    let now = Utc::now();
+    Readiness {
+        state: ReadinessState::Needs,
+        thing: Some(thing),
+        command,
+        since: now,
+        checked_at: now,
+        image: None,
+        notes: Vec::new(),
+        expiring: Vec::new(),
+    }
+    .reason()
 }
 
 /// Two agents declaring one managed provider name with different types or

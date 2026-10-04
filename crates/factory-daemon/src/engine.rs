@@ -9661,13 +9661,21 @@ edges: [{id: next, from: implement, to: review}]
             assert!(error.contains("needs the credential for factory-claude") && error.contains("claude setup-token") && error.contains("not started on the host"), "{error}");
             assert!(!std::fs::read_to_string(tools.join("calls")).unwrap_or_default().contains("sandbox create"));
 
+            // Ready, with the image the daemon built: the run is made from it.
+            // (A ready agent's managed sources are re-read at dispatch; the
+            // provisioner's own tests cover that, and the suffixed names.)
+            let mut factory = engine.factory_snapshot();
+            let agent = factory.config.scopes[0].agents.iter_mut().find(|a| a.name.as_deref() == Some("boxed-managed")).unwrap();
+            agent.openshell = Some(
+                serde_yaml_ng::from_str(&format!("cli: {}\nproviders: [by-hand]\npolicy:\n  network_policies: {{}}\n", cli.display())).unwrap(),
+            );
+            *engine.factory.write().unwrap() = factory;
             engine.provision.set_for_test(&key, readiness(ReadinessState::Ready, None, Some("/images/built/factory-agent-rootfs.tar.gz")));
             let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
             assert_eq!(runtime.starts.lock().unwrap().len(), 1);
             let calls = std::fs::read_to_string(tools.join("calls")).unwrap();
             let create = calls.lines().find(|l| l.starts_with("sandbox create")).unwrap();
-            assert!(create.contains("--from /images/built/factory-agent-rootfs.tar.gz") && create.contains("--provider factory-claude-test"), "{create}");
-            assert!(calls.contains("provider get factory-claude-test"), "the run's own preflight asks for the gateway's name: {calls}");
+            assert!(create.contains("--from /images/built/factory-agent-rootfs.tar.gz") && create.contains("--provider by-hand"), "{create}");
             let _ = run;
             std::fs::remove_dir_all(&scope_dir).ok();
         }
