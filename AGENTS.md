@@ -7,6 +7,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     crates/factory-kernel    L0: pure shared vocabulary and every live fact schema (Level/Fact, nested statuses, grants and evidence); no other factory-* dependency
     crates/factory-infrastructure L1: backup, running environments and renewal domain behaviour
     crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
+    crates/factory-agents         L3: standing agents, roles, harness health, runtime trait and session usage
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
@@ -187,13 +188,14 @@ something impossible.
 - Roles bound what an agent does by accident, not what it could do. Every agent
   runs as the owner and can reach the socket; one that omits its token is the
   owner. Never write anything that implies otherwise.
-- A role is data, not a match arm: role definitions, grant expansion and reach live in `factory-core/src/role.rs`
+- A role is data, not a match arm: role definitions, grant expansion and reach live in L3's `factory-agents/src/role.rs` (re-exported by `factory-core/src/role.rs`)
   and are checked in one place. A new request has to say which grant it needs --
   the match in `access.rs` has no wildcard arm, so the compiler asks.
 - Live facts and their nested schema live in L0, with a `Fact::Producer` and
   a complete typed catalogue test. The shared `Grant` vocabulary lives there
-  too and is re-exported by `role.rs`; wildcard authorization, receipt
-  deduplication, task-status mapping and conformance evaluation stay in core.
+  too and is re-exported by `role.rs`; wildcard expansion stays in L3,
+  while receipt deduplication, task-status mapping and conformance evaluation
+  stay outside L0.
   L0 never depends on a producing level or gathers evidence itself. Typed
   providers in daemon `facts/l1.rs` through `l5.rs` own the live reads;
   policy and fact-backed metrics ask `Facts<Reader>::get`. A port returns
@@ -201,17 +203,23 @@ something impossible.
   kernel read boundary enforces a sealed `Producer: Below<Reader>` relation:
   strictly upward reads only, including adjacent levels. Same-level calls
   stay in their service. The router and page composition use `Facts<People>`
-  outside the ladder, not an internal level's identity. L1 infrastructure
-  and L2 environment domain owners now live in physical crates; core keeps
+  outside the ladder, not an internal level's identity. L1 infrastructure,
+  L2 environment and L3 agent/runtime domain owners live in physical crates; core keeps
   compatibility re-exports. A physical owner declares
   `package.metadata.factory.level` and may depend on L0 or only the level
   directly below. The Cargo metadata guard includes aliases, target tables
   and dev/build dependencies. Do not add a core/facade back-edge, even for a
   test: whole-instance integration tests belong outside the ladder. Shared
-  schedule, launch, time-span and error values are L0; domain decisions
+  schedule, launch, time-span, opaque session-id and error values are L0; domain decisions
   remain in their owning level. Remaining crate/service splitting and the
   strict command ladder remain in #193; the bound alone is not service
   isolation or an authorization boundary.
+- Cumulative session usage is L3's runtime contract; only that typed usage
+  data is parsed, never transcript text. Run baselines, deltas and allocation
+  belong to the process layer. The runtime adapter seam remains available
+  through its existing core path; its methods and default unknown/unsupported
+  answers do not change. The agent prompt/reporting seam still awaits a
+  proper assignment payload, not an upward import of the full L4 task.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's
   `scope.roles` down to that scope -- from the live snapshot, and `authorize`,
