@@ -410,7 +410,7 @@ pub enum Request {
     /// exactly those three commands. `mode` is one of three closed values;
     /// nothing else deserializes, so no free string reaches a command.
     /// Journaled with who changed it, from what, to what. Needs
-    /// `host.power`, checked against the root scope.
+    /// `host.power` vocabulary, restricted to the owner even with a named grant.
     #[serde(rename = "host.power_mode.set")]
     HostPowerModeSet { mode: PowerMode },
     /// Read-only important-date metadata and native policy/CRA projections.
@@ -2376,7 +2376,8 @@ pub struct PowerModeReport {
     /// The mode set for battery power, `null` on a Mac with no battery.
     pub battery: Option<PowerMode>,
     /// The modes the sudoers rule lets this daemon set right now, found
-    /// with `sudo -n -l` -- which lists, and never runs, the command.
+    /// with a command-specific verbose sudo listing requiring explicit
+    /// NOPASSWD in its matching rule; never executes the command.
     pub permitted: Vec<PowerMode>,
     /// Every supported mode is permitted: the control is live.
     pub can_change: bool,

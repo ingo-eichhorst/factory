@@ -173,7 +173,8 @@ fn passwordless_match(text: &str, mode: PowerMode) -> bool {
     for line in text.lines().map(str::trim) {
         if line.starts_with("Sudoers entry:") || line.starts_with("LDAP Role:") {
             entries += 1;
-        } else if let Some(options) = line.strip_prefix("Options:") {
+            authentication = None;
+        } else if let Some(options) = line.strip_prefix("Options:").filter(|_| entries == 1) {
             for option in options.split(',').map(str::trim) {
                 match option {
                     "!authenticate" => authentication = Some(false),
@@ -181,7 +182,7 @@ fn passwordless_match(text: &str, mode: PowerMode) -> bool {
                     _ => {}
                 }
             }
-        } else if let Some(command) = line.strip_prefix("Matched:") {
+        } else if let Some(command) = line.strip_prefix("Matched:").filter(|_| entries == 1) {
             matched.push(command.trim());
         }
     }

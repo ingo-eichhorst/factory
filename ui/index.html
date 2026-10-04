@@ -1081,7 +1081,7 @@
          the request fails. -->
     <p class="env-note">The energy mode (System Settings &rarr; Battery &rarr; Energy Mode) sets how fast every
       agent's build and test runs. Reading it needs nothing; changing it runs
-      <code>sudo -n /usr/bin/pmset -a powermode 0|1|2</code> for every power source, which works only once a sudoers
+      <code>sudo -n -k -u root -- /usr/bin/pmset -a powermode 0|1|2</code> for every power source, which works only once a sudoers
       rule scoped to exactly those three commands is installed. Only a person changes it -- no task, schedule or run
       does on its own.</p>
     <!-- A daemon built before this page existed answers a bare 404: said

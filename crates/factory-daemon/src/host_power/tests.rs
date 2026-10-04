@@ -458,6 +458,7 @@ fn listing_success_is_not_passwordless_permission() {
         ),
         "Matching Defaults entries: !authenticate\n    Matched: /usr/bin/pmset -a powermode 2\n"
             .into(),
+        "Options: !authenticate\nSudoers entry: /etc/sudoers\n    Matched: /usr/bin/pmset -a powermode 2\n".into(),
     ] {
         assert!(!passwordless_match(&text, mode), "must fail closed: {text}");
     }
