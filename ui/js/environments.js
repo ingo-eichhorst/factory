@@ -299,7 +299,10 @@ function recoveriesHTML(report) {
 function scriptRecoveryHTML(report) {
   const journal = report.recovery_journal;
   if (!journal?.actions.length && !journal?.findings.length) return "";
-  const observation = value => value == null ? "not recorded" : (value ? "passed" : "failed");
+  const observation = value => {
+    if (value == null) return "not recorded";
+    return value ? "passed" : "failed";
+  };
   const rows = journal.actions.map(action => {
     const finish = action.finish;
     let result = "awaiting finish receipt; not a runtime status";

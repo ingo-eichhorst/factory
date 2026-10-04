@@ -36,11 +36,11 @@ for env in "${targets[@]}"; do
     fi
     local_ok=false; routes_ok=''; code=1
     if wait_for_http "$(http_base "$env")"; then local_ok=true; fi
-    if [ "$local_ok" = true ]; then
+    if [[ "$local_ok" = true ]]; then
       routes_ok=false
       if verify_network_access "$env"; then routes_ok=true; code=0; fi
     fi
-    if [ "$code" -eq 0 ]; then
+    if [[ "$code" -eq 0 ]]; then
       note "$env already running on $(tailscale_url "$env") and $(http_base "$env")"
     else
       note "$env is running but is not reachable through every required network route"
@@ -88,15 +88,15 @@ for env in "${targets[@]}"; do
   fi
 
   local_ok=''; routes_ok=''; code=1
-  if [ "$launch_code" -eq 0 ]; then
+  if [[ "$launch_code" -eq 0 ]]; then
     local_ok=false
     if wait_for_http "$(http_base "$env")"; then local_ok=true; fi
   fi
-  if [ "$local_ok" = true ]; then
+  if [[ "$local_ok" = true ]]; then
     routes_ok=false
     if verify_network_access "$env"; then routes_ok=true; code=0; fi
   fi
-  if [ "$code" -eq 0 ]; then
+  if [[ "$code" -eq 0 ]]; then
     note "$env restarted on $(tailscale_url "$env") and $(http_base "$env") at $(released_field "$env" commit | cut -c1-9 || true)"
   else
     note "$env restart did not verify every required route; last lines of $(env_log "$env"):"

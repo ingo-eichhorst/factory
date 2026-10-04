@@ -259,15 +259,15 @@ recovery_begin() {
   local args=(recovery-journal start --scope "$RECORD_SCOPE" --env "$env"
     --source ensure.sh --actor "$(id -un)" --reason "$reason" --command "$command")
   commit="$(released_field "$env" commit || true)"
-  [ -z "$commit" ] || args[${#args[@]}]=--commit
-  [ -z "$commit" ] || args[${#args[@]}]="$commit"
+  if [[ -n "$commit" ]]; then args+=(--commit "$commit"); fi
   record "${args[@]}"
 }
 
 recovery_end() {
+  local id="$1" exit_code="$2" local_http="$3" network_routes="$4" detail="$5"
   local args
-  args=(recovery-journal finish "$1" --exit-code "$2" --detail "$5")
-  [ -z "$3" ] || args+=(--local-http "$3")
-  [ -z "$4" ] || args+=(--network-routes "$4")
+  args=(recovery-journal finish "$id" --exit-code "$exit_code" --detail "$detail")
+  if [[ -n "$local_http" ]]; then args+=(--local-http "$local_http"); fi
+  if [[ -n "$network_routes" ]]; then args+=(--network-routes "$network_routes"); fi
   record "${args[@]}" >/dev/null
 }
