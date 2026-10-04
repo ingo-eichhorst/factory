@@ -875,6 +875,7 @@ mod tests {
                 guides.join("run-t1.md").display().to_string(),
             ],
             env: BTreeMap::from([("FACTORY_TOKEN".to_string(), "tok".to_string())]),
+            agent_kind: None,
         };
         let target = CallbackTarget {
             host: "host.openshell.internal".into(),

@@ -87,6 +87,7 @@ fn compatibility_values_are_the_canonical_kernel_types() {
         kind: LaunchKind::Named("shell".into()),
         args: vec![],
         env: Default::default(),
+        agent_kind: None,
     };
     let _: LaunchSpec = launch;
     let schedule: task::Schedule = Schedule::Every { seconds: 300 };

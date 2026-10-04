@@ -10,7 +10,9 @@
 #   /usr/local/bin/jq        jq
 #   /etc/claude-code/managed-settings.json   the allow rules an unattended run
 #                            needs (git push, gh pr create/merge, ...), so it
-#                            never waits on a permission prompt
+#                            never waits on a permission prompt -- and no
+#                            dynamic workflows, questions or plan mode, which
+#                            each stop for an answer nobody is there to give
 #   /etc/gitconfig           gh as git's GitHub credential helper, and the
 #                            commit identity
 #   /sandbox/.claude.json    onboarding done, /sandbox/work trusted

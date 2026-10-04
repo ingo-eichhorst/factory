@@ -569,13 +569,33 @@ session:
    token. The token is never on a command line, where it would sit in the
    host's process table, and the host copy of the env file is removed once
    it is uploaded.
-4. **Launch.** The herdr pane runs one short line, `sh '<state>/pane.sh'`,
+4. **Launch.** The herdr pane runs one short line, `bash '<state>/pane.sh'`,
    whose one command is `openshell sandbox exec --tty` of the in-sandbox
    launcher: it sources the env file and starts `claude` with the same
    arguments as on the host (guide, hook settings, declared args), with the
    prompt as its first message -- typed into a TUI through a pty, a
    multi-line prompt would submit at its first newline. The run is still
    visible in its pane, and `factory task output` still reads it.
+   `openshell` runs there under the harness's own argv0 (`exec -a claude`),
+   which is how herdr recognises an agent in a pane, so the herdr runtime
+   holds the session as the agent it is -- named like any run, listed by
+   `herdr agent list`, with herdr's inferred working/idle status, `agent prompt` for
+   later input and `herdr agent attach` -- rather than as a shell. If herdr
+   never sees the expected harness in the expected pane, or naming it fails,
+   dispatch fails and closes only its new tab. It never falls back to shell
+   submission: task text must not be executed by a host shell after a failed
+   launcher. Detection and rename share one bounded deadline, including a
+   hung Herdr client. Shell-harness runs remain ordinary shell panes.
+   The image's managed settings switch off dynamic workflows and deny
+   `AskUserQuestion` and plan mode: each stops for an answer, and nobody is
+   at a sandboxed run's terminal to give one.
+
+The native transport test, `cargo test -p factory-plugins --test openshell_herdr
+-- --nocapture`, requires `FACTORY_QA_OPENSHELL_IMAGE` and
+`FACTORY_QA_HERDR_BIN` (a wrapper targeting an isolated `qa-*` Herdr session).
+It uses a credential-free fixture to verify detection, naming, prompt delivery
+and cleanup through a real VM/PTY. It does not prove Claude's screen rules or
+the credentialed curator's publishing outcome.
 
 When the run ends -- done, failed, cancelled -- `close_session`
 closes the pane, and then, in the background so the run's own status is

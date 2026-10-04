@@ -7752,6 +7752,7 @@ mod tests {
             kind: factory_core::adapter::agent::LaunchKind::Named("pi".into()),
             args: vec!["--append-system-prompt".into(), "/tmp/guide.md".into()],
             env: Default::default(),
+            agent_kind: None,
         };
         let declared: ScopeAgent = serde_yaml_ng::from_str(
             "name: watcher\nharness: pi\nlifetime: permanent\nargs: [--model, opus]\n",
@@ -8740,7 +8741,7 @@ mod tests {
                 "recording"
             }
             async fn launch_spec(&self, _ctx: &AgentContext) -> Result<LaunchSpec> {
-                Ok(LaunchSpec { kind: LaunchKind::Command(vec!["true".into()]), args: Vec::new(), env: Default::default() })
+                Ok(LaunchSpec { kind: LaunchKind::Command(vec!["true".into()]), args: Vec::new(), env: Default::default(), agent_kind: None })
             }
             async fn prompt(&self, _ctx: &AgentContext) -> Result<String> {
                 Ok(String::new())
@@ -9564,7 +9565,7 @@ edges: [{id: next, from: implement, to: review}]
                 "cwd-probe"
             }
             async fn launch_spec(&self, ctx: &AgentContext) -> Result<LaunchSpec> {
-                Ok(LaunchSpec { kind: LaunchKind::Named("claude".into()), args: Vec::new(), env: ctx.env() })
+                Ok(LaunchSpec { kind: LaunchKind::Named("claude".into()), args: Vec::new(), env: ctx.env(), agent_kind: None })
             }
             async fn prompt(&self, ctx: &AgentContext) -> Result<String> {
                 Ok(format!("Working directory: {}\n", ctx.cwd.display()))
@@ -9628,7 +9629,7 @@ edges: [{id: next, from: implement, to: review}]
             let scope_dir = temp_dir("openshell-cwd");
             let tools = temp_dir("openshell-cwd-cli");
             let cli = fake_cli(&tools);
-            let (engine, _runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let (engine, runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
             let task = engine
                 .create(NewTask {
                     title: "where am i".into(),
@@ -9648,6 +9649,12 @@ edges: [{id: next, from: implement, to: review}]
             let name = scope_dir.file_name().unwrap().to_string_lossy().to_string();
             assert_eq!(prompt.trim(), format!("Working directory: /sandbox/work/{name}"));
             assert!(!prompt.contains(&scope_dir.display().to_string()), "{prompt}");
+            // A harness is handed to the runtime as the agent it is (`#218`),
+            // under its own argv0, so herdr can hold it like any other.
+            let starts = runtime.starts.lock().unwrap().clone();
+            assert_eq!(starts[0].launch.agent_kind.as_deref(), Some("claude"));
+            let pane_script = std::fs::read_to_string(teardown.state_dir.join("pane.sh")).unwrap();
+            assert!(pane_script.contains("exec -a 'claude' "), "{pane_script}");
             std::fs::remove_dir_all(&scope_dir).ok();
             std::fs::remove_dir_all(&tools).ok();
         }
@@ -9818,7 +9825,8 @@ edges: [{id: next, from: implement, to: review}]
             let starts = runtime.starts.lock().unwrap().clone();
             assert_eq!(starts.len(), 1);
             let LaunchKind::Command(words) = &starts[0].launch.kind else { panic!("{:?}", starts[0].launch.kind) };
-            assert!(words[0].starts_with("sh '") && words[0].ends_with("pane.sh'"), "{words:?}");
+            assert!(words[0].starts_with("bash '") && words[0].ends_with("pane.sh'"), "{words:?}");
+            assert_eq!(starts[0].launch.agent_kind, None, "the shell agent has no harness for herdr to see");
             assert!(starts[0].launch.env.is_empty(), "no token in the pane's environment");
             assert!(runtime.submits.lock().unwrap().is_empty(), "the prompt went in at launch, never typed");
             let calls = std::fs::read_to_string(tools.join("calls")).unwrap();
@@ -9832,6 +9840,7 @@ edges: [{id: next, from: implement, to: review}]
             assert!(teardown.state_dir.starts_with(engine.factory_snapshot().factory_dir()), "state lives under .factory");
             let pane_script = std::fs::read_to_string(teardown.state_dir.join("pane.sh")).unwrap();
             assert!(pane_script.contains("'sandbox' 'exec'") && pane_script.contains(&teardown.sandbox), "{pane_script}");
+            assert!(!pane_script.contains("exec -a"), "a shell stays a shell: {pane_script}");
             let launcher = std::fs::read_to_string(teardown.state_dir.join(".factory-run/launch.sh")).unwrap();
             let workdir = format!("/sandbox/work/{}", scope_dir.file_name().unwrap().to_string_lossy());
             assert!(launcher.contains(&format!("cd '{workdir}'")), "{launcher}");

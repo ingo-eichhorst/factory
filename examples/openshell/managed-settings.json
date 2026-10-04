@@ -13,12 +13,18 @@
       "Grep",
       "WebFetch",
       "WebSearch"
+    ],
+    "deny": [
+      "AskUserQuestion",
+      "EnterPlanMode"
     ]
   },
+  "disableWorkflows": true,
   "env": {
     "DISABLE_AUTOUPDATER": "1",
     "DISABLE_TELEMETRY": "1",
     "DISABLE_ERROR_REPORTING": "1",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_WORKFLOWS": "1"
   }
 }
