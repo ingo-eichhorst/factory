@@ -405,7 +405,7 @@ impl Provider<'_> {
             return Ok(Vec::new());
         }
         let run_ids: Vec<String> = resolved.iter().map(|r| r.run_id.clone()).collect();
-        let mut attestations_by_run = self.engine.policies.step_attestations_for(&run_ids).await?;
+        let mut attestations_by_run = self.engine.run_evidence.step_attestations_for(&run_ids).await?;
         Ok(resolved
             .into_iter()
             .map(|r| AttestedRun {

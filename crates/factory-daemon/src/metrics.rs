@@ -3298,7 +3298,7 @@ mod tests {
             worktree_digest: None,
         };
         engine
-            .policies
+            .run_evidence
             .append_step_attestation(&attestation)
             .await
             .unwrap();
@@ -3383,7 +3383,7 @@ mod tests {
             a.exit_code = None;
             a.verdict = *verdict;
             a.round = round as u32;
-            engine.policies.append_step_attestation(&a).await.unwrap();
+            engine.run_evidence.append_step_attestation(&a).await.unwrap();
         }
     }
 

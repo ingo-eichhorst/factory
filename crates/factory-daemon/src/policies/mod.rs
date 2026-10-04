@@ -2506,7 +2506,7 @@ mod tests {
             worktree_digest: None,
         };
         engine
-            .policies
+            .run_evidence
             .append_step_attestation(&attestation)
             .await
             .unwrap();

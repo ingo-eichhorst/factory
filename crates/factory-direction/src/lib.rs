@@ -1,5 +1,5 @@
 //! L6 authored direction: policy declarations, goals, scenarios and budgets.
-//! Domain behavior and owned check-in storage live here, not in the facade.
+//! Domain behavior, check-in and policy receipt storage live here, not in the facade.
 //! Evaluation stays in L5; facts and shared receipts remain plain L0 data.
 //! Live service isolation and adjacent command ports are still being migrated.
 //!
@@ -17,5 +17,6 @@ pub mod goals_store;
 pub mod policy;
 pub mod policy_export;
 pub mod policy_report;
+pub mod policy_store;
 pub mod reporting_clock;
 pub mod scenario;

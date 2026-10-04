@@ -292,7 +292,7 @@ impl Engine {
                 &instance,
                 finished_at,
             );
-            self.policies.append_provenance(&record).await?;
+            self.run_evidence.append_provenance(&record).await?;
         }
         Ok(())
     }
@@ -305,7 +305,7 @@ impl Engine {
         if run.status != RunStatus::Done {
             return Ok(Vec::new());
         }
-        let records = self.policies.provenance(id).await?;
+        let records = self.run_evidence.provenance(id).await?;
         Ok(records
             .into_iter()
             .filter(|p| {

@@ -5095,9 +5095,18 @@ into L5 plan sources belongs to L6, and the sole plan compiler stays in L5.
 Policy report/export data is owned in L6 rather than importing the wire
 protocol; existing `protocol` and Core paths re-export canonical types with
 unchanged JSON. The live GoalsStore/check-in schema and its full tests move
-with the goal owner. The daemon's PolicyStore still mixes process attestations
-and provenance with policy receipts and needs that split, not an L6 label on
-the shared store.
+with the goal owner. Policy receipt storage is owned by L6 too:
+`factory-direction::policy_store::PolicyStore` initializes only the existing
+`policy_attestations` table. L4's `RunEvidenceStore` separately owns
+`run_attestations` and `artifact_provenance`. The daemon opens both on the same
+instance database and routes verification, artifact capture and the process
+fact provider to L4; policy/reporting-clock reads keep the L6 receipt store.
+The old daemon policy path canonically re-exports L6, without a mixed-store
+wrapper. SQLite tables/indexes, serialized evidence, duplicate/withdrawal
+rules, malformed-row handling, batch/tie ordering and restart persistence
+remain unchanged; opening existing databases neither rewrites nor moves rows.
+No status table, new fact log, schema-version migration or extra database is
+introduced. Physical ownership is not completed live service/provider isolation.
 
 The wire protocol, observer event stream and unchanged generic Interface
 seam now live in `factory-interfaces`, outside the six-level ladder.
@@ -5124,9 +5133,9 @@ and strict command ladder are still ahead in #193.
     crates/factory-infrastructure L1: backup, running environments and renewal domain behaviour
     crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
-    crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy and TaskStore
+    crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy, TaskStore and run evidence/provenance store
     crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam (full live services still pending)
-    crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data and GoalsStore
+    crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data, GoalsStore and policy receipt store
     crates/factory-composition    outside stack: instance config/scope loading and dashboard/site/Line page projections
     crates/factory-interfaces     outside stack: wire protocol, observer event stream and Interface seam
     crates/factory-core      compatibility paths and remaining cross-level bridges

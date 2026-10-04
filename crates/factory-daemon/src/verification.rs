@@ -209,7 +209,7 @@ impl Engine {
                 "the executing agent cannot approve or reject its own work".into(),
             ));
         }
-        let evidence = self.policies.step_attestations(run_id).await?;
+        let evidence = self.run_evidence.step_attestations(run_id).await?;
         let step = run
             .required_steps
             .iter()
@@ -258,7 +258,7 @@ impl Engine {
             node_id: step.node_id.clone(),
             at: Utc::now(),
         };
-        self.policies.append_step_attestation(&attestation).await?;
+        self.run_evidence.append_step_attestation(&attestation).await?;
         self.entry(
             &task.id,
             TaskEntry::new(
@@ -408,7 +408,7 @@ impl Engine {
                 ));
             }
         }
-        let attestations = self.policies.step_attestations(run_id).await?;
+        let attestations = self.run_evidence.step_attestations(run_id).await?;
         let failed = attestations
             .iter()
             .rev()
@@ -816,7 +816,7 @@ impl Engine {
                 "could not compute the worktree digest for independent review"
             ))
         })?;
-        let attestations = self.policies.step_attestations(&subject.id).await?;
+        let attestations = self.run_evidence.step_attestations(&subject.id).await?;
         let all_tasks = self.store.list(&TaskFilter::default()).await?;
         let mut waiting = false;
         for step in subject
@@ -982,7 +982,7 @@ impl Engine {
         step: &RequiredStep,
     ) -> Result<()> {
         if self
-            .policies
+            .run_evidence
             .step_attestations(&subject.id)
             .await?
             .iter()
@@ -1057,7 +1057,7 @@ impl Engine {
             node_id: step.node_id.clone(),
             at: review_run.ended_at.unwrap_or_else(Utc::now),
         };
-        self.policies.append_step_attestation(&attestation).await?;
+        self.run_evidence.append_step_attestation(&attestation).await?;
         self.entry(
             &subject.task_id,
             TaskEntry::new(
@@ -1158,7 +1158,7 @@ impl Engine {
         };
         let category = control_plan::effective_category(task.category.as_deref()).to_string();
         let state = git_state(&dir).await;
-        let mut attestations = self.policies.step_attestations(&run.id).await?;
+        let mut attestations = self.run_evidence.step_attestations(&run.id).await?;
         let round_evidence = |all: &[StepAttestation]| {
             all.iter()
                 .filter(|evidence| {
@@ -1224,7 +1224,7 @@ impl Engine {
                 node_id: step.node_id.clone(),
                 at: Utc::now(),
             };
-            self.policies.append_step_attestation(&attestation).await?;
+            self.run_evidence.append_step_attestation(&attestation).await?;
             let code = exit_code
                 .map(|c| format!("exit {c}"))
                 .unwrap_or_else(|| "did not finish".into());
@@ -1256,7 +1256,7 @@ impl Engine {
         // Deterministic gates pass before a model review is ever spent. The
         // subject remains `verifying`; the review task's report wakes this
         // same coordinator, and labels make restart recovery idempotent.
-        attestations = self.policies.step_attestations(&run.id).await?;
+        attestations = self.run_evidence.step_attestations(&run.id).await?;
         let current_evidence = round_evidence(&attestations);
         let gates = control_plan::judge(
             &gate_steps,
@@ -1270,7 +1270,7 @@ impl Engine {
             return Ok(());
         }
 
-        let attestations = self.policies.step_attestations(&run.id).await?;
+        let attestations = self.run_evidence.step_attestations(&run.id).await?;
         let verdict = control_plan::judge(
             &run.required_steps,
             &round_evidence(&attestations),
@@ -1337,7 +1337,7 @@ impl Engine {
     /// Every attestation a run has collected, oldest first.
     pub(crate) async fn run_attestations(&self, run_id: &str) -> Result<Vec<StepAttestation>> {
         self.require_run(run_id).await?;
-        self.policies.step_attestations(run_id).await
+        self.run_evidence.step_attestations(run_id).await
     }
 
     /// `#158` phase 1: the one L4-owned read the `attested` policy check and
@@ -1350,7 +1350,7 @@ impl Engine {
     /// dispatch, `Run::required_steps`), its `fail_kind` (`None` for a run
     /// that ended `Done` -- `conformance_rate` reads this to exclude an
     /// infrastructure failure from its ratio), and every attestation it
-    /// collected (`PolicyStore::step_attestations_for`, one batch read). A
+    /// collected (`RunEvidenceStore::step_attestations_for`, one batch read). A
     /// bench attempt's task (`Task::bench_origin`) is always left out -- its
     /// own case gate judges it, the same rule `required_steps_for_task`
     /// already applies, so a plan on top would never apply to it anyway.
@@ -2653,8 +2653,8 @@ mod tests {
             .factory_snapshot()
             .root
             .join(".factory/provenance-test.sqlite");
-        Arc::get_mut(&mut engine).unwrap().policies =
-            crate::policies::PolicyStore::open(&db).unwrap();
+        Arc::get_mut(&mut engine).unwrap().run_evidence =
+            factory_process::evidence_store::RunEvidenceStore::open(&db).unwrap();
         if spawn {
             engine.spawn_verifier();
         }
@@ -2696,7 +2696,7 @@ mod tests {
         assert_eq!(held.status, RunStatus::Verifying);
         assert!(engine.run_provenance(&held.id).await.unwrap().is_empty());
         assert!(engine
-            .policies
+            .run_evidence
             .provenance(&held.id)
             .await
             .unwrap()
@@ -2745,12 +2745,12 @@ mod tests {
         std::fs::write(work.join("source.txt"), "source v2").unwrap();
         std::fs::write(work.join("release.bin"), "new output").unwrap();
         assert_eq!(engine.run_provenance(&held.id).await.unwrap(), records);
-        engine.policies.append_provenance(record).await.unwrap();
+        engine.run_evidence.append_provenance(record).await.unwrap();
         let mut changed = record.clone();
         changed.artifact.sha256 = "0".repeat(64);
-        assert!(engine.policies.append_provenance(&changed).await.is_err());
+        assert!(engine.run_evidence.append_provenance(&changed).await.is_err());
         assert_eq!(engine.run_provenance(&held.id).await.unwrap(), records);
-        let reopened = crate::policies::PolicyStore::open(
+        let reopened = factory_process::evidence_store::RunEvidenceStore::open(
             &engine
                 .factory_snapshot()
                 .root
@@ -2845,7 +2845,7 @@ mod tests {
                 RunStatus::Blocked
             );
             assert!(engine
-                .policies
+                .run_evidence
                 .provenance(&held.id)
                 .await
                 .unwrap()
@@ -3007,7 +3007,7 @@ mod tests {
         }))
         .unwrap();
         engine
-            .policies
+            .run_evidence
             .append_step_attestation(&evidence)
             .await
             .unwrap();
@@ -3015,7 +3015,7 @@ mod tests {
         evidence.id = "foreign".into();
         evidence.actor = "not-the-frozen-reviewer".into();
         engine
-            .policies
+            .run_evidence
             .append_step_attestation(&evidence)
             .await
             .unwrap();
@@ -3024,7 +3024,7 @@ mod tests {
         evidence.actor = step.actor.clone().unwrap();
         evidence.worktree_digest = Some("old-source".into());
         engine
-            .policies
+            .run_evidence
             .append_step_attestation(&evidence)
             .await
             .unwrap();
@@ -3033,7 +3033,7 @@ mod tests {
         evidence.worktree_digest = Some(held.artifacts[0].source.worktree_digest.clone());
         evidence.at = Utc::now();
         engine
-            .policies
+            .run_evidence
             .append_step_attestation(&evidence)
             .await
             .unwrap();
@@ -3042,7 +3042,7 @@ mod tests {
         evidence.verdict = AttestationVerdict::Fail;
         evidence.at += chrono::Duration::seconds(1);
         engine
-            .policies
+            .run_evidence
             .append_step_attestation(&evidence)
             .await
             .unwrap();
@@ -3075,8 +3075,8 @@ mod tests {
             .unwrap();
         let record =
             factory_core::provenance::statement(&run, &run.artifacts[0], &[], "test", Utc::now());
-        engine.policies.append_provenance(&record).await.unwrap();
-        assert_eq!(engine.policies.provenance(&run.id).await.unwrap().len(), 1);
+        engine.run_evidence.append_provenance(&record).await.unwrap();
+        assert_eq!(engine.run_evidence.provenance(&run.id).await.unwrap().len(), 1);
         assert!(engine.run_provenance(&run.id).await.unwrap().is_empty());
         engine
             .cancel_task_run(
