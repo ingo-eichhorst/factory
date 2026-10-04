@@ -402,6 +402,62 @@ fn waiting_tasks_exist_before_release_and_survive_a_real_restart() {
 }
 
 #[test]
+fn slow_health_recovers_after_a_shell_task_and_history_survives_restart() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["scope"]["environments"] = serde_yaml_ng::from_str(
+        "- name: staging\n  slo: { availability: 99% }\n  checks:\n    - { name: api, kind: command, command: 'if ! test -f healthy; then sleep 0.6; fi', every: 5s, timeout: 2s, slow_after_ms: 250 }\n",
+    ).unwrap();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let report = || {
+        let url = format!("{base}/api/environments");
+        expect_ok(&url, &get(&url))["report"].clone()
+    };
+    let slow = wait_for("slow check degrades staging", Duration::from_secs(15), || {
+        let r = report();
+        (r["environments"][0]["status"] == "degraded").then_some(r)
+    });
+    let card = &slow["environments"][0];
+    assert_eq!(card["uptime_window"], 1.0);
+    assert_eq!(card["error_budget"], 1.0);
+    assert_eq!(card["incidents"], json!([]));
+    assert_eq!(card["checks"][0]["last"]["slow"], true);
+    assert!(card["checks"][0]["last"]["detail"].as_str().unwrap().contains("exceeds 250ms"));
+
+    let draft = json!({ "name": "restore-health", "scope": "demo",
+        "nodes": [task_node("restore", "touch healthy")], "edges": [] });
+    let created = expect_ok(&format!("{base}/api/workflows"), &post(&format!("{base}/api/workflows"), &draft));
+    let id = created["workflow"]["id"].as_str().unwrap();
+    let started = expect_ok(&format!("{base}/api/workflows/{id}/run"), &post(&format!("{base}/api/workflows/{id}/run"), &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    wait_for("shell agent reports restore done", Duration::from_secs(30), || {
+        let run = run_status(&base, run_id);
+        (run["status"] == "done").then_some(run)
+    });
+    let recovered = wait_for("fast check restores staging", Duration::from_secs(15), || {
+        let r = report();
+        (r["environments"][0]["status"] == "up").then_some(r)
+    });
+    assert_eq!(recovered["environments"][0]["uptime_window"], 1.0);
+    daemon.sigterm();
+    // Raising the threshold does not rewrite samples already classified slow.
+    config["scope"]["environments"][0]["checks"][0]["slow_after_ms"] = 1000.into();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    daemon.spawn();
+    let persisted = report();
+    let card = &persisted["environments"][0];
+    assert_eq!(card["status"], "up");
+    assert_eq!(card["checks"][0]["slow_after_ms"], 1000);
+    assert!(card["checks"][0]["strip"].as_array().unwrap().iter().any(|b| b["slow"].as_u64().unwrap() > 0));
+    assert_eq!(card["incidents"], json!([]));
+}
+
+#[test]
 fn workspace_files_survive_fresh_shell_retry_restart_and_are_released_only_after_close_is_safe() {
     if missing_prerequisites() { return; }
     let mut daemon = provision();

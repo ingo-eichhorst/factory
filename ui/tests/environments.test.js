@@ -159,6 +159,14 @@ test("a check's strip and newest answer, and incidents, in words", () => {
   assert.equal(incidentText(STAGING.incidents[1], NOW), "2026-09-20 08:00 UTC · lasted 10m · /api/status");
 });
 
+test("slow successful checks are amber and retain the recorded reason", () => {
+  assert.equal(bucketTone({ ok: 3, failed: 0, slow: 1 }), "warn");
+  assert.equal(bucketTone({ ok: 3, failed: 1, slow: 1 }), "bad");
+  assert.equal(bucketTone({ ok: 3, failed: 0 }), "ok", "old daemon still works");
+  const last = { ok: true, slow: true, detail: "200; slow: 1000ms exceeds 750ms", latency_ms: 1000, at: STAGING.checks[0].last.at };
+  assert.equal(lastCheckText({ last }, NOW), "slow · 200; slow: 1000ms exceeds 750ms · 1000ms · 30s ago");
+});
+
 test("events, the scope query and a daemon without the endpoint", () => {
   assert.ok(isEnvironmentsEvent({ type: "deployment_updated", deployment: {} }));
   assert.ok(isEnvironmentsEvent({ type: "environment_status_changed", environment: "staging", status: "down" }));
@@ -237,4 +245,25 @@ test("nothing declared shows the config to write; an old daemon is a calm note, 
   assert.equal(el["environments-unavailable"].hidden, false);
   assert.equal(el["environments-error"].hidden, true);
   assert.equal(el.environments.hidden, true);
+});
+
+test("the rendered card and strip show recorded slowness and the threshold", () => {
+  const el = stubPage(IDS);
+  const check = STAGING.checks[0];
+  state.environments = {
+    ...REPORT,
+    environments: [{
+      ...STAGING, status: "degraded",
+      checks: [{ ...check, slow_after_ms: 750, last: { ...check.last, ok: true, slow: true, detail: "200; slow: 1000ms exceeds 750ms" }, strip: [{ start: NOW, ok: 1, failed: 0, slow: 1 }] }],
+    }],
+  };
+  renderEnvironments();
+  const html = el.environments.innerHTML;
+  assert.match(html, /class="sys-dot" data-tone="warn"/);
+  assert.match(html, /class="sys-slot" data-tone="warn"/);
+  assert.match(html, /1 ok \(1 slow\), 0 failed/);
+  assert.match(html, /slow above 750ms/);
+  assert.match(html, /200; slow: 1000ms exceeds 750ms/);
+  const css = readFileSync(new URL("../app.css", import.meta.url), "utf8");
+  assert.match(css, /\.sys-slot\[data-tone="warn"\]\s*\{\s*background: var\(--wait\)/);
 });

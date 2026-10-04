@@ -256,6 +256,10 @@ pub struct CheckDecl {
     /// 10s unless said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<Span>,
+    /// A successful answer slower than this is degraded, not unavailable.
+    /// Captured on the sample so changing this threshold does not rewrite history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_after_ms: Option<u64>,
 }
 
 impl CheckDecl {
@@ -372,6 +376,11 @@ pub fn validate<'a>(scopes: impl IntoIterator<Item = (&'a str, &'a [EnvironmentD
                         "{here}, check {name:?}: timeout is at most {MAX_TIMEOUT_SECONDS}s and no longer than every"
                     ));
                 }
+                if check.slow_after_ms.is_some_and(|ms| ms == 0 || ms >= timeout.saturating_mul(1000)) {
+                    return bad(format!(
+                        "{here}, check {name:?}: slow_after_ms is positive and below timeout in milliseconds"
+                    ));
+                }
                 match check.kind {
                     CheckKind::Http => {
                         if let Some(path) = &check.path {
@@ -418,10 +427,25 @@ pub struct Sample {
     pub at: DateTime<Utc>,
     pub ok: bool,
     pub latency_ms: u64,
+    /// Successful but slower than the threshold declared when checked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub slow: bool,
     /// What it answered, or why it failed: `200`, `expected 200, got 502`,
     /// `timed out after 5s`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+impl Sample {
+    pub fn status(&self) -> EnvStatus {
+        if !self.ok {
+            EnvStatus::Down
+        } else if self.slow {
+            EnvStatus::Degraded
+        } else {
+            EnvStatus::Up
+        }
+    }
 }
 
 /// The post-deploy verification: the environment's own checks, run once
@@ -558,9 +582,9 @@ pub struct Release {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvStatus {
-    /// Every check's latest answer was healthy.
+    /// Every known check's latest answer was healthy and fast.
     Up,
-    /// Some checks failing, some not.
+    /// Some checks failing, some not, or a successful check was slow.
     Degraded,
     /// Every check failing.
     Down,
@@ -571,12 +595,19 @@ pub enum EnvStatus {
 /// The status a set of latest answers adds up to. `latest` has one entry
 /// per declared check: its newest sample's `ok`, or `None` if it has none.
 pub fn status_of(latest: &[Option<bool>]) -> EnvStatus {
-    let known: Vec<bool> = latest.iter().flatten().copied().collect();
+    status_of_checks(
+        &latest.iter().map(|ok| ok.map(|ok| if ok { EnvStatus::Up } else { EnvStatus::Down })).collect::<Vec<_>>(),
+    )
+}
+
+/// Aggregate individual check answers, including slow successful responses.
+pub fn status_of_checks(latest: &[Option<EnvStatus>]) -> EnvStatus {
+    let known: Vec<EnvStatus> = latest.iter().flatten().copied().filter(|s| *s != EnvStatus::Unknown).collect();
     if known.is_empty() {
         EnvStatus::Unknown
-    } else if known.iter().all(|ok| *ok) {
+    } else if known.iter().all(|s| *s == EnvStatus::Up) {
         EnvStatus::Up
-    } else if known.iter().all(|ok| !*ok) {
+    } else if known.iter().all(|s| *s == EnvStatus::Down) {
         EnvStatus::Down
     } else {
         EnvStatus::Degraded
@@ -589,13 +620,13 @@ pub fn status_of(latest: &[Option<bool>]) -> EnvStatus {
 pub fn status_timeline(checks: &[String], samples: &[Sample]) -> (EnvStatus, Option<DateTime<Utc>>) {
     let mut ordered: Vec<&Sample> = samples.iter().filter(|s| checks.contains(&s.check)).collect();
     ordered.sort_by_key(|s| s.at);
-    let mut latest: Vec<Option<bool>> = vec![None; checks.len()];
+    let mut latest: Vec<Option<EnvStatus>> = vec![None; checks.len()];
     let mut status = EnvStatus::Unknown;
     let mut since = None;
     for s in ordered {
         let i = checks.iter().position(|c| c == &s.check).expect("filtered");
-        latest[i] = Some(s.ok);
-        let now = status_of(&latest);
+        latest[i] = Some(s.status());
+        let now = status_of_checks(&latest);
         if now != status || since.is_none() {
             status = now;
             since = Some(s.at);
@@ -795,6 +826,9 @@ pub struct StripBucket {
     pub start: DateTime<Utc>,
     pub ok: u32,
     pub failed: u32,
+    /// Subset of `ok`: successful samples which exceeded their threshold.
+    #[serde(default)]
+    pub slow: u32,
 }
 
 /// `samples` of one check, counted into `buckets` equal slots ending at
@@ -808,6 +842,7 @@ pub fn strip(samples: &[Sample], now: DateTime<Utc>, span: Duration, buckets: us
             start: start + Duration::milliseconds((i as f64 * width * 1000.0) as i64),
             ok: 0,
             failed: 0,
+            slow: 0,
         })
         .collect();
     for s in samples {
@@ -818,6 +853,7 @@ pub fn strip(samples: &[Sample], now: DateTime<Utc>, span: Duration, buckets: us
         let b = &mut out[i.min(buckets - 1)];
         if s.ok {
             b.ok += 1;
+            b.slow += u32::from(s.slow);
         } else {
             b.failed += 1;
         }
@@ -834,6 +870,8 @@ pub struct CheckView {
     pub kind: CheckKind,
     pub target: String,
     pub every_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_after_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<Sample>,
     /// The last 24 hours in 48 half-hour slots.
@@ -969,6 +1007,7 @@ pub fn report(
                             target: c.target(d.url.as_deref()),
                             kind: c.kind,
                             every_seconds: c.every_seconds(),
+                            slow_after_ms: c.slow_after_ms,
                             name,
                         }
                     })
@@ -1115,7 +1154,7 @@ mod tests {
     }
 
     fn s(check: &str, min: i64, ok: bool) -> Sample {
-        Sample { environment: "prod".into(), check: check.into(), at: t(min), ok, latency_ms: 1, detail: None }
+        Sample { environment: "prod".into(), check: check.into(), at: t(min), ok, latency_ms: 1, slow: false, detail: None }
     }
 
     fn decls(yaml: &str) -> Vec<EnvironmentDecl> {
@@ -1195,6 +1234,51 @@ mod tests {
         // promotes_to may cross scopes.
         let s = decls("- name: staging\n  promotes_to: prod\n");
         validate([("a", one.as_slice()), ("b", s.as_slice())]).unwrap();
+    }
+
+    #[test]
+    fn slow_threshold_is_optional_positive_and_below_timeout() {
+        for ms in [1, 9999] {
+            let envs = decls(&format!("- name: prod\n  checks: [{{ kind: command, command: 'true', slow_after_ms: {ms} }}]"));
+            validate([("factory", envs.as_slice())]).unwrap();
+            assert_eq!(envs[0].checks[0].slow_after_ms, Some(ms));
+            let back = decls(&serde_yaml_ng::to_string(&envs).unwrap());
+            assert_eq!(back, envs);
+        }
+        for ms in [0, 10000, u64::MAX] {
+            let envs = decls(&format!("- name: prod\n  checks: [{{ kind: command, command: 'true', slow_after_ms: {ms} }}]"));
+            assert!(validate([("factory", envs.as_slice())]).unwrap_err().to_string().contains("slow_after_ms"));
+        }
+    }
+
+    #[test]
+    fn slow_samples_degrade_status_without_fabricating_outages() {
+        let fast = s("api", 0, true);
+        let slow = Sample { slow: true, latency_ms: 1001, ..s("api", 1, true) };
+        let still_slow = Sample { at: t(2), ..slow.clone() };
+        let recovered = s("api", 3, true);
+        let samples = vec![fast.clone(), slow.clone(), still_slow];
+        let checks = vec!["api".into()];
+        assert_eq!(status_timeline(&checks, &samples), (EnvStatus::Degraded, Some(t(1))));
+        assert_eq!(availability(&samples, t(0)), Some(1.0));
+        assert!(incidents("prod", &samples).is_empty());
+        assert_eq!(status_of_checks(&[Some(EnvStatus::Down), Some(slow.status())]), EnvStatus::Degraded);
+        let buckets = strip(&samples, t(2), Duration::minutes(2), 1);
+        assert_eq!((buckets[0].ok, buckets[0].failed, buckets[0].slow), (3, 0, 2));
+        let mut reversed = vec![recovered, slow, fast];
+        assert_eq!(status_timeline(&checks, &reversed), (EnvStatus::Up, Some(t(3))));
+        reversed.push(Sample { ok: false, slow: true, ..s("api", 4, false) });
+        assert_eq!(status_timeline(&checks, &reversed), (EnvStatus::Down, Some(t(4))), "failure takes precedence");
+    }
+
+    #[test]
+    fn old_wire_samples_and_buckets_are_not_reclassified() {
+        let old = serde_json::json!({"environment":"prod", "check":"api", "at":t(0), "ok":true, "latency_ms":9000});
+        let sample: Sample = serde_json::from_value(old).unwrap();
+        assert!(!sample.slow);
+        assert_eq!(sample.status(), EnvStatus::Up);
+        let bucket: StripBucket = serde_json::from_value(serde_json::json!({"start":t(0), "ok":1, "failed":0})).unwrap();
+        assert_eq!(bucket.slow, 0);
     }
 
     #[test]

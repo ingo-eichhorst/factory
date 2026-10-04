@@ -82,7 +82,7 @@ function fact(label, value, level) {
 function strip(check) {
   const cells = (check.strip || []).map(b => {
     const tone = bucketTone(b);
-    const title = `${new Date(b.start).toISOString().slice(11, 16)} UTC · ${b.ok} ok, ${b.failed} failed`;
+    const title = `${new Date(b.start).toISOString().slice(11, 16)} UTC · ${b.ok} ok (${b.slow || 0} slow), ${b.failed} failed`;
     return `<span class="sys-slot" data-tone="${tone}" title="${esc(title)}"></span>`;
   }).join("");
   return `<div class="sys-strip" role="img" aria-label="${esc(`${check.name}: the last 24 hours in half-hour slots`)}">${cells}</div>`;
@@ -97,13 +97,13 @@ function checks(card, now) {
   return `<div class="sys-checks">${card.checks.map(c => `
     <div class="sys-check">
       <div class="sys-check-head">
-        <span class="sys-dot" data-tone="${c.last ? (c.last.ok ? "ok" : "bad") : "none"}"></span>
+        <span class="sys-dot" data-tone="${c.last ? (c.last.ok ? (c.last.slow ? "warn" : "ok") : "bad") : "none"}"></span>
         <span class="sys-check-name">${esc(c.name)}</span>
         <span class="tag">${esc(c.kind)}</span>
         <span class="sub mono" title="${esc(c.target)}">${esc(c.target)}</span>
       </div>
       ${strip(c)}
-      <div class="sub">${esc(lastCheckText(c, now))} · every ${esc(String(c.every_seconds))}s</div>
+      <div class="sub">${esc(lastCheckText(c, now))} · every ${esc(String(c.every_seconds))}s${c.slow_after_ms ? ` · slow above ${esc(String(c.slow_after_ms))}ms` : ""}</div>
     </div>`).join("")}</div>`;
 }
 
