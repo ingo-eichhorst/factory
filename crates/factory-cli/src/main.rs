@@ -585,6 +585,15 @@ struct ReleaseArgs {
     /// repository when left out; lead time for changes starts here.
     #[arg(long)]
     committed_at: Option<String>,
+    /// Explicit producing run. Evidence must match this scope and source commit.
+    #[arg(long)]
+    build_run: Option<String>,
+    /// The producing scope, when different from the release's scope.
+    #[arg(long)]
+    build_scope: Option<String>,
+    /// Compare against this immutable Git revision; otherwise use the previous release.
+    #[arg(long)]
+    compare_to: Option<String>,
 }
 
 impl ReleaseArgs {
@@ -597,6 +606,10 @@ impl ReleaseArgs {
             dirty: self.dirty,
             source: self.source,
             committed_at: self.committed_at.as_deref().map(parse_rfc3339).transpose()?,
+            build_run: self.build_run,
+            build_scope: self.build_scope,
+            compare_to: self.compare_to,
+            changes: None,
         })
     }
 }
@@ -6782,6 +6795,19 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn release_recording_accepts_an_explicit_producing_run_scope_and_comparison() {
+        let parsed = Cli::try_parse_from(["factory", "release", "add", "--scope", "demo", "--commit", "sha",
+            "--build-run", "build-id", "--build-scope", "source", "--compare-to", "base-sha"]).unwrap();
+        let Command::Release(ReleaseCmd::Add { release, .. }) = parsed.command else { panic!("release add"); };
+        let facts = release.facts().unwrap();
+        assert_eq!(facts.build_run.as_deref(), Some("build-id"));
+        assert_eq!(facts.build_scope.as_deref(), Some("source"));
+        assert_eq!(facts.compare_to.as_deref(), Some("base-sha"));
+        assert!(facts.changes.is_none(), "captured comparisons belong to the daemon, not the CLI");
+        assert!(Cli::try_parse_from(["factory", "deploy", "start", "--env", "review", "--commit", "sha", "--build-run", "build-id"]).is_ok());
+    }
+
     #[test]
     fn recovery_requires_a_reason_and_health_check_is_a_separate_command() {
         let parsed = Cli::try_parse_from(["factory", "recover", "production", "--reason", "restart installed system"]).unwrap();

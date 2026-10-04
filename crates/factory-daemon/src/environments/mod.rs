@@ -16,6 +16,7 @@ pub mod checks;
 pub mod store;
 mod promotion;
 mod recovery;
+mod releases;
 
 pub use store::EnvironmentStore;
 
@@ -364,6 +365,7 @@ impl Engine {
         let on_env: Vec<&Deployment> = history.iter().filter(|d| d.environment == req.environment).collect();
         let previous_commit =
             on_env.iter().find(|d| d.status == DeployStatus::Succeeded).map(|d| d.release.commit.clone());
+        self.enrich_release(&scope, &mut req.release, previous_commit.as_deref()).await?;
         let actor = self.actor(caller).await;
         let now = Utc::now();
         let deployment = Deployment {
@@ -486,6 +488,14 @@ impl Engine {
                 release.committed_at = committed_at(dir, release.commit.clone()).await;
             }
         }
+        let added = self.environments.releases_added().await?;
+        let deployments = self.environments.deployments().await?;
+        let previous = added.iter().filter(|(scope, facts, _)| scope == &req.scope && facts.commit != release.commit)
+            .map(|(_, facts, at)| (facts.commit.clone(), *at))
+            .chain(deployments.iter().filter(|deployment| deployment.scope == req.scope && deployment.release.commit != release.commit)
+                .map(|deployment| (deployment.release.commit.clone(), deployment.started_at)))
+            .max_by_key(|(_, at)| *at).map(|(commit, _)| commit);
+        self.enrich_release(&req.scope, &mut release, previous.as_deref()).await?;
         self.environments.release_added(&req.scope, &release, Utc::now()).await?;
         Ok((req.scope, release))
     }

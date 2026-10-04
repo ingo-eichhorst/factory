@@ -37,6 +37,17 @@ pub(crate) struct RecoveryQuery {
     pub limit: u32,
 }
 
+pub(crate) struct ReleaseBuildQuery {
+    pub scope: String,
+    pub commit: String,
+    pub run_id: String,
+}
+pub(crate) struct ReleaseSbomQuery {
+    pub scope: String,
+    pub commit: String,
+    pub version: Option<String>,
+}
+
 /// Registered producer, with a response constrained to its own fact type.
 /// No serialization, Any downcasts or string-keyed provider lookup.
 pub(crate) trait Port: Fact + Sized {
@@ -87,6 +98,8 @@ port!(AgentFact, l3, String, Vec<AgentFact>);
 port!(TaskFact, l4, NamedQuery, BTreeMap<String, Vec<TaskFact>>);
 port!(WorkflowFact, l4, NamedQuery, BTreeMap<String, Vec<WorkflowFact>>);
 port!(EnvironmentRecoveryFact, l4, RecoveryQuery, Vec<EnvironmentRecoveryFact>);
+port!(ReleaseBuildFact, l4, ReleaseBuildQuery, Option<ReleaseBuildFact>);
+port!(ReleaseSbomFact, l2, ReleaseSbomQuery, Vec<ReleaseSbomFact>);
 port!(AttestedRun, l4, AttestedQuery, Vec<AttestedRun>);
 port!(ArtifactProvenance, l4, String, Vec<ArtifactProvenance>);
 port!(CostReport, l4, factory_core::usage::SpendQuery, CostReport);
@@ -116,6 +129,8 @@ mod tests {
         registered::<TaskFact>();
         registered::<WorkflowFact>();
         registered::<EnvironmentRecoveryFact>();
+        registered::<ReleaseBuildFact>();
+        registered::<ReleaseSbomFact>();
         registered::<AttestedRun>();
         registered::<ArtifactProvenance>();
         registered::<CostReport>();

@@ -24,6 +24,8 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<TaskFact, L4>("TaskFact", "L4");
     assert_producer::<WorkflowFact, L4>("WorkflowFact", "L4");
     assert_producer::<EnvironmentRecoveryFact, L4>("EnvironmentRecoveryFact", "L4");
+    assert_producer::<ReleaseBuildFact, L4>("ReleaseBuildFact", "L4");
+    assert_producer::<ReleaseSbomFact, L2>("ReleaseSbomFact", "L2");
     assert_producer::<ConfirmedSecurityReport, L4>("ConfirmedSecurityReport", "L4");
     assert_producer::<AttestedRun, L4>("AttestedRun", "L4");
     assert_producer::<ArtifactProvenance, L4>("ArtifactProvenance", "L4");
@@ -46,6 +48,8 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "TaskFact",
         "WorkflowFact",
         "EnvironmentRecoveryFact",
+        "ReleaseBuildFact",
+        "ReleaseSbomFact",
         "ConfirmedSecurityReport",
         "AttestedRun",
         "ArtifactProvenance",
@@ -147,4 +151,18 @@ fn recovery_fact_preserves_actual_run_outcome_without_a_deployment_schema() {
     let fact: EnvironmentRecoveryFact = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(fact.run.as_ref().unwrap().status, RunStatus::Failed);
     assert_eq!(serde_json::to_value(fact).unwrap(), json);
+}
+
+#[test]
+fn release_evidence_facts_and_nested_attachment_schema_serialize_from_l0_alone() {
+    let build = serde_json::json!({ "scope": "demo", "commit": "sha", "task_id": "t",
+        "run": { "id": "r", "status": "done", "started_at": "2026-10-04T00:00:00Z" }, "artifacts": [], "attestations": [] });
+    let fact: ReleaseBuildFact = serde_json::from_value(build.clone()).unwrap();
+    assert_eq!(serde_json::to_value(fact).unwrap(), build);
+    let sbom = serde_json::json!({ "scope": "demo", "commit": "sha", "version": "v1", "attachment": {
+        "id": "a", "scope": "demo", "kind": "sbom", "run_id": "r", "task_id": "t", "attempt": 1,
+        "attached_at": "2026-10-04T00:00:00Z", "filename": "build.cdx.json", "spec_version": "1.6", "states": ["built"]
+    } });
+    let fact: ReleaseSbomFact = serde_json::from_value(sbom.clone()).unwrap();
+    assert_eq!(serde_json::to_value(fact).unwrap(), sbom);
 }

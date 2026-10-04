@@ -58,6 +58,16 @@ impl Provide<ExploitedFinding> for Provider<'_> {
         self.engine.exploited_findings(scope).await
     }
 }
+
+#[async_trait]
+impl Provide<factory_kernel::ReleaseSbomFact> for Provider<'_> {
+    type Query = super::ReleaseSbomQuery;
+    type Value = Vec<factory_kernel::ReleaseSbomFact>;
+    type Error = FactoryError;
+    async fn get(&self, query: &Self::Query) -> Result<Self::Value> {
+        self.engine.release_sboms(&query.scope, &query.commit, query.version.as_deref()).await
+    }
+}
 fn secrets_fact_map(rows: &[CredentialRow], scope: &str) -> BTreeMap<String, bool> {
     let mut map = BTreeMap::new();
     for row in rows {

@@ -116,6 +116,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
         .route("/api/dependencies", get(dependencies))
+        .route("/api/dependencies/documents/{id}", get(dependency_document))
         .route("/api/doctor", get(doctor))
         .route("/api/infrastructure", get(infrastructure))
         .route("/api/environments", get(environments))
@@ -126,6 +127,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/deployments", post(deploy_start))
         .route("/api/deployments/{id}/finish", post(deploy_finish))
         .route("/api/releases", post(release_add))
+        .route("/api/releases/detail", get(release_detail))
         .route("/api/backup", get(backup))
         .route("/api/backup/run", post(backup_run))
         .route("/api/backup/verify", post(backup_verify))
@@ -416,6 +418,16 @@ async fn environment_check(State(engine): State<Arc<Engine>>, Json(body): Json<E
 
 async fn environment_samples(State(engine): State<Arc<Engine>>, Query(query): Query<factory_core::environments::SampleQuery>) -> AxumResponse {
     run(&engine, Request::EnvironmentSamples(query)).await
+}
+
+async fn release_detail(State(engine): State<Arc<Engine>>, Query(query): Query<factory_core::environments::ReleaseQuery>) -> AxumResponse {
+    run(&engine, Request::ReleaseDetail(query)).await
+}
+
+#[derive(serde::Deserialize)]
+struct DependencyDocumentQuery { scope: String }
+async fn dependency_document(State(engine): State<Arc<Engine>>, Path(id): Path<String>, Query(query): Query<DependencyDocumentQuery>) -> AxumResponse {
+    run(&engine, Request::DependencyDocument { scope: query.scope, id }).await
 }
 
 /// `POST /api/deployments` with a `deploy.start` body.

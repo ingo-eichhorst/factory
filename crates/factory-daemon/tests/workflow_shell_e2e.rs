@@ -334,6 +334,114 @@ fn provision() -> Daemon {
 
 // -------------------------------------------------------------- the test
 
+#[test]
+fn release_evidence_matches_a_real_build_and_sbom_and_survives_git_changes_and_restart() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").current_dir(&daemon.root).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["config", "user.email", "release-evidence@example.invalid"]);
+    git(&["config", "user.name", "Release evidence QA"]);
+    std::fs::write(daemon.root.join(".gitignore"), "*\n").unwrap();
+    git(&["add", "-f", ".gitignore"]);
+    git(&["commit", "-q", "-m", "baseline"]);
+    git(&["remote", "add", "origin", "https://github.com/owner/repo.git"]);
+    let baseline = git(&["rev-parse", "HEAD"]);
+    let base = daemon.base_url();
+    let releases_url = format!("{base}/api/releases");
+    expect_ok(&releases_url, &post(&releases_url, &json!({ "scope": "demo", "commit": baseline })));
+    git(&["commit", "-q", "--allow-empty", "-m", "Merge pull request #90 from release", "-m", "Fixes #91\nRefs #92"]);
+    let commit = git(&["rev-parse", "HEAD"]);
+    let sbom = |sha: &str, phase: &str| json!({ "bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
+        "metadata": { "lifecycles": [{ "phase": phase }], "component": { "type": "application", "name": "product", "version": "v1",
+            "properties": [{ "name": "factory:git-sha", "value": sha }] } }, "components": [] });
+    let instructions = format!(
+        "set -eu\nprintf 'built release bytes' > product.bin\nprintf '%s' '{}' > build.cdx.json\nprintf '%s' '{}' > wrong.cdx.json\nprintf '%s' '{}' > running.cdx.json\n\
+         \"$FACTORY_BIN\" task attach --kind sbom build.cdx.json\n\"$FACTORY_BIN\" task attach --kind sbom wrong.cdx.json\n\"$FACTORY_BIN\" task attach --kind sbom running.cdx.json\n\
+         \"$FACTORY_BIN\" task report \"$FACTORY_TASK_ID\" --status done --artifact product.bin --result 'immutable product build'\n",
+        sbom(&commit, "build"), sbom(&"a".repeat(40), "build"), sbom(&commit, "operations")
+    );
+    let task_url = format!("{base}/api/tasks");
+    let task = expect_ok(&task_url, &post(&task_url, &json!({ "title": "Build product with provenance", "instructions": instructions,
+        "scope": "demo", "agent": "shell", "worktree": false, "category": "release" })))["task"].clone();
+    let task_id = task["id"].as_str().unwrap();
+    let run_url = format!("{task_url}/{task_id}/run");
+    expect_ok(&run_url, &post(&run_url, &json!({})));
+    wait_for("shell-agent build reports immutable artifacts", Duration::from_secs(30), || {
+        tasks(&base).into_iter().find(|task| task["id"] == task_id && task["status"] == "done")
+    });
+    let history_url = format!("{task_url}/{task_id}/runs");
+    let producing_run = expect_ok(&history_url, &get(&history_url))["runs"][0].clone();
+    let run_id = producing_run["id"].as_str().unwrap();
+    expect_ok(&releases_url, &post(&releases_url, &json!({ "scope": "demo", "commit": commit, "version": "v1", "build_run": run_id })));
+    let detail_url = format!("{releases_url}/detail?scope=demo&commit={commit}");
+    let detail = wait_for("completed source-matching build evidence is readable", Duration::from_secs(5), || {
+        let detail = expect_ok(&detail_url, &get(&detail_url))["detail"].clone();
+        detail["build"].is_object().then_some(detail)
+    });
+    assert_eq!(detail["changes"]["base"], baseline);
+    assert_eq!(detail["changes"]["commits"].as_array().unwrap().len(), 1);
+    assert_eq!(detail["changes"]["commits"][0]["pull_requests"], json!([90]));
+    assert_eq!(detail["changes"]["commits"][0]["issues"], json!([91]));
+    assert_eq!(detail["build"]["run"]["id"], run_id);
+    assert_eq!(detail["build"]["artifacts"][0]["artifact"]["source"]["commit"], commit);
+    assert_eq!(detail["build"]["artifacts"][0]["artifact"]["source"]["dirty"], false);
+    assert_eq!(detail["sboms"].as_array().unwrap().len(), 1, "wrong commit and operations lifecycle are not release build SBOMs");
+    let document_url = format!("{base}/api/dependencies/documents/{}?scope=demo", detail["sboms"][0]["attachment"]["id"].as_str().unwrap());
+    let document = expect_ok(&document_url, &get(&document_url));
+    assert_eq!(document["document"]["metadata"]["component"]["properties"][0]["value"], commit);
+    // A deployment actor is distinct from the producing run and does not
+    // replace the build's provenance when the same release is deployed.
+    let deployments_url = format!("{base}/api/deployments");
+    let deployment = expect_ok(&deployments_url, &post(&deployments_url, &json!({ "environment": "review-evidence", "scope": "demo", "commit": commit,
+        "version": "v1", "build_run": run_id, "compare_to": baseline })))["deployment"].clone();
+    let finish = format!("{deployments_url}/{}/finish", deployment["id"].as_str().unwrap());
+    expect_ok(&finish, &post(&finish, &json!({ "status": "succeeded" })));
+    let selected_url = format!("{detail_url}&deployment={}", deployment["id"].as_str().unwrap());
+    let selected = expect_ok(&selected_url, &get(&selected_url))["detail"].clone();
+    assert_eq!(selected["build"]["run"]["id"], run_id);
+    assert_eq!(deployment["actor"]["kind"], "person");
+    let report_url = format!("{base}/api/environments");
+    let report = expect_ok(&report_url, &get(&report_url))["report"].clone();
+    assert_eq!(report["environments"][0]["effectiveness"].as_array().unwrap().len(), 4);
+    assert_eq!(report["releases"][0]["effectiveness"]["finished"], 1);
+    assert_eq!(report["releases"][0]["effectiveness"]["observing"], 1, "fresh success is still inside the observation horizon");
+    let (_, wrong_selection) = raw_request("GET", &format!("{detail_url}&deployment=unknown"), None).unwrap();
+    assert!(wrong_selection.contains("does not belong"));
+    expect_ok(&releases_url, &post(&releases_url, &json!({ "scope": "demo", "commit": "b".repeat(40), "build_run": run_id })));
+    let mismatch_url = format!("{releases_url}/detail?scope=demo&commit={}", "b".repeat(40));
+    let mismatch = expect_ok(&mismatch_url, &get(&mismatch_url))["detail"].clone();
+    assert!(mismatch.get("build").is_none(), "a run cannot prove a different source commit");
+    assert!(mismatch["sboms"].as_array().unwrap().is_empty());
+    let other_version = expect_ok(&deployments_url, &post(&deployments_url, &json!({ "environment": "review-version", "scope": "demo",
+        "commit": commit, "version": "v2", "build_run": run_id })))["deployment"].clone();
+    let version_url = format!("{detail_url}&deployment={}", other_version["id"].as_str().unwrap());
+    let version_detail = expect_ok(&version_url, &get(&version_url))["detail"].clone();
+    assert_eq!(version_detail["release"]["version"], "v2", "the header identifies the selected deployment, not the aggregate catalogue");
+    assert!(version_detail["sboms"].as_array().unwrap().is_empty(), "an exact commit does not override a mismatched product version");
+    let other_scope = daemon.root.join("projects/other/.factory");
+    std::fs::create_dir_all(&other_scope).unwrap();
+    std::fs::write(other_scope.join("config.yaml"), "version: 1\nscope:\n  id: other-scope\n  name: other\n").unwrap();
+    std::fs::rename(daemon.root.join(".git"), daemon.root.join("git-is-unavailable")).unwrap();
+    daemon.sigterm();
+    daemon.spawn();
+    let recovered = expect_ok(&selected_url, &get(&selected_url))["detail"].clone();
+    assert_eq!(recovered["changes"], selected["changes"]);
+    assert_eq!(recovered["build"], selected["build"]);
+    assert_eq!(recovered["sboms"], selected["sboms"]);
+    assert_eq!(expect_ok(&document_url, &get(&document_url))["document"], document["document"]);
+    let (_, wrong_scope) = raw_request("GET", &document_url.replace("scope=demo", "scope=other"), None).unwrap();
+    assert!(wrong_scope.contains("no such attachment"), "{wrong_scope}");
+    expect_ok(&releases_url, &post(&releases_url, &json!({ "scope": "other", "commit": commit, "build_run": run_id })));
+    let foreign_url = format!("{releases_url}/detail?scope=other&commit={commit}");
+    let foreign = expect_ok(&foreign_url, &get(&foreign_url))["detail"].clone();
+    assert!(foreign.get("build").is_none(), "a completed run from another scope cannot prove this release");
+    assert!(foreign["sboms"].as_array().unwrap().is_empty());
+}
+
 /// `true` (and prints why) when this binary and the environment cannot run
 /// any test in this file -- shared so a second test does not have to repeat
 /// (or drift from) the same two checks.

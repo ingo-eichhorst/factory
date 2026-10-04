@@ -14,6 +14,7 @@
 
 import { MISSING } from "./infra-model.js";
 import { fmtAgo, fmtSpan, fmtWhen } from "./backup-model.js";
+import { refLinks } from "./policy-model.js";
 
 export { MISSING, fmtAgo, fmtSpan, fmtWhen };
 
@@ -204,6 +205,7 @@ export function deploymentRows(report) {
     reason: d.reason || "",
     previous: d.previous_commit ? shortCommit(d.previous_commit) : null,
     verification: verificationText(d),
+    detailQuery: releaseDetailQuery(d.scope, d.release.commit, d.id),
   }));
 }
 
@@ -219,7 +221,32 @@ export function releaseRows(report) {
     runningOn: r.running_on || [],
     deployments: r.deployments || 0,
     failed: r.failed_deployments || 0,
+    effectiveness: releaseEffectiveness(r),
+    fullCommit: r.commit,
   }));
+}
+
+export function releaseEffectiveness(release) {
+  const evidence = release.effectiveness;
+  if (evidence?.change_failure_rate == null) return MISSING;
+  const observing = evidence.observing ? ` · ${evidence.observing} still observing` : "";
+  return `${fmtPct(evidence.change_failure_rate)} · ${evidence.failed_changes}/${evidence.finished} changes · ${evidence.window_days}d${observing}`;
+}
+
+export function releaseDetailQuery(scope, commit, deployment = null) {
+  const query = new URLSearchParams({ scope, commit });
+  if (deployment) query.set("deployment", deployment);
+  return `/api/releases/detail?${query}`;
+}
+
+export function releaseBuildHref(build) {
+  const links = refLinks(build.scope, [{ kind: "task", id: build.task_id }, { kind: "run", id: build.run.id }]);
+  return links.find(link => link.kind === "run").href;
+}
+
+export function releaseRepositoryURL(changes, tail) {
+  if (!/^[a-z\d_-][a-z\d_.-]*\/[a-z\d_-][a-z\d_.-]*$/i.test(changes?.repository || "")) return null;
+  return `https://github.com/${changes.repository}/${tail}`;
 }
 
 /// Only the verified current release can be promoted; readiness is decided

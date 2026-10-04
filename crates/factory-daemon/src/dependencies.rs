@@ -843,6 +843,35 @@ fn exploited(scope: &str, stored: &[StoredDocument]) -> Vec<ExploitedFinding> {
 }
 
 impl Engine {
+    pub(crate) async fn release_sboms(&self, scope: &str, commit: &str, version: Option<&str>) -> Result<Vec<factory_kernel::ReleaseSbomFact>> {
+        let snapshot = self.factory_snapshot();
+        let canonical = snapshot.scope(scope)?.name.clone();
+        let root = snapshot.root;
+        let name = canonical.clone();
+        let documents = tokio::task::spawn_blocking(move || load_documents(&root, &name)).await
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("release SBOM read: {e}")))??;
+        let mut facts = Vec::new();
+        for document in documents {
+            if document.attachment.kind != AttachmentKind::Sbom || !document.attachment.states.contains(&LifecycleState::Built) { continue; }
+            let Some(identity) = product_identity(&document.json) else { continue; };
+            if identity.git_sha != commit || version.is_some_and(|version| version != identity.version) { continue; }
+            facts.push(factory_kernel::ReleaseSbomFact { scope: canonical.clone(), commit: identity.git_sha,
+                version: identity.version, attachment: document.attachment });
+        }
+        Ok(facts)
+    }
+
+    pub(crate) async fn dependency_document(&self, scope: &str, id: &str) -> Result<(Attachment, Value)> {
+        let snapshot = self.factory_snapshot();
+        let canonical = snapshot.scope(scope)?.name.clone();
+        let root = snapshot.root;
+        let documents = tokio::task::spawn_blocking(move || load_documents(&root, &canonical)).await
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("dependency document read: {e}")))??;
+        let document = documents.into_iter().find(|document| document.attachment.id == id)
+            .ok_or_else(|| FactoryError::BadRequest("no such attachment in the selected scope".into()))?;
+        Ok((document.attachment, document.json))
+    }
+
     pub(crate) async fn attach_dependency(
         &self,
         task_id: &str,

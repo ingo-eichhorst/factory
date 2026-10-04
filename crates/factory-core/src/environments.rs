@@ -25,6 +25,7 @@
 //! recording deployments is `factory-daemon`'s job.
 
 use chrono::{DateTime, Duration, Utc};
+pub mod effectiveness;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{FactoryError, Result};
@@ -628,6 +629,72 @@ pub struct ReleaseFacts {
     /// The commit's committer time: where lead time for changes starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committed_at: Option<DateTime<Utc>>,
+    /// An explicitly selected producing run, not the deployment's actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_run: Option<String>,
+    /// The producing scope; preserved when the release is promoted elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_scope: Option<String>,
+    /// Optional comparison selection. Defaults to the previously recorded release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare_to: Option<String>,
+    /// Git evidence captured at recording time; never recomputed on a page read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<ReleaseChanges>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseChange {
+    pub commit: String,
+    pub subject: String,
+    pub pull_requests: Vec<u64>,
+    pub issues: Vec<u64>,
+    /// Bare references without evidence that they name a PR or a closed issue.
+    pub references: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseChanges {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    pub commit: String,
+    /// GitHub owner/repository, only when the local origin names GitHub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    pub commits: Vec<ReleaseChange>,
+    /// Commits no longer reachable from the target (rollback/divergent histories).
+    #[serde(default)]
+    pub removed_commits: Vec<ReleaseChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diffstat: Option<String>,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseQuery {
+    pub scope: String,
+    pub commit: String,
+    /// Select a deployment's own comparison, instead of the catalogue's first snapshot.
+    #[serde(default)]
+    pub deployment: Option<String>,
+}
+
+/// Page facade: recorded L1 release plus independently produced L2/L4 evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseDetail {
+    pub release: Release,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<ReleaseChanges>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<factory_kernel::ReleaseBuildFact>,
+    pub sboms: Vec<factory_kernel::ReleaseSbomFact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sbom_reason: Option<String>,
 }
 
 /// One attempt to put a release on an environment.
@@ -685,6 +752,25 @@ pub struct Release {
     /// Deployments of it, by outcome.
     pub deployments: u32,
     pub failed_deployments: u32,
+    /// Change outcomes from the recorded 28-day cohort, including post-deploy incidents.
+    #[serde(default)]
+    pub effectiveness: ReleaseEffectiveness,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ReleaseEffectiveness {
+    pub window_days: i64,
+    pub finished: u32,
+    pub failed_changes: u32,
+    pub observing: u32,
+    pub change_failure_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DoraPeriod {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub dora: Dora,
 }
 
 // ============================================================== decisions
@@ -869,65 +955,13 @@ pub struct Dora {
     /// Mean of the same.
     pub mttr: Option<f64>,
     pub incidents: u32,
+    /// Successful changes still inside their observation horizon; their CFR is provisional.
+    #[serde(default)]
+    pub observing_changes: u32,
 }
 
 pub fn dora(deployments: &[Deployment], incidents: &[Incident], window_days: i64, now: DateTime<Utc>) -> Dora {
-    let since = now - Duration::days(window_days);
-    let mut finished: Vec<&Deployment> = deployments
-        .iter()
-        .filter(|d| d.finished() && d.finished_at.is_some_and(|f| f >= since && f <= now))
-        .collect();
-    finished.sort_by_key(|d| d.finished_at);
-    let succeeded: Vec<&&Deployment> = finished.iter().filter(|d| d.status == DeployStatus::Succeeded).collect();
-
-    let deploy_frequency = (!succeeded.is_empty()).then(|| succeeded.len() as f64 / (window_days as f64 / 7.0));
-    let mut lead: Vec<f64> = succeeded
-        .iter()
-        .filter_map(|d| {
-            let c = d.release.committed_at?;
-            Some((d.finished_at? - c).num_seconds().max(0) as f64)
-        })
-        .collect();
-    let lead_time_p50 = percentile(&mut lead, 50.0);
-
-    let horizon = Duration::hours(CHANGE_FAILURE_HORIZON_HOURS);
-    let failed_changes = finished
-        .iter()
-        .enumerate()
-        .filter(|(i, d)| match d.status {
-            DeployStatus::Failed | DeployStatus::RolledBack => true,
-            DeployStatus::Succeeded => {
-                let from = d.finished_at.expect("finished");
-                let next = finished.get(i + 1).and_then(|n| n.started_at.into());
-                let until = next.map(|n: DateTime<Utc>| n.min(from + horizon)).unwrap_or(from + horizon);
-                incidents.iter().any(|inc| inc.started_at >= from && inc.started_at < until)
-            }
-            DeployStatus::Running => false,
-        })
-        .count();
-    let change_failure_rate = (!finished.is_empty()).then(|| failed_changes as f64 / finished.len() as f64);
-
-    let in_window: Vec<&Incident> = incidents
-        .iter()
-        .filter(|i| i.started_at >= since || i.ended_at.is_none_or(|e| e >= since))
-        .collect();
-    let mut restores: Vec<f64> = in_window
-        .iter()
-        .filter(|i| i.ended_at.is_some_and(|e| e >= since))
-        .map(|i| i.duration_seconds(now) as f64)
-        .collect();
-    let mttr = (!restores.is_empty()).then(|| restores.iter().sum::<f64>() / restores.len() as f64);
-    let time_to_restore_p50 = percentile(&mut restores, 50.0);
-
-    Dora {
-        window_days,
-        deploy_frequency,
-        lead_time_p50,
-        change_failure_rate,
-        time_to_restore_p50,
-        mttr,
-        incidents: in_window.len() as u32,
-    }
+    effectiveness::dora_between(deployments, incidents, now - Duration::days(window_days.max(1)), now, now)
 }
 
 /// One slot of a check's history strip.
@@ -1041,6 +1075,8 @@ pub struct EnvironmentCard {
     /// Over the SLO window, newest first.
     pub incidents: Vec<Incident>,
     pub dora: Dora,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effectiveness: Vec<DoraPeriod>,
 }
 
 /// `GET /api/environments`: the Operations tab and `factory env`.
@@ -1161,12 +1197,22 @@ pub fn report(
             checks,
             incidents: window_incidents,
             dora: dora(&env_deploys, &all_incidents, window_days, now),
+            effectiveness: effectiveness::weekly(&env_deploys, &all_incidents, window_days, now),
             name,
         });
     }
     promotion_order(&mut cards);
 
-    let releases = releases(&deployments, added, &cards);
+    let mut releases = releases(&deployments, added, &cards);
+    let all_incidents: Vec<_> = cards.iter().flat_map(|card| {
+        let mine: Vec<_> = samples.iter().filter(|sample| sample.environment == card.name).cloned().collect();
+        incidents(&card.name, &mine)
+    }).collect();
+    let mut cohorts = effectiveness::release_cohorts(&deployments, &all_incidents, now);
+    for release in &mut releases {
+        release.effectiveness = cohorts.remove(&(release.scope.clone(), release.facts.commit.clone()))
+            .unwrap_or_else(|| ReleaseEffectiveness { window_days: DEFAULT_WINDOW_DAYS, ..Default::default() });
+    }
     let mut listed: Vec<Deployment> = deployments.iter().filter(|d| d.status == DeployStatus::Running).cloned().collect();
     listed.extend(deployments.iter().filter(|d| d.status != DeployStatus::Running).cloned());
     listed.truncate(REPORT_DEPLOYMENTS);
@@ -1191,6 +1237,16 @@ fn releases(
             f.profile = f.profile.take().or_else(|| facts.profile.clone());
             f.source = f.source.take().or_else(|| facts.source.clone());
             f.committed_at = f.committed_at.or(facts.committed_at);
+            if f.build_run.is_none() {
+                f.build_run = facts.build_run.clone();
+                f.build_scope = facts.build_scope.clone();
+            }
+            f.compare_to = f.compare_to.take().or_else(|| facts.compare_to.clone());
+            f.changes = f.changes.take().or_else(|| facts.changes.clone());
+            if f.changes.as_ref().is_some_and(|changes| changes.unavailable.is_some())
+                && facts.changes.as_ref().is_some_and(|changes| changes.unavailable.is_none()) {
+                f.changes = facts.changes.clone();
+            }
             f.dirty |= facts.dirty;
             return i;
         }
@@ -1201,6 +1257,7 @@ fn releases(
             running_on: Vec::new(),
             deployments: 0,
             failed_deployments: 0,
+            effectiveness: ReleaseEffectiveness::default(),
         });
         out.len() - 1
     }
@@ -1278,7 +1335,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    fn t(min: i64) -> DateTime<Utc> {
+    pub(super) fn t(min: i64) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap() + Duration::minutes(min)
     }
 
@@ -1290,7 +1347,7 @@ mod tests {
         serde_yaml_ng::from_str(yaml).unwrap()
     }
 
-    fn deploy(min: i64, status: DeployStatus, committed: Option<i64>) -> Deployment {
+    pub(super) fn deploy(min: i64, status: DeployStatus, committed: Option<i64>) -> Deployment {
         Deployment {
             id: format!("d{min}"),
             scope: "factory".into(),

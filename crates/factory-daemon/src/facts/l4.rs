@@ -22,6 +22,29 @@ use std::collections::{BTreeMap, BTreeSet};
 const RUN_LOOKBACK: u32 = 20;
 
 #[async_trait]
+impl Provide<factory_kernel::ReleaseBuildFact> for Provider<'_> {
+    type Query = super::ReleaseBuildQuery;
+    type Value = Option<factory_kernel::ReleaseBuildFact>;
+    type Error = FactoryError;
+    async fn get(&self, query: &Self::Query) -> Result<Self::Value> {
+        let Some(run) = self.engine.store.get_run(&query.run_id).await? else { return Ok(None); };
+        let Some(task) = self.engine.store.get(&run.task_id).await? else { return Ok(None); };
+        if task.scope != query.scope || run.status != factory_core::RunStatus::Done { return Ok(None); }
+        let artifacts: Vec<_> = self.engine.run_provenance(&run.id).await?.into_iter().filter(|record| {
+            record.scope == query.scope && record.artifact.scope == query.scope
+                && record.artifact.source.commit == query.commit && !record.artifact.source.dirty
+        }).collect();
+        if artifacts.is_empty() { return Ok(None); }
+        let attestations = self.engine.run_attestations(&run.id).await?;
+        Ok(Some(factory_kernel::ReleaseBuildFact {
+            scope: query.scope.clone(), commit: query.commit.clone(), task_id: task.id,
+            run: RunFact { id: run.id, status: run.status, started_at: run.started_at, ended_at: run.ended_at },
+            artifacts, attestations,
+        }))
+    }
+}
+
+#[async_trait]
 impl Provide<factory_kernel::EnvironmentRecoveryFact> for Provider<'_> {
     type Query = RecoveryQuery;
     type Value = Vec<factory_kernel::EnvironmentRecoveryFact>;

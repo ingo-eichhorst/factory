@@ -390,6 +390,33 @@ pub const RECOVERY_COMMIT_LABEL: &str = "factory.recovery.expected_commit";
 impl Fact for EnvironmentRecoveryFact {
     type Producer = L4;
 }
+
+/// The actual producing run and its immutable, source-matching artifacts.
+/// A deployment actor alone is never evidence of a build.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseBuildFact {
+    pub scope: String,
+    pub commit: String,
+    pub task_id: String,
+    pub run: RunFact,
+    pub artifacts: Vec<ArtifactProvenance>,
+    pub attestations: Vec<StepAttestation>,
+}
+impl Fact for ReleaseBuildFact {
+    type Producer = L4;
+}
+
+/// A build-lifecycle SBOM whose own product identity names this exact release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseSbomFact {
+    pub scope: String,
+    pub commit: String,
+    pub version: String,
+    pub attachment: Attachment,
+}
+impl Fact for ReleaseSbomFact {
+    type Producer = L2;
+}
 impl Fact for GateFact {
     type Producer = L5;
 }
@@ -599,6 +626,20 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         readers: &["L6 Operations page facade"],
         lives_in_kernel: true,
         note: "reported recovery workflow/run evidence; never an L1 deployment or metric input",
+    },
+    FactCatalogueEntry {
+        fact: "ReleaseBuildFact",
+        producer: "L4",
+        readers: &["L6 Operations release-detail facade"],
+        lives_in_kernel: true,
+        note: "explicitly selected completed producing run with exact scope/source artifact provenance",
+    },
+    FactCatalogueEntry {
+        fact: "ReleaseSbomFact",
+        producer: "L2",
+        readers: &["L6 Operations release-detail facade"],
+        lives_in_kernel: true,
+        note: "immutable build SBOM attachments selected by their exact product commit and optional version",
     },
     FactCatalogueEntry {
         fact: "ConfirmedSecurityReport",

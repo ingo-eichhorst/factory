@@ -733,6 +733,11 @@ impl Engine {
             Request::EnvironmentRecover(req) => Ok(Payload::WorkflowRun { run: self.recover_environment(caller, req).await? }),
             Request::EnvironmentCheck { environment } => Ok(Payload::EnvironmentVerification { verification: self.check_environment(&environment).await? }),
             Request::EnvironmentSamples(query) => Ok(Payload::EnvironmentSamples { page: self.environment_samples(query).await? }),
+            Request::ReleaseDetail(query) => Ok(Payload::ReleaseDetail { detail: Box::new(self.release_detail(query).await?) }),
+            Request::DependencyDocument { scope, id } => {
+                let (attachment, document) = self.dependency_document(&scope, &id).await?;
+                Ok(Payload::DependencyDocument { attachment, document })
+            }
             // `deployment_updated` is published inside.
             Request::DeployStart(req) => Ok(Payload::Deployment {
                 deployment: Box::new(self.deploy_start(caller, req).await?),
