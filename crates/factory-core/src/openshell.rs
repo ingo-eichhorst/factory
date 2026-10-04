@@ -762,7 +762,7 @@ pub fn smoke_script(providers: &[SmokeProvider], git_url: Option<&str>) -> Strin
     let mut out = String::from(
         "say() { printf 'factory-smoke %s\\n' \"$*\"; }\n\
          probe() { name=$1; shift; code=$(curl -sS -m 20 -o /tmp/factory-smoke.body -w '%{http_code}' \"$@\" 2>/tmp/factory-smoke.err) || code=000; \
-         if [ \"${code#2}\" = \"$code\" ]; then body=$(head -c 300 /tmp/factory-smoke.body /tmp/factory-smoke.err 2>/dev/null | tr -d '\\r' | tr '\\n' ' '); else body=; fi; \
+         if [ \"${code#2}\" = \"$code\" ]; then body=$(cat /tmp/factory-smoke.body /tmp/factory-smoke.err 2>/dev/null | tr -s ' \\r\\n\\t' ' ' | head -c 300); else body=; fi; \
          say \"http $name $code $body\"; }\n",
     );
     for provider in providers {
