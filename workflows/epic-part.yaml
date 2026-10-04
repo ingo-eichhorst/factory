@@ -5,14 +5,17 @@
 #       ▲           │
 #       └── agent exit ┘   at most 5 times
 #
-# Not started by hand. An executable intake plan names it in
-# `routing.workflow`, and Factory copies both nodes once per part into the
-# one generated decomposition run -- `<part>-implement`, `<part>-review` --
+# Never started as itself: Factory refuses that, since it would run once,
+# for no part, with its placeholders in braces. An executable intake plan
+# names it in `routing.workflow`, and Factory copies both nodes once per
+# part into the one generated decomposition run -- `<part>-implement`, `<part>-review` --
 # with each part's own values written in ({{part_id}}, {{part_title}},
 # {{part_instructions}}, {{part_acceptance}}, {{part_owns}},
-# {{part_interface}}, {{parent_title}}, {{parent_instructions}}; nothing else
-# may be used). `expand` leads into every root part's `implement`, and a
-# prerequisite part's `review` into its dependant's `implement`.
+# {{part_interface}}, {{parent_title}}, {{parent_instructions}},
+# {{integration_branch}}; nothing else may be used). `expand` leads into
+# every root part's `implement`, and a prerequisite part's `review` into its
+# dependant's `implement`. The review's exit back to `implement` becomes
+# `<part>-implement` in each copy, which is what `--send-to` names.
 #
 # `part:` makes it a part workflow, and says which node does what:
 #   * deliverable -- `implement`. Its worktree branch is what the integrator
@@ -75,9 +78,10 @@ nodes:
 
         ## How to work
 
-        - Your worktree is on a branch Factory cut from the integration branch, which already holds
-          every part this one depends on; what they reported is in the upstream output above. Work
-          and commit on that branch. Do not switch branches, rebase onto main, or push.
+        - Your worktree is on a branch Factory cut from the integration branch,
+          `{{integration_branch}}`, which already holds every part this one depends on; what they
+          reported is in the upstream output above. Work and commit on that branch. Do not switch
+          branches, rebase onto main, or push.
         - Open no pull request and mark none ready. The integrator owns the one PR.
         - Run the acceptance check and the tests that cover what you own. In this repository run
           cargo with HERDR_SESSION=qa-none and HERDR_SOCKET_PATH unset, so nothing opens panes in
@@ -88,10 +92,9 @@ nodes:
         another round on the same task and branch.
         - From the review: address every finding, commit, and say what you changed for each.
         - From Integration: either your branch no longer merges cleanly into the integration branch
-          or the combined acceptance check failed. The integration branch is the local
-          `factory/...` branch yours was cut from (`git branch --list 'factory/*'`). Merge it into
-          your branch, resolve, re-run the check, and commit. The review runs again before your
-          part is merged.
+          or the combined acceptance check failed. Merge the integration branch into yours
+          (`git merge {{integration_branch}}`), resolve, re-run the check, and commit. The review
+          runs again before your part is merged.
 
         Report `done` with --result: your branch (`git branch --show-current`), the commits, what
         changed, and the checks you ran with their results. If you are stuck on a question only a
@@ -106,8 +109,10 @@ nodes:
     task:
       title: "Review {{part_id}}: {{part_title}}"
       agent: builder
-      # It detaches HEAD onto the part's branch: never the implementer's
-      # checkout, and never the primary one.
+      # A worktree of its own, never the implementer's or the primary
+      # checkout. It points its own branch at the part's commits rather than
+      # detaching HEAD: Factory resumes, reuses and releases a worktree only
+      # while it is on the branch Factory made for it.
       worktree: true
       timeout_seconds: 5400
       labels: { workflow: epic-part, step: review }
@@ -130,12 +135,13 @@ nodes:
         ## How to review
 
         1. The implementer's result is in the upstream output above: its branch and what changed.
-           Your worktree shares the repository with theirs, so no fetch is needed. Note where you
-           start -- the integration branch as it stands -- then check their branch out detached,
-           so it stays theirs:
-             base=$(git rev-parse HEAD)
-             git switch --detach <branch>
-             git diff "$base"...HEAD
+           Your worktree shares the repository with theirs, so no fetch is needed. Bring their work
+           into your worktree without leaving your own branch, then read it against the
+           integration branch it will be merged into:
+             git reset --hard <their branch>
+             git diff {{integration_branch}}...HEAD
+           Never `git switch`, `git checkout` or detach HEAD here: Factory resumes, reuses and
+           releases this worktree only while it is on its own branch. Commit nothing.
         2. Run the acceptance check and the tests that cover the owned surface. In this repository
            run cargo with HERDR_SESSION=qa-none and HERDR_SOCKET_PATH unset.
         3. Review for correctness against the part's instructions and acceptance, tests that prove
@@ -144,13 +150,13 @@ nodes:
 
         Then report exactly one of:
         - `done`: nothing blocking is left. --result: the branch you reviewed and a short summary.
-        - `done --send-to implement`: concrete findings the implementer can fix alone. Put them in
-          --result as a numbered list, each with file:line and what "fixed" looks like. That sends
-          the part back for another round; the other parts are not affected.
+        - `done --send-to {{part_id}}-implement`: concrete findings the implementer can fix alone.
+          Put them in --result as a numbered list, each with file:line and what "fixed" looks like.
+          That sends the part back for another round; the other parts are not affected.
         - `blocked`: something only a person can settle (a design or product decision, a conflict
           with the part as written, a missing credential), or a question. State it exactly.
-        If `--send-to implement` is refused because no rounds remain, report `blocked` with the
-        findings still open, so a person decides.
+        If `--send-to {{part_id}}-implement` is refused because no rounds remain, report `blocked`
+        with the findings still open, so a person decides.
 
 edges:
   - { id: implement-review, from: implement, to: review }

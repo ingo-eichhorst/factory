@@ -798,6 +798,12 @@ test("#235 each part's copy of its part workflow is boxed and named; single-node
   assert.deepEqual(partGroups(githubIssue().nodes), []);
 });
 
+test("#235 a round integration sent the part back for says so; one a review sent back does not", () => {
+  assert.equal(roundLabel({ round: 2, integration_rounds: 1 }), "rework 2 (1 from integration)");
+  assert.equal(roundLabel({ round: 1 }), "rework 1");
+  assert.equal(roundLabel({ round: 0, integration_rounds: 0 }), "");
+});
+
 test("#235 saving a part workflow from the canvas keeps which node plays which role", () => {
   const workflow = { ...githubIssue(), part: { deliverable: "implement", terminal: "review" } };
   assert.deepEqual(saveDraft(workflow).part, { deliverable: "implement", terminal: "review" });

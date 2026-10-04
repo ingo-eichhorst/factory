@@ -2371,6 +2371,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lint_and_the_policy_tab_hold_a_part_workflows_steps_to_before_rules() {
+        let (engine, _) = engine("      - { applies_to: [feature], step: sbom, gate: \"true\", before: publish }");
+        let mut publish = node("publish");
+        publish.task.worktree = Some(true);
+        let template = engine
+            .create_workflow(WorkflowDraft {
+                name: "release-part".into(),
+                scope: "demo".into(),
+                category: Some("feature".into()),
+                part: Some(factory_core::workflow::PartSpec::default()),
+                nodes: vec![publish],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let lint = engine.workflow_lint(Some(template.id.clone()), None, None, None).await.unwrap();
+        assert!(lint.violations.iter().any(|v| v.starts_with("a-publish ")), "{:?}", lint.violations);
+        let report = engine.policy_report(Some("demo")).await.unwrap();
+        assert!(
+            report.workflow_findings.iter().any(|finding| finding.workflow == template.id && finding.detail.starts_with("a-publish ")),
+            "{:?}",
+            report.workflow_findings
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plan_without_a_template_whose_dependency_is_gated_starts() {
+        // Every category gets a tests gate, so the edge into `b` leaves
+        // `a`'s gate rather than `a` -- which the expand node's "joined"
+        // check refused before #238.
+        let (engine, _) = engine("      - { applies_to: [\"*\"], step: tests, gate: \"true\" }");
+        let parent = task(&engine, None).await;
+        let parts = ["a", "b"].map(|id| factory_core::intake::SplitPart {
+            id: id.into(),
+            title: id.into(),
+            instructions: format!("build {id}"),
+            acceptance: Some("true".into()),
+            owns: vec![id.into()],
+            interface: Some(id.into()),
+            estimate_seconds: Some(60),
+            depends_on: if id == "b" { vec!["a".into()] } else { Vec::new() },
+        });
+        let routing = factory_core::intake::Routing { scope: "demo".into(), agent: Some("shell".into()), ..Default::default() };
+        let run = engine.start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner).await.unwrap();
+        let into_b: Vec<&str> = run.definition.edges.iter().filter(|e| e.to == "b").map(|e| e.from.as_str()).collect();
+        assert_eq!(into_b, ["a.tests"]);
+        let expand = run.definition.nodes.iter().find(|n| n.kind == WorkflowNodeKind::Expand).unwrap();
+        assert_eq!(expand.expand.as_ref().unwrap().children, ["a", "b"], "the same children as ever");
+        let _ = engine.cancel_workflow(&run.id).await;
+    }
+
+    #[tokio::test]
     async fn every_copied_task_node_of_a_decomposition_gets_its_locked_gate() {
         let (engine, _) = engine(TESTS_FOR_FEATURES);
         let template = feature_part_workflow(&engine).await;

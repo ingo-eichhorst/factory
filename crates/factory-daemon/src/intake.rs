@@ -500,10 +500,7 @@ impl Engine {
         // `owns`/`estimate_seconds` are the executable-plan marker. Old
         // assessments with only the legacy split shape remain proposals and
         // keep the explicit owner-approved `intake decide split` fallback.
-        let plan_shaped = assessment
-            .split
-            .iter()
-            .any(|part| !part.owns.is_empty() || part.estimate_seconds.is_some());
+        let plan_shaped = plan_shaped(&assessment);
         let executable_plan = decide && plan_shaped;
         if executable_plan {
             intake::validate_plan(&assessment.split)
@@ -542,7 +539,15 @@ impl Engine {
                     .map_err(|e| FactoryError::BadRequest(format!("part workflow {}: {e}", found.name)))?;
             } else {
                 // Refused now rather than at release: an input the run needs,
-                // or a step that is not there, is the assessor's to fix.
+                // or a step that is not there, is the assessor's to fix --
+                // and so is a part workflow, which only an executable plan
+                // can run.
+                if found.part.is_some() {
+                    return Err(FactoryError::BadRequest(format!(
+                        "workflow {} is a part workflow: it runs only for the parts of an executable plan (a split with owns and estimate_seconds); route this item to an ordinary workflow",
+                        found.name
+                    )));
+                }
                 found
                     .with_inputs(&assessment.routing.inputs)
                     .map_err(|e| FactoryError::BadRequest(format!("workflow {}: {e}", found.name)))?;
@@ -763,6 +768,15 @@ impl Engine {
                     );
                 }
                 let released_into = match &routing.workflow {
+                    // `#235`: on a plan the route is the part workflow every
+                    // part runs through. Released as one item it would run
+                    // once, for no part, and the plan would be dropped.
+                    Some(workflow) if plan_shaped(&triage.assessment) => {
+                        return Err(FactoryError::BadRequest(format!(
+                            "this assessment is a plan whose parts run through part workflow {workflow}; releasing it as one item would drop the plan. Expand it instead: `factory intake assess {} --file <assessment> --decide`",
+                            item.id
+                        )));
+                    }
                     // Routed to a workflow: the workflow run is the work, so
                     // the item is released by starting it and has nothing
                     // left to do itself. `start_workflow` checks the caller
@@ -1261,6 +1275,16 @@ impl Engine {
 }
 
 /// The item's record, if it is still inside the gate.
+/// Whether an assessment's split is an executable plan rather than a
+/// proposal: `owns`/`estimate_seconds` are the marker. Its
+/// `routing.workflow`, if any, is then the part workflow (`#235`).
+fn plan_shaped(assessment: &intake::Assessment) -> bool {
+    assessment
+        .split
+        .iter()
+        .any(|part| !part.owns.is_empty() || part.estimate_seconds.is_some())
+}
+
 fn open_record(task: &Task) -> Result<&Intake> {
     let record = task
         .intake
@@ -2404,6 +2428,33 @@ mod tests {
         titles.sort();
         assert_eq!(titles, ["Implement Build foundation", "Implement Build surface", "Review Build foundation", "Review Build surface"]);
         assert!(children.iter().all(|task| task.intake.is_none()));
+    }
+
+    #[tokio::test]
+    async fn a_part_workflow_is_never_released_as_one_item() {
+        let engine = engine();
+        part_flow(&engine).await;
+        let item = add(&engine, "Build the whole subsystem").await;
+
+        // An item that is not a plan cannot be routed to one.
+        let mut single = assessment("demo");
+        single.routing.workflow = Some("part-flow".into());
+        let why = engine.intake_assess(&Caller::Owner, &item.id, single, false).await.unwrap_err();
+        assert!(why.to_string().contains("part-flow is a part workflow"), "{why}");
+
+        // A plan stored without --decide, and so with a ready verdict and
+        // no expansion yet: `decide ready` would drop the plan and run the
+        // template once, for no part.
+        let mut plan = plan_through("part-flow");
+        plan.complexity = 7;
+        let stored = engine.intake_assess(&Caller::Owner, &item.id, plan, false).await.unwrap();
+        assert_eq!(stored.intake.as_ref().unwrap().triage.as_ref().unwrap().verdict, Verdict::Ready);
+        let why = engine.intake_decide(&Caller::Owner, &item.id, Decision::Ready { run: false }).await.unwrap_err();
+        assert!(why.to_string().contains("Expand it instead"), "{why}");
+        let after = engine.require(&item.id).await.unwrap();
+        assert_eq!(after.status, TaskStatus::Intake, "nothing was released");
+        assert!(after.intake.as_ref().unwrap().decision.is_none());
+        assert!(engine.workflows.runs(None, None, 10).await.unwrap().is_empty(), "and no workflow started");
     }
 
     #[tokio::test]
