@@ -2304,6 +2304,108 @@ mod tests {
         assert!(engine.require(&surface.id).await.unwrap().after.is_none(), "the graph consumes the upstream wait");
     }
 
+    /// A two-part plan (`surface` after `foundation`) routed to `workflow`.
+    fn plan_through(workflow: &str) -> Assessment {
+        let mut plan = assessment("demo");
+        plan.complexity = 10;
+        plan.routing.workflow = Some(workflow.into());
+        plan.split = ["foundation", "surface"]
+            .into_iter()
+            .map(|id| factory_core::intake::SplitPart {
+                id: id.into(),
+                title: format!("Build {id}"),
+                instructions: "true".into(),
+                depends_on: if id == "surface" { vec!["foundation".into()] } else { Vec::new() },
+                acceptance: Some(format!("{id} tests pass")),
+                owns: vec![id.into()],
+                interface: Some(format!("{id} API")),
+                estimate_seconds: Some(600),
+            })
+            .collect();
+        plan
+    }
+
+    async fn part_flow(engine: &Arc<Engine>) {
+        let step = |id: &str, title: &str| WorkflowNode {
+            session: Default::default(),
+            id: id.into(),
+            position: CanvasPoint::default(),
+            kind: WorkflowNodeKind::Task,
+            task: NewTask {
+                title: title.into(),
+                instructions: "{{part_instructions}}".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(id == "implement"),
+                ..Default::default()
+            },
+            gate: None,
+            exits: Vec::new(),
+            expand: None,
+        };
+        engine
+            .create_workflow(WorkflowDraft {
+                name: "part-flow".into(),
+                scope: "demo".into(),
+                part: Some(factory_core::workflow::PartSpec::default()),
+                nodes: vec![step("implement", "Implement {{part_title}}"), step("review", "Review {{part_title}}")],
+                edges: vec![factory_core::workflow::WorkflowEdge {
+                    id: "implement-review".into(),
+                    from: "implement".into(),
+                    to: "review".into(),
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_complete_plan_can_run_every_part_through_a_part_workflow() {
+        let engine = engine();
+        part_flow(&engine).await;
+        issue_flow(&engine).await;
+        let item = add(&engine, "Build the whole subsystem").await;
+
+        // Not a part workflow: it takes an input of its own.
+        let why = engine.intake_assess(&Caller::Owner, &item.id, plan_through("issue-flow"), true).await.unwrap_err();
+        assert!(why.to_string().contains("part workflow issue-flow"), "{why}");
+        assert!(why.to_string().contains("takes no other input; it declares \"issue\""), "{why}");
+        // Factory fills in the part's values; the plan gives none.
+        let mut with_inputs = plan_through("part-flow");
+        with_inputs.routing.inputs.insert("part_id".into(), "x".into());
+        let why = engine.intake_assess(&Caller::Owner, &item.id, with_inputs, true).await.unwrap_err();
+        assert!(why.to_string().contains("leave routing.inputs out"), "{why}");
+        // A step the template does not have.
+        let mut unknown_step = plan_through("part-flow");
+        unknown_step.routing.agents.insert("ship".into(), "shell".into());
+        let why = engine.intake_assess(&Caller::Owner, &item.id, unknown_step, true).await.unwrap_err();
+        assert!(why.to_string().contains("no step \"ship\""), "{why}");
+        assert!(engine.require(&item.id).await.unwrap().intake.unwrap().triage.is_none(), "nothing was written");
+
+        let mut plan = plan_through("part-flow");
+        plan.routing.agents.insert("review".into(), "shell".into());
+        let expanded = engine.intake_assess(&Caller::Owner, &item.id, plan, true).await.unwrap();
+        assert_eq!(expanded.intake.as_ref().unwrap().stage, IntakeStage::Split);
+        let result = expanded.result.as_deref().unwrap();
+        assert!(result.starts_with("expanded into 4 tasks"), "{result}");
+        assert!(result.contains("every part through part workflow part-flow"), "{result}");
+        let template = engine.find_workflow("demo", "part-flow").await.unwrap();
+        let decision = expanded.intake.as_ref().unwrap().decision.clone().unwrap();
+        assert_eq!(decision.part_workflow.as_deref(), Some(template.id.as_str()), "the decision says which template");
+        assert_eq!(decision.parts.len(), 4);
+
+        let children: Vec<Task> = engine
+            .store
+            .list(&TaskFilter { parent_task_id: Some(item.id.clone()), ..Default::default() })
+            .await
+            .unwrap();
+        let mut titles: Vec<&str> = children.iter().map(|task| task.title.as_str()).collect();
+        titles.sort();
+        assert_eq!(titles, ["Implement Build foundation", "Implement Build surface", "Review Build foundation", "Review Build surface"]);
+        assert!(children.iter().all(|task| task.intake.is_none()));
+    }
+
     #[tokio::test]
     async fn the_triage_run_may_propose_a_split_but_not_make_one() {
         let engine = engine();

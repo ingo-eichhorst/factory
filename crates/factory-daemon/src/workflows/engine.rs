@@ -206,7 +206,21 @@ mod tests {
     }
 
     fn engine_in_git_scope(root: PathBuf, repo: PathBuf) -> Arc<Engine> {
-        let config = Config {
+        let config = git_scope_config(repo);
+        let mut registry = Registry::with_builtins();
+        registry.add_runtime(Arc::new(QuietRuntime::default()), "test");
+        Arc::new(Engine::new(
+            Factory { root, config },
+            registry,
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
+    }
+
+    /// One `demo` scope at `repo`, on the quiet runtime.
+    fn git_scope_config(repo: PathBuf) -> Config {
+        Config {
             version: 1,
             instance: Instance {
                 id: "test".into(),
@@ -245,16 +259,7 @@ mod tests {
             }],
             infrastructure: Default::default(),
             plugins_dir: None,
-        };
-        let mut registry = Registry::with_builtins();
-        registry.add_runtime(Arc::new(QuietRuntime::default()), "test");
-        Arc::new(Engine::new(
-            Factory { root, config },
-            registry,
-            Arc::new(SqliteStore::in_memory().unwrap()),
-            PathBuf::from("factory"),
-            Vec::new(),
-        ))
+        }
     }
 
     async fn wait_for_worktree_run(engine: &Engine, task_id: &str) -> factory_core::Run {
@@ -2269,6 +2274,563 @@ mod tests {
             "the integration branch was pushed"
         );
         let _ = worktree::remove(&repo, &integration_dir, "factory/issue-180").await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // --- #235: every part through a part workflow ---------------------------
+
+    /// A repository with one commit on `main`, for an integrated plan.
+    async fn epic_repo(root: &Path) -> PathBuf {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-q", "-b", "main"]).await;
+        git_ok(&repo, &["config", "user.email", "factory@example.test"]).await;
+        git_ok(&repo, &["config", "user.name", "Factory Test"]).await;
+        std::fs::write(repo.join("README.md"), "base\n").unwrap();
+        git_ok(&repo, &["add", "README.md"]).await;
+        git_ok(&repo, &["commit", "-q", "-m", "base"]).await;
+        repo
+    }
+
+    /// `engine_in_git_scope`, kept on disk: dropping one and building
+    /// another over the same root is a daemon restart.
+    fn epic_engine_on_disk(root: &Path, repo: &Path) -> Arc<Engine> {
+        let db = root.join("factory.db");
+        let mut registry = Registry::with_builtins();
+        registry.add_runtime(Arc::new(QuietRuntime::default()), "test");
+        Arc::new(
+            Engine::new(
+                Factory { root: root.to_path_buf(), config: git_scope_config(repo.to_path_buf()) },
+                registry,
+                Arc::new(SqliteStore::open(&db).unwrap()),
+                PathBuf::from("factory"),
+                Vec::new(),
+            )
+            .with_workflow_store(crate::workflows::WorkflowStore::open(&db).unwrap()),
+        )
+    }
+
+    /// implement (a worktree of its own) -> review (none), the review
+    /// sending work back at most `max_rounds` times -- the shape of
+    /// `workflows/epic-part.yaml`, on the `shell` agent.
+    async fn part_workflow(engine: &Arc<Engine>, max_rounds: u32) -> WorkflowDefinition {
+        let mut implement = node("implement");
+        implement.task.worktree = Some(true);
+        implement.task.title = "Implement {{part_title}}".into();
+        implement.task.instructions = "{{part_instructions}}\nDone when: {{part_acceptance}}".into();
+        let mut review = node("review");
+        review.task.title = "Review {{part_title}}".into();
+        review.exits = vec![WorkflowExit {
+            to: "implement".into(),
+            check: None,
+            agent: Some("concrete findings the implementer can fix alone".into()),
+            max_rounds: Some(max_rounds),
+        }];
+        engine
+            .create_workflow(WorkflowDraft {
+                name: "part-flow".into(),
+                scope: "demo".into(),
+                part: Some(factory_core::workflow::PartSpec { deliverable: Some("implement".into()), terminal: None }),
+                nodes: vec![implement, review],
+                edges: vec![edge("implement", "review")],
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+    }
+
+    fn epic_part(id: &str, depends_on: &[&str], acceptance: &str) -> SplitPart {
+        SplitPart {
+            id: id.into(),
+            title: format!("Part {}", id.to_uppercase()),
+            instructions: format!("build {id}"),
+            depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
+            acceptance: Some(acceptance.into()),
+            owns: vec![format!("{id}.txt")],
+            interface: Some(format!("{id}.txt exists")),
+            estimate_seconds: Some(600),
+        }
+    }
+
+    fn task_of<'a>(tasks: &'a [factory_core::Task], node: &str) -> &'a factory_core::Task {
+        tasks
+            .iter()
+            .find(|task| task.workflow_origin.as_ref().is_some_and(|origin| origin.node_id == node))
+            .unwrap_or_else(|| panic!("no task for node {node}"))
+    }
+
+    /// Report `done` for the task's active run, optionally sending the work
+    /// back to `send_to`, then advance its workflow.
+    async fn report_done(engine: &Arc<Engine>, task_id: &str, result: &str, send_to: Option<&str>) {
+        let run = loop {
+            if let Some(run) = engine.store.active_run(task_id).await.unwrap() {
+                break run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        engine
+            .report(
+                task_id,
+                TaskReport {
+                    artifacts: Vec::new(),
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: Some(result.into()),
+                    send_to: send_to.map(str::to_string),
+                    error: None,
+                    token: run.token,
+                },
+            )
+            .await
+            .unwrap();
+        engine.sync_workflow_for_task(task_id).await;
+    }
+
+    /// Write `files` in the active run's worktree and commit them.
+    async fn commit_in(engine: &Engine, task_id: &str, files: &[(&str, &str)]) -> PathBuf {
+        let run = wait_for_worktree_run(engine, task_id).await;
+        let dir = PathBuf::from(run.worktree_path.unwrap());
+        for (name, text) in files {
+            std::fs::write(dir.join(name), text).unwrap();
+            git_ok(&dir, &["add", name]).await;
+        }
+        git_ok(&dir, &["commit", "-q", "-m", "work"]).await;
+        dir
+    }
+
+    async fn merges_on(dir: &Path, branch: &str) -> usize {
+        let output = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-list", "--count", "--merges", "--first-parent", branch])
+            .output()
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_part_workflow_is_copied_once_per_part_and_parts_join_terminal_to_entry() {
+        let engine = engine();
+        let template = part_workflow(&engine, 5).await;
+        let parent = engine
+            .create(NewTask {
+                title: "Epic".into(),
+                instructions: "the whole change".into(),
+                scope: Some("demo".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let parts = vec![
+            epic_part("a", &[], "test -f a.txt"),
+            epic_part("b", &[], "test -f b.txt"),
+            epic_part("c", &["a"], "test -f c.txt"),
+        ];
+        let routing = Routing {
+            scope: "demo".into(),
+            agent: Some("shell".into()),
+            workflow: Some(template.id.clone()),
+            agents: BTreeMap::from([("review".to_string(), "shell".to_string())]),
+            ..Default::default()
+        };
+        let run = engine.start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner).await.unwrap();
+
+        let definition = &run.definition;
+        let task_nodes: Vec<&str> = definition
+            .nodes
+            .iter()
+            .filter(|node| node.kind == WorkflowNodeKind::Task)
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(task_nodes, ["a-implement", "a-review", "b-implement", "b-review", "c-implement", "c-review"]);
+        let expand = definition.nodes.iter().find(|node| node.kind == WorkflowNodeKind::Expand).unwrap();
+        assert_eq!(expand.expand.as_ref().unwrap().children, task_nodes, "expand lists every copied node");
+        let edges: Vec<(&str, &str)> = definition.edges.iter().map(|e| (e.from.as_str(), e.to.as_str())).collect();
+        for expected in [
+            ("expand", "a-implement"),
+            ("expand", "b-implement"),
+            ("a-implement", "a-review"),
+            ("a-review", "c-implement"),
+        ] {
+            assert!(edges.contains(&expected), "{expected:?} in {edges:?}");
+        }
+        assert!(!edges.contains(&("expand", "c-implement")), "a dependant starts from its prerequisite, not expand");
+        assert!(definition.description.contains("part workflow part-flow"), "{}", definition.description);
+        assert!(run.integration.is_none(), "this scope is not a git repository");
+
+        let children = tasks(&engine).await;
+        assert_eq!(children.iter().filter(|task| task.parent_task_id.as_deref() == Some(parent.id.as_str())).count(), 6);
+        let implement = task_of(&children, "a-implement");
+        assert_eq!(implement.title, "Implement Part A");
+        assert_eq!(implement.instructions, "build a\nDone when: test -f a.txt");
+        assert_eq!(implement.parent_task_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(implement.decomposition_part.as_deref(), Some("a"));
+        assert_eq!(implement.labels[factory_core::intake::PART_LABEL], "a");
+        assert_eq!(implement.labels[factory_core::intake::PARENT_LABEL], parent.id);
+        assert_eq!(implement.estimate_seconds, Some(600), "the part's estimate is on its deliverable");
+        assert!(!implement.worktree, "no git repository, so no worktree for any copy");
+        let review = task_of(&children, "a-review");
+        assert_eq!(review.title, "Review Part A");
+        assert_eq!(review.estimate_seconds, None);
+        assert_eq!(review.decomposition_part.as_deref(), Some("a"));
+        assert_eq!(review.depends_on, vec![implement.id.clone()]);
+        let dependant = task_of(&children, "c-implement");
+        assert_eq!(dependant.depends_on, vec![review.id.clone()], "c follows a's terminal");
+        assert!(dependant.after.is_some(), "and waits for it");
+    }
+
+    #[tokio::test]
+    async fn a_plan_without_a_part_workflow_is_generated_exactly_as_before() {
+        let root = std::env::temp_dir().join(format!("factory-epic-plain-{}", uuid::Uuid::new_v4()));
+        let repo = epic_repo(&root).await;
+        let engine = engine_in_git_scope(root.clone(), repo);
+        let parent = engine
+            .create(NewTask {
+                title: "Two slices".into(),
+                instructions: "one result".into(),
+                scope: Some("demo".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let parts = vec![epic_part("a", &[], "test -f a.txt"), epic_part("b", &["a"], "test -f b.txt")];
+        let routing = Routing { scope: "demo".into(), agent: Some("shell".into()), ..Default::default() };
+        let run = engine.start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner).await.unwrap();
+        let definition = &run.definition;
+        assert_eq!(definition.description, format!("Generated from approved intake task {}", parent.id));
+        let ids: Vec<&str> = definition.nodes.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(ids, ["expand", "a", "b"]);
+        let edges: Vec<(&str, &str, &str)> =
+            definition.edges.iter().map(|e| (e.id.as_str(), e.from.as_str(), e.to.as_str())).collect();
+        assert_eq!(edges, [("expand-a", "expand", "a"), ("a-b", "a", "b")]);
+        let expand = definition.nodes[0].expand.as_ref().unwrap();
+        assert_eq!(expand.children, ["a", "b"]);
+        let b = &definition.nodes[2];
+        assert_eq!(b.task.title, "Part B");
+        assert_eq!(b.task.estimate_seconds, Some(600));
+        assert_eq!(b.task.worktree, Some(true));
+        assert_eq!(
+            b.task.instructions,
+            format!(
+                "build b\n\nDone when: test -f b.txt\n\nOwned surface: b.txt\n\nInterface / hand-off: b.txt exists\n\n---\nPart b of task {} (Two slices). The parent request, for context:\n\none result",
+                parent.id
+            )
+        );
+        let integration = run.integration.as_ref().unwrap();
+        assert_eq!(integration.parts[1].node_id, "b");
+        assert_eq!(integration.parts[1].terminal_node, None, "a single-node part plays every role");
+        assert_eq!(integration.parts[1].terminal(), "b");
+        let _ = engine.cancel_workflow(&run.id).await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_template_that_no_longer_keeps_the_contract_is_refused_at_expansion() {
+        let engine = engine();
+        // No `part:` block: the roles are derived, so the template can be
+        // edited into something ambiguous and still be stored.
+        let mut implement = node("implement");
+        implement.task.worktree = Some(true);
+        let template = create(&engine, vec![implement, node("review")], vec![edge("implement", "review")]).await;
+        let mut draft = WorkflowDraft {
+            name: template.name.clone(),
+            scope: "demo".into(),
+            nodes: template.nodes.clone(),
+            edges: template.edges.clone(),
+            ..Default::default()
+        };
+        draft.nodes[1].task.worktree = Some(true);
+        engine.update_workflow(&template.id, draft).await.unwrap();
+
+        let parent = engine
+            .create(NewTask { title: "Epic".into(), scope: Some("demo".into()), worktree: Some(false), ..Default::default() })
+            .await
+            .unwrap();
+        let parts = vec![epic_part("a", &[], "true"), epic_part("b", &[], "true")];
+        let routing = Routing { scope: "demo".into(), workflow: Some(template.id.clone()), ..Default::default() };
+        let refused = engine
+            .start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("part workflow pipeline"), "{refused}");
+        assert!(refused.contains("name the one whose branch is integrated with part.deliverable"), "{refused}");
+        assert_eq!(tasks(&engine).await.len(), 1, "nothing but the parent exists");
+
+        // Two parts whose namespaced ids collide are refused by name.
+        let mut implement = node("x-y");
+        implement.task.worktree = Some(true);
+        let colliding = engine
+            .create_workflow(WorkflowDraft {
+                name: "colliding".into(),
+                scope: "demo".into(),
+                nodes: vec![node("y"), implement],
+                edges: vec![edge("y", "x-y")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let parts = vec![epic_part("a", &[], "true"), epic_part("a-x", &[], "true")];
+        let routing = Routing { scope: "demo".into(), workflow: Some(colliding.id), ..Default::default() };
+        let refused = engine
+            .start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("a-x-y") && refused.contains("rename a part"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn each_part_is_reviewed_in_its_own_loop_and_again_after_integration_sends_it_back() {
+        let root = std::env::temp_dir().join(format!("factory-epic-{}", uuid::Uuid::new_v4()));
+        let repo = epic_repo(&root).await;
+        let engine = epic_engine_on_disk(&root, &repo);
+        let template = part_workflow(&engine, 5).await;
+        let parent = engine
+            .create(NewTask {
+                title: "Epic in three parts".into(),
+                instructions: "one integrated result".into(),
+                scope: Some("demo".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let parts = vec![
+            epic_part("a", &[], "test -f a.txt"),
+            epic_part("b", &[], "test -f b.txt"),
+            epic_part("c", &["a"], "test -f c.txt && test -f a.txt"),
+        ];
+        let routing = Routing {
+            scope: "demo".into(),
+            agent: Some("shell".into()),
+            workflow: Some(template.id.clone()),
+            ..Default::default()
+        };
+        let run = engine.start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner).await.unwrap();
+        let integration = run.integration.clone().unwrap();
+        let integration_dir = PathBuf::from(&integration.worktree_path);
+        assert_eq!(
+            integration.parts.iter().map(|part| (part.node_id.as_str(), part.terminal())).collect::<Vec<_>>(),
+            [("a-implement", "a-review"), ("b-implement", "b-review"), ("c-implement", "c-review")]
+        );
+        let all = tasks(&engine).await;
+        assert_eq!(all.iter().filter(|task| task.parent_task_id.as_deref() == Some(parent.id.as_str())).count(), 6);
+        let id = |node: &str| task_of(&all, node).id.clone();
+
+        // A and B start together; C waits for A.
+        wait_for_worktree_run(&engine, &id("a-implement")).await;
+        wait_for_worktree_run(&engine, &id("b-implement")).await;
+        assert!(engine.store.active_run(&id("c-implement")).await.unwrap().is_none());
+
+        // A's review loops inside A only.
+        commit_in(&engine, &id("a-implement"), &[("a.txt", "a\n"), ("README.md", "base\nalpha\n")]).await;
+        report_done(&engine, &id("a-implement"), "branch with a", None).await;
+        wait_for_attempt(&engine, &id("a-review"), 1).await;
+        report_done(&engine, &id("a-review"), "1. a.txt needs a second line", Some("a-implement")).await;
+        wait_for_attempt(&engine, &id("a-implement"), 2).await;
+        let midway = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(node_run(&midway, "a-review").round, 1);
+        assert_eq!(node_run(&midway, "b-review").round, 0, "the other part's budget is its own");
+        assert!(midway.integration.as_ref().unwrap().merged_nodes.is_empty());
+        assert!(engine.store.active_run(&id("c-implement")).await.unwrap().is_none(), "C waits through A's loop");
+
+        commit_in(&engine, &id("a-implement"), &[("a.txt", "a\nsecond\n")]).await;
+        report_done(&engine, &id("a-implement"), "fixed", None).await;
+        wait_for_attempt(&engine, &id("a-review"), 2).await;
+        report_done(&engine, &id("a-review"), "passes", None).await;
+        let merged = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(merged.integration.as_ref().unwrap().merged_nodes, ["a-implement"]);
+        let c_run = wait_for_worktree_run(&engine, &id("c-implement")).await;
+        assert!(
+            PathBuf::from(c_run.worktree_path.unwrap()).join("a.txt").exists(),
+            "C branches from the integration branch A was merged into"
+        );
+
+        // Restart in the middle of integration: the same branch, the same
+        // ledger, nothing merged twice.
+        drop(engine);
+        let engine = epic_engine_on_disk(&root, &repo);
+        engine.recover_workflows().await;
+        engine.recover_workflows().await;
+        let recovered = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(recovered.integration.as_ref().unwrap().merged_nodes, ["a-implement"]);
+        assert_eq!(recovered.integration.as_ref().unwrap().worktree_path, integration.worktree_path);
+        assert_eq!(merges_on(&integration_dir, &integration.branch).await, 1);
+        assert_eq!(tasks(&engine).await.len(), 7, "the parent and its six tasks, no more");
+
+        // B conflicts with A on the integration branch: it goes back to
+        // B's implement, and B's review runs again before B is merged.
+        let b_dir = commit_in(&engine, &id("b-implement"), &[("b.txt", "b\n"), ("README.md", "base\nbeta\n")]).await;
+        report_done(&engine, &id("b-implement"), "branch with b", None).await;
+        wait_for_attempt(&engine, &id("b-review"), 1).await;
+        report_done(&engine, &id("b-review"), "passes", None).await;
+        let rework = wait_for_worktree_run(&engine, &id("b-implement")).await;
+        assert_eq!(rework.attempt, 2, "the merge conflict returns B's deliverable");
+        assert!(rework.feedback.as_ref().unwrap().feedback.as_deref().unwrap().contains("merge the integration branch"));
+        let sent_back = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(sent_back.integration.as_ref().unwrap().merged_nodes, ["a-implement"]);
+        let b_review = node_run(&sent_back, "b-review");
+        assert_eq!(b_review.status, WorkflowNodeStatus::Unstarted, "B's review is not left showing the old done");
+        assert_eq!((b_review.round, b_review.integration_rounds, b_review.exit_rounds()), (1, 1, 0));
+        assert_eq!(node_run(&sent_back, "b-implement").integration_rounds, 1);
+        assert_eq!(engine.store.runs(&id("b-review"), 10).await.unwrap().len(), 1);
+
+        let merge = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&b_dir)
+            .args(["merge", "--no-edit", &integration.branch])
+            .output()
+            .await
+            .unwrap();
+        assert!(!merge.status.success(), "the conflict is real");
+        commit_in(&engine, &id("b-implement"), &[("README.md", "base\nalpha\nbeta\n")]).await;
+        report_done(&engine, &id("b-implement"), "merged the integration branch", None).await;
+        let review_again = wait_for_attempt(&engine, &id("b-review"), 2).await;
+        assert_eq!(review_again.workflow_round, 1);
+        assert_eq!(
+            engine.workflow_run(&run.id).await.unwrap().integration.unwrap().merged_nodes,
+            ["a-implement"],
+            "B waits for its review"
+        );
+        report_done(&engine, &id("b-review"), "passes again", None).await;
+        assert_eq!(
+            engine.workflow_run(&run.id).await.unwrap().integration.unwrap().merged_nodes,
+            ["a-implement", "b-implement"]
+        );
+
+        // C runs its own chain, and the combined checks hand off one branch.
+        commit_in(&engine, &id("c-implement"), &[("c.txt", "c\n")]).await;
+        report_done(&engine, &id("c-implement"), "branch with c", None).await;
+        wait_for_attempt(&engine, &id("c-review"), 1).await;
+        report_done(&engine, &id("c-review"), "passes", None).await;
+        let finished = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(finished.status, WorkflowRunStatus::Done, "{:?}", finished.error);
+        let integration = finished.integration.unwrap();
+        assert_eq!(integration.merged_nodes, ["a-implement", "b-implement", "c-implement"]);
+        assert!(integration.checks_passed);
+        assert_eq!(merges_on(&integration_dir, &integration.branch).await, 3);
+        assert!(engine.require(&parent.id).await.unwrap().result.unwrap().contains("Integrated on"));
+        let integration_dirs = std::fs::read_dir(engine.factory_snapshot().worktrees_dir())
+            .unwrap()
+            .filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().starts_with("integration-"))
+            .count();
+        assert_eq!(integration_dirs, 1, "one integration branch, across the restart");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn integration_rework_is_bounded_per_part_and_not_spent_by_its_review_loop() {
+        let root = std::env::temp_dir().join(format!("factory-epic-exhaust-{}", uuid::Uuid::new_v4()));
+        let repo = epic_repo(&root).await;
+        let engine = engine_in_git_scope(root.clone(), repo);
+        let template = part_workflow(&engine, 5).await;
+        let parent = engine
+            .create(NewTask { title: "Epic".into(), scope: Some("demo".into()), worktree: Some(false), ..Default::default() })
+            .await
+            .unwrap();
+        let parts = vec![epic_part("a", &[], "true"), epic_part("b", &["a"], "true")];
+        let routing = Routing {
+            scope: "demo".into(),
+            agent: Some("shell".into()),
+            workflow: Some(template.id.clone()),
+            ..Default::default()
+        };
+        let run = engine.start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner).await.unwrap();
+        let all = tasks(&engine).await;
+        let dependant = task_of(&all, "b-implement").id.clone();
+        let implement = task_of(&all, "a-implement").id.clone();
+        let review = task_of(&all, "a-review").id.clone();
+
+        // An uncommitted file: the integrator refuses the worktree every
+        // time A's review passes.
+        let first = wait_for_worktree_run(&engine, &implement).await;
+        std::fs::write(PathBuf::from(first.worktree_path.unwrap()).join("a.txt"), "never committed\n").unwrap();
+        report_done(&engine, &implement, "done", None).await;
+        // One round of A's own review loop first.
+        wait_for_attempt(&engine, &review, 1).await;
+        report_done(&engine, &review, "1. try again", Some("a-implement")).await;
+        let mut implement_attempt = 2;
+        let mut review_attempt = 2;
+        for round in 1..=3 {
+            wait_for_attempt(&engine, &implement, implement_attempt).await;
+            report_done(&engine, &implement, "done", None).await;
+            wait_for_attempt(&engine, &review, review_attempt).await;
+            report_done(&engine, &review, "passes", None).await;
+            let current = engine.workflow_run(&run.id).await.unwrap();
+            assert_eq!(node_run(&current, "a-implement").integration_rounds, round, "integration round {round}");
+            assert_eq!(current.status, WorkflowRunStatus::Running);
+            implement_attempt += 1;
+            review_attempt += 1;
+        }
+        wait_for_attempt(&engine, &implement, implement_attempt).await;
+        report_done(&engine, &implement, "done", None).await;
+        wait_for_attempt(&engine, &review, review_attempt).await;
+        report_done(&engine, &review, "passes", None).await;
+
+        let failed = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(failed.status, WorkflowRunStatus::Failed);
+        assert_eq!(failed.failure_node_id.as_deref(), Some("a-implement"));
+        assert!(failed.error.as_deref().unwrap().contains("integration rework exhausted after 3 rounds"), "{:?}", failed.error);
+        assert_eq!(node_run(&failed, "a-review").exit_rounds(), 1, "the review spent one round of its own");
+        assert!(
+            engine.store.runs(&dependant, 10).await.unwrap().is_empty(),
+            "a's review was done four times, but a was never merged, so b never started"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_restart_in_the_middle_of_expansion_fills_in_the_same_task_once() {
+        let root = std::env::temp_dir().join(format!("factory-epic-expand-{}", uuid::Uuid::new_v4()));
+        let repo = epic_repo(&root).await;
+        let engine = epic_engine_on_disk(&root, &repo);
+        let template = part_workflow(&engine, 5).await;
+        let parent = engine
+            .create(NewTask { title: "Epic".into(), scope: Some("demo".into()), worktree: Some(false), ..Default::default() })
+            .await
+            .unwrap();
+        let parts = vec![epic_part("a", &[], "true"), epic_part("b", &["a"], "true")];
+        let routing = Routing {
+            scope: "demo".into(),
+            agent: Some("shell".into()),
+            workflow: Some(template.id.clone()),
+            ..Default::default()
+        };
+        let run = engine.start_decomposition_workflow(&parent, &parts, &routing, &Caller::Owner).await.unwrap();
+        wait_for_worktree_run(&engine, &task_of(&tasks(&engine).await, "a-implement").id).await;
+
+        // The crash window: b-review's id was chosen and persisted, but its
+        // task was never created.
+        let missing = {
+            let _guard = engine.workflow_edit.lock().await;
+            let mut torn = engine.workflow_run(&run.id).await.unwrap();
+            let node = torn.nodes.iter_mut().find(|node| node.node_id == "b-review").unwrap();
+            node.task_created = false;
+            let id = node.task_id.clone().unwrap();
+            engine.workflows.put_run(&torn).await.unwrap();
+            assert!(engine.store.delete(&id).await.unwrap());
+            id
+        };
+        drop(engine);
+
+        let engine = epic_engine_on_disk(&root, &repo);
+        engine.recover_workflows().await;
+        engine.recover_workflows().await;
+        let all = tasks(&engine).await;
+        assert_eq!(all.len(), 5, "the parent and four tasks: {:?}", all.iter().map(|t| &t.title).collect::<Vec<_>>());
+        assert_eq!(task_of(&all, "b-review").id, missing, "recovery fills in exactly the persisted id");
+        let recovered = engine.workflow_run(&run.id).await.unwrap();
+        assert_eq!(recovered.integration, run.integration, "the same integration branch and worktree");
+        let integration_dirs = std::fs::read_dir(engine.factory_snapshot().worktrees_dir())
+            .unwrap()
+            .filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().starts_with("integration-"))
+            .count();
+        assert_eq!(integration_dirs, 1);
+        let _ = engine.cancel_workflow(&run.id).await;
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -1315,6 +1315,40 @@ impl WorkflowDefinition {
                 }
             }
         }
+        for input in &self.inputs {
+            if !PART_INPUTS.contains(&input.name.as_str()) {
+                return Err(format!(
+                    "a part workflow is filled with each part's own values and takes no other input; it declares {:?}, but only {} exist",
+                    input.name,
+                    part_inputs_words()
+                ));
+            }
+        }
+        for node in &self.nodes {
+            let texts = [&node.task.title, &node.task.instructions].into_iter().chain(node.task.labels.values());
+            for text in texts {
+                if let Some(unknown) = placeholders(text).into_iter().find(|name| !PART_INPUTS.contains(name)) {
+                    return Err(format!(
+                        "node {:?} uses {{{{{unknown}}}}}, which is not a part input; a part workflow may only use {}",
+                        node.id,
+                        part_inputs_words()
+                    ));
+                }
+            }
+            let commands = node
+                .exits
+                .iter()
+                .filter_map(|exit| exit.check.as_deref())
+                .chain(node.gate.as_ref().and_then(|gate| gate.command.as_deref()));
+            for command in commands {
+                if let Some(name) = placeholders(command).into_iter().next() {
+                    return Err(format!(
+                        "node {:?} writes {{{{{name}}}}} into a command; part values are never spliced into a command the daemon runs",
+                        node.id
+                    ));
+                }
+            }
+        }
         let one = |role: &str, rule: &str, found: Vec<&str>| -> Result<String, String> {
             match found.as_slice() {
                 [only] => Ok(only.to_string()),
@@ -1395,40 +1429,6 @@ impl WorkflowDefinition {
                 }
             }
         };
-        for input in &self.inputs {
-            if !PART_INPUTS.contains(&input.name.as_str()) {
-                return Err(format!(
-                    "a part workflow is filled with each part's own values and takes no other input; it declares {:?}, but only {} exist",
-                    input.name,
-                    part_inputs_words()
-                ));
-            }
-        }
-        for node in &self.nodes {
-            let texts = [&node.task.title, &node.task.instructions].into_iter().chain(node.task.labels.values());
-            for text in texts {
-                if let Some(unknown) = placeholders(text).into_iter().find(|name| !PART_INPUTS.contains(name)) {
-                    return Err(format!(
-                        "node {:?} uses {{{{{unknown}}}}}, which is not a part input; a part workflow may only use {}",
-                        node.id,
-                        part_inputs_words()
-                    ));
-                }
-            }
-            let commands = node
-                .exits
-                .iter()
-                .filter_map(|exit| exit.check.as_deref())
-                .chain(node.gate.as_ref().and_then(|gate| gate.command.as_deref()));
-            for command in commands {
-                if let Some(name) = placeholders(command).into_iter().next() {
-                    return Err(format!(
-                        "node {:?} writes {{{{{name}}}}} into a command; part values are never spliced into a command the daemon runs",
-                        node.id
-                    ));
-                }
-            }
-        }
         Ok(PartShape { entry, deliverable, terminal })
     }
 
