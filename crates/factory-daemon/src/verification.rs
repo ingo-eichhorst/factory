@@ -291,6 +291,9 @@ impl Engine {
                 .await
             {
                 Ok(run) => run,
+                Err(FactoryError::DispatchSuperseded(_)) => {
+                    return self.require_run(&run.id).await;
+                }
                 Err(FactoryError::CapacityHeld { agent, in_use, max }) => {
                     // Approval is durable; a busy slot is a queue, not a
                     // failed attempt. The normal release/sweep worker resumes
@@ -447,18 +450,16 @@ impl Engine {
                     )
                 })?;
             // A gate has no task result of its own for `upstream_outputs` to
-            // carry. Freeze its concrete finding into the next round's task
-            // template; review findings travel through the review task.
-            if failed.is_some_and(|a| a.kind == StepKind::Gate) {
-                if let Some(node) = workflow.definition.nodes.iter_mut().find(|n| n.id == origin.node_id) {
-                    node.task.instructions = format!(
-                        "{}\n\nRework requested from run {}:\n{}",
-                        node.task.instructions.trim_end(), run.id, finding
-                    );
-                }
-            }
+            // carry. Freeze its concrete finding on this feedback round,
+            // without changing the standing task or immutable definition.
             match workflow.send_back(&from, &origin.node_id) {
-                factory_core::workflow::SendBack::Sent { .. } => Some(workflow),
+                factory_core::workflow::SendBack::Sent { .. } => {
+                    if let Some(request) = workflow.nodes.iter_mut().find(|node| node.node_id == origin.node_id)
+                        .and_then(|node| node.rework_request.as_mut()) {
+                        request.feedback = Some(finding.clone());
+                    }
+                    Some(workflow)
+                }
                 factory_core::workflow::SendBack::Exhausted { max_rounds } => {
                     return Err(FactoryError::BadRequest(format!(
                         "verification rework exhausted its {max_rounds} rounds; a person must resolve it"
@@ -911,7 +912,28 @@ impl Engine {
                 }),
                 _ => None,
             };
-            let review = self.create_review_task(new, review_origin, review_id).await?;
+            let previous_task = if let (Some(origin), Some(node_id)) = (&task.workflow_origin, &step.node_id) {
+                self.workflow_run(&origin.workflow_run_id).await?.nodes.iter()
+                    .find(|node| node.node_id == *node_id).and_then(|node| node.task_id.clone())
+            } else { None };
+            let review = if let Some(previous_id) = previous_task {
+                // A control node also owns one standing task. Its next
+                // independent review is a fresh conversation on a new run.
+                if self.store.active_run(&previous_id).await?.is_some() {
+                    waiting = true;
+                    continue;
+                }
+                self.store.update(&previous_id, &factory_core::task::TaskPatch {
+                    instructions: Some(new.instructions),
+                    agent: new.agent, labels: Some(new.labels),
+                    status: Some(factory_core::task::TaskStatus::Pending),
+                    clear_result: true, clear_error: true, clear_routed_to: true,
+                    clear_failure: true, clear_closure: true,
+                    ..Default::default()
+                }).await?
+            } else {
+                self.create_review_task(new, review_origin, review_id).await?
+            };
             if let (Some(origin), Some(node_id)) = (&task.workflow_origin, &step.node_id) {
                 let mut workflow = self.workflow_run(&origin.workflow_run_id).await?;
                 if let Some(node) = workflow.nodes.iter_mut().find(|n| n.node_id == *node_id) {
@@ -2211,6 +2233,7 @@ mod tests {
 
     fn node(id: &str) -> WorkflowNode {
         WorkflowNode {
+            session: Default::default(),
             id: id.into(),
             position: CanvasPoint::default(),
             kind: WorkflowNodeKind::Task,
@@ -2357,11 +2380,13 @@ mod tests {
         for _ in 0..400 {
             let run = engine.workflow_run(&wf.id).await.unwrap();
             let node = run.nodes.iter().find(|n| n.node_id == "a").unwrap();
-            if let Some(id) = node.task_id.as_deref().filter(|id| *id != first_task) {
-                let retry = engine.require(id).await.unwrap();
-                assert_eq!(node.round, 1);
-                assert!(retry.instructions.contains("tests exit 1"), "{}", retry.instructions);
-                return;
+            if node.task_id.as_deref() == Some(first_task.as_str()) {
+                if let Some(retry) = engine.store.active_run(&first_task).await.unwrap().filter(|run| run.attempt == 2) {
+                    assert_eq!(node.round, 1);
+                    assert_eq!(retry.workflow_round, 1);
+                    assert!(retry.feedback.as_ref().unwrap().feedback.as_deref().unwrap().contains("tests exit 1"));
+                    return;
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }

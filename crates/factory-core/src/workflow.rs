@@ -15,6 +15,9 @@ pub struct CanvasPoint {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowNode {
     pub id: String,
+    /// Feedback resumes by default. Independent work may explicitly opt out.
+    #[serde(default, skip_serializing_if = "SessionPolicy::is_resume")]
+    pub session: SessionPolicy,
     #[serde(default)]
     pub position: CanvasPoint,
     #[serde(default)]
@@ -34,6 +37,20 @@ pub struct WorkflowNode {
     /// Fan-out/join policy for an `Expand` node.  Absent everywhere else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expand: Option<ExpandSpec>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPolicy {
+    #[default]
+    Resume,
+    Fresh,
+}
+
+impl SessionPolicy {
+    fn is_resume(&self) -> bool {
+        *self == Self::Resume
+    }
 }
 
 /// One ordered conditional route out of a task node (`#149`). Exactly one of
@@ -56,6 +73,8 @@ pub struct WorkflowExit {
 #[derive(Debug, Clone, Deserialize)]
 struct WorkflowNodeWire {
     pub id: String,
+    #[serde(default)]
+    pub session: SessionPolicy,
     #[serde(default)]
     pub position: CanvasPoint,
     #[serde(default)]
@@ -97,6 +116,7 @@ impl<'de> Deserialize<'de> for WorkflowNode {
         }
         Ok(Self {
             id: wire.id,
+            session: wire.session,
             position: wire.position,
             kind: wire.kind,
             task: wire.task,
@@ -834,6 +854,7 @@ impl WorkflowDefinition {
             category: task.category.clone(),
             inputs: Vec::new(),
             nodes: vec![WorkflowNode {
+                session: Default::default(),
                 id: IMPLICIT_NODE.into(),
                 position: CanvasPoint::default(),
                 kind: WorkflowNodeKind::Task,
@@ -1036,6 +1057,7 @@ fn control_node(
     };
     let noun = step.kind.as_str();
     WorkflowNode {
+        session: SessionPolicy::Fresh,
         id: id.to_string(),
         position: CanvasPoint {
             x: work.position.x + if before { -40.0 } else { 40.0 },
@@ -1247,6 +1269,9 @@ impl WorkflowNodeStatus {
 pub struct WorkflowNodeRun {
     pub node_id: String,
     pub status: WorkflowNodeStatus,
+    /// Run history of the same task, oldest first. Legacy task ids stay separate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<WorkflowAttempt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1255,12 +1280,12 @@ pub struct WorkflowNodeRun {
     /// pass; otherwise the backwards-exit rounds it has used.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub round: u32,
-    /// The tasks earlier rounds spawned here, oldest first. Kept so their
+    /// Legacy tasks earlier rounds spawned here, oldest first. Kept so their
     /// history stays findable; never mirrored, never recreated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub superseded_task_ids: Vec<String>,
     /// On the node work was sent back to: who sent it and why, which its
-    /// next task is dispatched with.
+    /// next run is dispatched with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rework_request: Option<ReworkRequest>,
     /// Set once this node's ordered exits have been evaluated. Necessary so
@@ -1273,6 +1298,14 @@ pub struct WorkflowNodeRun {
     /// Human-readable route reason for `SkippedByRoute` nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowAttempt {
+    pub run_id: String,
+    pub attempt: u32,
+    pub round: u32,
+    pub status: crate::run::RunStatus,
 }
 
 /// Why a node is running again -- see [`WorkflowNodeRun::rework_request`].
@@ -1355,6 +1388,7 @@ impl WorkflowRun {
                 .map(|node| WorkflowNodeRun {
                     node_id: node.id.clone(),
                     status: WorkflowNodeStatus::Unstarted,
+                    attempts: Vec::new(),
                     task_id: None,
                     error: None,
                     round: 0,
@@ -1427,11 +1461,11 @@ pub enum SendBack {
 impl WorkflowRun {
     /// Send `from`'s work back through its declared backwards exit, if it has one
     /// and a round is left: every node on the path from the target down to
-    /// `from` goes back to `unstarted` with its task moved to
-    /// `superseded_task_ids` and its round counted up, the target is told
+    /// `from` goes back to `unstarted` with its task retained and its round
+    /// counted up, the target is told
     /// who sent it back, and the not-yet-started nodes below `from` (a gate
     /// mirrored `skipped` off the failed run, say) are `unstarted` again.
-    /// Nothing is spawned here; the next advance does that.
+    /// Nothing is dispatched here; the next advance starts another run.
     pub fn send_back(&mut self, from: &str, to: &str) -> SendBack {
         let Some(spec) = self
             .definition
@@ -1470,9 +1504,8 @@ impl WorkflowRun {
                 }
                 continue;
             }
-            if let Some(task) = node.task_id.take() {
-                node.superseded_task_ids.push(task);
-            }
+            // The task is standing intent; another round is another run.
+            // Leave legacy superseded ids untouched rather than rewriting history.
             node.status = WorkflowNodeStatus::Unstarted;
             node.error = None;
             node.round = round;
@@ -1519,6 +1552,7 @@ mod tests {
 
     fn node(id: &str) -> WorkflowNode {
         WorkflowNode {
+            session: Default::default(),
             id: id.into(),
             position: CanvasPoint::default(),
             kind: WorkflowNodeKind::Task,
@@ -1540,6 +1574,18 @@ mod tests {
             edges,
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn feedback_session_policy_defaults_to_resume_and_round_trips_fresh() {
+        let legacy: WorkflowNode = serde_yaml_ng::from_str("id: review\ntask: {title: Review}").unwrap();
+        assert_eq!(legacy.session, SessionPolicy::Resume);
+        assert!(serde_json::to_value(&legacy).unwrap().get("session").is_none());
+        let mut independent = legacy;
+        independent.session = SessionPolicy::Fresh;
+        let json = serde_json::to_value(&independent).unwrap();
+        assert_eq!(json["session"], "fresh");
+        assert_eq!(serde_json::from_value::<WorkflowNode>(json).unwrap().session, SessionPolicy::Fresh);
     }
 
     #[test]
@@ -1761,6 +1807,7 @@ mod tests {
 
     fn gate_node(id: &str, step: &str) -> WorkflowNode {
         WorkflowNode {
+            session: Default::default(),
             id: id.into(),
             position: CanvasPoint::default(),
             kind: WorkflowNodeKind::Gate,
@@ -2167,8 +2214,8 @@ mod tests {
         );
         let implement = node(&run, "implement");
         assert_eq!(implement.status, WorkflowNodeStatus::Unstarted);
-        assert_eq!(implement.task_id, None);
-        assert_eq!(implement.superseded_task_ids, vec!["i1"]);
+        assert_eq!(implement.task_id.as_deref(), Some("i1"));
+        assert!(implement.superseded_task_ids.is_empty());
         assert_eq!(
             implement.rework_request,
             Some(ReworkRequest {
@@ -2193,7 +2240,7 @@ mod tests {
         );
         assert_eq!(
             node(&run, "implement").superseded_task_ids,
-            vec!["i1"],
+            Vec::<String>::new(),
             "i2 never existed here"
         );
         ran(&mut run, "review", WorkflowNodeStatus::Failed, "r3");

@@ -352,6 +352,7 @@ mod tests {
     async fn a_legacy_stored_run_mid_rework_loads_and_can_take_its_next_round() {
         let store = WorkflowStore::in_memory().unwrap();
         let task = |id: &str, exits| WorkflowNode {
+            session: Default::default(),
             id: id.into(),
             position: CanvasPoint::default(),
             kind: WorkflowNodeKind::Task,

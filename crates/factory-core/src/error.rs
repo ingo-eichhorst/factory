@@ -39,6 +39,11 @@ pub enum FactoryError {
     #[error("waiting for a {agent} slot ({in_use}/{max} in use)")]
     CapacityHeld { agent: String, in_use: u32, max: u32 },
 
+    /// Another dispatch already claimed this task or advanced its attempt.
+    /// Not a failure of the winning run: callers must leave it alone.
+    #[error("dispatch superseded: {0}")]
+    DispatchSuperseded(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -62,6 +67,7 @@ impl FactoryError {
             Self::Denied(_) => "denied",
             Self::HarnessUnhealthy(_) => "harness_unhealthy",
             Self::CapacityHeld { .. } => "capacity_held",
+            Self::DispatchSuperseded(_) => "dispatch_superseded",
             Self::Other(_) => "internal",
         }
     }

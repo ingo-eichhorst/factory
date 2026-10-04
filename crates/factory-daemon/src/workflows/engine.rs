@@ -384,6 +384,7 @@ mod tests {
 
     fn node(id: &str) -> WorkflowNode {
         WorkflowNode {
+            session: Default::default(),
             id: id.into(),
             position: CanvasPoint::default(),
             kind: WorkflowNodeKind::Task,
@@ -409,6 +410,7 @@ mod tests {
     /// *rendered* upstream section rather than the file `shell` points at.
     fn harness_node(id: &str) -> WorkflowNode {
         WorkflowNode {
+            session: Default::default(),
             id: id.into(),
             position: CanvasPoint::default(),
             kind: WorkflowNodeKind::Task,
@@ -1275,6 +1277,17 @@ mod tests {
         run.nodes.iter().find(|n| n.node_id == node).unwrap()
     }
 
+    async fn wait_for_attempt(engine: &Engine, task_id: &str, attempt: u32) -> factory_core::Run {
+        for _ in 0..400 {
+            if let Some(run) = engine.store.active_run(task_id).await.unwrap() {
+                if run.attempt == attempt && engine.store.entries(task_id, 50).await.unwrap().iter().any(|entry|
+                    entry.kind == "dispatched" && entry.run_id.as_deref() == Some(run.id.as_str())) { return run; }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("attempt {attempt} did not start on task {task_id}");
+    }
+
     /// implement -> review -> ship, review sending the work back to
     /// implement at most `max_rounds` times. `implement` is a harness node
     /// so the prompt it is re-dispatched with can be read back.
@@ -1359,17 +1372,20 @@ mod tests {
                     .is_some_and(|data| data["routed_to"] == "implement")
         }));
 
-        let all = wait_for_tasks(&engine, 3).await;
-        let again = of_node(&all, "implement").into_iter().find(|t| t.id != first.id).unwrap().clone();
-        assert_eq!(again.title, "implement (rework 1)");
+        let second_run = wait_for_attempt(&engine, &first.id, 2).await;
+        let again = engine.require(&first.id).await.unwrap();
+        assert_eq!(again.title, "implement");
+        assert_eq!(second_run.workflow_round, 1);
+        assert!(second_run.feedback.as_ref().unwrap().feedback.as_deref().unwrap().contains("the parser test is missing"));
+        assert_eq!(tasks(&engine).await.len(), 2);
         let prompt = wait_for_prompt(&engine, &recorder, &again.id).await;
         assert!(prompt.contains("sent this work back -- rework round 1 of 5"), "{prompt}");
         assert!(prompt.contains("the parser test is missing"), "{prompt}");
 
         let midway = engine.workflow_run(&run.id).await.unwrap();
         assert_eq!(midway.status, WorkflowRunStatus::Running);
-        assert_eq!(node_run(&midway, "implement").superseded_task_ids, vec![first.id.clone()]);
-        assert_eq!(node_run(&midway, "review").superseded_task_ids, vec![review.id.clone()]);
+        assert!(node_run(&midway, "implement").superseded_task_ids.is_empty());
+        assert!(node_run(&midway, "review").superseded_task_ids.is_empty());
         assert_eq!(node_run(&midway, "review").round, 1);
         assert_eq!(node_run(&midway, "ship").status, WorkflowNodeStatus::Unstarted);
 
@@ -1381,11 +1397,12 @@ mod tests {
         );
 
         finish_with_result(&engine, &again.id, "PR https://example.test/pr/1, fixed").await;
-        let all = wait_for_tasks(&engine, 4).await;
-        let second_review = of_node(&all, "review").into_iter().find(|t| t.id != review.id).unwrap().clone();
-        assert_eq!(second_review.title, "review (rework 1)");
+        let second_review_run = wait_for_attempt(&engine, &review.id, 2).await;
+        let second_review = engine.require(&review.id).await.unwrap();
+        assert_eq!(second_review.title, "review");
+        assert_eq!(second_review_run.workflow_round, 1);
         finish(&engine, &second_review.id, RunStatus::Done).await;
-        let ship = of_node(&wait_for_tasks(&engine, 5).await, "ship")[0].clone();
+        let ship = of_node(&wait_for_tasks(&engine, 3).await, "ship")[0].clone();
         finish(&engine, &ship.id, RunStatus::Done).await;
         assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Done);
     }
@@ -1415,15 +1432,11 @@ mod tests {
         finish(&engine, &implement.id, RunStatus::Done).await;
         let review = of_node(&wait_for_tasks(&engine, 2).await, "review")[0].clone();
         review_fails(&engine, &review.id, "still wrong").await;
-        let all = wait_for_tasks(&engine, 3).await;
-        let again = of_node(&all, "implement").into_iter().find(|t| t.id != implement.id).unwrap().clone();
+        wait_for_attempt(&engine, &implement.id, 2).await;
+        let again = engine.require(&implement.id).await.unwrap();
         finish(&engine, &again.id, RunStatus::Done).await;
-        let all = wait_for_tasks(&engine, 4).await;
-        let last = of_node(&all, "review")
-            .into_iter()
-            .find(|t| t.id != review.id)
-            .unwrap()
-            .clone();
+        wait_for_attempt(&engine, &review.id, 2).await;
+        let last = engine.require(&review.id).await.unwrap();
         let active = loop {
             if let Some(active) = engine.store.active_run(&last.id).await.unwrap() {
                 break active;
@@ -1451,7 +1464,7 @@ mod tests {
         assert_eq!(run.status, WorkflowRunStatus::Running);
         assert_eq!(
             tasks(&engine).await.len(),
-            4,
+            2,
             "nothing spawned past the budget"
         );
     }
@@ -2113,6 +2126,7 @@ mod tests {
             .find(|task| task.decomposition_part.as_deref() == Some("child"))
             .unwrap();
 
+        wait_for_attempt(&engine, &child.id, 1).await;
         let cancelled = engine.cancel_workflow(&run.id).await.unwrap();
         assert_eq!(cancelled.status, WorkflowRunStatus::Cancelled);
         assert!(engine.store.active_run(&child.id).await.unwrap().is_some());
@@ -2193,6 +2207,7 @@ impl Engine {
 
         let child_ids: Vec<String> = parts.iter().map(|part| part.id.clone()).collect();
         let mut nodes = vec![WorkflowNode {
+            session: Default::default(),
             id: "expand".into(),
             position: CanvasPoint::default(),
             kind: WorkflowNodeKind::Expand,
@@ -2236,6 +2251,7 @@ impl Engine {
             let mut part_labels = labels.clone();
             part_labels.insert(factory_core::intake::PART_LABEL.into(), part.id.clone());
             nodes.push(WorkflowNode {
+                session: Default::default(),
                 id: part.id.clone(),
                 position: CanvasPoint {
                     x: 240.0 + index as f64 * 180.0,
@@ -3159,6 +3175,19 @@ impl Engine {
             };
             match self.store.get(&task_id).await {
                 Ok(Some(task)) => {
+                    let attempts = self.store.runs(&task_id, u32::MAX).await?;
+                    node.attempts = attempts.iter().rev().map(|attempt| factory_core::workflow::WorkflowAttempt {
+                        run_id: attempt.id.clone(), attempt: attempt.attempt,
+                        round: attempt.workflow_round, status: attempt.status,
+                    }).collect();
+                    // The task still mirrors the last round until the next
+                    // dispatch. Never let that old done overwrite send_back.
+                    if node.round > 0 {
+                        let latest = self.store.runs(&task_id, 1).await?.into_iter().next();
+                        if latest.as_ref().is_none_or(|attempt| attempt.workflow_round < node.round) {
+                            continue;
+                        }
+                    }
                     // A check-exit error blocks the workflow node after its
                     // task has already completed. Preserve that orchestration
                     // block instead of mirroring the task's `done` over it.
@@ -3447,6 +3476,33 @@ impl Engine {
                     .is_some_and(|task| task.status == TaskStatus::Pending && task.runs == 0)
                 {
                     to_start.push(existing_id);
+                } else if run.nodes.iter().any(|node| node.node_id == node_id && node.round > 0) {
+                    let caller = self.caller_for_actor(&run.started_by).await;
+                    let template = &run.definition.nodes.iter().find(|node| node.id == node_id)
+                        .expect("snapshot node").task;
+                    if let Err(denial) = self.authorize_workflow_spawn(&caller, template).await {
+                        let node = run.nodes.iter_mut().find(|node| node.node_id == node_id)
+                            .expect("snapshot node");
+                        node.status = WorkflowNodeStatus::Failed;
+                        node.error = Some(denial.to_string());
+                        run.status = WorkflowRunStatus::Failed;
+                        run.failure_node_id = Some(node_id);
+                        run.error = Some(denial.to_string());
+                        continue;
+                    }
+                    self.store.update(&existing_id, &TaskPatch {
+                        status: Some(TaskStatus::Pending),
+                        clear_result: true, clear_routed_to: true, clear_error: true,
+                        clear_failure: true, clear_closure: true,
+                        ..Default::default()
+                    }).await?;
+                    let node = run.nodes.iter_mut().find(|node| node.node_id == node_id)
+                        .expect("snapshot node");
+                    node.status = WorkflowNodeStatus::Pending;
+                    self.entry(&existing_id, TaskEntry::new("daemon", "workflow_feedback",
+                        format!("rework round {} queued on the same task", node.round))).await;
+                    self.publish_task(&existing_id).await;
+                    to_start.push(existing_id);
                 }
                 continue;
             }
@@ -3461,10 +3517,6 @@ impl Engine {
             // The spawned task carries the category it was planned as, so
             // its own record says what its run was held to.
             template.category = Some(run.definition.node_category(snapshot_node));
-            let round = run.nodes.iter().find(|n| n.node_id == node_id).map_or(0, |n| n.round);
-            if round > 0 {
-                template.title = format!("{} (rework {round})", template.title);
-            }
 
             // Re-resolve who this run runs for, every time: a role can
             // change between the click that started it and a node it spawns
@@ -3643,6 +3695,13 @@ impl Engine {
             if backwards {
                 match run.send_back(from, &exit.to) {
                     SendBack::Sent { round, max_rounds } => {
+                        let feedback = task.as_ref().map(|task| [task.error.as_deref(), task.result.as_deref()]
+                            .into_iter().flatten().collect::<Vec<_>>().join("\n\n"));
+                        for node in &mut run.nodes {
+                            if let Some(request) = node.rework_request.as_mut().filter(|request| request.round == round) {
+                                request.feedback = feedback.clone();
+                            }
+                        }
                         if let Some(task_id) = &task_id {
                             self.entry(
                                 task_id,
@@ -3749,6 +3808,10 @@ impl Engine {
             let Ok(Some(subject_run)) = self.store.runs(&task_id, 1).await.map(|r| r.into_iter().next()) else {
                 continue;
             };
+            if run.nodes.iter().find(|node| node.node_id == subject)
+                .is_some_and(|node| node.round > subject_run.workflow_round) {
+                continue;
+            }
             let evidence = self
                 .policies
                 .step_attestations(&subject_run.id)
@@ -3872,8 +3935,22 @@ impl Engine {
         else {
             return;
         };
+        if node.round > 0 {
+            let Ok(Some(latest)) = self.store.runs(task_id, 1).await.map(|runs| runs.into_iter().next()) else {
+                return;
+            };
+            if latest.workflow_round < node.round {
+                return;
+            }
+        }
         node.status = node_status(&task);
         node.error = task.error;
+        if let Ok(attempts) = self.store.runs(task_id, u32::MAX).await {
+            node.attempts = attempts.iter().rev().map(|attempt| factory_core::workflow::WorkflowAttempt {
+                run_id: attempt.id.clone(), attempt: attempt.attempt,
+                round: attempt.workflow_round, status: attempt.status,
+            }).collect();
+        }
         if !run.status.is_terminal() && node.status == WorkflowNodeStatus::Failed {
             run.status = WorkflowRunStatus::Failed;
             run.failure_node_id = Some(node.node_id.clone());
@@ -4029,7 +4106,7 @@ impl Engine {
                     };
                     if let Ok(Some(task)) = self.store.get(&task_id).await {
                         if task.status == TaskStatus::Pending
-                            && task.runs == 0
+                            && (task.runs == 0 || node.round > 0)
                             && self
                                 .store
                                 .active_run(&task_id)

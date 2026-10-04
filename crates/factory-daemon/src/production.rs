@@ -18,6 +18,8 @@
 //!   rework (the bug fixed here) read a healthy recurring task as almost
 //!   entirely rework. The true signal is `Run::trigger`, fixed by
 //!   `is_rework`:
+//!     - A workflow feedback round (`workflow_round > 0`) is always rework,
+//!       including when its previous attempt finished `done` with findings.
 //!     - `Trigger::Retry` is always rework -- it exists (see `Trigger`'s own
 //!       doc comment) only as the daemon's automatic retry of a run that
 //!       just failed.
@@ -25,7 +27,7 @@
 //!       task's *previous* run (`attempt - 1`) ended `failed` or
 //!       `cancelled` -- a person or a workflow re-running a task to fix a
 //!       failure. Re-running a task whose previous run already finished
-//!       `done` is not rework: that is new work on a standing task, not a
+//!       `done`, without explicit feedback, is not rework: new standing work, not a
 //!       correction, however many times it has been run before.
 //!     - `Trigger::Schedule`, `Trigger::Bench` and `Trigger::Agent` are
 //!       never rework, whatever the previous run's outcome. A scheduled
@@ -249,6 +251,9 @@ fn bucket_bounds(bin: ProductionBin, from: DateTime<Utc>, now: DateTime<Utc>) ->
 /// than its window) looks up as `None`, read the same as "did not fail":
 /// no evidence of a failure to correct, so not rework.
 fn is_rework(run: &Run, predecessor_status: &BTreeMap<(&str, u32), RunStatus>) -> bool {
+    if run.workflow_round > 0 {
+        return true;
+    }
     match run.trigger {
         // The daemon's own automatic retry of a run that just failed -- see
         // `Trigger::Retry`'s own doc comment. Always rework, whatever
@@ -359,6 +364,9 @@ mod tests {
             spent_token_sha256: None,
             superseded_token_sha256s: Vec::new(),
             continued_from: None,
+            workflow_round: 0,
+            feedback: None,
+            resume_context: None,
             resumed_session: None,
             original_estimate: None,
             provider_account: None,
@@ -665,6 +673,18 @@ mod tests {
         predecessor.insert(("t1", 1), RunStatus::Cancelled);
         let r = run("r2", "t1", 2, RunStatus::Done, Trigger::Workflow, at(0), Some(at(10)));
         assert!(is_rework(&r, &predecessor));
+    }
+
+    #[test]
+    fn workflow_feedback_after_done_is_rework_not_first_pass() {
+        let mut predecessor = BTreeMap::new();
+        predecessor.insert(("t1", 1), RunStatus::Done);
+        let mut feedback = run("r2", "t1", 2, RunStatus::Done, Trigger::Workflow, at(0), Some(at(10)));
+        feedback.workflow_round = 1;
+        assert!(is_rework(&feedback, &predecessor));
+        let mut ordinary = feedback.clone();
+        ordinary.workflow_round = 0;
+        assert!(!is_rework(&ordinary, &predecessor));
     }
 
     #[test]

@@ -570,6 +570,9 @@ impl TaskStore for SqliteStore {
                 // notion of a previous run.
                 superseded_token_sha256s: Vec::new(),
                 continued_from: None,
+                workflow_round: 0,
+                feedback: None,
+                resume_context: None,
                 resumed_session: None,
                 original_estimate: None,
                 provider_account: None,
@@ -696,6 +699,15 @@ impl TaskStore for SqliteStore {
             }
             if let Some(v) = patch.resumed_session {
                 run.resumed_session = Some(v);
+            }
+            if let Some(v) = patch.workflow_round {
+                run.workflow_round = v;
+            }
+            if let Some(v) = patch.feedback {
+                run.feedback = Some(v);
+            }
+            if let Some(v) = patch.resume_context {
+                run.resume_context = Some(v);
             }
             if let Some(v) = patch.ended_at {
                 run.ended_at = Some(v);

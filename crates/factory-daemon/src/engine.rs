@@ -1275,7 +1275,10 @@ impl Engine {
                 Ok(Payload::Task { task })
             }
             Request::TaskReport { id, report } => {
-                let run = self.report(&id, report).await?;
+                // Feedback now carries a richer run snapshot. Keep the
+                // report/verification chain off every request's future,
+                // including small reads on axum's default worker stack.
+                let run = Box::pin(self.report(&id, report)).await?;
                 self.sync_workflow_for_task(&id).await;
                 self.sync_bench_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
@@ -1362,7 +1365,7 @@ impl Engine {
                 deleted: self.delete_workflow(&id).await?,
             }),
             Request::WorkflowStart { id, inputs } => Ok(Payload::WorkflowRun {
-                run: self.start_workflow(&id, inputs, caller).await?,
+                run: Box::pin(self.start_workflow(&id, inputs, caller)).await?,
             }),
             Request::WorkflowRunGet { id } => Ok(Payload::WorkflowRun {
                 run: self.workflow_run(&id).await?,
@@ -1371,7 +1374,7 @@ impl Engine {
                 runs: self.workflows.runs(workflow_id.as_deref(), scope.as_deref(), limit.unwrap_or(50)).await?,
             }),
             Request::WorkflowRunCancel { id } => Ok(Payload::WorkflowRun {
-                run: self.cancel_workflow(&id).await?,
+                run: Box::pin(self.cancel_workflow(&id)).await?,
             }),
             Request::WorkflowLint { workflow, task, scope, category } => Ok(Payload::WorkflowLint {
                 lint: self.workflow_lint(workflow, task, scope, category).await?,
@@ -2709,6 +2712,10 @@ impl Engine {
         }
         let run = match Box::pin(self.dispatch(task_id, trigger, due, continue_from)).await {
             Ok(run) => run,
+            Err(FactoryError::DispatchSuperseded(reason)) => {
+                tracing::debug!(task = task_id, "dispatch superseded: {reason}");
+                return;
+            }
             // Blocked, not failed: `harness_gate` has already said why on
             // the task, and there is no run to close.
             Err(FactoryError::HarnessUnhealthy(reason)) => {
@@ -2823,6 +2830,18 @@ impl Engine {
 
     pub(crate) async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) -> Result<Run> {
         let task = self.require(task_id).await?;
+        let workflow_node = if let Some(origin) = &task.workflow_origin {
+            self.workflows.get_run(&origin.workflow_run_id).await?.and_then(|workflow| {
+                let node = workflow.nodes.iter().find(|node| node.node_id == origin.node_id
+                    && node.task_id.as_deref() == Some(task.id.as_str()))?.clone();
+                let policy = workflow.definition.nodes.iter().find(|node| node.id == origin.node_id)?.session;
+                Some((node, policy))
+            })
+        } else { None };
+        let feedback_round = workflow_node.as_ref().map_or(0, |(node, _)| node.round);
+        let continue_from = if continue_from.is_none() && trigger == Trigger::Workflow && feedback_round > 0 {
+            self.store.runs(task_id, 1).await?.into_iter().next().filter(|previous| previous.status.is_terminal())
+        } else { continue_from };
         // Resolve again rather than trusting what was written down: the config
         // may have changed since the task was created.
         let (agent_name, adapter_name, declaration) =
@@ -2861,7 +2880,39 @@ impl Engine {
         // one -- `resolve_continue` only ever reads the previous run and this
         // dispatch's freshly resolved agent/runtime.
         let sandboxed_agent = declaration.as_ref().is_some_and(|d| d.sandbox == Sandbox::Openshell);
+        let role_name = self.effective_role(&task.scope, &agent_name).await;
+        let role = self.roles_for(&task.scope).get(&role_name).cloned();
+        let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.policy_chain(&task.scope));
+        let goal = self.goal_context(factory.root.clone(), task.labels.get("goal").cloned()).await;
+        let quality = self.quality_context(&task.scope).await;
+        let probe = agent.health_probe();
+        let version = probe.as_ref().and_then(|probe| self.harness.rows(
+            &[(adapter_name.clone(), probe.clone())], None
+        ).into_iter().next().and_then(|row| row.version));
+        // Hash guide inputs, code and the observed binary version, never tokens.
+        let binary_stamp = probe.as_ref().and_then(|probe| crate::harness_health::resolve(probe.program()))
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| (metadata.len(), metadata.modified().ok()));
+        let guide_inputs = format!("{:?}", (
+            &role, &policy_frameworks, &goal, &quality, &declaration,
+            &task.runtime, &task.instructions, &task.title, (&task.scope, &scope_path),
+            &task.worktree, (&version, &binary_stamp),
+            include_str!("../../factory-core/src/adapter/agent.rs"),
+        ));
+        let fingerprint = factory_core::run::token_digest(&guide_inputs);
         let continue_outcome = match &continue_from {
+            Some(_) if workflow_node.as_ref().is_some_and(|(_, policy)| *policy == factory_core::workflow::SessionPolicy::Fresh) => {
+                Some(ContinueOutcome::Fresh { reason: "the workflow node declares session: fresh".into() })
+            }
+            Some(previous) if previous.resume_context.as_ref().is_some_and(|context| context.resumes >= 8) => Some(ContinueOutcome::Fresh {
+                reason: "the eight-round conversation resume cap was reached; resetting with a fresh conversation".into(),
+            }),
+            Some(_) if probe.is_some() && version.is_none() => Some(ContinueOutcome::Fresh {
+                reason: "the harness version is not known, so resume compatibility cannot be verified".into(),
+            }),
+            Some(previous) if previous.resume_context.as_ref().is_none_or(|context| context.fingerprint != fingerprint) => Some(ContinueOutcome::Fresh {
+                reason: "the guide, role, agent declaration or harness version changed (or no compatibility checkpoint was recorded)".into(),
+            }),
             // `#218`: the conversation lived in the previous run's sandbox,
             // which was deleted when that run ended.
             Some(_) if sandboxed_agent => Some(ContinueOutcome::Fresh {
@@ -2901,6 +2952,29 @@ impl Engine {
         // counted as occupying a slot until it resumes dispatch.
         let run = {
             let _admission = self.admission_lock.lock().await;
+            // The API's earlier active-run check is not an admission claim.
+            // Recheck under the reservation lock before creating/launching,
+            // including approval-held runs and stale continuation requests.
+            if let Some(active) = self.store.active_run(task_id).await? {
+                let held = existing.as_ref().is_some_and(|held| held.id == active.id)
+                    && active.status == RunStatus::Blocked
+                    && active.session.is_none();
+                if !held {
+                    return Err(FactoryError::DispatchSuperseded(format!(
+                        "task {task_id} already has active run {}", active.id)));
+                }
+            } else if existing.is_some() {
+                return Err(FactoryError::DispatchSuperseded("the approval-held run already ended".into()));
+            }
+            if let Some(previous) = &continue_from {
+                if self.store.runs(task_id, 1).await?.first().is_none_or(|latest| latest.id != previous.id) {
+                    return Err(FactoryError::DispatchSuperseded("a newer attempt replaced the requested continuation".into()));
+                }
+            }
+            if trigger == Trigger::Workflow && feedback_round > 0 && !resumed
+                && self.store.runs(task_id, 1).await?.first().is_some_and(|latest| latest.workflow_round >= feedback_round) {
+                return Err(FactoryError::DispatchSuperseded("this feedback round already has an attempt".into()));
+            }
             let agent_max = declaration.as_ref().and_then(|d| d.max_sessions);
             let cap = self.capacity_for(&task.scope, &agent_name, agent_max).await?;
             if cap.held() {
@@ -2933,6 +3007,8 @@ impl Engine {
         let mut initial_patch = RunPatch {
             original_estimate: task.effective_estimate(),
             provider_account,
+            workflow_round: Some(feedback_round),
+            feedback: workflow_node.as_ref().and_then(|(node, _)| node.rework_request.clone()),
             ..Default::default()
         };
         // `#178`: recorded whether or not the continuation actually managed
@@ -3092,32 +3168,51 @@ impl Engine {
             _ => Workspace::Fresh,
         };
         let (cwd, run) = self.place_run(&task, run, &scope_path, workspace).await?;
+        let resumes = if run.resumed_session.is_some() {
+            continue_from.as_ref().and_then(|previous| previous.resume_context.as_ref())
+                .map_or(1, |previous| previous.resumes.saturating_add(1))
+        } else { 0 };
+        let checkpoint = crate::resume::checkpoint(&cwd, fingerprint, resumes).await;
+        let run = self.store.update_run(&run.id, &RunPatch {
+            resume_context: Some(checkpoint.clone()), ..Default::default()
+        }).await?;
 
         // Resolved the same way `caller_for` resolves it for every other
         // request, off the agent this run actually landed on rather than
         // whatever the task's own record says -- `resolve_agent` may have
         // fallen back to a bare adapter name the task did not ask for.
-        let role = self.effective_role(&task.scope, &agent_name).await;
-        let role = self.roles_for(&task.scope).get(&role).cloned();
 
         // Direct parents only, computed now rather than when the node's task
         // was created (`create_workflow_task`) -- so a restart's recovery
         // pass, which dispatches through this same function, needs no
         // change of its own to pick this up.
-        let upstream = self.upstream_outputs(&task).await;
+        let mut upstream = self.upstream_outputs(&task).await;
+        if run.resumed_session.is_some() {
+            if let Some(previous) = continue_from.as_ref().and_then(|previous| previous.resume_context.as_ref()) {
+                upstream.push(UpstreamOutput {
+                    node_id: "resume-context".into(), task_id: task.id.clone(),
+                    title: "What changed since your previous run".into(),
+                    result: Some(crate::resume::summary(&cwd, previous, &checkpoint).await),
+                });
+            }
+        }
+        if feedback_round > 0 {
+            upstream.push(UpstreamOutput {
+                node_id: "feedback-round".into(), task_id: task.id.clone(),
+                title: format!("Workflow rework round {feedback_round}"),
+                result: Some("Feedback on the prior attempt is recorded as a new run of the same task.".into()),
+            });
+        }
         let agent_exits = self.agent_exit_context(&task).await;
         let knowledge = self.knowledge_hints(&task, &run.id).await;
         // Same chain the L6 tab and `policy attest` fold against
         // (`Engine::policy_chain`), reduced to just the names the guide
         // names -- see `factory_core::policy::frameworks_in_chain`.
-        let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.policy_chain(&task.scope));
         // The one sentence the guide says about a `goal=` label -- resolved
         // once here, the same as `policy_frameworks`, never re-read once the
         // guide is built.
-        let goal = self.goal_context(factory.root.clone(), task.labels.get("goal").cloned()).await;
         // The scope's H-importance quality attributes (`#107`), judged now
         // and never again for this run -- the same once-at-dispatch rule.
-        let quality = self.quality_context(&task.scope).await;
 
         // `sandbox: openshell` (`#218`): the run's harness starts inside a
         // sandbox, so everything that names Factory to the agent -- the CLI
@@ -3279,7 +3374,7 @@ impl Engine {
         Ok(run)
     }
 
-    /// Whether `factory task run --continue`'s (`#178`) previous run can
+    /// Whether a continuation or feedback round's (`#178`) previous run can
     /// really be resumed, and with what. Every fallback below ends in
     /// `ContinueOutcome::Fresh`, never an error: a `--continue` that cannot
     /// continue still dispatches, exactly as a plain `task run` would,
@@ -3329,6 +3424,11 @@ impl Engine {
                             reason: "the previous run's worktree branch was not recorded".into(),
                         };
                     };
+                    if !crate::resume::on_branch(Path::new(path), branch).await {
+                        return ContinueOutcome::Fresh {
+                            reason: "the previous run's worktree is no longer on its recorded branch".into(),
+                        };
+                    }
                     Some((PathBuf::from(path), branch.clone()))
                 }
                 _ => {
@@ -3547,12 +3647,18 @@ impl Engine {
             .and_then(|node| node.rework_request.clone());
         if let Some(request) = request {
             if let Some(feedback) = request.feedback.as_deref() {
+                let sender = if request.from_node == "integration" {
+                    "Integration".to_owned()
+                } else {
+                    run.definition.nodes.iter().find(|node| node.id == request.from_node)
+                        .map(|node| node.task.title.clone()).unwrap_or_else(|| request.from_node.clone())
+                };
                 outputs.push(UpstreamOutput {
                     node_id: request.from_node.clone(),
                     task_id: request.from_task.clone(),
                     title: format!(
-                        "Integration sent this work back -- rework round {} of {}",
-                        request.round, request.max_rounds
+                        "{} sent this work back -- rework round {} of {}",
+                        sender, request.round, request.max_rounds
                     ),
                     result: Some(truncate_tail(feedback, UPSTREAM_RESULT_BYTE_CAP).into_owned()),
                 });
@@ -3896,6 +4002,23 @@ impl Engine {
             .flatten()
             .and_then(|r| r.token)
             .map(|t| factory_core::run::token_digest(&t));
+        let resume_context = match self.store.get_run(run_id).await? {
+            Some(previous) if previous.resume_context.is_some() => {
+                let context = previous.resume_context.as_ref().expect("checked context");
+                let directory = if let Some(path) = previous.worktree_path.as_ref() {
+                    Some(PathBuf::from(path))
+                } else {
+                    self.store.get(&previous.task_id).await?.and_then(|task|
+                        self.factory_snapshot().scope_path(&task.scope).ok())
+                };
+                match directory {
+                    Some(directory) => Some(crate::resume::checkpoint(
+                        &directory, context.fingerprint.clone(), context.resumes).await),
+                    None => Some(context.clone()),
+                }
+            }
+            _ => None,
+        };
         let run = self
             .store
             .update_run(
@@ -3905,6 +4028,7 @@ impl Engine {
                     clear_session: true,
                     clear_token: true,
                     spent_token_sha256,
+                    resume_context,
                     // A run that has ended is not waiting on anybody, so the
                     // block's own clock and the runtime's standing guess both
                     // go with the session -- `blocked_since` is documented to
@@ -7600,6 +7724,9 @@ mod tests {
             spent_token_sha256: None,
             superseded_token_sha256s: Vec::new(),
             continued_from: None,
+            workflow_round: 0,
+            feedback: None,
+            resume_context: None,
             resumed_session: None,
             original_estimate: None,
             provider_account: None,
@@ -7654,6 +7781,9 @@ mod tests {
             spent_token_sha256: None,
             superseded_token_sha256s: Vec::new(),
             continued_from: None,
+            workflow_round: 0,
+            feedback: None,
+            resume_context: None,
             resumed_session: None,
             original_estimate: None,
             provider_account: None,
@@ -7826,6 +7956,9 @@ mod tests {
             spent_token_sha256: None,
             superseded_token_sha256s: Vec::new(),
             continued_from: None,
+            workflow_round: 0,
+            feedback: None,
+            resume_context: None,
             resumed_session: None,
             original_estimate: None,
             provider_account: None,
@@ -8557,6 +8690,189 @@ mod tests {
             assert_eq!(start.cwd, PathBuf::from(prev.worktree_path.clone().unwrap()));
 
             std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        async fn wait_node_attempt(engine: &Engine, node: &str, attempt: u32) -> (Task, Run) {
+            for _ in 0..500 {
+                for task in engine.store.list(&TaskFilter::default()).await.unwrap() {
+                    if task.workflow_origin.as_ref().is_some_and(|origin| origin.node_id == node) {
+                        if let Some(run) = engine.store.active_run(&task.id).await.unwrap().filter(|run| run.attempt == attempt) {
+                            if engine.store.entries(&task.id, 50).await.unwrap().iter().any(|entry|
+                                entry.kind == "dispatched" && entry.run_id.as_deref() == Some(run.id.as_str())) {
+                                return (task, run);
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("no attempt {attempt} on node {node}");
+        }
+
+        #[tokio::test]
+        async fn workflow_feedback_resumes_both_same_tasks_and_records_rounds_on_runs() {
+            workflow_feedback_round(false).await;
+        }
+
+        #[tokio::test]
+        async fn workflow_feedback_fresh_review_policy_keeps_task_but_not_conversation() {
+            workflow_feedback_round(true).await;
+        }
+
+        async fn workflow_feedback_round(fresh_review: bool) {
+            let scope_dir = git_scope_dir("workflow-resume").await;
+            let (engine, runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let mut draft = serde_yaml_ng::from_str::<factory_core::workflow::WorkflowDraft>(r#"
+name: feedback resume
+scope: demo
+nodes:
+  - id: implement
+    task: {title: Implement, instructions: implement, scope: demo, agent: recording, runtime: stub-run, worktree: true}
+  - id: review
+    task: {title: Review, instructions: review, scope: demo, agent: recording, runtime: stub-run, worktree: true}
+    exits: [{to: implement, agent: needs fixes, max_rounds: 3}]
+edges: [{id: next, from: implement, to: review}]
+"#).unwrap();
+            if fresh_review {
+                draft.nodes.iter_mut().find(|node| node.id == "review").unwrap().session = factory_core::workflow::SessionPolicy::Fresh;
+            }
+            let definition = engine.create_workflow(draft).await.unwrap();
+            let workflow = engine.start_workflow(&definition.id, Default::default(), &crate::access::Caller::Owner).await.unwrap();
+            let (implement, first) = wait_node_attempt(&engine, "implement", 1).await;
+            let old_token = first.token.clone().unwrap();
+            seed_session_id(&engine, &first, "implement-session").await;
+            engine.report(&implement.id, TaskReport {
+                status: Some(RunStatus::Done), result: Some("first work".into()), token: first.token,
+                artifacts: Vec::new(), message: None, send_to: None, error: None,
+            }).await.unwrap();
+            engine.sync_workflow_for_task(&implement.id).await;
+            let (review, review_first) = wait_node_attempt(&engine, "review", 1).await;
+            seed_session_id(&engine, &review_first, "review-session").await;
+            engine.report(&review.id, TaskReport {
+                status: Some(RunStatus::Done), result: Some("fix the parser".into()),
+                send_to: Some("implement".into()), token: review_first.token,
+                artifacts: Vec::new(), message: None, error: None,
+            }).await.unwrap();
+            engine.sync_workflow_for_task(&review.id).await;
+            let (again, second) = wait_node_attempt(&engine, "implement", 2).await;
+            assert_eq!(again.id, implement.id);
+            assert_eq!(again.title, "Implement");
+            assert_eq!(second.worktree_path, first.worktree_path);
+            assert_eq!(second.resumed_session.as_deref(), Some("implement-session"));
+            assert_eq!(second.workflow_round, 1);
+            assert_eq!(second.feedback.as_ref().unwrap().feedback.as_deref(), Some("fix the parser"));
+            assert_ne!(second.token.as_deref(), Some(old_token.as_str()));
+            assert!(engine.caller_for(Some(&old_token)).await.unwrap_err().to_string().contains("newer run"));
+            engine.recover_workflows().await;
+            assert_eq!(engine.store.runs(&implement.id, 50).await.unwrap().len(), 2, "recovery cannot replay feedback");
+            engine.report(&implement.id, TaskReport {
+                status: Some(RunStatus::Done), result: Some("fixed".into()), token: second.token,
+                artifacts: Vec::new(), message: None, send_to: None, error: None,
+            }).await.unwrap();
+            engine.sync_workflow_for_task(&implement.id).await;
+            let (review_again, review_second) = wait_node_attempt(&engine, "review", 2).await;
+            assert_eq!(review_again.id, review.id);
+            let duplicate = engine.dispatch(&implement.id, Trigger::Workflow, Due::now(), None).await.unwrap_err();
+            assert!(matches!(duplicate, FactoryError::DispatchSuperseded(_)), "a settled feedback round cannot be replayed");
+            assert_eq!(engine.store.runs(&implement.id, 50).await.unwrap().len(), 2);
+            if fresh_review {
+                assert_ne!(review_second.worktree_path, review_first.worktree_path);
+                assert!(review_second.resumed_session.is_none());
+                assert!(continue_fallback_reasons(&engine, &review.id).await.iter().any(|reason| reason.contains("session: fresh")));
+            } else {
+                assert_eq!(review_second.worktree_path, review_first.worktree_path);
+                assert_eq!(review_second.resumed_session.as_deref(), Some("review-session"));
+            }
+            engine.report(&review.id, TaskReport {
+                status: Some(RunStatus::Done), result: Some("passed".into()), token: review_second.token,
+                artifacts: Vec::new(), message: None, send_to: None, error: None,
+            }).await.unwrap();
+            engine.sync_workflow_for_task(&review.id).await;
+            let settled = engine.workflow_run(&workflow.id).await.unwrap();
+            assert_eq!(settled.status, factory_core::workflow::WorkflowRunStatus::Done);
+            assert_eq!(engine.store.list(&TaskFilter::default()).await.unwrap().len(), 2);
+            for node in settled.nodes {
+                assert_eq!(node.attempts.iter().map(|attempt| attempt.round).collect::<Vec<_>>(), vec![0, 1]);
+                assert!(node.superseded_task_ids.is_empty());
+            }
+            assert_eq!(runtime.starts.lock().unwrap().len(), 4);
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_checkpoint_is_taken_at_run_end_and_rejects_a_changed_branch() {
+            let scope_dir = git_scope_dir("continue-checkpoint").await;
+            let (engine, _) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, true).await;
+            let first = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            let directory = PathBuf::from(first.worktree_path.as_ref().unwrap());
+            assert!(tokio::process::Command::new("git")
+                .args(["commit", "--allow-empty", "-m", "work during this run"])
+                .current_dir(&directory).status().await.unwrap().success());
+            seed_session_id(&engine, &first, "recorded-session").await;
+            engine.fail_run(&first.id, FailKind::AckTimeout, "outage").await;
+            let previous = engine.require_run(&first.id).await.unwrap();
+            assert_ne!(previous.resume_context.as_ref().unwrap().branch_head, first.resume_context.as_ref().unwrap().branch_head);
+            let current = crate::resume::checkpoint(&directory, "unused".into(), 0).await;
+            assert_eq!(previous.resume_context.as_ref().unwrap().branch_head, current.branch_head);
+            assert!(tokio::process::Command::new("git").args(["switch", "-c", "different-branch"])
+                .current_dir(&directory).status().await.unwrap().success());
+            let fresh = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(previous)).await.unwrap();
+            assert!(fresh.resumed_session.is_none());
+            assert_ne!(fresh.worktree_path, first.worktree_path);
+            assert!(continue_fallback_reasons(&engine, &task.id).await.iter().any(|reason| reason.contains("recorded branch")));
+            std::fs::remove_dir_all(scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_concurrent_dispatch_claims_only_one_run() {
+            let scope_dir = temp_dir("continue-concurrent");
+            let (engine, runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            let previous = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &previous, "recorded-session").await;
+            let (left, right) = tokio::join!(
+                engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(previous.clone())),
+                engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(previous.clone()))
+            );
+            let (winner, loser) = match (left, right) {
+                (Ok(run), Err(error)) | (Err(error), Ok(run)) => (run, error),
+                pair => panic!("exactly one dispatch must win: {pair:?}"),
+            };
+            assert!(matches!(loser, FactoryError::DispatchSuperseded(_)));
+            assert_eq!(engine.store.runs(&task.id, 50).await.unwrap().len(), 2);
+            assert_eq!(runtime.starts.lock().unwrap().len(), 2);
+            assert_eq!(engine.store.active_run(&task.id).await.unwrap().unwrap().id, winner.id);
+            engine.start_run_due_continue(&task.id, Due::now(), previous.clone()).await;
+            assert!(!engine.require_run(&winner.id).await.unwrap().status.is_terminal(), "the loser cannot fail the winner");
+            engine.fail_run(&winner.id, FailKind::AckTimeout, "next outage").await;
+            let stale = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(previous)).await.unwrap_err();
+            assert!(matches!(stale, FactoryError::DispatchSuperseded(_)));
+            assert_eq!(runtime.starts.lock().unwrap().len(), 2);
+            std::fs::remove_dir_all(scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn continue_resets_after_eight_resumes_and_rejects_changed_guide_context() {
+            let scope_dir = temp_dir("continue-guard");
+            let (engine, _) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            let previous = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            seed_session_id(&engine, &previous, "recorded-session").await;
+            let mut previous = engine.require_run(&previous.id).await.unwrap();
+            previous.resume_context.as_mut().unwrap().resumes = 8;
+            let next = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(previous)).await.unwrap();
+            assert!(next.resumed_session.is_none());
+            assert_eq!(next.resume_context.as_ref().unwrap().resumes, 0);
+            assert!(continue_fallback_reasons(&engine, &task.id).await.iter().any(|reason| reason.contains("eight-round")));
+            engine.fail_run(&next.id, FailKind::AckTimeout, "another outage").await;
+            seed_session_id(&engine, &next, "fresh-session").await;
+            let mut previous = engine.require_run(&next.id).await.unwrap();
+            previous.resume_context.as_mut().unwrap().fingerprint = "old-guide".into();
+            let fresh = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(previous)).await.unwrap();
+            assert!(fresh.resumed_session.is_none());
+            assert!(continue_fallback_reasons(&engine, &task.id).await.iter().any(|reason| reason.contains("guide, role")));
+            std::fs::remove_dir_all(scope_dir).ok();
         }
 
         #[tokio::test]

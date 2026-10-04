@@ -570,6 +570,62 @@ fn a_downstream_shell_node_reads_its_parents_stdout_from_the_upstream_file() {
     );
 }
 
+#[test]
+fn feedback_is_two_runs_per_task_through_real_shell_reports_and_restart() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    let base = daemon.base_url();
+    let mut review = task_node("review", "touch reviewed; printf 'fix the parser\\n'");
+    review["exits"] = json!([{ "to": "implement", "check": "test ! -f fixed", "max_rounds": 2 }]);
+    let draft = json!({
+        "name": "feedback-rounds", "scope": "demo",
+        "nodes": [task_node("implement", "if test -f reviewed; then touch fixed; cat \"$FACTORY_UPSTREAM_FILE\"; else printf 'initial work\\n'; fi"), review],
+        "edges": [edge("review-work", "implement", "review")]
+    });
+    let created = expect_ok(&format!("{base}/api/workflows"), &post(&format!("{base}/api/workflows"), &draft));
+    let workflow = created["workflow"]["id"].as_str().unwrap();
+    let started = expect_ok(&format!("{base}/api/workflows/{workflow}/run"),
+        &post(&format!("{base}/api/workflows/{workflow}/run"), &json!({})));
+    let workflow_run = started["run"]["id"].as_str().unwrap();
+    let finished = wait_for("feedback rounds to settle", Duration::from_secs(45), || {
+        let run = run_status(&base, workflow_run);
+        matches!(run["status"].as_str(), Some("done" | "failed" | "cancelled")).then_some(run)
+    });
+    assert_eq!(finished["status"], "done", "{finished}");
+    let original_tasks = tasks(&base);
+    assert_eq!(original_tasks.len(), 2, "feedback must not clone tasks: {original_tasks:?}");
+    for task in &original_tasks {
+        assert_eq!(task["runs"], 2);
+        assert_eq!(task["status"], "done");
+        assert!(!task["title"].as_str().unwrap().contains("rework"));
+        let task_id = task["id"].as_str().unwrap();
+        let history = expect_ok(&format!("{base}/api/tasks/{task_id}/runs"),
+            &get(&format!("{base}/api/tasks/{task_id}/runs")));
+        let runs = history["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 2);
+        let second = runs.iter().find(|run| run["attempt"] == 2).unwrap();
+        assert_eq!(second["workflow_round"], 1);
+        assert_eq!(second["task_id"], task["id"]);
+        if task["title"] == "implement" {
+            assert!(second["feedback"]["feedback"].as_str().unwrap().contains("fix the parser"));
+            assert!(second["result"].as_str().unwrap().contains("fix the parser"));
+            assert!(second["result"].as_str().unwrap().contains("review sent this work back"));
+        }
+        let node = finished["nodes"].as_array().unwrap().iter().find(|node| node["task_id"] == task["id"]).unwrap();
+        assert_eq!(node["attempts"].as_array().unwrap().len(), 2);
+        assert!(node.get("superseded_task_ids").is_none());
+    }
+    daemon.sigterm();
+    daemon.spawn();
+    assert_eq!(run_status(&base, workflow_run)["status"], "done");
+    let recovered_tasks = tasks(&base);
+    for task in original_tasks {
+        assert!(recovered_tasks.iter().any(|recovered| recovered["id"] == task["id"] && recovered["runs"] == 2));
+    }
+}
+
 /// The real proof against the pty: a command over 1100 bytes -- comfortably
 /// past the 1024-byte canonical-mode limit (`MAX_CANON`) that a typed line
 /// this long would have been silently cut off by -- still reaches `done`,

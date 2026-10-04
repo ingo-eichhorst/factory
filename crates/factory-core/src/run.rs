@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 
 pub use factory_kernel::RunStatus;
 
+fn is_zero_round(round: &u32) -> bool {
+    *round == 0
+}
+
 /// L4 maps the shared run status to its own task model.
 pub trait RunTaskStatus {
     fn as_task_status(self) -> crate::task::TaskStatus;
@@ -106,6 +110,15 @@ impl BlockSource {
 
 pub use factory_kernel::FailKind;
 
+/// A bounded resume checkpoint. No credentials, transcript or inferred usage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeContext {
+    pub fingerprint: String,
+    pub branch_head: Option<String>,
+    pub main_head: Option<String>,
+    pub resumes: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {
     pub id: String,
@@ -171,7 +184,7 @@ pub struct Run {
     /// Empty on every run that was not itself a continuation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub superseded_token_sha256s: Vec<String>,
-    /// Set when this run was dispatched by `factory task run --continue`:
+    /// Set for `factory task run --continue` or workflow feedback:
     /// the previous run's id, whether or not the continuation actually
     /// managed to resume a session (see `resumed_session` for that).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -185,6 +198,14 @@ pub struct Run {
     /// warn about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_session: Option<String>,
+    /// Workflow feedback belongs to this attempt, never its task title.
+    #[serde(default, skip_serializing_if = "is_zero_round")]
+    pub workflow_round: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<crate::workflow::ReworkRequest>,
+    /// Hash of the guide/role, declaration and observed harness version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_context: Option<ResumeContext>,
     /// The task estimate as it stood when this attempt was dispatched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_estimate: Option<crate::task::Estimate>,
@@ -393,6 +414,12 @@ pub struct RunPatch {
     /// continuation actually resumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_round: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<crate::workflow::ReworkRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_context: Option<ResumeContext>,
     /// See `Run::last_session`. Set together with `session`, and with
     /// nothing that ever clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -466,6 +493,9 @@ mod tests {
         assert_eq!(run.queued_at, None);
         assert_eq!(run.scheduled_for, None);
         assert_eq!(run.fail_kind, None);
+        assert_eq!(run.workflow_round, 0);
+        assert!(run.feedback.is_none());
+        assert!(run.resume_context.is_none());
     }
 
     #[test]

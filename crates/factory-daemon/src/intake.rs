@@ -1915,6 +1915,7 @@ mod tests {
                 name: "fix-flow".into(),
                 scope: "demo".into(),
                 nodes: vec![WorkflowNode {
+                    session: Default::default(),
                     id: "fix".into(),
                     position: CanvasPoint::default(),
                     kind: WorkflowNodeKind::Task,
@@ -2258,6 +2259,15 @@ mod tests {
         assert_eq!(still_waiting.runs, 0, "a direct run request cannot jump its dependency");
         assert!(kinds(&engine, &surface.id).await.contains(&"dependency_held".to_string()));
 
+        // Intake dispatches the foundation in the background. Wait for its
+        // admission/launch writes before changing the fixture's task mirror.
+        for _ in 0..400 {
+            if kinds(&engine, &foundation.id).await.contains(&"dispatched".to_string()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(kinds(&engine, &foundation.id).await.contains(&"dispatched".to_string()));
         engine
             .store
             .update(
@@ -2297,6 +2307,7 @@ mod tests {
                 scope: "demo".into(),
                 inputs: vec![factory_core::workflow::WorkflowInput { name: "issue".into(), description: "number".into() }],
                 nodes: vec![WorkflowNode {
+                    session: Default::default(),
                     id: "fix".into(),
                     position: CanvasPoint::default(),
                     kind: WorkflowNodeKind::Task,

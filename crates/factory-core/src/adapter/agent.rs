@@ -430,7 +430,7 @@ impl AgentContext {
             ""
         };
         // `#178`/`#180`: this run picked an earlier run's conversation back
-        // up, either after infrastructure failed or for integration rework.
+        // up, either after infrastructure failed or for workflow feedback.
         // Whatever `factory task report` command sits
         // earlier in this same history belonged to that run, which is over
         // -- reporting with it now gets refused (`Engine::check_run_token`,
@@ -489,6 +489,10 @@ impl AgentContext {
                 name = self.agent_name,
                 scope = self.scope,
             )),
+        }
+
+        if self.task.as_ref().is_some_and(|binding| binding.task.workflow_origin.is_some()) {
+            out.push_str("Workflow feedback starts a new run of the same task, not a new task. Read the supplied findings and upstream outputs again. A compatible conversation may resume, but only this run's reporting commands and token are valid. Independent verification reviewers start fresh conversations.\n\n");
         }
 
         if let Some(binding) = self.task.as_ref().filter(|binding| {

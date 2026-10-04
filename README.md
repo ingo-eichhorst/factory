@@ -2963,16 +2963,26 @@ edges:
   `skipped_by_route` with a reason such as `skipped (review -> ready)`; those
   nodes count as finished, and a child is eligible when every predecessor is
   done or skipped by route and at least one is done. A backward exit sends the
-  path from `to` through the reporting node back to `unstarted`. Each
-  re-spawned task is
-  titled `(... rework k)`, the node run keeps its earlier tasks in
-  `superseded_task_ids`, and `to`'s new task is dispatched with the sender's
-  `--result` as an extra upstream entry, "... sent this work back -- rework
-  round k of N". Once every round is used, another `--send-to` is refused and
+  path from `to` through the reporting node back to `unstarted`. Each node
+  keeps its task id and title and starts a new run: `workflow_round` records
+  the round, and the target run's `feedback` freezes the sender's findings.
+  The canvas links each attempt to that same task's run history. `to`'s next
+  run is dispatched with the sender's `--result` as an extra upstream entry,
+  "... sent this work back -- rework round k of N". Once every round is used,
+  another `--send-to` is refused and
   tells the agent to report `blocked` with the open findings. A superseded
-  task's late state changes are ignored. Stored legacy
+  task's late state changes are ignored. Existing legacy `(rework N)` tasks
+  and `superseded_task_ids` remain readable; history is not rewritten. Stored legacy
   `rework: { to, max_rounds }` definitions and run snapshots load as one
   `agent:` exit, so an in-flight loop keeps its remaining rounds.
+- **Feedback sessions.** Nodes default to `session: resume`: implementers
+  and reviewers reuse the previous recorded conversation and worktree when
+  the safety checks below allow it. Set `session: fresh` (also in the node
+  inspector) for independent review; injected verification reviewers use
+  fresh sessions. Ordinary retries stay fresh. Every feedback run receives
+  new reporting commands and a new token, even when it resumes. Rework rate
+  and first-pass yield count feedback runs as rework even after a successful
+  previous attempt; healthy scheduled firings are not rework.
 - **Failures do not route.** `failed` means the attempt broke and fails the
   workflow node like any other failure. Review findings that should go back
   are a successful `done --send-to`, so the review task closes completed and
@@ -3272,8 +3282,8 @@ socket and HTTP interfaces) resumes a task's newest run instead of starting a
 fresh one. It is refused outright unless that run is terminal and ended on an
 infrastructure failure -- `FailKind::AckTimeout`, `RunTimeout`, `SessionGone`,
 or `DispatchFailed` after a session had already come up -- never on an
-ordinary retry, a workflow rework, or a feedback round, which all keep
-today's fresh-session behaviour unchanged. Everything below that gate is a
+ordinary application failure. Workflow feedback automatically uses the same
+resume mechanism; ordinary retries stay fresh. Everything below that gate is a
 fallback, never an error: a `--continue` that cannot actually resume still
 dispatches, exactly as a plain `task run` would, with a `continue_fallback`
 journal entry naming the one reason it fell back.
@@ -3283,7 +3293,8 @@ journal entry naming the one reason it fell back.
   Agent seam: declared, never run, `None` by default and for every
   out-of-process plugin (the plugin protocol does not change). `claude-code`
   answers `--resume <id>`, `codex` answers the subcommand `resume <id>`;
-  `pi`, `opencode` and `shell` declare none, which sends `--continue` straight
+  `pi` answers `--session <recorded-id-or-path>`; `opencode` and `shell`
+  declare none, which sends `--continue` straight
   to the fresh-session fallback for them. `ResumeSpec::args` is prepended to
   the launch, ahead of anything `launch_spec` or a scope's own declared args
   add, so a subcommand like codex's stays first.
@@ -3299,10 +3310,20 @@ journal entry naming the one reason it fell back.
   would wipe the very work being resumed.
 - **Falls back to fresh, journaled with the reason, when:** the task's agent
   or adapter changed since the previous run; no session id was recorded; the
-  adapter declares no resume; the worktree is gone; or the runtime does not
+  adapter declares no resume; the worktree is gone or on another branch;
+  the guide, role, declaration or observed harness version changed (legacy
+  runs with no compatibility checkpoint also fall back); eight consecutive
+  resumes have been used; or the runtime does not
   confirm the previous session is gone (`AgentRuntime::status`, asked at
   `--continue` time) -- Factory never runs two processes on one conversation,
   so an unconfirmed answer refuses rather than risks it.
+- **What changed.** A resumed prompt includes bounded, read-only git changes
+  since the previous run ended, for both its branch and the locally recorded
+  `origin/main` (local `main` when no remote ref exists), plus GitHub's PR
+  conflict signal when readable. Missing baselines or unreadable PRs are
+  explicitly unknown. This never fetches, merges, resets or edits files.
+  Concurrent dispatches claim the task under the admission lock; only one
+  may launch, and a stale continuation cannot overwrite a newer attempt.
 - **New run, new token, and a short prompt.** The resumed turn's prompt is a
   brief continue note plus the new run's reporting contract, not the task
   replayed in full -- the resumed conversation already has the original
