@@ -799,6 +799,29 @@ pub fn smoke_script(providers: &[SmokeProvider], git_url: Option<&str>) -> Strin
     out
 }
 
+/// An error body without what changes on every request (`request_id`), so
+/// the same rejection reads the same each time -- one Inbox item, with an
+/// age, not a new one per smoke.
+fn without_volatile(body: &str) -> String {
+    let mut out = body.to_string();
+    for key in ["\"request_id\"", "\"requestId\""] {
+        while let Some(at) = out.find(key) {
+            let after = &out[at + key.len()..];
+            let Some(open) = after.find('"') else { break };
+            let Some(close) = after[open + 1..].find('"') else { break };
+            let mut end = at + key.len() + open + 1 + close + 1;
+            let mut start = at;
+            if out[end..].trim_start().starts_with(',') {
+                end += out[end..].find(',').unwrap() + 1;
+            } else if out[..start].trim_end().ends_with(',') {
+                start = out[..start].rfind(',').unwrap();
+            }
+            out.replace_range(start..end, "");
+        }
+    }
+    out.trim().to_string()
+}
+
 /// What a smoke's output means: `Ok(notes)` when every probe passed (a
 /// note for each that reached its endpoint without confirming the
 /// credential), `Err(reason)` naming the first that did not.
@@ -835,7 +858,7 @@ pub fn judge_smoke(output: &str) -> std::result::Result<Vec<String>, String> {
                     {
                         return Err(format!(
                             "the provider {name}'s credential was rejected by its endpoint (HTTP {code}: {})",
-                            body.chars().take(200).collect::<String>()
+                            without_volatile(body).chars().take(200).collect::<String>()
                         ))
                     }
                     other => notes.push(format!(
@@ -1752,9 +1775,11 @@ policy: {}
     fn a_smoke_fails_only_on_what_proves_a_problem() {
         let ok = "factory-smoke env factory-claude ok\nfactory-smoke http factory-claude 200 \nfactory-smoke git ok\nfactory-smoke done\n";
         assert_eq!(judge_smoke(ok), Ok(vec![]));
-        let rejected = "factory-smoke http factory-claude 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"Invalid bearer token\"}}\nfactory-smoke done\n";
+        let rejected = "factory-smoke http factory-claude 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"Invalid bearer token\"},\"request_id\":\"req_011CfgoiWhwkxoqyq6LY9Gf2\"}\nfactory-smoke done\n";
         let e = judge_smoke(rejected).unwrap_err();
         assert!(e.contains("provider factory-claude's credential was rejected") && e.contains("HTTP 401"), "{e}");
+        assert!(!e.contains("req_011"), "the same rejection reads the same every time: {e}");
+        assert_eq!(judge_smoke(&rejected.replace("req_011CfgoiWhwkxoqyq6LY9Gf2", "req_other")), Err(e));
         let github = "factory-smoke http factory-github 401 {\"message\":\"Bad credentials\"}\nfactory-smoke done\n";
         assert!(judge_smoke(github).unwrap_err().contains("factory-github"));
         // Reached, and the endpoint did not say the credential is bad: a

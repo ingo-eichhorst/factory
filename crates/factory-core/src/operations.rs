@@ -1477,6 +1477,14 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             } else {
                 format!("expires on {} ({} days)", expiring.expires, expiring.days_left)
             };
+            // Since the warning window opened: the same item, ageing, on
+            // every read -- not a new one each time.
+            let since = expiring
+                .expires
+                .and_hms_opt(0, 0, 0)
+                .map(|midnight| midnight.and_utc() - Duration::days(crate::openshell::EXPIRY_WARNING_DAYS))
+                .unwrap_or(now)
+                .min(now);
             attention.push(Exception {
                 kind: ExceptionKind::CredentialExpiring,
                 severity: if expiring.days_left < 7 { Severity::High } else { Severity::Medium },
@@ -1485,8 +1493,8 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 title: Some(expiring.provider.clone()),
                 run_id: None,
                 agent: Some(sb.agent.clone()),
-                since: now,
-                age_s: 0.0,
+                since,
+                age_s: seconds(now - since),
                 reason: format!(
                     "the credential of the OpenShell provider {} {when}; renew it and put the new value in {}, \
                      then update expires: in the agent's openshell block",

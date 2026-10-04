@@ -63,6 +63,9 @@ const GATEWAY_START: Duration = Duration::from_secs(45);
 const START_BACKOFF: Duration = Duration::from_secs(120);
 const SMOKE_CREATE: Duration = Duration::from_secs(10 * 60);
 const SMOKE_EXEC_SECS: u64 = 120;
+/// A smoke that failed is run again after this long, or as soon as
+/// anything it proves changes.
+const SMOKE_RETRY: Duration = Duration::from_secs(30 * 60);
 /// A failed build is retried after this long, or as soon as its key moves.
 const BUILD_RETRY: Duration = Duration::from_secs(60 * 60);
 const BUILD_DEADLINE: Duration = Duration::from_secs(60 * 60);
@@ -173,6 +176,10 @@ pub(crate) struct Provisioner {
     profiles: Mutex<Digests>,
     /// Per agent: the fingerprint its last passing smoke ran against.
     smoked: Mutex<BTreeMap<AgentKey, String>>,
+    /// Per agent: the fingerprint, time and reason of its last failing
+    /// smoke -- so a credential that stays rejected costs one VM per
+    /// `SMOKE_RETRY`, not one per pass.
+    smoke_failed: Mutex<BTreeMap<AgentKey, (String, Instant, String)>>,
     build: Mutex<BuildState>,
     salt: [u8; 16],
     pass: tokio::sync::Mutex<()>,
@@ -197,6 +204,7 @@ impl Provisioner {
             given: Mutex::default(),
             profiles: Mutex::default(),
             smoked: Mutex::default(),
+            smoke_failed: Mutex::default(),
             build: Mutex::default(),
             salt: *uuid::Uuid::new_v4().as_bytes(),
             pass: tokio::sync::Mutex::new(()),
@@ -350,6 +358,7 @@ impl Engine {
         let live: BTreeSet<AgentKey> = agents.iter().map(|d| d.key.clone()).collect();
         lock(&self.provision.readiness).retain(|key, _| live.contains(key));
         lock(&self.provision.smoked).retain(|key, _| live.contains(key));
+        lock(&self.provision.smoke_failed).retain(|key, _| live.contains(key));
         // Two agents naming one managed provider differently would update
         // it back and forth; both are told instead.
         let conflicts = conflicting_providers(&agents);
@@ -488,15 +497,26 @@ impl Engine {
         if lock(&self.provision.smoked).get(&agent.key) == Some(&print) {
             return Ok(());
         }
+        let failed_before = lock(&self.provision.smoke_failed)
+            .get(&agent.key)
+            .filter(|(before, at, _)| *before == print && at.elapsed() < SMOKE_RETRY)
+            .map(|(_, _, reason)| reason.clone());
+        if let Some(reason) = failed_before {
+            return Err(needs(format!("a passing smoke run ({reason})"), smoke_hint(config, &reason)));
+        }
         let instance = factory.config.instance.id.clone();
         let state_root = factory.factory_dir().join("openshell-provision");
         match smoke_run(&base, &instance, &state_root, &image_path, &gateway_names, &policy, &script).await {
             Ok(more) => {
                 notes.extend(more);
+                lock(&self.provision.smoke_failed).remove(&agent.key);
                 lock(&self.provision.smoked).insert(agent.key.clone(), print);
                 Ok(())
             }
-            Err(reason) => Err(needs(format!("a passing smoke run ({reason})"), smoke_hint(config, &reason))),
+            Err(reason) => {
+                lock(&self.provision.smoke_failed).insert(agent.key.clone(), (print, Instant::now(), reason.clone()));
+                Err(needs(format!("a passing smoke run ({reason})"), smoke_hint(config, &reason)))
+            }
         }
     }
 

@@ -335,6 +335,17 @@ async fn a_credential_the_endpoint_rejects_fails_the_smoke_and_the_agent_needs_i
     assert!(f.calls().lines().any(|l| l.starts_with("sandbox delete factory-s")), "the smoke sandbox is deleted either way");
     let gate = f.engine.sandbox_gate(&f.key(), &declared(&f.engine)[0].config).await.unwrap_err();
     assert!(gate.contains("credential was rejected"), "{gate}");
+    // Nothing changed: the next pass does not make another VM to be told
+    // the same thing, and the readiness keeps its age.
+    let since = f.readiness().since;
+    let again = f.pass().await;
+    assert_eq!(f.calls().matches("sandbox create").count(), 1, "{}", f.calls());
+    assert_eq!((again.state, again.since), (ReadinessState::Needs, since));
+    // A new value is worth another try at once.
+    private_file(&f.root.join("secrets/claude"), "a-new-token", 0o600);
+    std::fs::remove_file(f.dir.join("smoke")).unwrap();
+    assert_eq!(f.pass().await.state, ReadinessState::Ready);
+    assert_eq!(f.calls().matches("sandbox create").count(), 2);
 }
 
 #[tokio::test]
