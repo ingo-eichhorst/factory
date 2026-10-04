@@ -9,8 +9,8 @@
 //!
 //! ## Reuse, not reimplementation
 //!
-//! A check measure is judged by `policy::evaluate` as a one-control
-//! catalogue (`quality::applied_checks` builds those controls), so its
+//! A check measure is judged by L5's evaluator as an L5 subject, not an L6
+//! catalogue (`quality::check_subjects` builds its command inputs), so its
 //! evidence is gathered by `policies::Engine::dataset_level_facts`/
 //! `evidence_for_scope` -- the same two functions `policy_report` and
 //! `scenarios_report` call, lazy in the same way: a scope none of whose
@@ -60,7 +60,7 @@ use factory_core::config::{Factory, Scope};
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
 use factory_core::metrics::{MetricId, MetricSeries, MetricValue};
-use factory_core::policy::{self, Check};
+use factory_core::checks::Check;
 use factory_core::protocol::{CharacteristicView, QualityRemediation, QualityReport, ScopeQuality};
 use factory_core::quality::{self, Level, Measure, QualityCatalogue, QualityTree, ScenarioStatus, ScopeReport};
 use factory_core::task::{NewTask, TaskFilter};
@@ -329,19 +329,19 @@ impl Engine {
         values: &BTreeMap<MetricId, MetricValue>,
         now: DateTime<Utc>,
     ) -> Result<(Vec<ScopeReport>, Vec<quality::Finding>)> {
-        let per_scope_applied: Vec<(&Scope, Vec<policy::Applied>)> =
-            inputs.trees.iter().map(|(t, tree)| (t, quality::applied_checks(tree))).collect();
+        let per_scope_applied: Vec<(&Scope, Vec<factory_core::checks::EvaluationSubject>)> =
+            inputs.trees.iter().map(|(t, tree)| (t, quality::check_subjects(tree))).collect();
 
         // The knowledge vault is walked only when some scenario asks a
-        // `knowledge` question -- through `load_catalogues_and_tags`, the
-        // same walk a policy request makes, rather than a second one.
+        // `knowledge` question -- a same-level L5 call to the existing
+        // provider, without reading L6's authored policy catalogues.
         let needs_tags = per_scope_applied
             .iter()
             .flat_map(|(_, applied)| applied)
             .flat_map(|a| &a.evidence)
             .any(|c| matches!(c, Check::Knowledge { .. }));
         let tags: BTreeSet<String> = if needs_tags {
-            self.load_catalogues_and_tags().await?.2
+            crate::facts::assurance_knowledge_tags(self).await?.tags
         } else {
             BTreeSet::new()
         };
@@ -365,7 +365,7 @@ impl Engine {
                     now,
                 )
                 .await?;
-            findings.extend(policy::evidence_findings(&evidence, &t.name).into_iter().map(|f| quality::Finding {
+            findings.extend(factory_core::checks::evidence_findings(&evidence, &t.name).into_iter().map(|f| quality::Finding {
                 kind: quality::FindingKind::AmbiguousCheckTarget,
                 subject: f.subject,
                 detail: f.detail,

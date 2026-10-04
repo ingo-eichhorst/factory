@@ -26,6 +26,11 @@
 //!   identifies page/API composition outside the six-level ladder.
 
 mod duration;
+mod evaluation_receipts;
+pub use evaluation_receipts::{
+    Attestation, ClockDeadlineKind, ClockItemRef, ClockMark, ControlRef, CorrectiveMeasureMark,
+    Withdrawal,
+};
 pub mod error;
 pub use error::{FactoryError, Result};
 mod launch;
@@ -36,36 +41,43 @@ mod span;
 pub use span::{parse_span, Span};
 mod session;
 pub use session::SessionRef;
-mod workflow_identity;
 mod slug;
+mod workflow_identity;
 pub use slug::is_slug;
 pub use workflow_identity::{WorkflowOrigin, WorkflowWorkspace};
 mod knowledge_hints;
-pub use knowledge_hints::{KnowledgeHit, KnowledgeHints};
+pub use knowledge_hints::{KnowledgeHints, KnowledgeHit};
 mod process_metrics;
-pub use process_metrics::{ProductionBin, ProductionBucket, ProductionFact, ProcessMetricFact, BenchResolutionFact};
+pub use process_metrics::{
+    BenchResolutionFact, ProcessMetricFact, ProductionBin, ProductionBucket, ProductionFact,
+};
 mod fact_vocabulary;
 pub mod facts;
 pub use fact_vocabulary::*;
 mod ports;
 mod provenance;
 pub use provenance::*;
-mod stats;
 mod spend;
+mod stats;
 mod workspace;
-pub use workspace::{WorkspaceLifetime, WorkspaceSpec};
-pub use spend::{CostGroupBy, CostReport, CostRow, DailySpend, FinishedSpend, SpendBasis, SpendFigure, TokenSums};
-pub use facts::{EnvironmentMetricFact, KnowledgeTags, ScopeCapacityFact};
-pub use facts::{EnvironmentRecoveryFact, RECOVERY_COMMIT_LABEL, RECOVERY_ENVIRONMENT_LABEL, RECOVERY_REASON_LABEL};
-pub use facts::{ReleaseBuildFact, ReleaseSbomFact};
-pub use facts::{RecoveryJournalFact, ScriptRecoveryAction, ScriptRecoveryFinish};
-pub use facts::{DeploymentMirrorFact, DeploymentMirrorPlan, DeploymentMirrorPhase};
 pub use facts::DeploymentPublicationFact;
+pub use facts::{DeploymentMirrorFact, DeploymentMirrorPhase, DeploymentMirrorPlan};
+pub use facts::{EnvironmentMetricFact, KnowledgeTags, ScopeCapacityFact};
+pub use facts::{
+    EnvironmentRecoveryFact, RECOVERY_COMMIT_LABEL, RECOVERY_ENVIRONMENT_LABEL,
+    RECOVERY_REASON_LABEL,
+};
+pub use facts::{RecoveryJournalFact, ScriptRecoveryAction, ScriptRecoveryFinish};
+pub use facts::{ReleaseBuildFact, ReleaseSbomFact};
+pub use spend::{
+    CostGroupBy, CostReport, CostRow, DailySpend, FinishedSpend, SpendBasis, SpendFigure, TokenSums,
+};
+pub use workspace::{WorkspaceLifetime, WorkspaceSpec};
 pub mod renewals;
 pub use renewals::*;
 mod service_evidence;
-pub use service_evidence::*;
 pub use ports::{Below, FactProvider, FactValue, Facts, People, Provide, Reader};
+pub use service_evidence::*;
 
 pub use duration::Duration;
 pub use facts::{

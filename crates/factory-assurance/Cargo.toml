@@ -11,6 +11,10 @@ level = 5
 factory-kernel = { path = "../factory-kernel" }
 factory-process = { path = "../factory-process" }
 serde.workspace = true
+chrono.workspace = true
+serde_yaml_ng.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+uuid.workspace = true

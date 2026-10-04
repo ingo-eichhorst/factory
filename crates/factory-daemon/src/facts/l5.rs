@@ -8,6 +8,19 @@ pub(crate) struct Provider<'a> {
     pub(super) engine: &'a Engine,
 }
 
+/// Same-level L5 reads are ordinary calls, not an upward Facts<L6> identity.
+/// The provider remains the sole implementation of the live read.
+pub(crate) async fn assurance_gate_facts(
+    engine: &Engine,
+    names: &BTreeSet<String>,
+) -> Result<BTreeMap<String, GateFact>> {
+    Provide::<GateFact>::get(&Provider { engine }, names).await
+}
+
+pub(crate) async fn assurance_knowledge_tags(engine: &Engine) -> Result<KnowledgeTags> {
+    Provide::<KnowledgeTags>::get(&Provider { engine }, &()).await
+}
+
 #[async_trait]
 impl Provide<factory_kernel::BenchResolutionFact> for Provider<'_> {
     type Query = String;

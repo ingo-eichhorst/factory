@@ -748,10 +748,14 @@ dependencies = [
 name = "factory-assurance"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "factory-kernel",
  "factory-process",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
+ "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]

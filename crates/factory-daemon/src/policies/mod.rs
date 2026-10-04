@@ -21,10 +21,11 @@ use factory_core::config::{Factory, Scope};
 use factory_core::error::{FactoryError, Result};
 use factory_core::policy::{self, Attestation, ControlRef, Withdrawal};
 use factory_core::policy_export;
+use factory_core::checks::CheckSource;
 use factory_core::protocol::{CatalogueSummary, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy, WorkflowEnforcement, WorkflowEnforcementFinding};
 use factory_core::reporting_clock::{self, ClockDeadlineState, ClockMark};
 use factory_core::task::{NewTask, Task};
-use factory_kernel::{DaemonConfigFact, BackupFact, SecretsPresence, AgentFact, TaskFact, WorkflowFact, GateFact, DependenciesFact, AttestedRun, L6};
+use factory_kernel::{DaemonConfigFact, BackupFact, SecretsPresence, AgentFact, TaskFact, WorkflowFact, DependenciesFact, AttestedRun, L5, L6};
 use crate::facts::{Facts, NamedQuery, AttestedQuery, TaskInventoryQuery};
 use factory_kernel::TaskInventoryFact;
 
@@ -34,10 +35,10 @@ use crate::engine::Engine;
 /// Every distinct dataset name a `gate` check among `applied`'s controls
 /// names -- what a caller resolving `gate` facts (`Engine::gate_facts_for`)
 /// has to ask about, and no more.
-fn gate_dataset_names(applied: &[policy::Applied]) -> BTreeSet<String> {
+fn gate_dataset_names(applied: &[impl CheckSource]) -> BTreeSet<String> {
     applied
         .iter()
-        .flat_map(|a| &a.evidence)
+        .flat_map(|a| a.checks())
         .filter_map(|check| match check {
             policy::Check::Gate { dataset, .. } => Some(dataset.clone()),
             _ => None,
@@ -48,28 +49,28 @@ fn gate_dataset_names(applied: &[policy::Applied]) -> BTreeSet<String> {
 /// Whether any check among `applied` is `roles` or `sandbox` -- both read
 /// `Evidence::agents`, so a scope whose catalogue never asks either
 /// question never pays for `Engine::agent_facts_for`'s `roles_for` lookup.
-fn needs_agent_facts(applied: &[policy::Applied]) -> bool {
+fn needs_agent_facts(applied: &[impl CheckSource]) -> bool {
     applied
         .iter()
-        .flat_map(|a| &a.evidence)
+        .flat_map(|a| a.checks())
         .any(|check| matches!(check, policy::Check::Roles { .. } | policy::Check::Sandbox))
 }
 
 /// Whether any check among `applied` is `secrets` -- gates
 /// `Engine::credential_inventory`, the one part of this module's evidence
 /// gathering that touches the filesystem, behind an actual need for it.
-fn needs_secrets_facts(applied: &[policy::Applied]) -> bool {
+fn needs_secrets_facts(applied: &[impl CheckSource]) -> bool {
     applied
         .iter()
-        .flat_map(|a| &a.evidence)
+        .flat_map(|a| a.checks())
         .any(|check| matches!(check, policy::Check::Secrets { .. }))
 }
 
 /// Whether any check among `applied` is `daemon`.
-fn needs_daemon_facts(applied: &[policy::Applied]) -> bool {
+fn needs_daemon_facts(applied: &[impl CheckSource]) -> bool {
     applied
         .iter()
-        .flat_map(|a| &a.evidence)
+        .flat_map(|a| a.checks())
         .any(|check| matches!(check, policy::Check::Daemon { .. }))
 }
 
@@ -79,8 +80,8 @@ fn needs_daemon_facts(applied: &[policy::Applied]) -> bool {
 /// backup store, behind an actual need for it. Distinct from
 /// `needs_daemon_facts`: a catalogue asking only `power_assertion` must
 /// never pay for it.
-fn needs_backup_facts(applied: &[policy::Applied]) -> bool {
-    applied.iter().flat_map(|a| &a.evidence).any(|check| {
+fn needs_backup_facts(applied: &[impl CheckSource]) -> bool {
+    applied.iter().flat_map(|a| a.checks()).any(|check| {
         matches!(
             check,
             policy::Check::Daemon { fact } if matches!(fact.as_str(), "backup_recent" | "backup_offsite" | "backup_verified")
@@ -88,23 +89,23 @@ fn needs_backup_facts(applied: &[policy::Applied]) -> bool {
     })
 }
 
-fn needs_dependencies_facts(applied: &[policy::Applied]) -> bool {
-    applied.iter().flat_map(|a| &a.evidence)
+fn needs_dependencies_facts(applied: &[impl CheckSource]) -> bool {
+    applied.iter().flat_map(|a| a.checks())
         .any(|check| matches!(check, policy::Check::Dependencies { .. }))
 }
 
 /// Whether any check among `applied` is `attested` -- gates
 /// `Engine::attested_runs`, the one part of this module's evidence
 /// gathering that reads finished runs and their `StepAttestation`s (`#158`).
-fn needs_attested_facts(applied: &[policy::Applied]) -> bool {
+fn needs_attested_facts(applied: &[impl CheckSource]) -> bool {
     applied
         .iter()
-        .flat_map(|a| &a.evidence)
+        .flat_map(|a| a.checks())
         .any(|check| matches!(check, policy::Check::Attested { .. }))
 }
 
-fn needs_budget_facts(applied: &[policy::Applied]) -> bool {
-    applied.iter().flat_map(|a| &a.evidence).any(|check| matches!(check, policy::Check::BudgetWithin))
+fn needs_budget_facts(applied: &[impl CheckSource]) -> bool {
+    applied.iter().flat_map(|a| a.checks()).any(|check| matches!(check, policy::Check::BudgetWithin))
 }
 
 /// Every category an `attested` check among `applied`'s controls names, and
@@ -117,24 +118,24 @@ fn needs_budget_facts(applied: &[policy::Applied]) -> bool {
 /// carrying an `attested` check -- `Check::own_max_age` always returns one
 /// for it -- so this never has to fall back to a default.
 fn attested_categories(
-    applied: &[policy::Applied],
+    applied: &[impl CheckSource],
 ) -> (BTreeSet<String>, Option<factory_core::policy::Duration>) {
     let mut categories = BTreeSet::new();
     let mut widest: Option<factory_core::policy::Duration> = None;
     for a in applied {
         if !a
-            .evidence
+            .checks()
             .iter()
             .any(|c| matches!(c, policy::Check::Attested { .. }))
         {
             continue;
         }
-        for check in &a.evidence {
+        for check in a.checks() {
             if let policy::Check::Attested { category, .. } = check {
                 categories.insert(category.clone());
             }
         }
-        if let Some(w) = a.max_age {
+        if let Some(w) = a.max_age() {
             widest = Some(widest.map_or(w, |cur| cur.max(w)));
         }
     }
@@ -173,12 +174,12 @@ impl Engine {
     async fn resolve_task_and_workflow_facts(
         &self,
         scope: &str,
-        applied: &[policy::Applied],
+        applied: &[impl CheckSource],
     ) -> Result<(BTreeMap<String, Vec<policy::TaskFact>>, BTreeMap<String, Vec<policy::WorkflowFact>>)> {
         let mut task_names: BTreeSet<&str> = BTreeSet::new();
         let mut workflow_names: BTreeSet<&str> = BTreeSet::new();
         for a in applied {
-            for check in &a.evidence {
+            for check in a.checks() {
                 match check {
                     policy::Check::Task { task, .. } => {
                         task_names.insert(task.as_str());
@@ -191,7 +192,7 @@ impl Engine {
             }
         }
 
-        let facts = Facts::<L6>::new(self);
+        let facts = Facts::<L5>::new(self);
         let tasks = facts.get::<TaskFact>(&NamedQuery {
             scope: scope.to_string(), names: task_names.into_iter().map(str::to_string).collect(),
         }).await?;
@@ -207,7 +208,7 @@ impl Engine {
     /// evaluating several scopes in one report calls this once, over the
     /// union of every scope's `gate` checks, rather than once per scope.
     async fn gate_facts_for(&self, names: &BTreeSet<String>) -> Result<BTreeMap<String, policy::GateFact>> {
-        Facts::<L6>::new(self).get::<GateFact>(names).await
+        crate::facts::assurance_gate_facts(self, names).await
     }
 
     /// The facts every scope in a report's subtree shares, resolved once
@@ -227,9 +228,9 @@ impl Engine {
     /// `gate`/`daemon`/`secrets` check the baseline never did (an
     /// `add_frameworks` draft, say), and this is what picks up the extra
     /// fact lazily rather than the caller having to know in advance.
-    pub(crate) async fn dataset_level_facts(
+    pub(crate) async fn dataset_level_facts<S: CheckSource>(
         &self,
-        per_scope_applied: &[(&Scope, Vec<policy::Applied>)],
+        per_scope_applied: &[(&Scope, Vec<S>)],
     ) -> Result<(
         BTreeMap<String, policy::GateFact>,
         Option<policy::DaemonFact>,
@@ -242,7 +243,7 @@ impl Engine {
             dataset_names.extend(gate_dataset_names(applied));
         }
         let gates = self.gate_facts_for(&dataset_names).await?;
-        let facts = Facts::<L6>::new(self);
+        let facts = Facts::<L5>::new(self);
         let daemon_fact = if per_scope_applied.iter().any(|(_, applied)| needs_daemon_facts(applied)) {
             Some(facts.get::<DaemonConfigFact>(&()).await?)
         } else { None };
@@ -281,7 +282,7 @@ impl Engine {
     async fn attested_evidence(
         &self,
         scope: &str,
-        applied: &[policy::Applied],
+        applied: &[impl CheckSource],
     ) -> Result<Option<Vec<factory_core::conformance::AttestedRun>>> {
         if !needs_attested_facts(applied) {
             return Ok(None);
@@ -297,7 +298,7 @@ impl Engine {
         };
         let scopes: BTreeSet<String> = std::iter::once(scope.to_string()).collect();
         Ok(Some(
-            Facts::<L6>::new(self).get::<AttestedRun>(&AttestedQuery {
+            Facts::<L5>::new(self).get::<AttestedRun>(&AttestedQuery {
                 scopes: Some(scopes), categories: Some(categories), window,
             })
                 .await?,
@@ -317,7 +318,7 @@ impl Engine {
         &self,
         snapshot: &Factory,
         t: &Scope,
-        applied: &[policy::Applied],
+        applied: &[impl CheckSource],
         tags: &BTreeSet<String>,
         all_attestations: &[Attestation],
         gates: &BTreeMap<String, policy::GateFact>,
@@ -334,7 +335,7 @@ impl Engine {
             .map(|ancestor| ancestor.name.as_str())
             .collect();
         let (tasks, workflows) = self.resolve_task_and_workflow_facts(&t.name, applied).await?;
-        let facts = Facts::<L6>::new(self);
+        let facts = Facts::<L5>::new(self);
         let agents = if needs_agent_facts(applied) {
             Some(facts.get::<AgentFact>(&t.name).await?)
         } else { None };
