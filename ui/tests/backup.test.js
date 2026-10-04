@@ -118,7 +118,7 @@ test("L1 gains a Backup tab after Infrastructure, with a view and a sub-label th
   assert.match(page, /id="tab-infrastructure"[^>]*>Infrastructure<\/button>[\s\S]*<button id="tab-backup" hidden>Backup<\/button>/);
   assert.match(page, /id="view-backup"/);
   assert.match(page, /<span class="lv-sub">Host, daemon, Doctor, operations and backup<\/span>/);
-  assert.match(app, /infra: \["infrastructure", "doctor", "environments", "backup"\]/);
+  assert.match(app, /infra: \["infrastructure", "doctor", "environments", "backup", "dates"\]/);
   assert.match(app, /backup: \{ onShow: startBackup, onHide: stopAgentPoll \}/);
   assert.match(app, /state\.tab === "backup"/, "the rail's re-render names every tab");
   assert.match(app, /isBackupEvent\(ev\) && state\.tab === "backup"/, "backup_* events refetch the page");

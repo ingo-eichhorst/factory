@@ -34,13 +34,14 @@ pub enum ViewId {
     Inbox,
     Compliance,
     Cost,
+    ImportantDates,
 }
 
 impl ViewId {
     /// Every view id, in the order the catalogue above lists them --
     /// nothing reads this today, but a validation error or a future
     /// catalogue listing wants the closed set spelled out once.
-    pub const ALL: [ViewId; 11] = [
+    pub const ALL: [ViewId; 12] = [
         ViewId::Kpis,
         ViewId::Throughput,
         ViewId::OnTheLine,
@@ -52,6 +53,7 @@ impl ViewId {
         ViewId::Inbox,
         ViewId::Compliance,
         ViewId::Cost,
+        ViewId::ImportantDates,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -67,6 +69,7 @@ impl ViewId {
             ViewId::Inbox => "inbox",
             ViewId::Compliance => "compliance",
             ViewId::Cost => "cost",
+            ViewId::ImportantDates => "important_dates",
         }
     }
 }

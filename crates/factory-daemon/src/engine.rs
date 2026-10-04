@@ -343,6 +343,10 @@ pub struct Engine {
     pub(crate) harness: crate::harness_health::HarnessHealth,
     /// `sandbox: openshell` prerequisites, kept in the background (`#234`).
     pub(crate) provision: crate::provision::Provisioner,
+    pub(crate) infrastructure_expiries: crate::renewals::store::ObservationStore<factory_kernel::L1>,
+    pub(crate) credential_expiries: crate::renewals::store::ObservationStore<factory_kernel::L2>,
+    pub(crate) renewal_alerts: crate::renewals::store::AlertStore,
+    pub(crate) renewal_declaration_cache: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<factory_kernel::RenewalDecl>>>,
     /// The fingerprint of what the last successful `Request::Quality`
     /// loaded -- every profile in `.factory/quality/` and every scope's
     /// quality chain -- with when it loaded them, so the next read can tell
@@ -455,6 +459,10 @@ impl Engine {
             power,
             harness: crate::harness_health::HarnessHealth::new(),
             provision: crate::provision::Provisioner::default(),
+            infrastructure_expiries: crate::renewals::store::ObservationStore::in_memory().expect("expiry metadata store should open"),
+            credential_expiries: crate::renewals::store::ObservationStore::in_memory().expect("expiry metadata store should open"),
+            renewal_alerts: crate::renewals::store::AlertStore::in_memory().expect("renewal alert store should open"),
+            renewal_declaration_cache: Default::default(),
             quality_seen: Default::default(),
             quality_guide_cache: Default::default(),
             schedule_lock: tokio::sync::Mutex::new(()),
@@ -717,6 +725,7 @@ impl Engine {
             // request future's stack frame. Every request variant shares that
             // frame even when Infrastructure was not the one selected.
             Request::Infrastructure => Ok(Box::pin(self.infrastructure()).await),
+            Request::ImportantDates { scope } => Ok(Payload::ImportantDates { report: Box::new(self.important_dates(scope.as_deref()).await?) }),
             Request::Backup => Ok(Payload::Backup {
                 report: Box::new(self.backup_report().await?),
             }),
@@ -5405,9 +5414,12 @@ mod tests {
                 intake: Default::default(),
                 dependencies: Default::default(),
                 environments: Vec::new(),
+                renewals: Vec::new(),
             }],
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory {
             root: std::env::temp_dir().join(format!("factory-engine-test-{}", uuid::Uuid::new_v4())),
@@ -5512,9 +5524,12 @@ mod tests {
                     intake: Default::default(),
                     dependencies: Default::default(),
                     environments: Vec::new(),
+                    renewals: Vec::new(),
                 }],
                 infrastructure: Default::default(),
                 plugins_dir: None,
+                renewals: Vec::new(),
+                renewals_notify: None,
             };
             let factory = Factory {
                 root: std::env::temp_dir().join(format!("factory-capacity-test-{}", uuid::Uuid::new_v4())),
@@ -8719,9 +8734,12 @@ mod tests {
                     intake: Default::default(),
                     dependencies: Default::default(),
                     environments: Vec::new(),
+                    renewals: Vec::new(),
                 }],
                 infrastructure: Default::default(),
                 plugins_dir: None,
+                renewals: Vec::new(),
+                renewals_notify: None,
             };
             let factory = Factory {
                 root: std::env::temp_dir().join(format!("factory-continue-test-{}", uuid::Uuid::new_v4())),

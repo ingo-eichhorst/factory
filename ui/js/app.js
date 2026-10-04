@@ -30,6 +30,7 @@ import { loadInfrastructure, renderInfrastructure } from "./infrastructure.js";
 import { refreshDoctor, renderDoctor, wireDoctor } from "./doctor.js";
 import { refreshBackup, renderBackup, wireBackup } from "./backup.js";
 import { isBackupEvent } from "./backup-model.js";
+import { refreshDates, wireDates, loadDateBadges } from "./dates.js";
 import { refreshEnvironments, wireEnvironments } from "./environments.js";
 import { isEnvironmentsEvent } from "./environments-model.js";
 import { loadPolicy, reloadPolicy, wirePolicy } from "./policy.js";
@@ -58,7 +59,7 @@ const VIEWS = {
   // The daemon's attention list, every scope -- the same exceptions the
   // Line tab shows per scope (`#106`), so there is one list, filtered
   // two ways, and not two derivations that can disagree.
-  inbox: { onShow: loadInbox },
+  inbox: { onShow: startInbox, onHide: stopAgentPoll },
   // No poll: a policy read is cheap (catalogues on disk, the knowledge index,
   // the attestations store -- see `Request::Policy`'s doc comment) and
   // changes only when somebody attests or withdraws, which arrives as
@@ -150,6 +151,7 @@ const VIEWS = {
   // unplugged, which fires no event -- and refetched on every `backup_*`
   // event (`onEvent` below), which the daemon's own job publishes too.
   backup: { onShow: startBackup, onHide: stopAgentPoll },
+  dates: { onShow: startDates, onHide: stopAgentPoll },
 };
 
 // ------------------------------------------------------------------- the URL
@@ -239,7 +241,7 @@ const LEVEL_VIEWS = {
   // Quality closes the row: benchmarks and knowledge are how the work gets
   // better, quality attributes whether it has got good enough.
   imp: ["benchmarks", "knowledge", "quality"],
-  infra: ["infrastructure", "doctor", "environments", "backup"],
+  infra: ["infrastructure", "doctor", "environments", "backup", "dates"],
 };
 
 /// The live level that claims `tab`, for backfilling `state.level` before any
@@ -378,6 +380,7 @@ function rerender(route) {
   else if (state.tab === "doctor") renderDoctor();
   // A backup is of the whole instance: no rail selection narrows it.
   else if (state.tab === "backup") renderBackup();
+  else if (state.tab === "dates") refreshDates();
 }
 
 /// The rail is a view over `state.scopes`, so it is rebuilt wherever that is
@@ -445,7 +448,9 @@ function startOccupancy() {
 function startRoster() {
   stopAgentPoll();
   loadAgents();
-  state.agentPoll = setInterval(renderAgents, 5000);
+  const refresh = async () => { await loadDateBadges(); renderAgents(); };
+  refresh();
+  state.agentPoll = setInterval(refresh, 10000);
 }
 
 /// No poll: roles change only when somebody writes one or gives one, and
@@ -466,7 +471,7 @@ function startAgentRuntime() {
 /// is the one place -- app.js, which already knows every view -- that renders
 /// both of them from it.
 async function refreshEnvironment() {
-  await loadEnvironment();
+  await Promise.all([loadEnvironment(), loadDateBadges()]);
   renderSandboxes();
   renderSecrets();
 }
@@ -551,6 +556,18 @@ function startBackup() {
   state.agentPoll = setInterval(refreshBackup, 30000);
 }
 
+function startDates() {
+  stopAgentPoll();
+  refreshDates();
+  state.agentPoll = setInterval(refreshDates, 30000);
+}
+
+function startInbox() {
+  stopAgentPoll();
+  loadInbox();
+  state.agentPoll = setInterval(loadInbox, 30000);
+}
+
 // ---------------------------------------------------------------------- boot
 
 async function boot() {
@@ -626,6 +643,7 @@ async function boot() {
   $("infrastructure-refresh").onclick = () => refreshInfrastructure();
   wireDoctor();
   wireBackup();
+  wireDates();
   wireEnvironments();
   wireOccupancy();
   $("newTask").onclick = () => openCreate();
@@ -798,6 +816,14 @@ function onEvent(ev) {
   if (state.tab === "budget" && budgetEvent(ev)) reloadBudget();
   // A backup taken (by a person or the schedule), failed or verified.
   if (isBackupEvent(ev) && state.tab === "backup") refreshBackup();
+  if (ev.type === "important_dates_updated" || ev.type === "policy_changed") {
+    if (state.tab === "dates") refreshDates();
+    if (state.tab === "dashboard") loadDashboard();
+    if (state.tab === "inbox") loadInbox();
+    if (state.tab === "roster") loadDateBadges().then(renderAgents);
+    if (state.tab === "sandboxes") refreshEnvironment();
+    if (state.tab === "environments") refreshEnvironments();
+  }
   // A deployment began or ended, or an environment's status changed.
   if (isEnvironmentsEvent(ev) && state.tab === "environments") refreshEnvironments().catch(error => console.warn("Operations refresh failed", error));
   if (state.tab === "doctor" && (ev.type === "task_entry" || ev.type === "run_updated")) refreshDoctor();

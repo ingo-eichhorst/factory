@@ -58,7 +58,7 @@ test("#185: L1 gains an Operations tab between Infrastructure and Backup, and it
   assert.match(page, /id="environments-unavailable"/);
   assert.match(page, /id="environments-error"/);
   assert.match(page, /<span class="lv-sub">Host, daemon, Doctor, operations and backup<\/span>/);
-  assert.match(app, /infra: \["infrastructure", "doctor", "environments", "backup"\]/);
+  assert.match(app, /infra: \["infrastructure", "doctor", "environments", "backup", "dates"\]/);
   assert.match(app, /environments: \{ onShow: startEnvironments, onHide: stopAgentPoll \}/);
   assert.match(app, /state\.agentPoll = setInterval\(refreshEnvironments, 30000\)/);
   assert.match(app, /if \(isEnvironmentsEvent\(ev\) && state\.tab === "environments"\) refreshEnvironments\(\)\.catch\(/);

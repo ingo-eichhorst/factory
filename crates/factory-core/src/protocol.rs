@@ -391,6 +391,9 @@ pub enum Request {
     /// only ever what the config says it is.
     #[serde(rename = "infrastructure")]
     Infrastructure,
+    /// Read-only important-date metadata and native policy/CRA projections.
+    #[serde(rename = "important-dates")]
+    ImportantDates { #[serde(default)] scope: Option<String> },
     /// The L1 Backup page (`#116`): the configured destination and schedule,
     /// every snapshot of this instance found there with how it was kept and
     /// verified, and the honest warnings those facts add up to. Read-only,
@@ -1189,6 +1192,7 @@ pub enum Payload {
     Policy { report: PolicyReport },
     /// The answer to `Request::PolicyClock`.
     PolicyClock { clock: crate::reporting_clock::ReportingClock },
+    ImportantDates { report: Box<crate::renewals::ImportantDatesReport> },
     /// The answer to `Request::PolicyControl`.
     PolicyControl { detail: PolicyControlDetail },
     /// The answer to `Request::PolicyAttest`/`Request::PolicyWithdraw`: the

@@ -462,6 +462,11 @@ pub struct DeploymentPublicationFact {
     pub production: bool,
 }
 impl Fact for DeploymentPublicationFact { type Producer = L1; }
+pub use crate::renewals::{InfrastructureExpiryFact, CredentialExpiryFact, ScheduledRunDatesFact, RenewalDeclarationsFact};
+impl Fact for InfrastructureExpiryFact { type Producer = L1; }
+impl Fact for RenewalDeclarationsFact { type Producer = L1; }
+impl Fact for CredentialExpiryFact { type Producer = L2; }
+impl Fact for ScheduledRunDatesFact { type Producer = L4; }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -615,6 +620,22 @@ pub struct FactCatalogueEntry {
 /// a wrong level reader a compile error instead of a comment. All listed schemas
 /// and their nested vocabulary now live in L0.
 pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
+    FactCatalogueEntry {
+        fact: "RenewalDeclarationsFact", producer: "L1", readers: &["L6 important dates"],
+        lives_in_kernel: true, note: "validated authored expiry metadata read live; no credential values (#236)",
+    },
+    FactCatalogueEntry {
+        fact: "InfrastructureExpiryFact", producer: "L1", readers: &["L6 important dates", "People router"],
+        lives_in_kernel: true, note: "public TLS certificate expiry metadata; never private keys (#236)",
+    },
+    FactCatalogueEntry {
+        fact: "CredentialExpiryFact", producer: "L2", readers: &["L6 important dates", "People router"],
+        lives_in_kernel: true, note: "credential expiry metadata only, never credential contents (#236)",
+    },
+    FactCatalogueEntry {
+        fact: "ScheduledRunDatesFact", producer: "L4", readers: &["L6 important dates"],
+        lives_in_kernel: true, note: "authoritative next scheduled attempts and agent dependencies (#236)",
+    },
     FactCatalogueEntry {
         fact: "CostReport",
         producer: "L4",

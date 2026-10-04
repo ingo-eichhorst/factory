@@ -176,6 +176,12 @@ pub struct Config {
     /// `.factory/`. Defaults to `plugins`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugins_dir: Option<PathBuf>,
+    /// Important-date metadata for the whole instance. Never credential values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renewals: Vec<crate::renewals::RenewalDecl>,
+    /// Optional standing owner opt-in for rare (one-day/overdue) push alerts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renewals_notify: Option<crate::renewals::RenewalsNotify>,
 }
 
 impl Config {
@@ -434,6 +440,7 @@ impl Config {
     /// Falling back to the default instead would demote an agent on a typo
     /// and never mention it.
     pub fn validate(&self) -> Result<()> {
+        crate::renewals::validate(&self.renewals, self.renewals_notify.as_ref())?;
         self.roles()?;
         self.refuse_root_scope_roles()?;
         self.refuse_root_scope_policies()?;
@@ -444,6 +451,7 @@ impl Config {
         self.infrastructure.validate()?;
         self.validate_environments()?;
         for scope in self.scope.iter().chain(&self.scopes) {
+            crate::renewals::validate(&scope.renewals, None)?;
             scope.validate_dependencies()?;
             refuse_zero_max_sessions(scope)?;
             let roles = self.roles_for_scope(scope)?;
@@ -504,6 +512,7 @@ impl Config {
     /// the only scope checked here, and its message says it is the root's
     /// list -- never that it is every role a nested scope might have.
     pub fn validate_instance(&self) -> Result<()> {
+        crate::renewals::validate(&self.renewals, self.renewals_notify.as_ref())?;
         let roles = self.roles()?;
         self.refuse_root_scope_roles()?;
         self.refuse_root_scope_policies()?;
@@ -513,6 +522,7 @@ impl Config {
         self.validate_dashboards(std::iter::empty())?;
         self.infrastructure.validate()?;
         if let Some(scope) = &self.scope {
+            crate::renewals::validate(&scope.renewals, None)?;
             scope.validate_dependencies()?;
             refuse_zero_max_sessions(scope)?;
             for agent in scope.declared_agents() {
@@ -789,6 +799,17 @@ pub fn refuse_misplaced_scope_infrastructure(document: &serde_yaml_ng::Value, pa
 
 fn default_version() -> u32 {
     1
+}
+
+/// Nested files read only `scope:`; never silently drop renewal metadata.
+pub fn refuse_misplaced_scope_renewals(document: &serde_yaml_ng::Value, path: &Path) -> Result<()> {
+    for key in ["renewals", "renewals_notify"] {
+        if document.as_mapping().is_some_and(|root| root.contains_key(serde_yaml_ng::Value::String(key.into()))) {
+            let destination = if key == "renewals" { "under scope.renewals" } else { "in the instance root" };
+            return Err(FactoryError::BadRequest(format!("scope config {} has top-level {key}; put it {destination}", path.display())));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1587,6 +1608,9 @@ pub struct Scope {
     /// instance, checked by `Config::validate`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub environments: Vec<crate::environments::EnvironmentDecl>,
+    /// This scope's authored important-date metadata, kept in its own config.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renewals: Vec<crate::renewals::RenewalDecl>,
 }
 
 impl DependenciesConfig {
@@ -2097,6 +2121,8 @@ mod tests {
                 quality: Vec::new(),
                 infrastructure: Infrastructure::default(),
                 plugins_dir: None,
+                renewals: Vec::new(),
+                renewals_notify: None,
             },
         }
     }

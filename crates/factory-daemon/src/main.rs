@@ -29,6 +29,7 @@ mod metrics;
 mod occupancy;
 mod openshell;
 mod provision;
+mod renewals;
 mod operations;
 mod recovery_journal;
 mod policies;
@@ -179,6 +180,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         intake: Default::default(),
         dependencies: Default::default(),
         environments: Vec::new(),
+        renewals: Vec::new(),
     };
     let config = Config {
         version: 1,
@@ -195,6 +197,8 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         quality: Default::default(),
         infrastructure: Default::default(),
         plugins_dir: None,
+        renewals: Vec::new(),
+        renewals_notify: None,
     };
     std::fs::write(&config_path, serde_yaml_ng::to_string(&config)?)?;
     println!("wrote {}", config_path.display());
@@ -308,6 +312,9 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let goals_store = goals::GoalsStore::open(&factory.database_path())?;
     let backup_store = backup::BackupStore::open(&factory.database_path())?;
     let environment_store = environments::EnvironmentStore::open(&factory.database_path())?;
+    let infrastructure_expiries = renewals::store::ObservationStore::open(&factory.database_path())?;
+    let credential_expiries = renewals::store::ObservationStore::open(&factory.database_path())?;
+    let renewal_alerts = renewals::store::AlertStore::open(&factory.database_path())?;
     let engine = Arc::new(
         Engine::new(factory.clone(), registry, store, factory_bin(), interface_names)
             .with_workflow_store(workflow_store)
@@ -315,7 +322,8 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
             .with_policy_store(policy_store)
             .with_goals_store(goals_store)
             .with_backup_store(backup_store)
-            .with_environment_store(environment_store),
+            .with_environment_store(environment_store)
+            .with_renewal_stores(infrastructure_expiries, credential_expiries, renewal_alerts),
     );
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -414,6 +422,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // and neither may hold up startup or any dispatch but its own agent's.
     let provisioning = tokio::spawn(provision::run(engine.clone(), shutdown_rx.clone()));
     let recovery_receipts = tokio::spawn(recovery_journal::run(engine.clone(), shutdown_rx.clone()));
+    let important_dates = tokio::spawn(renewals::run(engine.clone(), shutdown_rx.clone()));
 
     engine.bus.publish(Event::DaemonStarted {
         at: chrono::Utc::now(),
@@ -455,6 +464,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     health.abort();
     provisioning.abort();
     recovery_receipts.abort();
+    important_dates.abort();
     engine.registry.shutdown().await;
     Ok(())
 }

@@ -1124,6 +1124,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         config.scopes = vec![
             scope_at("company-id", "company", ".", ""),
@@ -1564,6 +1566,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let root_scope = scope_at("root-id", "root", ".", "");
         let mut team_scope: Scope = serde_yaml_ng::from_str(
@@ -1648,6 +1652,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory { root, config };
         let registry = Registry::with_builtins();
@@ -2089,6 +2095,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory { root: root.to_path_buf(), config };
         let registry = Registry::with_builtins();
@@ -2346,6 +2354,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory { root, config };
         let registry = Registry::with_builtins();

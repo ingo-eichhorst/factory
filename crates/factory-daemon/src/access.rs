@@ -293,6 +293,7 @@ impl Engine {
             | Request::DependenciesVex { .. }
             | Request::Doctor
             | Request::Infrastructure
+            | Request::ImportantDates { .. }
             // Lists the destination and reads the history; writes nothing.
             | Request::Backup
             // Samples and deployments folded on read; writes nothing.
@@ -864,6 +865,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory {
             root: PathBuf::from("/tmp/factory-access-test"),

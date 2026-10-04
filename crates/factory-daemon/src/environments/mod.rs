@@ -570,6 +570,8 @@ pub(crate) mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         config.validate_environments().unwrap();
         let factory = Factory { root: root.clone(), config };

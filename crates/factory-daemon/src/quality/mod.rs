@@ -650,6 +650,8 @@ mod tests {
             quality: vec!["baseline".into()],
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let registry = Registry::with_builtins();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());

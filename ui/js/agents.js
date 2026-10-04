@@ -4,6 +4,7 @@
 import { $, esc, api, state, since, statusBadge } from "./core.js";
 import { inScope, scopeLabel } from "./scopes.js";
 import { readinessTag } from "./sandboxes.js";
+import { dateBadges } from "./dates.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
 import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openTask } from "./tasks.js";
@@ -119,6 +120,7 @@ export function renderAgents() {
           ${a.adapter !== a.name ? `<span class="sub">${esc(a.adapter)}</span>` : ""}
           ${standing ? statusBadge(a.state) : ""}
           ${agentTags(a)}
+          ${dateBadges({ scope: s.name, agent: a.name })}
           <span style="margin-left:auto"></span>
           ${rolePicker}
           <span class="row-btns">${buttons.join("")}</span>

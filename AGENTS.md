@@ -33,6 +33,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/task-model.js                                          a task's board column, failure/close line and actions (#122), pure
     ui/js/{scenarios,scenarios-model}.js                         the L6 Scenarios tab and its pure shaping logic
     ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic
+    ui/js/{dates,dates-model}.js                                 Important Dates, shared dependency badges and renewal Inbox shaping (#236)
     ui/js/{environments,environments-model}.js                   the L1 Operations tab (#185) and its pure shaping logic
     ui/js/{doctor,doctor-model}.js                               the L1 Doctor dependency view and its pure shaping logic
     ui/js/dashboard-model.js                                     the dashboard's tile vocabulary, default layout and row packing (#163), pure

@@ -76,6 +76,8 @@ import { $, esc, api, state } from "./core.js";
 import { inScope, routeHref, scopeLabel } from "./scopes.js";
 import { ACTION_LABELS, actionRequest, fmtAge, inboxItems } from "./operations-model.js";
 import { inboxClockRows } from "./clock-model.js";
+import { fetchDates } from "./dates.js";
+import { renewalInboxRows, datesSummary } from "./dates-model.js";
 import { taskUsageLine, costFigure } from "./usage-model.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
@@ -154,6 +156,21 @@ let tileMetrics; // last /api/metrics answer: { values, series, registry }
 let tileOccupancy; // last /api/occupancy answer's `.occupancy`
 let tilePolicy; // last /api/policy answer's `.report`
 let tileCosts; // last /api/costs answer's `.report`
+let tileDates;
+let datesAsked = 0;
+
+async function loadTileDates() {
+  const scope = state.scope;
+  const mine = ++datesAsked;
+  const report = await fetchDates(scope);
+  if (mine === datesAsked && scope === state.scope) tileDates = { scope, report };
+}
+
+function datesTile() {
+  const report = tileDates?.scope === state.scope ? tileDates.report : null;
+  const summary = datesSummary(report);
+  return dcard("Important dates", summary.counts, `<p>Next expiry: ${esc(summary.next)}</p>${!report ? `<p class="sub">${esc(summary.text)}</p>` : ""}<a href="${esc(routeHref(state.scope, "dates"))}">Open important dates</a>`);
+}
 
 export async function loadDashboard() {
   // Production and the layout are independent reads, same as before #162;
@@ -189,6 +206,7 @@ async function loadTileData(tiles) {
     needs.operations ? loadInbox() : Promise.resolve(),
     needs.policy ? loadTilePolicy() : Promise.resolve(),
     needs.costs ? loadTileCosts() : Promise.resolve(),
+    needs.dates ? loadTileDates() : Promise.resolve(),
   ]);
 }
 
@@ -384,6 +402,7 @@ const VIEW_RENDERERS = {
   inbox: () => inboxTile(),
   compliance: () => complianceTile(),
   cost: () => costTile(),
+  important_dates: () => datesTile(),
 };
 
 /// A tile `isTileRenderable` (`dashboard-model.js`) says this page cannot
@@ -938,6 +957,7 @@ let inboxReport;
 /// addition to the daemon's attention queue, not the queue itself, and
 /// `inboxClockRows` already returns `[]` for a `null` clock (`clock-model.js`).
 let clockReport;
+let renewalReport;
 let inboxAsked = 0;
 let inboxReceivedAt = 0; // when it arrived, on this browser's clock -- ages grow from there
 
@@ -981,7 +1001,7 @@ function clockFindingHref(scope) {
 /// each block is already ordered within itself, and a missed legal
 /// deadline leads.
 function inboxRows(elapsedS) {
-  return [...inboxClockRows(clockReport, elapsedS, clockReportTitle, clockFindingHref), ...inboxItems(inboxReport, elapsedS)];
+  return [...inboxClockRows(clockReport, elapsedS, clockReportTitle, clockFindingHref), ...renewalInboxRows(renewalReport), ...inboxItems(inboxReport, elapsedS)];
 }
 
 /// The Inbox is the daemon's attention list (`#106`), every scope, minus
@@ -994,10 +1014,11 @@ export async function loadInbox() {
   // Two refetches can overlap; only the newest one's answer is drawn, or a
   // slow old read could land last and bring back what was just resolved.
   const mine = ++inboxAsked;
-  const [ops, clock] = await Promise.all([fetchOperationsReport(), fetchClock()]);
+  const [ops, clock, renewals] = await Promise.all([fetchOperationsReport(), fetchClock(), fetchDates()]);
   if (mine !== inboxAsked) return;
   inboxReport = ops;
   clockReport = clock;
+  renewalReport = renewals;
   inboxReceivedAt = Date.now();
   renderInbox();
 }
@@ -1064,16 +1085,14 @@ export function renderInbox() {
   const host = $("inbox");
   if (!host) return;
   if (inboxReport === undefined) { host.innerHTML = "loading…"; return; }
-  if (inboxReport === null) {
-    host.innerHTML = `<div class="err">What needs a person is not available right now.</div>`;
-    return;
-  }
   const items = inboxRows((Date.now() - inboxReceivedAt) / 1000);
   if (!items.length) {
-    host.innerHTML = `<div class="empty">Nothing waiting on a person right now.</div>`;
+    host.innerHTML = inboxReport && renewalReport ? `<div class="empty">Nothing waiting on a person right now.</div>` : `<div class="err">Some attention sources are unavailable; the list may be incomplete.</div>`;
     return;
   }
   host.innerHTML = items.map(inboxItemRow).join("");
+  if (!inboxReport) host.innerHTML += `<p class="sub">Process attention is unavailable; this list may omit process warnings.</p>`;
+  if (!renewalReport) host.innerHTML += `<p class="sub">Renewal metadata is unavailable; this list may omit expiry warnings.</p>`;
   wireInboxRows(host);
 }
 
@@ -1091,9 +1110,8 @@ export function renderInbox() {
 /// for `#inbox`.
 function inboxTile() {
   if (inboxReport === undefined) return dcard("Inbox", "", `<div class="inbox-list"><div class="empty">loading…</div></div>`);
-  if (inboxReport === null) return dcard("Inbox", "", `<div class="inbox-list"><div class="err">What needs a person is not available right now.</div></div>`);
-  const items = inboxRows((Date.now() - inboxReceivedAt) / 1000).filter((it) => !it.scope || inScope(it.scope));
-  if (!items.length) return dcard("Inbox", "0 waiting", `<div class="inbox-list"><div class="empty">Nothing waiting on a person right now.</div></div>`);
+  const items = inboxRows((Date.now() - inboxReceivedAt) / 1000).filter((it) => it.kind === "renewal" && it.scopes.length ? it.scopes.some(inScope) : !it.scope || inScope(it.scope));
+  if (!items.length) return dcard("Inbox", "", `<div class="inbox-list"><div class="empty">${inboxReport && renewalReport ? "Nothing waiting on a person right now." : "Some attention sources are unavailable; the list may be incomplete."}</div></div>`);
   const top = items.slice(0, 5).map(inboxItemRow).join("");
   return dcard("Inbox", `${items.length} waiting`, `<div class="inbox-list">${top}</div>`);
 }

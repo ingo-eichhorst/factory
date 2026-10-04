@@ -329,6 +329,8 @@ mod tests {
             scopes: Vec::new(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory { root, config };
         let registry = Registry::with_builtins();

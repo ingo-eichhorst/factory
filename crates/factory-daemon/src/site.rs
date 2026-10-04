@@ -673,6 +673,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         Arc::new(Engine::new(
             factory_core::config::Factory { root: path.to_path_buf(), config },

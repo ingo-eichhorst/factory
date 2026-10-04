@@ -816,6 +816,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let runtime = Arc::new(TypingRuntime::default());
         let mut registry = Registry::with_builtins();

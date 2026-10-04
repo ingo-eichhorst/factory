@@ -17,6 +17,8 @@ pub enum Event {
         at: DateTime<Utc>,
         instance: String,
     },
+    /// Expiry metadata was refreshed; carries no credential or raw output.
+    ImportantDatesUpdated { at: DateTime<Utc> },
     TaskCreated {
         task: Task,
     },
@@ -193,7 +195,7 @@ impl Event {
             | Event::WorkflowRunUpdated { .. }
             | Event::BenchRunUpdated { .. } => None,
             Event::AgentActivity { .. } => None,
-            Event::DaemonStarted { .. } => None,
+            Event::DaemonStarted { .. } | Event::ImportantDatesUpdated { .. } => None,
         }
     }
 }

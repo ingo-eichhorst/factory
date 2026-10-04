@@ -22,6 +22,22 @@ use std::collections::{BTreeMap, BTreeSet};
 const RUN_LOOKBACK: u32 = 20;
 
 #[async_trait]
+impl Provide<factory_kernel::ScheduledRunDatesFact> for Provider<'_> {
+    type Query = ();
+    type Value = factory_kernel::ScheduledRunDatesFact;
+    type Error = FactoryError;
+    async fn get(&self, _: &()) -> Result<Self::Value> {
+        let snapshot = self.engine.factory_snapshot();
+        let tasks = self.engine.store.list(&TaskFilter::default()).await?;
+        let runs = tasks.into_iter().filter(|task| task.schedule.is_some() && !task.schedule_paused && task.fires())
+            .filter_map(|task| task.next_run_at.map(|next_run_at| factory_kernel::ScheduledRunDate {
+                task: task.id, title: task.title, scope: snapshot.canonical_scope_name(&task.scope), agent: task.agent, next_run_at,
+            })).collect();
+        Ok(factory_kernel::ScheduledRunDatesFact { runs })
+    }
+}
+
+#[async_trait]
 impl Provide<factory_kernel::DeploymentMirrorFact> for Provider<'_> {
     type Query = String;
     type Value = Vec<factory_kernel::DeploymentMirrorFact>;

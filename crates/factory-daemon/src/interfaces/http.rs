@@ -118,6 +118,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/dependencies", get(dependencies))
         .route("/api/dependencies/documents/{id}", get(dependency_document))
         .route("/api/doctor", get(doctor))
+        .route("/api/important-dates", get(important_dates))
         .route("/api/infrastructure", get(infrastructure))
         .route("/api/environments", get(environments))
         .route("/api/environments/promote", post(environment_promote))
@@ -497,6 +498,10 @@ async fn release_add(
 
 async fn doctor(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Doctor).await
+}
+
+async fn important_dates(State(engine): State<Arc<Engine>>, Query(q): Query<PolicyQuery>) -> AxumResponse {
+    run(&engine, Request::ImportantDates { scope: q.scope.filter(|scope| !scope.trim().is_empty()) }).await
 }
 
 async fn backup(State(engine): State<Arc<Engine>>) -> AxumResponse {
@@ -2384,6 +2389,8 @@ mod tests {
             quality: vec!["baseline".into()],
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
@@ -2680,6 +2687,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
@@ -2819,6 +2828,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         let engine = Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()));
@@ -2888,6 +2899,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         let engine = Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()));

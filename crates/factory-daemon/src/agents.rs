@@ -981,6 +981,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory {
             root: PathBuf::from("/tmp/factory-agents-test"),
@@ -1316,6 +1318,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let mut registry = Registry::with_builtins();
         registry.add_agent(

@@ -55,7 +55,7 @@ test("the Inbox no longer derives its own list from the task list", () => {
   assert.doesNotMatch(dashboard, /t\.status === "blocked"\) out\.push/);
   assert.doesNotMatch(dashboard, /entries\?limit=20/, "the blocked reason arrives with the exception");
   assert.match(dashboard, /api\("\/api\/operations"\)/);
-  assert.match(wiring, /inbox: \{ onShow: loadInbox \}/);
+  assert.match(wiring, /inbox: \{ onShow: startInbox, onHide: stopAgentPoll \}/);
 });
 
 test("a policy_changed event reloads the Inbox too, since a clock submission can flip one of its rows to met (#157/#170 phase 2)", () => {
@@ -165,7 +165,7 @@ test("the Inbox lists the attention queue, every scope, with the reason inline",
   // attention queue now -- `answering` hands both the same operations-
   // shaped body, so the clock side contributes nothing (`.clock` is
   // `undefined` on it), same as a daemon that predates the endpoint.
-  assert.deepEqual([...requested].sort(), ["/api/operations", "/api/policy/clock"]);
+  assert.deepEqual([...requested].sort(), ["/api/important-dates", "/api/operations", "/api/policy/clock"]);
   const html = el.inbox.innerHTML;
   assert.equal((html.match(/class="inbox-item"/g) || []).length, REPORT.attention.length);
   assert.match(html, /summarise support inbox<\/b> — blocked/);
@@ -198,7 +198,7 @@ test("the Inbox says when there is nothing, and when it could not ask", async ()
   assert.match(el.inbox.innerHTML, /Nothing waiting on a person right now\./);
   globalThis.fetch = async () => { throw new Error("offline"); };
   await loadInbox();
-  assert.match(el.inbox.innerHTML, /not available right now/);
+  assert.match(el.inbox.innerHTML, /unavailable.*incomplete/);
 });
 
 test("the Inbox also lists the reporting clock's overdue and due-soon deadlines (#157/#170 phase 2)", async () => {

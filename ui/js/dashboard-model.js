@@ -74,7 +74,7 @@ export const EPIC_VIEW_IDS = Object.freeze([
 /// `/api/production`), most likely retired once phase 3 gives each figure
 /// its own metric tile. Named clearly so nothing mistakes it for part of
 /// the epic's design.
-export const VIEW_IDS = Object.freeze(["kpis", ...EPIC_VIEW_IDS]);
+export const VIEW_IDS = Object.freeze(["kpis", ...EPIC_VIEW_IDS, "important_dates"]);
 
 /// What this page can draw a card for, in the order `DEFAULT_DASHBOARD`
 /// uses the first five of -- see `dashboard.js`'s `VIEW_RENDERERS`, which
@@ -95,6 +95,7 @@ export const RENDERABLE_VIEW_IDS = Object.freeze([
   "inbox",
   "compliance",
   "cost",
+  "important_dates",
 ]);
 
 /// `"view"` or `"metric"` for a well-shaped tile, `null` for anything else

@@ -80,6 +80,8 @@ enum Command {
     /// account each agent's model calls go to. Read-only; never reads a
     /// credential.
     Infra,
+    /// Important dates: expiry metadata, dependencies, renewal lines and native clocks.
+    Dates { #[arg(long)] scope: Option<String> },
     /// L1 Backup: whether the instance's own state -- the database, the
     /// authored content, the configs -- is backed up, how recently, and
     /// whether a backup has been proved to restore. With no subcommand,
@@ -1756,6 +1758,19 @@ async fn main() -> Result<()> {
         Command::Infra => {
             let payload = client.send(Request::Infrastructure).await?;
             print(&payload, cli.json, infrastructure_text)
+        }
+
+        Command::Dates { scope } => {
+            let payload = client.send(Request::ImportantDates { scope }).await?;
+            print(&payload, cli.json, |payload| match payload {
+                Payload::ImportantDates { report } => Some(report.entries.iter().map(|entry| {
+                    let item = &entry.observation;
+                    let date = item.expires_at.map(|date| date.to_rfc3339()).unwrap_or_else(|| if item.no_expiry { "no reported expiry".into() } else { "unknown".into() });
+                    let dependencies = item.affects.iter().map(|dependency| dependency.label.as_str()).collect::<Vec<_>>().join(", ");
+                    format!("{}  {date}  {:?} / {:?}{}\n  {}\n  affects: {dependencies}\n  renew: {}\n", item.name, entry.state, item.basis, if entry.resolved { " (resolved by native clock)" } else { "" }, item.detail, item.renew)
+                }).collect::<Vec<_>>().join("\n")),
+                _ => None,
+            })
         }
 
         Command::Backup { command } => match command.unwrap_or(BackupCmd::Status) {
@@ -6781,6 +6796,7 @@ fn describe_retry(p: RetryPolicy) -> String {
 
 fn describe_event(e: &Event) -> String {
     match e {
+        Event::ImportantDatesUpdated { .. } => "important dates refreshed".into(),
         Event::DaemonStarted { instance, .. } => format!("daemon up: {instance}"),
         Event::TaskCreated { task } => format!("created  {}", one_line(task)),
         Event::TaskUpdated { task } => format!("updated  {}", one_line(task)),

@@ -190,9 +190,12 @@ mod tests {
                 intake: Default::default(),
                 dependencies: Default::default(),
                 environments: Vec::new(),
+                renewals: Vec::new(),
             }],
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let mut registry = Registry::with_builtins();
         registry.add_runtime(Arc::new(QuietRuntime::default()), "test");
@@ -256,9 +259,12 @@ mod tests {
                 intake: Default::default(),
                 dependencies: Default::default(),
                 environments: Vec::new(),
+                renewals: Vec::new(),
             }],
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         }
     }
 
@@ -396,9 +402,12 @@ mod tests {
                 intake: Default::default(),
                 dependencies: Default::default(),
                 environments: Vec::new(),
+                renewals: Vec::new(),
             }],
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let recorder = Arc::new(RecordingRuntime::new());
         let mut registry = Registry::with_builtins();
@@ -1364,9 +1373,12 @@ mod tests {
                     intake: Default::default(),
                     dependencies: Default::default(),
                     environments: Vec::new(),
+                    renewals: Vec::new(),
                 }],
                 infrastructure: Default::default(),
                 plugins_dir: None,
+                renewals: Vec::new(),
+                renewals_notify: None,
             };
             let mut registry = Registry::with_builtins();
             registry.add_runtime(Arc::new(QuietRuntime::default()), "test");

@@ -13,6 +13,10 @@ fn assert_producer<F: Fact<Producer = P>, P: Level>(name: &str, producer: &str) 
 
 #[test]
 fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
+    assert_producer::<InfrastructureExpiryFact, L1>("InfrastructureExpiryFact", "L1");
+    assert_producer::<RenewalDeclarationsFact, L1>("RenewalDeclarationsFact", "L1");
+    assert_producer::<CredentialExpiryFact, L2>("CredentialExpiryFact", "L2");
+    assert_producer::<ScheduledRunDatesFact, L4>("ScheduledRunDatesFact", "L4");
     assert_producer::<DaemonConfigFact, L1>("DaemonConfigFact", "L1");
     assert_producer::<ScopeCapacityFact, L1>("ScopeCapacityFact", "L1");
     assert_producer::<EnvironmentMetricFact, L1>("EnvironmentMetricFact", "L1");
@@ -38,8 +42,33 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
 }
 
 #[test]
+fn renewal_fact_metadata_and_nested_dependencies_roundtrip_without_core() {
+    let declaration: RenewalDecl = serde_json::from_value(serde_json::json!({
+        "name": "token", "kind": "credential", "expires": "2027-10-04", "lead": "30d", "affects": ["demo/curator"]
+    })).unwrap();
+    let declared = RenewalDeclarationsFact { declarations: vec![ScopedRenewalDeclaration { scope: Some("demo".into()), declaration }], findings: vec![] };
+    let json = serde_json::to_value(&declared).unwrap();
+    assert_eq!(json["declarations"][0]["declaration"]["owner"], "owner");
+    assert_eq!(serde_json::from_value::<RenewalDeclarationsFact>(json).unwrap(), declared);
+    assert!(serde_json::from_value::<RenewalDecl>(serde_json::json!({"name": "bad", "kind": "credential", "secret": "forbidden"})).is_err());
+    let observation = ExpiryObservation {
+        id: "openshell:gateway:claude".into(), name: "Claude token".into(), kind: DateKind::Credential, scope: None,
+        expires_at: Some("2027-10-04T00:00:00Z".parse().unwrap()), no_expiry: false, basis: DateBasis::Observed, source: DateSource::Openshell,
+        detail: "expiry metadata".into(), observed_at: None, attempted_at: "2026-10-04T00:00:00Z".parse().unwrap(), issue: None,
+        affects: vec![DateDependency { scope: Some("demo".into()), agent: Some("curator".into()), environment: None, provider: Some("claude".into()), label: "demo/curator".into() }],
+        lead_seconds: 30 * 86400, renew: "rotate at source".into(), owner: "owner".into(),
+    };
+    let fact = CredentialExpiryFact { observations: vec![observation] };
+    let json = serde_json::to_value(&fact).unwrap();
+    assert_eq!(json["observations"][0]["affects"][0]["agent"], "curator");
+    assert_eq!(serde_json::from_value::<CredentialExpiryFact>(json).unwrap(), fact);
+}
+
+#[test]
 fn catalogue_is_complete_unique_and_has_readers() {
     let mut expected = vec![
+        "InfrastructureExpiryFact", "CredentialExpiryFact", "ScheduledRunDatesFact",
+        "RenewalDeclarationsFact",
         "DaemonConfigFact",
         "ScopeCapacityFact",
         "EnvironmentMetricFact",

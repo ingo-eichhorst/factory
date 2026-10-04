@@ -32,6 +32,7 @@ export const VIEW_LABELS = Object.freeze({
   inbox: "Inbox",
   compliance: "Compliance",
   cost: "Cost",
+  important_dates: "Important dates",
 });
 
 /// Every catalogue entry: one per `view` id, then one per metric `/api/
