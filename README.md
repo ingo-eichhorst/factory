@@ -530,10 +530,10 @@ keeps starts only when that agent is `ready`; otherwise it fails with the
 same reason the page shows (an agent not judged yet is waited for, up to 45
 seconds). A scheduled task whose agent `needs` something raises a
 `sandbox not ready` item in the Inbox as soon as that is known -- not at the
-due time. A declared secret's `expires` raises one `credential expiring` item
-per secret, naming every scope, agent and provider that uses it, 30 days
-ahead, again 7 days ahead and again on the day; an inline credential's own
-`expires:` still raises one per provider.
+due time. A declared secret's `expires` is an Important dates entry
+(`secret:<name>`, see "Secrets"), whose Inbox item names every scope, agent
+and provider that uses it; an inline credential's own `expires:` still raises
+`credential expiring` per provider.
 
 **Instances never touch each other's.** Every profile and provider the
 daemon writes carries this instance's suffix -- the first eight characters
@@ -778,6 +778,16 @@ moved: add an entry whose `source:` is exactly the inline credential, then
 replace the credential with `{ secret: <name> }` and move any `expires:` with
 it. The provider is given the same value, so nothing on the gateway is
 recreated.
+
+**Expiry in the Inbox.** The Important dates ledger (`#236`) reads the
+catalogue instead of keeping a copy: every entry is one ledger entry,
+`secret:<name>`, read from the live config (so an edited date counts at once),
+with the entry's renew line and every scope / agent / provider that uses it as
+its dependants. Its Inbox item is the ledger's: at the 30-day lead, 7 days,
+1 day and on the day -- one item per secret, however many providers name it.
+A provider named from the catalogue gets no date of its own in the ledger
+(no derived Claude date, no repeat of the secret's); only one OpenShell itself
+reports is kept beside it.
 
 **What is written, and what never is.** The tab's Edit, `PUT
 /api/secrets/<name>` and the `secret.set` request (grant `secrets.edit`, the
@@ -2438,7 +2448,10 @@ keys are never passed to a probe. A peer expiry is not a trust, hostname,
 readiness or health verdict, and does not require supplying mTLS credentials.
 
 OpenShell `provider list -o json` supplies credential expiry metadata; Factory
-never uses `provider get` for the ledger. Where no actual expiry is reported,
+never uses `provider get` for the ledger. Each entry of the root's declared
+`secrets:` catalogue is an entry of its own, `secret:<name>` (see "Secrets");
+a provider named from it by `{ secret: <name> }` is dated by that entry, not
+by a row of its own. Where no actual expiry is reported,
 a Claude provider may use its declared source file's modification time plus
 365 days: **derived**, explicitly approximate, not a claim about the token's
 contents. The standard source is `~/.config/factory/secrets/claude-oauth-token`.

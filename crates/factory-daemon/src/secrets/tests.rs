@@ -5,7 +5,6 @@
 
 use super::*;
 use factory_core::config::{CONFIG_FILE, FACTORY_DIR};
-use factory_core::operations::ExceptionKind;
 use factory_core::protocol::{Payload, Request, Response};
 use factory_core::secrets::ExpiryState;
 use factory_plugins::{Registry, SqliteStore};
@@ -175,6 +174,7 @@ async fn the_tab_shows_both_entries_with_presence_resolution_expiry_and_users_an
 #[tokio::test]
 async fn changing_the_date_writes_the_root_config_journals_who_and_raises_the_inbox_item_at_once() {
     let (dir, engine) = instance(None);
+    let mut events = engine.bus.subscribe();
     let soon = Utc::now().date_naive() + chrono::Duration::days(10);
     let metadata = SecretMetadata {
         expires: Some(Expiry::On(soon)),
@@ -195,6 +195,11 @@ async fn changing_the_date_writes_the_root_config_journals_who_and_raises_the_in
     }
     assert_eq!(engine.factory_snapshot().config.secrets[0].expires, Some(Expiry::On(soon)), "live without a restart");
 
+    assert!(
+        matches!(events.try_recv(), Ok(factory_core::event::Event::ImportantDatesUpdated { .. })),
+        "the ledger, its Inbox items and its push hook are told now"
+    );
+
     // Journaled with who changed what.
     let entries = engine.store.entries(SECRETS_JOURNAL, 10).await.unwrap();
     assert_eq!(entries.len(), 1);
@@ -205,28 +210,31 @@ async fn changing_the_date_writes_the_root_config_journals_who_and_raises_the_in
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].secret, "claude-oauth-token");
 
-    // The Inbox has it now, naming the agent that stops working.
-    let report = match engine
-        .handle_request(Request::Operations { scope: None, window: Default::default(), detail: false })
-        .await
-    {
-        Response::Ok { data: Payload::Operations { report } } => report,
-        other => panic!("{other:?}"),
-    };
-    let item = report
-        .attention
+    // The Inbox has it now: the Important dates ledger reads the catalogue
+    // (#236), and a date inside the 30-day lead is a milestone at once,
+    // naming the agent that stops working.
+    let report = engine.important_dates(None).await.unwrap();
+    let entry = report
+        .entries
         .iter()
-        .find(|e| e.kind == ExceptionKind::CredentialExpiring && e.title.as_deref() == Some("claude-oauth-token"))
-        .expect("an expiry inside 30 days is an Inbox item at once");
-    assert!(item.reason.contains(&format!("awesome-herdr / awesome-herdr-curator / factory-claude-{SUFFIX}")), "{}", item.reason);
-    assert!(item.reason.contains("claude setup-token"), "{}", item.reason);
-    assert_eq!(item.scope.as_deref(), Some("awesome-herdr"));
+        .find(|e| e.observation.id == "secret:claude-oauth-token")
+        .expect("every declared secret is a ledger entry");
+    assert!(entry.milestone.is_some() && !entry.resolved, "{entry:?}");
+    assert_eq!(entry.observation.source, factory_core::renewals::DateSource::Secret);
+    assert_eq!(entry.observation.renew, "claude setup-token");
+    assert_eq!(entry.href, "#all/secrets");
+    let affects: Vec<&str> = entry.observation.affects.iter().map(|d| d.label.as_str()).collect();
+    assert_eq!(affects, [format!("awesome-herdr / awesome-herdr-curator / factory-claude-{SUFFIX}")]);
+    let github = report.entries.iter().find(|e| e.observation.id == "secret:github-gh-login").unwrap();
+    assert!(github.observation.no_expiry && github.milestone.is_none(), "{github:?}");
+    // One entry per secret: the ledger has no second, per-provider copy.
+    assert_eq!(report.entries.iter().filter(|e| e.observation.id.contains("factory-claude")).count(), 0);
 
     // Acceptance 5: no value anywhere this wrote or answered.
     engine.check_catalogue().await;
     assert_no_value("the root config", &dir.root_text());
     assert_no_value("the journal", &serde_json::to_string(&entries).unwrap());
-    assert_no_value("the Inbox", &serde_json::to_string(&report).unwrap());
+    assert_no_value("Important dates", &serde_json::to_string(&report).unwrap());
     assert_no_value("the Environment payload", &environment(&engine).await.3);
 }
 

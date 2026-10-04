@@ -319,7 +319,6 @@ impl Engine {
             late_after_seconds: Some(2 * capacity.tick_seconds as i64),
             harnesses: self.harness.rows(&[], snapshot.config.daemon.harness_health.repair_script.as_deref()),
             sandboxes: self.sandbox_attention(&snapshot, &tasks),
-            secrets: crate::secrets::attention(&snapshot),
         };
         Ok(operations::report(&input))
     }

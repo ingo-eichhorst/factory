@@ -71,7 +71,7 @@ function catalogueRow(row) {
 }
 
 function undeclaredRow(row) {
-  const expiry = row.expires ? `${expiryText(row)}` : "no expires:";
+  const expiry = row.expires ? expiryText(row) : "no expires: on the provider";
   return `<tr>
     <td>${esc(row.scope)}</td>
     <td>${esc(row.agent)}</td>

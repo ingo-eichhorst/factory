@@ -397,6 +397,54 @@ async fn a_metadata_probe_never_resolves_the_declared_credential_source() {
 }
 
 #[tokio::test]
+async fn a_provider_named_from_the_catalogue_is_dated_once_by_its_secret_and_still_counts_as_a_dependant() {
+    // #244: the ledger reads the declared catalogue. A provider whose
+    // credential is `{ secret: }` gets no derived or repeated date of its
+    // own; the secret's entry carries the date, once.
+    let f = fixture();
+    let cli = f.root.join("openshell");
+    script(&cli, "#!/bin/sh\ncase \"$1 $2\" in\n'gateway list') echo '[]';;\n*) echo '{\"providers\":[{\"name\":\"factory-claude-a1b2c3d4\",\"type\":\"claude-code-oauth\"},{\"name\":\"factory-github-a1b2c3d4\",\"type\":\"github-publish\"}]}';;\nesac\n");
+    // What the default-file derivation would otherwise date the Claude row by.
+    let default = f.root.join(".config/factory/secrets/claude-oauth-token");
+    std::fs::create_dir_all(default.parent().unwrap()).unwrap();
+    write(&default, "dummy");
+    let mut snapshot = f.engine.factory_snapshot();
+    snapshot.config.secrets = serde_yaml_ng::from_str(&format!(
+        "- {{ name: claude-oauth-token, kind: token, source: {{ from: file, path: {} }}, expires: 2027-10-04 }}\n\
+         - {{ name: github-gh-login, kind: token, source: {{ from: command, run: gh auth token }}, expires: never }}\n",
+        default.display()
+    ))
+    .unwrap();
+    snapshot.config.scopes[0].agents[0].sandbox = factory_core::config::Sandbox::Openshell;
+    snapshot.config.scopes[0].agents[0].openshell = Some(serde_yaml_ng::from_str(&format!("cli: {}\nimage: custom-image\nproviders:\n - name: factory-claude\n   type: claude-code-oauth\n   credential: {{secret: claude-oauth-token}}\n - name: factory-github\n   type: github-publish\n   credential: {{secret: github-gh-login}}\npolicy: {{}}\n", cli.display())).unwrap());
+    let unavailable = f.root.join("no-tool").display().to_string();
+    let tools = probes::Tools {
+        openssl: unavailable.clone(),
+        github: unavailable.clone(),
+        tailscale: unavailable,
+        openshell: Some(cli.display().to_string()),
+        metadata_home: f.root.clone(),
+        config_home: f.root.join(".config"),
+        enabled: true,
+    };
+    let observed = probes::observe(&snapshot, &tools, Utc::now()).await;
+    let ids: Vec<&str> = observed.credentials.iter().map(|o| o.id.as_str()).collect();
+    assert!(!ids.iter().any(|id| id.contains("factory-claude") || id.contains("factory-github")), "{ids:?}");
+    let github = observed.credentials.iter().find(|o| o.id == "github-token").unwrap();
+    assert!(
+        github.affects.iter().any(|d| d.agent.as_deref() == Some("curator")),
+        "a `gh auth token` secret is still the GitHub token's dependant: {:?}",
+        github.affects
+    );
+
+    let secrets = crate::secrets::ledger_observations(&snapshot, Utc::now());
+    assert_eq!(secrets.len(), 2);
+    assert_eq!((secrets[0].id.as_str(), secrets[0].basis), ("secret:claude-oauth-token", DateBasis::Declared));
+    assert_eq!(secrets[0].affects[0].label, "demo / curator / factory-claude-a1b2c3d4");
+    assert!(secrets[1].no_expiry);
+}
+
+#[tokio::test]
 async fn native_attestations_and_cra_keep_their_own_validity_and_fulfillment() {
     use crate::access::Caller;
     use factory_core::{

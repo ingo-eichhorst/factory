@@ -2701,6 +2701,7 @@ fn splice_secret_metadata(
             Some(line) => {
                 let stop = block_end(&lines, line, item_end, key_indent);
                 let stop = last_content(&lines, line, stop).map(|last| last + 1).unwrap_or(stop);
+                let replacement = keep_expires_comment(key, lines[line].2, replacement);
                 edits.push((offset_of(&lines, text, line), offset_of(&lines, text, stop), replacement));
             }
             None => missing.push_str(&replacement),
@@ -2720,6 +2721,20 @@ fn splice_secret_metadata(
         }
     }
     Ok(out)
+}
+
+/// A changed `expires:` keeps the comment written after it (`expires:
+/// 2027-10-04  # a year after setup-token`). Only there: a date or `never`
+/// has no `#` of its own, while a renew line or a note may.
+fn keep_expires_comment(key: &str, old_line: &str, replacement: String) -> String {
+    if key != "expires" || replacement.is_empty() {
+        return replacement;
+    }
+    let rest = key_rest(old_line, key).unwrap_or_default();
+    match rest.find(" #") {
+        Some(at) => format!("{}  {}\n", replacement.trim_end_matches('\n'), rest[at..].trim()),
+        None => replacement,
+    }
 }
 
 /// The expected entry, rendered as a block sequence item at `indent`.
@@ -2908,7 +2923,7 @@ roles: {}
             note: Some("rotated by hand: see #244".into()),
         };
         let out = splice(ROOT, 0, "claude-oauth-token", &m);
-        assert!(out.contains("    expires: 2026-10-20\n"), "{out}");
+        assert!(out.contains("    expires: 2026-10-20  # a year after setup-token\n"), "the comment stays: {out}");
         assert!(!out.contains("renew: \"claude setup-token"), "renew removed: {out}");
         assert!(out.contains("    note: 'rotated by hand: see #244'\n") || out.contains("    note: rotated by hand: see #244\n"), "{out}");
         for kept in ["# The two credentials", "# Claude's token, renewed yearly.", "# Who runs here.", "source: { from: file, path: ~/.config/factory/secrets/claude-oauth-token }", "source: { from: command, run: \"gh auth token\" }"] {

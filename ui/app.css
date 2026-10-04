@@ -2516,3 +2516,4 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
 #view-secrets section > p.sub { margin: 0; padding: 8px 14px; border-bottom: 1px solid var(--line-soft); }
 #secrets-changes { margin: 0; padding: 8px 14px 10px 30px; font-size: 12px; line-height: 1.5; }
 #secrets-catalogue td { vertical-align: top; }
+#secrets-catalogue .tag, #secrets-undeclared .tag { white-space: nowrap; display: inline-block; }

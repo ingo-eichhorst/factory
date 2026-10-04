@@ -822,7 +822,7 @@ function onEvent(ev) {
     if (state.tab === "dashboard") loadDashboard();
     if (state.tab === "inbox") loadInbox();
     if (state.tab === "roster") loadDateBadges().then(renderAgents);
-    if (state.tab === "sandboxes") refreshEnvironment();
+    if (state.tab === "sandboxes" || state.tab === "secrets") refreshEnvironment();
     if (state.tab === "environments") refreshEnvironments();
   }
   // A deployment began or ended, or an environment's status changed.

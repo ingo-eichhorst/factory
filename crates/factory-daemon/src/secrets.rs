@@ -10,6 +10,9 @@
 //! What is written: an entry's `expires`, `renew` and `note`, into the
 //! instance root's config (`Engine::write_secret_metadata`), journaled with
 //! who changed what. Nothing else, and never a value.
+//!
+//! Each entry is also an Important dates observation (`ledger_observations`),
+//! which is how a declared expiry reaches the Inbox (`#236`).
 
 use crate::access::Caller;
 use crate::engine::Engine;
@@ -142,21 +145,59 @@ pub(crate) fn rows(
     (secrets, undeclared)
 }
 
-/// One declared secret's expiry, for the Inbox (`#244`).
-pub(crate) fn attention(factory: &Factory) -> Vec<factory_core::operations::SecretAttention> {
+/// One Important dates observation per declared secret (`#244`): the
+/// renewals ledger (`#236`) reads the catalogue rather than keeping a copy,
+/// and its milestones -- the 30-day lead, 7 days, 1 day, the day itself --
+/// are the secret's Inbox items, one per secret, naming every scope, agent
+/// and provider that uses it. Built from the live snapshot on every read, so
+/// an edited date counts at once.
+pub(crate) fn ledger_observations(
+    factory: &Factory,
+    now: chrono::DateTime<Utc>,
+) -> Vec<factory_core::renewals::ExpiryObservation> {
+    use factory_core::renewals::{DateBasis, DateDependency, DateKind, DateSource};
     let mut used = users(factory);
     factory
         .config
         .secrets
         .iter()
-        .filter_map(|secret| {
-            Some(factory_core::operations::SecretAttention {
-                name: secret.name.clone(),
-                expires: secret.expires?.date()?,
-                renew: secret.renew.clone(),
-                source: secret.source.describe(),
-                used_by: used.remove(&secret.name).unwrap_or_default(),
-            })
+        .map(|secret| {
+            let mut item = crate::renewals::probes::observation(
+                format!("secret:{}", secret.name),
+                format!("Secret {}", secret.name),
+                DateKind::Credential,
+                DateSource::Secret,
+                now,
+            );
+            match secret.expires {
+                Some(Expiry::On(date)) => {
+                    item.expires_at = date.and_hms_opt(0, 0, 0).map(|midnight| midnight.and_utc());
+                    item.basis = DateBasis::Declared;
+                    item.detail = "declared in the instance root's secrets:".into();
+                }
+                Some(Expiry::Never) => {
+                    item.no_expiry = true;
+                    item.basis = DateBasis::Declared;
+                    item.detail = "declared never to expire in the instance root's secrets:".into();
+                }
+                None => item.detail = "the instance root's secrets: gives no expires: for it".into(),
+            }
+            if let Some(renew) = &secret.renew {
+                item.renew = renew.clone();
+            }
+            item.affects = used
+                .remove(&secret.name)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|u| DateDependency {
+                    label: format!("{} / {} / {}", u.scope, u.agent, u.provider),
+                    scope: Some(u.scope),
+                    agent: Some(u.agent),
+                    environment: None,
+                    provider: Some(u.provider),
+                })
+                .collect();
+            item
         })
         .collect()
 }
@@ -228,6 +269,8 @@ impl Engine {
                 tracing::warn!(secret = %name, "the secret's metadata was written but not journaled: {e}");
             }
             tracing::info!(secret = %name, "secret metadata changed: {}", change_words(&before, &metadata));
+            // The ledger, its Inbox items and its push hook read the new date now.
+            self.bus.publish(factory_core::event::Event::ImportantDatesUpdated { at: Utc::now() });
         }
         let (rows, _, _) = self.secrets_view().await;
         rows.into_iter()

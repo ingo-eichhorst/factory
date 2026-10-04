@@ -30,10 +30,9 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeSet;
 
-/// How far ahead a declared expiry is `due soon` and raised in the Inbox.
+/// How far ahead a declared expiry is `due soon` -- the Important dates
+/// ledger's default lead, which raises its Inbox item (`#236`).
 pub const DUE_SOON_DAYS: i64 = crate::openshell::EXPIRY_WARNING_DAYS;
-/// The second, louder warning.
-pub const URGENT_DAYS: i64 = 7;
 
 /// What sort of secret an entry is. Shown, never acted on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,22 +208,6 @@ pub fn expiry_state(expires: Option<Expiry>, today: NaiveDate) -> (ExpiryState, 
     }
 }
 
-/// The Inbox stage a date is in: the day it opened (30 days ahead, 7 days
-/// ahead, the expiry day itself) -- so a dismissed item comes back, as a
-/// new one, at the next stage. `None` outside the warning window.
-pub fn warning_stage(expires: NaiveDate, today: NaiveDate) -> Option<NaiveDate> {
-    let left = (expires - today).num_days();
-    if left > DUE_SOON_DAYS {
-        None
-    } else if left > URGENT_DAYS {
-        Some(expires - chrono::Duration::days(DUE_SOON_DAYS))
-    } else if left > 0 {
-        Some(expires - chrono::Duration::days(URGENT_DAYS))
-    } else {
-        Some(expires)
-    }
-}
-
 fn is_secret_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
@@ -325,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn expiry_states_and_inbox_stages() {
+    fn expiry_states() {
         let today = day(2026, 10, 4);
         assert_eq!(expiry_state(Some(Expiry::On(day(2027, 10, 4))), today), (ExpiryState::Ok, Some(365)));
         assert_eq!(expiry_state(Some(Expiry::On(day(2026, 11, 3))), today), (ExpiryState::DueSoon, Some(30)));
@@ -333,15 +316,6 @@ mod tests {
         assert_eq!(expiry_state(Some(Expiry::On(day(2026, 10, 3))), today), (ExpiryState::Expired, Some(-1)));
         assert_eq!(expiry_state(Some(Expiry::Never), today), (ExpiryState::Never, None));
         assert_eq!(expiry_state(None, today), (ExpiryState::Unknown, None));
-
-        let expires = day(2026, 12, 1);
-        assert_eq!(warning_stage(expires, day(2026, 10, 31)), None);
-        assert_eq!(warning_stage(expires, day(2026, 11, 1)), Some(day(2026, 11, 1)));
-        assert_eq!(warning_stage(expires, day(2026, 11, 23)), Some(day(2026, 11, 1)));
-        assert_eq!(warning_stage(expires, day(2026, 11, 24)), Some(day(2026, 11, 24)), "seven days left");
-        assert_eq!(warning_stage(expires, day(2026, 11, 30)), Some(day(2026, 11, 24)));
-        assert_eq!(warning_stage(expires, expires), Some(expires));
-        assert_eq!(warning_stage(expires, day(2027, 1, 1)), Some(expires));
     }
 
     #[test]
