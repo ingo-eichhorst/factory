@@ -771,6 +771,18 @@ pub enum Request {
     /// like `Request::DashboardSet`. Needs `dashboard.edit` in `scope`.
     #[serde(rename = "dashboard.reset")]
     DashboardReset { scope: String },
+    /// Set a declared secret's metadata -- `expires`, `renew` and `note`,
+    /// replaced whole; a field left out is removed -- in the instance
+    /// root's `secrets:` (`#244`). The only write to the catalogue, and it
+    /// never carries, writes, reads back or returns a value: the entry's
+    /// `source` is never touched. Journaled with who changed what.
+    /// Answered with `Payload::Secret`. Needs `secrets.edit`.
+    #[serde(rename = "secret.set")]
+    SecretSet {
+        name: String,
+        #[serde(default)]
+        metadata: crate::secrets::SecretMetadata,
+    },
     /// The L6 Goals tab: vision, mission, the north star and its inputs,
     /// every cycle's own summary, the asked-for (or current) cycle's full
     /// graded report, and the roadmap -- narrowed to `scope` (and its
@@ -1083,7 +1095,19 @@ pub enum Payload {
     Environment {
         sandboxes: Vec<SandboxRow>,
         credentials: Vec<CredentialRow>,
+        /// The declared catalogue (`#244`), one row per entry.
+        #[serde(default)]
+        secrets: Vec<SecretRow>,
+        /// Managed OpenShell providers whose credential is still written
+        /// inline in a scope's config, not declared in the catalogue.
+        #[serde(default)]
+        undeclared: Vec<UndeclaredCredential>,
+        /// The newest metadata changes, newest last.
+        #[serde(default)]
+        secret_changes: Vec<SecretChange>,
     },
+    /// The answer to `Request::SecretSet`: the entry as it now stands.
+    Secret { secret: SecretRow },
     Attachment { attachment: Attachment },
     Dependencies { report: DependenciesReport },
     Doctor { report: DoctorReport },
@@ -2132,6 +2156,84 @@ pub struct CredentialRow {
     /// page goes on showing it whichever scope the rail has selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+}
+
+/// One declared secret (`#244`), as the Secrets tab shows it. Everything
+/// here is metadata or a yes/no about the source; never a value, and never
+/// anything a source printed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretRow {
+    pub name: String,
+    pub kind: crate::secrets::SecretKind,
+    /// `file`, `command`, `env` or `keychain`.
+    pub from: String,
+    /// Where it lives, in words: the path, the command, the variable's
+    /// name, the Keychain item.
+    pub source: String,
+    /// For a `file`: whether it is there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub present: Option<bool>,
+    /// For a `file` that is there: owned by the daemon's user and readable
+    /// by nobody else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_only: Option<bool>,
+    /// Whether the source gave a value at the provisioner's last pass --
+    /// it ran, or was found. `None` until the first pass has checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolves: Option<bool>,
+    /// Why it did not. Never a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<crate::secrets::Expiry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days_left: Option<i64>,
+    pub state: crate::secrets::ExpiryState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renew: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Every scope, agent and provider that names it.
+    #[serde(default)]
+    pub used_by: Vec<SecretUse>,
+}
+
+/// One provider naming a secret: `scope / agent / provider`, the provider
+/// by its name on the gateway (this instance's suffix included).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretUse {
+    pub scope: String,
+    pub agent: String,
+    pub provider: String,
+}
+
+/// A managed OpenShell provider whose credential is written inline in a
+/// scope's config (`#234`) rather than declared in the catalogue: it works,
+/// and the Secrets tab names it so it can be moved.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UndeclaredCredential {
+    pub scope: String,
+    pub agent: String,
+    pub provider: String,
+    pub from: String,
+    pub source: String,
+    /// The provider's own `expires:`, if it gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<chrono::NaiveDate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days_left: Option<i64>,
+    pub state: crate::secrets::ExpiryState,
+}
+
+/// One journaled metadata change. Metadata only, as the journal holds it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretChange {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub secret: String,
+    pub by: String,
+    pub message: String,
 }
 
 /// The machine the daemon runs on, read live on every request and never

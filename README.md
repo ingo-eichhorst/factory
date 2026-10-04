@@ -438,11 +438,14 @@ scope:
       providers:             # kept by the daemon from a credential source -- by reference, never by value
         - name: factory-claude
           type: claude-code-oauth
-          credential: { from: file, path: ~/.config/factory/secrets/claude-oauth-token }
-          # expires: 2027-10-04   # optional; the Inbox warns 30 days ahead
+          credential: { secret: claude-oauth-token }   # an entry of the root's secrets: (see "Secrets")
         - name: factory-github
           type: github-publish
-          credential: { from: command, run: "gh auth token" }
+          credential: { secret: github-gh-login }
+        # - name: factory-ci                            # or a source written inline (#234):
+        #   type: generic                               #   it works, and the Secrets tab marks it undeclared
+        #   credential: { from: env, name: CI_TOKEN }
+        #   expires: 2027-01-31                         #   optional, inline only; the Inbox warns 30 days ahead
         # - factory-legacy   # a bare name: created by hand on the gateway
       upload: workdir        # the run's directory -> /sandbox/work/<its name> (default)
       download: none         # or `workdir`: copy the tree back, never .git
@@ -463,9 +466,11 @@ stays one this build accepts.
 The block is refused at load, naming the scope's path, when it is present
 without `sandbox: openshell` or the other way round, when it misspells a key
 (a credential source's included), names no policy, gives a policy that is not
-version 1, or a credential source that cannot work. It holds no secret: a
-provider is a name, or a name with the place its credential is read from, and
-credentials live in OpenShell's credential store.
+version 1, or a credential source that cannot work -- and when a
+`{ secret: <name> }` names nothing the root's `secrets:` declares, or the
+provider's own `expires:` disagrees with that secret's (both dates are named).
+It holds no secret: a provider is a name, or a name with the place its
+credential is read from, and credentials live in OpenShell's credential store.
 
 **Declaring it is the whole setup (`#234`).** For every agent that declares
 `sandbox: openshell`, the daemon keeps the prerequisites of its runs in place
@@ -495,7 +500,9 @@ command that supplies it, on L2 Sandboxes and the roster:
    `github-publish`) are imported when a provider names them.
 4. **Providers.** An entry with a `credential:` is created when missing and
    updated when its source's value changes (rotation), the value read fresh
-   each pass from `{ from: file, path }` (`~` is the daemon's home; refused
+   each pass from the source -- written inline, or the declared secret's a
+   `{ secret: <name> }` names (the same source either way, so moving one into
+   the catalogue changes nothing on the gateway) -- `{ from: file, path }` (`~` is the daemon's home; refused
    unless a regular file of the daemon's user that nobody else can read or
    write -- `chmod 600`), `{ from: command, run }` (`sh -c`, with Homebrew's
    and `/usr/local`'s `bin` added to launchd's bare PATH, so `gh auth token`
@@ -523,7 +530,10 @@ keeps starts only when that agent is `ready`; otherwise it fails with the
 same reason the page shows (an agent not judged yet is waited for, up to 45
 seconds). A scheduled task whose agent `needs` something raises a
 `sandbox not ready` item in the Inbox as soon as that is known -- not at the
-due time -- and an `expires:` within 30 days raises `credential expiring`.
+due time. A declared secret's `expires` raises one `credential expiring` item
+per secret, naming every scope, agent and provider that uses it, 30 days
+ahead, again 7 days ahead and again on the day; an inline credential's own
+`expires:` still raises one per provider.
 
 **Instances never touch each other's.** Every profile and provider the
 daemon writes carries this instance's suffix -- the first eight characters
@@ -653,6 +663,9 @@ mkdir -p ~/.config/factory/secrets
 (umask 077; cat > ~/.config/factory/secrets/claude-oauth-token)   # paste the token, Ctrl-D
 ```
 
+and its entry in the root's `secrets:` (see "Secrets"), with `expires:` a year
+on -- the date the Secrets tab counts down and the Inbox warns about.
+
 ```sh
 # 1. CLI + gateway (Homebrew formula; MicroVM driver needs e2fsprogs)
 curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION=v0.1.2 sh
@@ -726,10 +739,65 @@ running as the daemon's owner, so it reads whatever that user can read:
 a scope's own `.env`, the system keychain. The runtime is a terminal
 multiplexer, not a boundary.
 
-The L2 Environment page's **Secrets** tab reports exactly that and nothing
-more: for each known location, whether a file is there. No value is ever
-opened, held, logged, or returned — `present` is the entire result of each
-check, and there is no write path, in the UI or over the socket.
+**The declared catalogue (`#244`).** The secrets Factory itself depends on --
+today, the credentials of OpenShell providers -- are declared once, in the
+instance root's `.factory/config.yaml`. An entry says where a secret lives and
+what it is for, never what it is:
+
+```yaml
+secrets:
+  - name: claude-oauth-token
+    kind: token            # token | api-key | certificate | ssh-key | password | other
+    source: { from: file, path: ~/.config/factory/secrets/claude-oauth-token }
+    expires: 2027-10-04    # a date, or never; left out is "unknown"
+    renew: "claude setup-token, then (umask 077; cat > ~/.config/factory/secrets/claude-oauth-token)"
+    note: the curator's subscription token   # optional
+  - name: github-gh-login
+    kind: token
+    source: { from: command, run: "gh auth token" }
+    expires: never
+    renew: "gh auth login"
+```
+
+`source:` takes the kinds an inline provider credential does (`file` with `~`
+and the owner-only check, `command`, `env`, `keychain`). The block is strict:
+an unknown key, kind or date is refused at load by name, as is a name declared
+twice; only the root's file may hold it. A provider names an entry with
+`credential: { secret: <name> }`; its own `expires:` is superseded by the
+entry's, and refused when the two disagree.
+
+The L2 Environment page's **Secrets** tab lists each entry: whether a `file`
+source is there and owner-only (its metadata, never its content); whether the
+source resolved at the provisioner's last pass -- for a `command`, `env` or
+`keychain`, that it ran or was found, never what it returned, and a page load
+never runs one itself; the expiry as a date, days left and `ok` / `due soon`
+(30 days) / `expired` / `never` / `unknown`; the renew line; and every
+scope / agent / provider that uses it. Providers still written inline are
+listed as **undeclared**, with their scope, agent and provider, so they can be
+moved: add an entry whose `source:` is exactly the inline credential, then
+replace the credential with `{ secret: <name> }` and move any `expires:` with
+it. The provider is given the same value, so nothing on the gateway is
+recreated.
+
+**What is written, and what never is.** The tab's Edit, `PUT
+/api/secrets/<name>` and the `secret.set` request (grant `secrets.edit`, the
+root scope's, never part of a `*`) write exactly one thing: an existing
+entry's `expires`, `renew` and `note`, replaced whole, into the instance
+root's `.factory/config.yaml`. Only those keys of that one entry change --
+every other line and comment stays as written, and the write is refused,
+writing nothing, if the result would differ in anything else or if the
+catalogue in the file no longer matches the one the daemon loaded. Each change
+is journaled (under `factory:secrets`, shown on the tab) with who made it and
+the old and new metadata. Nothing ever writes an entry's `name`, `kind` or
+`source`, adds or removes an entry, or touches a scope's file. A value is
+never written, read back, logged, journaled, returned by the API or shown:
+the provisioner reads a source only to hand the value to the one `openshell
+provider create/update` child that needs it and to learn whether it
+resolves, and drops it.
+
+Below the catalogue, the tab still reports the well-known locations: for each,
+whether a file is there. No value is opened, held, logged, or returned --
+`present` is the entire result of each check.
 
 ## Dependencies
 
@@ -4913,6 +4981,7 @@ migration and strict command ladder are still ahead in #193.
     ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
     ui/js/{dashboard,activity,site,site-render}.js               the new views
     ui/js/{sandboxes,secrets,dependencies}.js                    L2's three tabs
+    ui/js/secrets-model.js                                       the Secrets tab's declared catalogue (#244), pure
     ui/js/dependencies-model.js                                  Dependencies' pure shaping logic
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use factory_core::config::{
     refuse_misplaced_scope_dashboard, refuse_misplaced_scope_infrastructure, refuse_misplaced_scope_policies,
-    refuse_misplaced_scope_quality, refuse_misplaced_scope_roles, Factory, Scope, CONFIG_FILE, FACTORY_DIR,
+    refuse_misplaced_scope_quality, refuse_misplaced_scope_roles, refuse_misplaced_scope_secrets, Factory, Scope, CONFIG_FILE, FACTORY_DIR,
 };
 use factory_core::error::{FactoryError, Result};
 use serde::Deserialize;
@@ -136,6 +136,8 @@ fn read_scope(path: &Path) -> Result<Scope> {
     // block belongs.
     refuse_misplaced_scope_infrastructure(&document, path)?;
     factory_core::config::refuse_misplaced_scope_renewals(&document, path)?;
+    // And `secrets:` (#244), for the same reason.
+    refuse_misplaced_scope_secrets(&document, path)?;
     let file: ScopeFile = serde_yaml_ng::from_value(document).map_err(parsing)?;
     Ok(file.scope)
 }
@@ -261,6 +263,7 @@ mod tests {
                 policies: Default::default(),
                 quality: Default::default(),
                 infrastructure: Default::default(),
+                secrets: Vec::new(),
                 plugins_dir: None,
                 renewals: Vec::new(),
                 renewals_notify: None,

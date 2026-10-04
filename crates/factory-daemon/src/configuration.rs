@@ -1587,6 +1587,7 @@ mod tests {
                 policies: Default::default(),
                 quality: Default::default(),
                 infrastructure,
+                secrets: Vec::new(),
                 plugins_dir: None,
                 renewals: Vec::new(),
                 renewals_notify: None,
@@ -2547,5 +2548,386 @@ mod tests {
         let engine = instance.engine();
         assert!(engine.set_dashboard("nope", vec![tile_yaml("throughput_week", "s")]).is_err());
         assert!(engine.reset_dashboard("nope").is_err());
+    }
+}
+
+// ============================================== the secrets catalogue (#244)
+//
+// The one write into `secrets:`: an entry's `expires`, `renew` and `note`,
+// in the instance root's config. Never its `source`, never a value -- there
+// is no value anywhere in this file to write. The same sequence as the
+// dashboard's: take the edit lock, read the file, check the instance as it
+// would be, splice only those keys of that one entry, parse the result back
+// and refuse unless exactly that changed, write atomically, then update the
+// live snapshot.
+
+/// The keys a metadata write owns, in the order they are written.
+const SECRET_METADATA_KEYS: [&str; 3] = ["expires", "renew", "note"];
+
+/// `metadata` as the three `(key, value)` pairs it writes; `None` removes.
+fn secret_metadata_values(metadata: &factory_core::secrets::SecretMetadata) -> [(&'static str, Option<String>); 3] {
+    [
+        ("expires", metadata.expires.map(|e| e.to_string())),
+        ("renew", metadata.renew.clone()),
+        ("note", metadata.note.clone()),
+    ]
+}
+
+/// One plain YAML scalar for `value`, quoted only when YAML would otherwise
+/// read it as something else. A date and `never` are written bare.
+fn secret_scalar(key: &str, value: &str) -> Result<String> {
+    if key == "expires" {
+        return Ok(value.to_string());
+    }
+    let rendered = serde_yaml_ng::to_string(&Value::String(value.to_string()))
+        .map_err(|error| FactoryError::Other(anyhow::anyhow!("encoding a secret's {key}: {error}")))?;
+    let rendered = rendered.trim_end_matches('\n');
+    if rendered.contains('\n') {
+        return Err(bad(format!("a secret's {key} is one line")));
+    }
+    Ok(rendered.to_string())
+}
+
+/// The document with entry `index` of `secrets:` carrying `metadata` --
+/// what the spliced file must parse back to, exactly.
+fn expected_secret_document(
+    document: &Value,
+    index: usize,
+    metadata: &factory_core::secrets::SecretMetadata,
+    path: &Path,
+) -> Result<Value> {
+    let mut expected = document.clone();
+    let entry = mapping(&mut expected, "the document", path)?
+        .get_mut(Value::String("secrets".into()))
+        .and_then(Value::as_sequence_mut)
+        .and_then(|entries| entries.get_mut(index))
+        .ok_or_else(|| bad(format!("{} has no secrets: entry {index}", path.display())))?;
+    let entry = mapping(entry, "a secrets: entry", path)?;
+    for (key, value) in secret_metadata_values(metadata) {
+        let key = Value::String(key.into());
+        match value {
+            Some(value) => {
+                entry.insert(key, Value::String(value));
+            }
+            None => {
+                entry.remove(&key);
+            }
+        }
+    }
+    Ok(expected)
+}
+
+/// The `secrets:` block's lines: the key's own line, and the first line
+/// after the block. A sequence may sit at the key's own indentation
+/// (`secrets:\n- name: x`), so a `-` line at column 0 is still inside.
+fn secrets_block(lines: &[(usize, usize, &str)]) -> Option<(usize, usize)> {
+    let at = lines
+        .iter()
+        .position(|(_, _, line)| indentation(line) == Some(0) && key_rest(line, "secrets").is_some())?;
+    let end = (at + 1..lines.len())
+        .find(|index| {
+            let line = lines[*index].2;
+            is_content(line) && indentation(line) == Some(0) && !line.starts_with('-')
+        })
+        .unwrap_or(lines.len());
+    Some((at, end))
+}
+
+/// Where each entry of the block starts: the `-` lines at the block's
+/// shallowest dash indentation.
+fn secret_item_starts(lines: &[(usize, usize, &str)], from: usize, to: usize) -> Vec<usize> {
+    let dash = |line: &str| {
+        let trimmed = line.trim_start_matches(' ');
+        is_content(line) && (trimmed.starts_with("- ") || trimmed.trim_end() == "-")
+    };
+    let Some(indent) = (from..to).filter(|i| dash(lines[*i].2)).filter_map(|i| indentation(lines[i].2)).min() else {
+        return Vec::new();
+    };
+    (from..to).filter(|i| dash(lines[*i].2) && indentation(lines[*i].2) == Some(indent)).collect()
+}
+
+/// The file's text with entry `index` (named `name`) of the root's
+/// `secrets:` carrying `metadata` and nothing else changed. A block-style
+/// entry has just those keys' lines replaced, removed or added, so every
+/// comment and every other line stays as written; a flow-style entry, or
+/// one whose first line is one of those keys, is rewritten whole as a block.
+fn splice_secret_metadata(
+    text: &str,
+    document: &Value,
+    index: usize,
+    name: &str,
+    metadata: &factory_core::secrets::SecretMetadata,
+    path: &Path,
+) -> Result<String> {
+    let lines = line_table(text);
+    let (at, end) = secrets_block(&lines).ok_or_else(|| bad(format!("{} has no top-level secrets: block", path.display())))?;
+    let rest = key_rest(lines[at].2, "secrets").unwrap_or_default();
+    let flow_block = !rest.trim().is_empty() && !rest.trim_start().starts_with('#');
+    let starts = if flow_block { Vec::new() } else { secret_item_starts(&lines, at + 1, end) };
+    let Some(&start) = starts.get(index) else {
+        // `secrets: [ ... ]` on one line: rewrite the block, once.
+        return rewrite_secrets_block(text, &lines, at, end, document, index, metadata, path);
+    };
+    let item_end = starts.get(index + 1).copied().unwrap_or(end);
+    let item_end = last_content(&lines, start, item_end).map(|last| last + 1).unwrap_or(item_end);
+    let first = lines[start].2;
+    let dash_indent = indentation(first).unwrap_or(0);
+    let after_dash = first.trim_start_matches(' ').trim_start_matches('-').trim_start_matches(' ');
+    let key_indent = dash_indent + (first.trim_start_matches(' ').len() - after_dash.len());
+
+    // Which entry this is was settled by its index; its text must agree.
+    if !(opens_entry(after_dash, "name") && key_rest(after_dash, "name").is_some_and(|v| v.trim().trim_matches(['"', '\'']) == name))
+        && !(start + 1..item_end).any(|i| {
+            indentation(lines[i].2) == Some(key_indent)
+                && key_rest(lines[i].2, "name").is_some_and(|v| v.trim().trim_matches(['"', '\'']) == name)
+        })
+    {
+        return rewrite_secret_item(text, &lines, start, item_end, dash_indent, document, index, metadata, path);
+    }
+    if after_dash.starts_with('{') || SECRET_METADATA_KEYS.iter().any(|key| key_rest(after_dash, key).is_some()) {
+        return rewrite_secret_item(text, &lines, start, item_end, dash_indent, document, index, metadata, path);
+    }
+
+    let pad = " ".repeat(key_indent);
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    let mut missing = String::new();
+    for (key, value) in secret_metadata_values(metadata) {
+        let found = (start + 1..item_end).find(|i| indentation(lines[*i].2) == Some(key_indent) && key_rest(lines[*i].2, key).is_some());
+        let replacement = match &value {
+            Some(value) => format!("{pad}{key}: {}\n", secret_scalar(key, value)?),
+            None => String::new(),
+        };
+        match found {
+            Some(line) => {
+                let stop = block_end(&lines, line, item_end, key_indent);
+                let stop = last_content(&lines, line, stop).map(|last| last + 1).unwrap_or(stop);
+                edits.push((offset_of(&lines, text, line), offset_of(&lines, text, stop), replacement));
+            }
+            None => missing.push_str(&replacement),
+        }
+    }
+    if !missing.is_empty() {
+        let at = offset_of(&lines, text, item_end);
+        edits.push((at, at, missing));
+    }
+    edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+    let mut out = text.to_string();
+    for (from, to, replacement) in edits {
+        if from == to {
+            out = insert_at(&out, from, &replacement);
+        } else {
+            out.replace_range(from..to, &replacement);
+        }
+    }
+    Ok(out)
+}
+
+/// The expected entry, rendered as a block sequence item at `indent`.
+fn rendered_secret_item(document: &Value, index: usize, metadata: &factory_core::secrets::SecretMetadata, indent: usize, path: &Path) -> Result<String> {
+    let expected = expected_secret_document(document, index, metadata, path)?;
+    let entry = expected
+        .get("secrets")
+        .and_then(|s| s.get(index))
+        .cloned()
+        .ok_or_else(|| bad(format!("{} has no secrets: entry {index}", path.display())))?;
+    let yaml = serde_yaml_ng::to_string(&vec![entry])
+        .map_err(|error| FactoryError::Other(anyhow::anyhow!("encoding a secrets: entry: {error}")))?;
+    let pad = " ".repeat(indent);
+    Ok(yaml.lines().map(|line| format!("{pad}{line}\n")).collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rewrite_secret_item(
+    text: &str,
+    lines: &[(usize, usize, &str)],
+    start: usize,
+    end: usize,
+    indent: usize,
+    document: &Value,
+    index: usize,
+    metadata: &factory_core::secrets::SecretMetadata,
+    path: &Path,
+) -> Result<String> {
+    let rendered = rendered_secret_item(document, index, metadata, indent, path)?;
+    let from = offset_of(lines, text, start);
+    let to = offset_of(lines, text, end);
+    Ok(format!("{}{}{}", &text[..from], rendered, &text[to..]))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rewrite_secrets_block(
+    text: &str,
+    lines: &[(usize, usize, &str)],
+    at: usize,
+    end: usize,
+    document: &Value,
+    index: usize,
+    metadata: &factory_core::secrets::SecretMetadata,
+    path: &Path,
+) -> Result<String> {
+    let expected = expected_secret_document(document, index, metadata, path)?;
+    let secrets = expected
+        .get("secrets")
+        .cloned()
+        .ok_or_else(|| bad(format!("{} has no secrets: block", path.display())))?;
+    let yaml = serde_yaml_ng::to_string(&BTreeMap::from([("secrets", secrets)]))
+        .map_err(|error| FactoryError::Other(anyhow::anyhow!("encoding secrets: {error}")))?;
+    let stop = last_content(lines, at, end).map(|last| last + 1).unwrap_or(end);
+    let from = offset_of(lines, text, at);
+    let to = offset_of(lines, text, stop);
+    Ok(format!("{}{}{}", &text[..from], yaml, &text[to..]))
+}
+
+/// A catalogue with every entry's metadata cleared: what must match between
+/// the file and the running daemon before a metadata write may go ahead.
+fn without_metadata(secrets: &[factory_core::secrets::SecretDecl]) -> Vec<factory_core::secrets::SecretDecl> {
+    secrets
+        .iter()
+        .cloned()
+        .map(|mut s| {
+            s.expires = None;
+            s.renew = None;
+            s.note = None;
+            s
+        })
+        .collect()
+}
+
+impl Engine {
+    /// Write a declared secret's metadata into the instance root's config
+    /// and make it hold from the next request. Answers what the entry said
+    /// before, and whether anything changed (an unchanged write writes and
+    /// journals nothing).
+    pub(crate) fn write_secret_metadata(
+        &self,
+        name: &str,
+        metadata: &factory_core::secrets::SecretMetadata,
+    ) -> Result<(factory_core::secrets::SecretMetadata, bool)> {
+        let _edit = self
+            .configuration_edit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let factory = self.factory_snapshot();
+        let path = factory.factory_dir().join(CONFIG_FILE);
+        let text = fs::read_to_string(&path)
+            .map_err(|error| FactoryError::Other(anyhow::anyhow!("reading {}: {error}", path.display())))?;
+        let document: Value =
+            serde_yaml_ng::from_str(&text).map_err(|error| bad(format!("parsing {}: {error}", path.display())))?;
+        let file: Config =
+            serde_yaml_ng::from_str(&text).map_err(|error| bad(format!("parsing {}: {error}", path.display())))?;
+        let Some(index) = factory.config.secrets.iter().position(|s| s.name == name) else {
+            let declared: Vec<&str> = factory.config.secrets.iter().map(|s| s.name.as_str()).collect();
+            return Err(bad(format!(
+                "no secret {name:?} is declared in the instance root's secrets: (it declares: {})",
+                if declared.is_empty() { "nothing".to_string() } else { declared.join(", ") }
+            )));
+        };
+        if without_metadata(&file.secrets) != without_metadata(&factory.config.secrets) {
+            return Err(bad(format!(
+                "the secrets: in {} changed since the daemon read it; restart Factory before editing a secret from here",
+                path.display()
+            )));
+        }
+        let before = file.secrets[index].metadata();
+        if before == *metadata {
+            return Ok((before, false));
+        }
+        let mut after = factory.config.secrets.clone();
+        after[index].expires = metadata.expires;
+        after[index].renew = metadata.renew.clone();
+        after[index].note = metadata.note.clone();
+
+        // The instance as it would be, checked whole: a provider's own
+        // `expires:` that would now disagree with the secret's is refused
+        // here, before a byte is written.
+        let mut candidate = factory.clone();
+        candidate.config.secrets = after.clone();
+        candidate.config.validate()?;
+
+        let serialized = splice_secret_metadata(&text, &document, index, name, metadata, &path)?;
+        let written: Value = serde_yaml_ng::from_str(&serialized).map_err(|error| {
+            FactoryError::Other(anyhow::anyhow!(
+                "could not edit the secret {name} in {} without breaking it ({error}); nothing was written",
+                path.display()
+            ))
+        })?;
+        let reparsed: Option<Config> = serde_yaml_ng::from_str(&serialized).ok();
+        if written != expected_secret_document(&document, index, metadata, &path)?
+            || reparsed.map(|c| c.secrets) != Some(after.clone())
+        {
+            return Err(FactoryError::Other(anyhow::anyhow!(
+                "could not edit the secret {name} in {} without changing more than its expires, renew and note; \
+                 nothing was written",
+                path.display()
+            )));
+        }
+        atomic_write(&path, &serialized)?;
+        self.replace_instance_secrets(after);
+        Ok((before, true))
+    }
+}
+
+#[cfg(test)]
+mod secret_splice_tests {
+    use super::*;
+    use factory_core::secrets::{Expiry, SecretMetadata};
+
+    const ROOT: &str = "\
+version: 1
+instance: { id: abc, name: test }
+# The two credentials the curator needs.
+secrets:
+  # Claude's token, renewed yearly.
+  - name: claude-oauth-token
+    kind: token
+    source: { from: file, path: ~/.config/factory/secrets/claude-oauth-token }
+    expires: 2027-10-04   # a year after setup-token
+    renew: \"claude setup-token, then (umask 077; cat > ~/.config/factory/secrets/claude-oauth-token)\"
+  - name: github-gh-login
+    kind: token
+    source: { from: command, run: \"gh auth token\" }
+    expires: never
+
+# Who runs here.
+roles: {}
+";
+
+    fn splice(text: &str, index: usize, name: &str, metadata: &SecretMetadata) -> String {
+        let document: Value = serde_yaml_ng::from_str(text).unwrap();
+        let out = splice_secret_metadata(text, &document, index, name, metadata, Path::new("config.yaml")).unwrap();
+        let written: Value = serde_yaml_ng::from_str(&out).unwrap();
+        assert_eq!(written, expected_secret_document(&document, index, metadata, Path::new("config.yaml")).unwrap(), "{out}");
+        out
+    }
+
+    #[test]
+    fn only_the_three_keys_of_the_one_entry_move_and_every_comment_stays() {
+        let m = SecretMetadata {
+            expires: Some(Expiry::On(chrono::NaiveDate::from_ymd_opt(2026, 10, 20).unwrap())),
+            renew: None,
+            note: Some("rotated by hand: see #244".into()),
+        };
+        let out = splice(ROOT, 0, "claude-oauth-token", &m);
+        assert!(out.contains("    expires: 2026-10-20\n"), "{out}");
+        assert!(!out.contains("renew: \"claude setup-token"), "renew removed: {out}");
+        assert!(out.contains("    note: 'rotated by hand: see #244'\n") || out.contains("    note: rotated by hand: see #244\n"), "{out}");
+        for kept in ["# The two credentials", "# Claude's token, renewed yearly.", "# Who runs here.", "source: { from: file, path: ~/.config/factory/secrets/claude-oauth-token }", "source: { from: command, run: \"gh auth token\" }"] {
+            assert!(out.contains(kept), "{kept} lost: {out}");
+        }
+        // The other entry, and the note lands inside this one.
+        let second = splice(&out, 1, "github-gh-login", &SecretMetadata { expires: Some(Expiry::Never), renew: Some("gh auth login".into()), note: None });
+        assert!(second.contains("    expires: never\n    renew: gh auth login\n\n# Who runs here."), "{second}");
+    }
+
+    #[test]
+    fn a_dash_at_column_zero_and_a_flow_entry_are_both_edited() {
+        let text = "secrets:\n- name: a\n  kind: token\n  source: { from: env, name: A }\n- { name: b, kind: token, source: { from: env, name: B } }\nroles: {}\n";
+        let out = splice(text, 0, "a", &SecretMetadata { expires: Some(Expiry::Never), ..Default::default() });
+        assert!(out.starts_with("secrets:\n- name: a\n  kind: token\n  source: { from: env, name: A }\n  expires: never\n- { name: b"), "{out}");
+        let out = splice(&out, 1, "b", &SecretMetadata { renew: Some("rotate b".into()), ..Default::default() });
+        assert!(out.contains("- name: b\n") && out.contains("renew: rotate b\n") && out.ends_with("roles: {}\n"), "{out}");
+        let flow = "secrets: [{ name: a, kind: token, source: { from: env, name: A } }]\nroles: {}\n";
+        let out = splice(flow, 0, "a", &SecretMetadata { note: Some("n".into()), ..Default::default() });
+        assert!(out.contains("note: n") && out.ends_with("roles: {}\n"), "{out}");
     }
 }

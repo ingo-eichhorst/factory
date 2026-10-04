@@ -554,6 +554,20 @@ pub struct OperationsInput<'a> {
     /// Every `sandbox: openshell` agent's readiness (`#234`), with the
     /// scheduled tasks it would run.
     pub sandboxes: Vec<SandboxAttention>,
+    /// Every declared secret with an expiry date (`#244`), with the
+    /// providers that name it.
+    pub secrets: Vec<SecretAttention>,
+}
+
+/// One declared secret with a date, for the attention queue (`#244`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SecretAttention {
+    pub name: String,
+    pub expires: chrono::NaiveDate,
+    pub renew: Option<String>,
+    /// Where the renewed value goes, in words. Never a value.
+    pub source: String,
+    pub used_by: Vec<crate::protocol::SecretUse>,
 }
 
 /// One sandboxed agent, for the attention queue.
@@ -589,6 +603,64 @@ impl ScopeFilter {
 }
 
 // ================================================================ report
+
+/// The Inbox item for one declared secret, when its date is inside the
+/// warning window: one per secret, whichever agents use it, kept when a
+/// scope filter covers any of them. Its `since` is the day the current
+/// stage opened -- 30 days ahead, 7 days ahead, the day itself -- so the
+/// item is new at each stage.
+fn secret_expiring(
+    secret: &SecretAttention,
+    today: chrono::NaiveDate,
+    now: DateTime<Utc>,
+    filter: Option<&ScopeFilter>,
+) -> Option<Exception> {
+    let stage = crate::secrets::warning_stage(secret.expires, today)?;
+    if filter.is_some_and(|f| !secret.used_by.iter().any(|u| f.covers(&u.scope))) {
+        return None;
+    }
+    let left = (secret.expires - today).num_days();
+    let when = match left {
+        l if l < 0 => format!("expired on {}", secret.expires),
+        0 => format!("expires today ({})", secret.expires),
+        1 => format!("expires tomorrow ({})", secret.expires),
+        l => format!("expires on {} ({l} days)", secret.expires),
+    };
+    let users = match secret.used_by.as_slice() {
+        [] => "no agent names it".to_string(),
+        all => {
+            let named: Vec<String> = all.iter().map(|u| format!("{} / {} / {}", u.scope, u.agent, u.provider)).collect();
+            let verb = if left < 0 { "have stopped" } else { "stop" };
+            format!("{} {verb} working without it: {}", if all.len() == 1 { "1 agent" } else { "these agents" }, named.join(", "))
+        }
+    };
+    let renew = match &secret.renew {
+        Some(renew) => format!("renew it with `{renew}`"),
+        None => format!("renew it and put the new value in {}", secret.source),
+    };
+    let since = stage.and_hms_opt(0, 0, 0).map(|midnight| midnight.and_utc()).unwrap_or(now).min(now);
+    let scopes: BTreeSet<&str> = secret.used_by.iter().map(|u| u.scope.as_str()).collect();
+    let agents: BTreeSet<&str> = secret.used_by.iter().map(|u| u.agent.as_str()).collect();
+    Some(Exception {
+        kind: ExceptionKind::CredentialExpiring,
+        severity: if left <= crate::secrets::URGENT_DAYS { Severity::High } else { Severity::Medium },
+        scope: (scopes.len() == 1).then(|| scopes.iter().next().map(|s| s.to_string())).flatten(),
+        task_id: None,
+        title: Some(secret.name.clone()),
+        run_id: None,
+        agent: (agents.len() == 1).then(|| agents.iter().next().map(|a| a.to_string())).flatten(),
+        since,
+        age_s: seconds(now - since),
+        reason: format!(
+            "the secret {} {when}; {users}. {renew}, then update its expires: in the Secrets tab",
+            secret.name
+        ),
+        actions: Vec::new(),
+        suspicion: false,
+        observation: false,
+        also: Vec::new(),
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperationsReport {
@@ -647,8 +719,11 @@ pub enum ExceptionKind {
     /// soon as it is known rather than at the due time, naming the one
     /// missing thing and the command that supplies it.
     SandboxNotReady,
-    /// A managed provider's declared credential expires within
-    /// `openshell::EXPIRY_WARNING_DAYS`, or already has.
+    /// A declared secret (`#244`) expires within
+    /// `secrets::DUE_SOON_DAYS`, within `secrets::URGENT_DAYS`, or already
+    /// has: one item per secret, naming every agent that stops working, new
+    /// at each of those three stages. A managed provider whose credential
+    /// is still written inline, with its own `expires:`, raises one too.
     CredentialExpiring,
 }
 
@@ -1508,6 +1583,14 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
         }
     }
 
+    // -- declared secrets that expire soon (#244) ---------------------------
+    let today = now.date_naive();
+    for secret in &input.secrets {
+        if let Some(item) = secret_expiring(secret, today, now, input.scope.as_ref()) {
+            attention.push(item);
+        }
+    }
+
     // -- signposts: observations ------------------------------------------
     for sp in &input.signposts {
         attention.push(Exception {
@@ -2314,6 +2397,55 @@ mod tests {
         assert_eq!(r.attention[0].kind, ExceptionKind::CredentialExpiring);
         assert!(r.attention[0].reason.contains("expires on 2027-01-01 (12 days)") && r.attention[0].reason.contains("the file ~/t"), "{}", r.attention[0].reason);
         assert!(report(&OperationsInput { now: now(), sandboxes: vec![sandboxed(ReadinessState::Needs, vec![("t".into(), "x".into())])], scope: Some(ScopeFilter::exactly("other")), ..Default::default() }).attention.is_empty());
+    }
+
+    #[test]
+    fn a_declared_secret_is_one_item_at_30_days_7_days_and_on_the_day_naming_every_agent() {
+        use crate::protocol::SecretUse;
+        let today = now().date_naive();
+        let user = |scope: &str, agent: &str| SecretUse { scope: scope.into(), agent: agent.into(), provider: format!("factory-claude-{agent}") };
+        let secret = |days: i64, used_by: Vec<SecretUse>| SecretAttention {
+            name: "claude-oauth-token".into(),
+            expires: today + Duration::days(days),
+            renew: Some("claude setup-token".into()),
+            source: "the file ~/t".into(),
+            used_by,
+        };
+        let items = |s: SecretAttention, scope: Option<ScopeFilter>| {
+            report(&OperationsInput { now: now(), secrets: vec![s], scope, ..Default::default() }).attention
+        };
+        assert!(items(secret(31, vec![user("herdr", "curator")]), None).is_empty(), "outside the window");
+
+        let at_30 = items(secret(30, vec![user("herdr", "curator")]), None);
+        assert_eq!(at_30.len(), 1);
+        let e = &at_30[0];
+        assert_eq!((e.kind, e.severity), (ExceptionKind::CredentialExpiring, Severity::Medium));
+        assert_eq!((e.title.as_deref(), e.scope.as_deref(), e.agent.as_deref()), (Some("claude-oauth-token"), Some("herdr"), Some("curator")));
+        assert!(e.reason.contains("(30 days)") && e.reason.contains("herdr / curator / factory-claude-curator") && e.reason.contains("`claude setup-token`"), "{}", e.reason);
+
+        // Each stage is a new item: its `since` is the day the stage opened.
+        let midnight = |d: chrono::NaiveDate| d.and_hms_opt(0, 0, 0).unwrap().and_utc();
+        assert_eq!(e.since, midnight(today), "the 30-day stage opened today");
+        let at_8 = &items(secret(8, vec![user("herdr", "curator")]), None)[0];
+        assert_eq!((at_8.since, at_8.severity), (midnight(today - Duration::days(22)), Severity::Medium), "still the 30-day stage");
+        let at_7 = &items(secret(7, vec![user("herdr", "curator")]), None)[0];
+        assert_eq!((at_7.since, at_7.severity), (midnight(today), Severity::High), "the 7-day stage opened today");
+        let at_3 = &items(secret(3, vec![user("herdr", "curator")]), None)[0];
+        assert_eq!(at_3.since, midnight(today - Duration::days(4)));
+        let today_item = &items(secret(0, vec![user("herdr", "curator")]), None)[0];
+        assert_eq!(today_item.since, midnight(today));
+        assert!(today_item.reason.contains("expires today"), "{}", today_item.reason);
+        let gone = &items(secret(-3, vec![user("herdr", "curator"), user("site", "publisher")]), None)[0];
+        assert!(gone.reason.contains("expired on") && gone.reason.contains("these agents have stopped working"), "{}", gone.reason);
+        assert_eq!((gone.scope.as_deref(), gone.agent.as_deref()), (None, None), "two scopes, two agents");
+
+        // A scope filter keeps it when it covers any user; an unused secret
+        // shows only unfiltered.
+        assert_eq!(items(secret(5, vec![user("herdr", "curator"), user("site", "publisher")]), Some(ScopeFilter::exactly("site"))).len(), 1);
+        assert!(items(secret(5, vec![user("herdr", "curator")]), Some(ScopeFilter::exactly("site"))).is_empty());
+        let unused = items(secret(5, vec![]), None);
+        assert!(unused[0].reason.contains("no agent names it"), "{}", unused[0].reason);
+        assert!(items(secret(5, vec![]), Some(ScopeFilter::exactly("site"))).is_empty());
     }
 
     #[test]

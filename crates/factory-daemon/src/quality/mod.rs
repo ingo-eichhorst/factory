@@ -649,6 +649,7 @@ mod tests {
             policies: PolicyDeclaration::default(),
             quality: vec!["baseline".into()],
             infrastructure: Default::default(),
+            secrets: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,

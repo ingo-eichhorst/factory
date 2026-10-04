@@ -379,6 +379,8 @@ code.id { font: 400 11px/1.4 var(--mono); color: var(--faint); }
    that is actually there -- both are "worth a second look", not "wrong". */
 .tag.warn { color: var(--wait); border-color: var(--wait); }
 .tag.ok { color: var(--run); border-color: var(--run); }
+/* A declared secret that is expired, absent, or will not resolve (#244). */
+.tag.bad { color: var(--fault); border-color: var(--fault); }
 
 /* The role an agent is working under, changed in place. */
 select.rolepick {
@@ -2508,3 +2510,9 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
 .budget-spend { overflow-x: auto; }
 .budget-spend table { width: 100%; border-collapse: collapse; }
 .budget-spend td, .budget-spend th { text-align: left; padding: 10px; border-bottom: 1px solid var(--line); }
+
+/* ------------------------------------------------- L2 secrets catalogue (#244) */
+#view-secrets section + section { margin-top: 14px; }
+#view-secrets section > p.sub { margin: 0; padding: 8px 14px; border-bottom: 1px solid var(--line-soft); }
+#secrets-changes { margin: 0; padding: 8px 14px 10px 30px; font-size: 12px; line-height: 1.5; }
+#secrets-catalogue td { vertical-align: top; }

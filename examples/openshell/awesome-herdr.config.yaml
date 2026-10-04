@@ -10,10 +10,33 @@
 # e.g. factory-claude-1a2b3c4d), keeps the OpenShell gateway running, and
 # smoke-tests the result before the curator is `ready`. The one human step:
 # `claude setup-token` (a browser login, once a year), with the token written
-# to the file below, owner-only:
+# to the catalogue entry's file, owner-only:
 #
 #   mkdir -p ~/.config/factory/secrets
 #   (umask 077; cat > ~/.config/factory/secrets/claude-oauth-token)   # paste, Ctrl-D
+#
+# Both credentials are declared once, in the instance root's
+# .factory/config.yaml (#244), and named below by `{ secret: <name> }`. The
+# L2 Secrets tab lists them with their expiry and who uses them, and the
+# Inbox warns 30 days, 7 days and on the day:
+#
+#   secrets:
+#     - name: claude-oauth-token
+#       kind: token
+#       source: { from: file, path: ~/.config/factory/secrets/claude-oauth-token }
+#       expires: 2027-10-04     # a year after setup-token
+#       renew: "claude setup-token, then (umask 077; cat > ~/.config/factory/secrets/claude-oauth-token)"
+#     - name: github-gh-login
+#       kind: token
+#       source: { from: command, run: "gh auth token" }
+#       expires: never
+#       renew: "gh auth login"
+#
+# An inline `credential: { from: ..., ... }` still works, and the Secrets tab
+# shows it as undeclared. Moving one into the catalogue: add an entry whose
+# `source:` is exactly the inline credential, then replace the credential
+# with `{ secret: <name> }` (and move any `expires:` with it). The provider
+# is given the same value, so nothing on the gateway is recreated.
 #
 # The weekly audit is `--no-worktree`, so its working directory is the scope
 # itself: the tree and its .git go in by upload, the run publishes by pushing
@@ -38,14 +61,13 @@ scope:
         # claude-code-oauth profile, from `claude setup-token`.
         - name: factory-claude
           type: claude-code-oauth
-          credential: { from: file, path: ~/.config/factory/secrets/claude-oauth-token }
-          # expires: 2027-10-04   # a year after setup-token; the Inbox warns 30 days ahead
+          credential: { secret: claude-oauth-token }
         # github-publish profile -- GitHub reads, git clone/fetch, and the
         # createPullRequest/mergePullRequest mutations. `gh` is found under
         # launchd through Homebrew's bin, which the daemon adds to PATH.
         - name: factory-github
           type: github-publish
-          credential: { from: command, run: "gh auth token" }
+          credential: { secret: github-gh-login }
       upload: workdir
       download: none
       fast_forward: true

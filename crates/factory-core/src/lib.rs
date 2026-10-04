@@ -38,6 +38,7 @@ pub mod renewals;
 pub mod role;
 pub mod run;
 pub mod scenario;
+pub mod secrets;
 pub mod task;
 pub mod usage;
 pub mod workflow;

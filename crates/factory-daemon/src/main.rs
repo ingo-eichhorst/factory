@@ -40,6 +40,7 @@ mod resume;
 mod roles;
 mod scenarios;
 mod scheduler;
+mod secrets;
 mod schedule;
 mod site;
 mod stores;
@@ -196,6 +197,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         policies: Default::default(),
         quality: Default::default(),
         infrastructure: Default::default(),
+        secrets: Vec::new(),
         plugins_dir: None,
         renewals: Vec::new(),
         renewals_notify: None,

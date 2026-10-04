@@ -708,7 +708,31 @@
     <p class="env-note" id="secrets-reach"></p>
     <p class="env-note" id="secrets-boundary"></p>
     <p class="env-note bad" id="secrets-error" hidden></p>
+    <!-- The declared catalogue (#244): the instance root's secrets:, each
+         entry's presence, whether it resolves, its expiry and who names it.
+         Edit changes metadata only (expires, renew, note). -->
     <section>
+      <h3>Declared secrets</h3>
+      <table>
+        <thead><tr><th>Secret</th><th>Source</th><th>Present</th><th>Resolves</th><th>Expiry</th><th>Renew</th><th>Used by</th><th></th></tr></thead>
+        <tbody id="secrets-catalogue"></tbody>
+      </table>
+      <div class="empty" id="noCatalogue" hidden>No secrets declared. Add a <code>secrets:</code> block to the instance root's <code>.factory/config.yaml</code>.</div>
+    </section>
+    <section id="secrets-undeclared-section" hidden>
+      <h3>Undeclared credentials</h3>
+      <p class="sub">OpenShell providers whose credential is still written inline in a scope's config. They work; move each into the catalogue and name it with <code>credential: { secret: &lt;name&gt; }</code>.</p>
+      <table>
+        <thead><tr><th>Scope</th><th>Agent</th><th>Provider</th><th>Source</th><th>State</th></tr></thead>
+        <tbody id="secrets-undeclared"></tbody>
+      </table>
+    </section>
+    <section id="secrets-changes-section" hidden>
+      <h3>Changes</h3>
+      <ul id="secrets-changes"></ul>
+    </section>
+    <section>
+      <h3>Well-known locations</h3>
       <table>
         <thead><tr><th>Integration</th><th>Label</th><th>Path</th><th>Present</th></tr></thead>
         <tbody id="secrets"></tbody>

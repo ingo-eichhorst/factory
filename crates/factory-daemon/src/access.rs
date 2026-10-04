@@ -230,6 +230,9 @@ impl Engine {
             // An ordinary grant, unlike the role-layer writes it otherwise
             // resembles: a layout cannot widen what an agent may do.
             Request::DashboardSet { .. } | Request::DashboardReset { .. } => Grant::DashboardEdit,
+            // A declared secret's metadata in the instance root's config
+            // (`#244`); never a value.
+            Request::SecretSet { .. } => Grant::SecretsEdit,
             Request::AgentStop { .. } => Grant::AgentStop,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
@@ -453,7 +456,7 @@ impl Engine {
                 Some(root) if root.name == *scope => Ok(()),
                 Some(root) => Err(FactoryError::Denied(format!(
                     "{} works in {scope}; the knowledge base, datasets, bench runs, policy \
-                     attestations, goals check-ins and backups are company-wide and belong to the \
+                     attestations, goals check-ins, backups and the secrets catalogue are company-wide and belong to the \
                      root scope ({:?}) alone",
                     caller.describe(),
                     root.name
@@ -724,6 +727,11 @@ impl Engine {
                 Reach::Scope => in_root_scope(),
                 Reach::Own => Err(deny("take or verify a backup; that requires scope reach")),
             },
+            // The catalogue is the instance root's, like a backup.
+            Request::SecretSet { .. } => match def.reach {
+                Reach::Scope => in_root_scope(),
+                Reach::Own => Err(deny("change a declared secret's metadata; that requires scope reach")),
+            },
             // A deployment belongs to its environment's scope. Own reach
             // covers what the caller's own run deploys and nothing else: it
             // may start one from a run, and finish only one its run started.
@@ -864,6 +872,7 @@ mod tests {
             policies: Default::default(),
             quality: Default::default(),
             infrastructure: Default::default(),
+            secrets: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -1185,6 +1194,34 @@ mod tests {
         assert!(allowed(&e, &worker("w"), Request::Backup).await, "reading the status is open to every agent");
         assert!(allowed(&e, &worker("w"), Request::Doctor).await, "Doctor is a read open to every agent");
         assert!(allowed(&e, &Caller::Owner, Request::BackupRun).await);
+    }
+
+    /// `#244`: `secrets.edit` changes the instance root's catalogue, so it
+    /// is checked against the root scope like `backup.run` -- and, unlike
+    /// it, `*` never grants it: a role moves an expiry only when given the
+    /// grant by name.
+    #[tokio::test]
+    async fn secrets_edit_is_the_root_scopes_and_never_granted_by_a_wildcard() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  keeper:\n    grants: [secrets.edit]\n    reach: scope\n  \
+             own-keeper:\n    grants: [secrets.edit]\n    reach: own\n  \
+             everything:\n    grants: ['*']\n    reach: scope\n",
+        );
+        let caller = |scope: &str, role: &str| Caller::Agent {
+            scope: scope.into(),
+            name: "w".into(),
+            role: Role::new(role),
+            run_id: None,
+        };
+        let set = || Request::SecretSet { name: "claude-oauth-token".into(), metadata: Default::default() };
+        assert!(allowed(&e, &caller("demo", "keeper"), set()).await);
+        assert!(!allowed(&e, &caller("other", "keeper"), set()).await, "outside the root scope");
+        assert!(!allowed(&e, &caller("demo", "own-keeper"), set()).await, "own reach never covers the instance");
+        assert!(!allowed(&e, &caller("demo", "everything"), set()).await, "`*` does not include secrets.edit");
+        assert!(!allowed(&e, &worker("w"), set()).await);
+        assert!(allowed(&e, &worker("w"), Request::Environment).await, "reading the tab is open");
+        assert!(allowed(&e, &Caller::Owner, set()).await);
     }
 
     /// `#152`: verifying an encrypted snapshot decrypts it, so an `identity`

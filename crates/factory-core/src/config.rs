@@ -172,6 +172,13 @@ pub struct Config {
     /// discovered by reading a credential. See `Infrastructure`.
     #[serde(default, skip_serializing_if = "Infrastructure::is_empty")]
     pub infrastructure: Infrastructure,
+    /// The declared secrets catalogue (`#244`): where each secret lives and
+    /// what it is for, never its value. Only the instance root declares it
+    /// -- a nested scope's file refuses the block
+    /// (`refuse_misplaced_scope_secrets`) -- and an OpenShell provider names
+    /// an entry with `credential: { secret: <name> }`. See `secrets`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<crate::secrets::SecretDecl>,
     /// Where the daemon looks for out-of-process adapters, relative to
     /// `.factory/`. Defaults to `plugins`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -449,6 +456,7 @@ impl Config {
         self.refuse_root_scope_dashboard()?;
         self.validate_dashboards(self.scopes.iter())?;
         self.infrastructure.validate()?;
+        crate::secrets::validate(&self.secrets)?;
         self.validate_environments()?;
         for scope in self.scope.iter().chain(&self.scopes) {
             crate::renewals::validate(&scope.renewals, None)?;
@@ -458,6 +466,7 @@ impl Config {
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
                 refuse_bad_openshell(scope, &agent)?;
+                refuse_bad_secret_refs(&self.secrets, scope, &agent)?;
                 self.infrastructure.refuse_unknown_provider(scope, &agent)?;
                 if !roles.contains(&agent.role) {
                     return Err(FactoryError::BadRequest(format!(
@@ -521,6 +530,7 @@ impl Config {
         self.refuse_root_scope_dashboard()?;
         self.validate_dashboards(std::iter::empty())?;
         self.infrastructure.validate()?;
+        crate::secrets::validate(&self.secrets)?;
         if let Some(scope) = &self.scope {
             crate::renewals::validate(&scope.renewals, None)?;
             scope.validate_dependencies()?;
@@ -528,6 +538,7 @@ impl Config {
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
                 refuse_bad_openshell(scope, &agent)?;
+                refuse_bad_secret_refs(&self.secrets, scope, &agent)?;
                 self.infrastructure.refuse_unknown_provider(scope, &agent)?;
                 if !roles.contains(&agent.role) {
                     return Err(FactoryError::BadRequest(format!(
@@ -664,6 +675,68 @@ pub fn refuse_bad_openshell(scope: &Scope, agent: &ScopeAgent) -> Result<()> {
         },
         _ => Ok(()),
     }
+}
+
+/// Every `credential: { secret: <name> }` an agent's OpenShell providers
+/// give names a declared secret, and a provider's own `expires:` agrees with
+/// that secret's -- the catalogue's is the one that holds (`#244`), so two
+/// dates that disagree are refused with both named rather than one quietly
+/// winning.
+pub fn refuse_bad_secret_refs(catalogue: &[crate::secrets::SecretDecl], scope: &Scope, agent: &ScopeAgent) -> Result<()> {
+    let Some(block) = &agent.openshell else { return Ok(()) };
+    for provider in &block.providers {
+        let crate::openshell::ProviderDecl::Managed(managed) = provider else { continue };
+        let Some(name) = managed.credential.secret() else { continue };
+        let refuse = |what: String| {
+            Err(FactoryError::BadRequest(format!(
+                "scope {:?} gives {:?} the OpenShell provider {:?} {what}",
+                scope.name,
+                agent.name(),
+                managed.name,
+            )))
+        };
+        let Some(secret) = crate::secrets::find(catalogue, name) else {
+            let declared: Vec<&str> = catalogue.iter().map(|s| s.name.as_str()).collect();
+            return refuse(format!(
+                "the credential {{ secret: {name} }}, which the instance root's secrets: does not declare (it declares: {})",
+                if declared.is_empty() { "nothing".to_string() } else { declared.join(", ") }
+            ));
+        };
+        let Some(own) = managed.expires else { continue };
+        let own = crate::secrets::Expiry::On(own);
+        match secret.expires {
+            Some(catalogue) if catalogue == own => {}
+            Some(catalogue) => {
+                return refuse(format!(
+                    "expires: {own}, and the secret {name} it names says expires: {catalogue}; \
+                     the secret's date is the one that holds, so remove expires: from the provider"
+                ))
+            }
+            None => {
+                return refuse(format!(
+                    "expires: {own}, and the secret {name} it names gives no expires:; \
+                     move the date to the secret in the instance root's secrets:"
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A `secrets:` block in a nested scope's file: only the instance root's is
+/// read, so one written anywhere else would quietly declare nothing.
+pub fn refuse_misplaced_scope_secrets(document: &serde_yaml_ng::Value, path: &Path) -> Result<()> {
+    let misplaced = document
+        .as_mapping()
+        .is_some_and(|root| root.contains_key(serde_yaml_ng::Value::String("secrets".into())));
+    if misplaced {
+        return Err(FactoryError::BadRequest(format!(
+            "scope config {} has a `secrets:` block, which only the instance root's config reads. \
+             Move its entries into the root .factory/config.yaml",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// A `max_sessions: 0` would never run anything -- which is never what
@@ -2139,6 +2212,7 @@ mod tests {
                 policies: PolicyDeclaration::default(),
                 quality: Vec::new(),
                 infrastructure: Infrastructure::default(),
+                secrets: Vec::new(),
                 plugins_dir: None,
                 renewals: Vec::new(),
                 renewals_notify: None,
@@ -3273,6 +3347,46 @@ mod tests {
             "name: a\nagents:\n  - harness: claude-code\n    sandbox: openshell\n    openshell:\n      image: img\n      polcy: {}\n",
         );
         assert!(typo.unwrap_err().to_string().contains("polcy"));
+    }
+
+    #[test]
+    fn a_secret_reference_names_a_declared_secret_and_agrees_with_its_date() {
+        const SECRETS: &str = "secrets:\n  - { name: claude-oauth-token, kind: token, source: { from: file, path: ~/t }, expires: 2027-10-04 }\n  - { name: gh, kind: token, source: { from: command, run: gh auth token }, expires: never }\n  - { name: open, kind: other, source: { from: env, name: OPEN } }\n";
+        let with = |secrets: &str, credential: &str| {
+            config_with(&format!(
+                "{secrets}scopes:\n  - name: demo\n    path: projects/demo\n    agents:\n      - name: curator\n        harness: claude-code\n        sandbox: openshell\n        openshell:\n          image: img\n          providers:\n            - name: factory-claude\n              type: claude-code-oauth\n              {credential}\n          policy: {{}}\n"
+            ))
+        };
+        with(SECRETS, "credential: { secret: claude-oauth-token }").validate().unwrap();
+        // The same date on the provider agrees, and is allowed.
+        with(SECRETS, "credential: { secret: claude-oauth-token }\n              expires: 2027-10-04").validate().unwrap();
+        // An inline source keeps working (#234), with or without a catalogue.
+        with("", "credential: { from: file, path: ~/t }\n              expires: 2027-10-04").validate().unwrap();
+        for (secrets, credential, expected) in [
+            ("", "credential: { secret: claude-oauth-token }", "does not declare (it declares: nothing)"),
+            (SECRETS, "credential: { secret: claude }", "does not declare (it declares: claude-oauth-token, gh, open)"),
+            (SECRETS, "credential: { secret: claude-oauth-token }\n              expires: 2027-11-04", "expires: 2027-11-04, and the secret claude-oauth-token it names says expires: 2027-10-04"),
+            (SECRETS, "credential: { secret: gh }\n              expires: 2027-11-04", "says expires: never"),
+            (SECRETS, "credential: { secret: open }\n              expires: 2027-11-04", "gives no expires:"),
+        ] {
+            let e = with(secrets, credential).validate().unwrap_err().to_string();
+            assert!(e.contains(expected) && e.contains("factory-claude") && e.contains("curator"), "{credential}: {e}");
+        }
+        let twice = config_with("secrets:\n  - { name: a, kind: token, source: { from: env, name: A } }\n  - { name: a, kind: token, source: { from: env, name: B } }\n");
+        assert!(twice.validate().unwrap_err().to_string().contains("twice"));
+        assert!(twice.validate_instance().unwrap_err().to_string().contains("twice"));
+    }
+
+    #[test]
+    fn a_secrets_block_in_a_nested_scope_file_is_refused() {
+        let document: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("scope:\n  id: s\n  name: demo\nsecrets: []\n").unwrap();
+        let e = refuse_misplaced_scope_secrets(&document, Path::new("/x/projects/demo/.factory/config.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("/x/projects/demo/.factory/config.yaml") && e.contains("only the instance root"), "{e}");
+        let fine: serde_yaml_ng::Value = serde_yaml_ng::from_str("scope:\n  id: s\n  name: demo\n").unwrap();
+        refuse_misplaced_scope_secrets(&fine, Path::new("x")).unwrap();
     }
 
     #[test]
