@@ -748,13 +748,20 @@ dependencies = [
 name = "factory-assurance"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "chrono",
+ "csv",
  "factory-kernel",
  "factory-process",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

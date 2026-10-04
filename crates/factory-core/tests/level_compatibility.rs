@@ -209,3 +209,31 @@ fn legacy_quality_synthetic_control_api_only_adapts_the_l5_subjects() {
         factory_assurance::checks::StatusKind::Open
     );
 }
+
+#[test]
+fn benchmark_knowledge_and_provider_paths_are_the_canonical_l5_owners() {
+    let dataset: Option<factory_core::dataset::Dataset> = None;
+    let _: Option<factory_assurance::dataset::Dataset> = dataset;
+    let origin: Option<factory_core::bench::BenchOrigin> = None;
+    let _: Option<factory_assurance::bench::BenchOrigin> = origin;
+    let config: Option<factory_core::benchmark::Configuration> = None;
+    let _: Option<factory_assurance::benchmark::Configuration> = config;
+    let index: Option<factory_core::knowledge::Index> = None;
+    let _: Option<factory_assurance::knowledge::Index> = index;
+    let provider: Option<&dyn factory_core::adapter::KnowledgeProvider> = None;
+    let canonical: Option<&dyn factory_assurance::knowledge_provider::KnowledgeProvider> = provider;
+    assert!(canonical.is_none());
+    let query: factory_core::adapter::KnowledgeQuery =
+        factory_assurance::knowledge_provider::KnowledgeQuery {
+            text: "question".into(),
+            tags: vec![],
+            scope: None,
+            limit: 10,
+        };
+    assert_eq!(
+        serde_json::to_value(query).unwrap(),
+        json!({"text":"question", "limit":10})
+    );
+    let store: Option<factory_core::bench_store::BenchStore> = None;
+    let _: Option<factory_assurance::bench_store::BenchStore> = store;
+}
