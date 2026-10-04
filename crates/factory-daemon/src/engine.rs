@@ -3003,7 +3003,13 @@ impl Engine {
                 return Err(FactoryError::DispatchSuperseded("this one-shot dependency already has an attempt".into()));
             }
             if let Some(origin) = &admitted_task.workflow_origin {
-                if self.workflow_run(&origin.workflow_run_id).await?.status.is_terminal() {
+                let ended = self.workflow_run(&origin.workflow_run_id).await?.status.is_terminal();
+                let unadmitted = admitted_task.runs == 0 || admitted_task.closure.as_ref()
+                    .is_some_and(|closure| closure.reason == factory_core::task::CloseReason::NotPlanned);
+                // An approval-held run was already admitted. Ending the
+                // workflow stops new automatic work, not a person's
+                // decision on that frozen run or an explicit continuation.
+                if ended && !resumed && (trigger != Trigger::Manual || unadmitted) {
                     return Err(FactoryError::DispatchSuperseded("the workflow ended before admission".into()));
                 }
             }

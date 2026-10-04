@@ -682,6 +682,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn waiting_terminal_workflow_still_allows_explicit_infrastructure_continue() {
+        let engine = engine();
+        let definition = create(&engine, vec![node("a"), node("b")], vec![edge("a", "b")]).await;
+        let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+        let all = tasks(&engine).await;
+        let a = of_node(&all, "a")[0].clone();
+        let b = of_node(&all, "b")[0].clone();
+        let first = wait_for_attempt(&engine, &a.id, 1).await;
+        engine.fail_run(&first.id, FailKind::AckTimeout, "provider vanished").await;
+        engine.sync_workflow_for_task(&a.id).await;
+        assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Failed);
+        let response = engine.handle_request(factory_core::protocol::Request::TaskRun {
+            id: a.id.clone(), reason: None, continue_run: true, override_wait: false,
+        }).await;
+        assert!(matches!(response, factory_core::protocol::Response::Ok { .. }), "{response:?}");
+        let second = wait_for_attempt(&engine, &a.id, 2).await;
+        assert_eq!(second.continued_from.as_deref(), Some(first.id.as_str()));
+        finish(&engine, &a.id, RunStatus::Done).await;
+        assert_eq!(engine.require(&b.id).await.unwrap().runs, 0, "continuation never revives cancelled downstream work");
+    }
+
+    #[tokio::test]
     async fn dispatch_carries_direct_parent_outputs_for_a_fan_in_node() {
         let (engine, recorder) = engine_with_recorder();
         let definition = create(
