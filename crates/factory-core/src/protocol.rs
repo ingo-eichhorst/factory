@@ -1424,6 +1424,11 @@ pub struct AgentView {
     pub error: Option<String>,
     /// Task runs this agent is working on in this scope right now.
     pub active: Vec<AgentActivity>,
+    /// For a `sandbox: openshell` agent, whether its sandbox prerequisites
+    /// are in place ahead of any run (`#234`). Absent for every other agent
+    /// and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<crate::openshell::Readiness>,
 }
 
 /// One role, as the roster, the pickers and the Roles view show it.
@@ -2096,6 +2101,9 @@ pub struct SandboxRow {
     #[serde(default)]
     pub enforced: bool,
     pub worktree_capable: bool,
+    /// See `AgentView::readiness`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<crate::openshell::Readiness>,
 }
 
 /// One place on disk a credential might already sit, checked for existence

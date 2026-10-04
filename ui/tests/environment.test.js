@@ -69,3 +69,25 @@ test("a failed fetch gets its own element and never takes the reachability note'
   assert.deepEqual(visibleCredentials(state.environment && state.environment.credentials), []);
   state.environmentError = null;
 });
+
+test("an openshell row says whether its sandbox could be made now, and what it needs", async () => {
+  const { readinessTag, readinessDetail } = await import("../js/sandboxes.js");
+  assert.equal(readinessTag({ sandbox: "docker" }), "", "only openshell has prerequisites the daemon keeps");
+  assert.match(readinessTag({ sandbox: "openshell" }), />checking</);
+  const needs = {
+    state: "needs",
+    thing: "the credential for factory-claude from the file ~/.config/factory/secrets/claude-oauth-token (it cannot be read)",
+    command: "claude setup-token, then (umask 077; cat > ~/.config/factory/secrets/claude-oauth-token)",
+  };
+  const tag = readinessTag({ sandbox: "openshell", readiness: needs });
+  assert.match(tag, /data-tone="bad"/);
+  assert.match(tag, />needs</);
+  const detail = readinessDetail(needs);
+  assert.match(detail, /needs the credential for factory-claude/);
+  assert.match(detail, /<code>claude setup-token, then \(umask 077; cat &gt; ~\/.config/);
+  assert.match(readinessTag({ sandbox: "openshell", readiness: { state: "ready" } }), /data-tone="ok"/);
+  const ready = readinessDetail({ state: "ready", notes: ["a new image is being built"], expiring: [{ provider: "factory-claude", expires: "2027-01-01", days_left: 9 }] });
+  assert.match(ready, /a new image is being built/);
+  assert.match(ready, /factory-claude's credential expires on 2027-01-01 \(9 days\)/);
+  assert.equal(readinessDetail(undefined), "");
+});

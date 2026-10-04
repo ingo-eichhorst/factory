@@ -31,11 +31,20 @@
 #                   default: this host's `git config user.name/user.email`
 #   IMAGE_TAG       default factory-agent:latest            (docker mode)
 #   OUT             default ~/.local/share/factory/openshell (rootfs mode)
+#   FACTORY_SOURCE  the Factory checkout the CLI is built from;
+#                   default: the one this script sits in
+#   FACTORY_TARGET_DIR  cargo's target directory for that build; default: a
+#                   temporary one. Never inside the checkout's own target/,
+#                   which a running daemon may be executing from.
+#
+# The daemon runs this itself (#234) for an agent whose openshell: block
+# names no image: it writes the copy it carries to a directory of its own
+# and sets FACTORY_SOURCE, FACTORY_TARGET_DIR and OUT.
 set -eu
 
 mode=${1:-auto}
 here=$(cd "$(dirname "$0")" && pwd)
-repo=$(cd "$here/../.." && pwd)
+repo=$(cd "${FACTORY_SOURCE:-$here/../..}" && pwd)
 base=${BASE_IMAGE:-ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:aeef1c63f00e2913ea002ccb3aaf925f338b5c5d70e63576f0d95c16a138044e}
 herdr_version=${HERDR_VERSION:-v0.9.3}
 jq_version=${JQ_VERSION:-jq-1.8.2}
@@ -70,10 +79,11 @@ command -v "$cargo" >/dev/null 2>&1 || cargo="$HOME/.cargo/bin/cargo"
 rustup=${RUSTUP:-rustup}
 command -v "$rustup" >/dev/null 2>&1 || rustup="$HOME/.cargo/bin/rustup"
 "$rustup" target add aarch64-unknown-linux-musl >/dev/null
+target_dir=${FACTORY_TARGET_DIR:-$work/target}
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
   "$cargo" build --release -p factory-cli --target aarch64-unknown-linux-musl \
-  --manifest-path "$repo/Cargo.toml" --target-dir "$work/target"
-cp "$work/target/aarch64-unknown-linux-musl/release/factory" "$stage/usr/local/bin/factory"
+  --manifest-path "$repo/Cargo.toml" --target-dir "$target_dir"
+cp "$target_dir/aarch64-unknown-linux-musl/release/factory" "$stage/usr/local/bin/factory"
 
 echo "==> herdr $herdr_version and $jq_version (Linux aarch64)"
 curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -o "$stage/usr/local/bin/herdr" \

@@ -3,6 +3,7 @@
 
 import { $, esc, api, state, since, statusBadge } from "./core.js";
 import { inScope, scopeLabel } from "./scopes.js";
+import { readinessTag } from "./sandboxes.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
 import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openTask } from "./tasks.js";
@@ -60,6 +61,10 @@ export function agentTags(a) {
   if (a.sandbox && a.sandbox !== "none") {
     tags.push(`<span class="tag ${a.sandbox === "openshell" ? "ok" : "warn"}">${esc(a.sandbox)}</span>`);
   }
+  // Whether that sandbox could be made now (#234); the Sandboxes tab
+  // names what is missing and the command that supplies it.
+  const readiness = readinessTag(a).trim();
+  if (readiness) tags.push(readiness);
   if (a.source && a.source !== "builtin" && a.source !== "missing") tags.push(`<span class="tag plug">plugin</span>`);
   if (!a.declared) tags.push(`<span class="tag">undeclared</span>`);
   return tags.join(" ");

@@ -23,6 +23,37 @@ export function sandboxTag(row) {
     : ` <span class="tag warn">declared, not enforced</span>`;
 }
 
+/// Whether a `sandbox: openshell` agent's prerequisites are in place ahead
+/// of any run (#234): `ready`, `preparing`, or `needs` the one thing named.
+/// An openshell row the daemon has not judged yet says so; any other row
+/// has nothing to say.
+export function readinessTag(row) {
+  if (row?.sandbox !== "openshell") return "";
+  const r = row.readiness;
+  if (!r) return ` <span class="tag">checking</span>`;
+  const tone = r.state === "ready" ? "ok" : r.state === "needs" ? "bad" : "warn";
+  const title = r.thing ? ` title="${esc(r.thing)}"` : "";
+  return ` <span class="tag sys-badge" data-tone="${tone}"${title}>${esc(r.state)}</span>`;
+}
+
+/// The line under a row that is not ready: what it needs and the command
+/// that supplies it, or what the daemon is doing about it. Notes ride along
+/// for a ready row -- an image rebuilding, an expiry ahead.
+export function readinessDetail(readiness) {
+  if (!readiness) return "";
+  const lines = [];
+  if (readiness.state === "needs" && readiness.thing) lines.push(`needs ${esc(readiness.thing)}`);
+  if (readiness.state === "preparing" && readiness.thing) lines.push(esc(readiness.thing));
+  if (readiness.command) lines.push(`<code>${esc(readiness.command)}</code>`);
+  for (const note of readiness.notes || []) lines.push(esc(note));
+  for (const e of readiness.expiring || []) {
+    lines.push(e.days_left < 0
+      ? `${esc(e.provider)}'s credential expired on ${esc(e.expires)}`
+      : `${esc(e.provider)}'s credential expires on ${esc(e.expires)} (${esc(String(e.days_left))} days)`);
+  }
+  return lines.map(line => `<div class="sub">${line}</div>`).join("");
+}
+
 function sandboxRow(row) {
   return `<tr>
     <td><div class="title">${esc(row.scope)}</div><div class="sub">${esc(row.scope_path)}</div></td>
@@ -30,7 +61,7 @@ function sandboxRow(row) {
     <td>${esc(row.agent)}</td>
     <td>${esc(row.harness)}</td>
     <td>${esc(row.lifetime)}</td>
-    <td>${esc(row.sandbox)}${sandboxTag(row)}</td>
+    <td>${esc(row.sandbox)}${sandboxTag(row)}${readinessTag(row)}${readinessDetail(row.readiness)}</td>
     <td>${row.worktree_capable ? "yes" : "no"}</td>
   </tr>`;
 }

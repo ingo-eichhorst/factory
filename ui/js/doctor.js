@@ -7,6 +7,7 @@ import { findingCard } from "./dependency-finding.js";
 import {
   doctorFailure,
   findingSummary,
+  gatewaySummary,
   identityText,
   scanAge,
   statusSummary,
@@ -42,6 +43,21 @@ function evidenceCard(title, document, now) {
   </article>`;
 }
 
+/// The OpenShell gateways sandboxed agents use (#234). Absent when no agent
+/// declares `sandbox: openshell`.
+function gatewaySection(rows) {
+  if (!rows || !rows.length) return "";
+  return `<section class="doctor-evidence-grid">${rows.map((row) => {
+    const g = gatewaySummary(row);
+    return `<article class="infra-card doctor-evidence">
+      <header class="infra-card-head"><h3>OpenShell gateway ${esc(g.name)}</h3><span class="tag bk-badge" data-level="${esc(g.level)}">${esc(g.label)}</span></header>
+      ${g.facts ? `<div class="sub">${esc(g.facts)}</div>` : ""}
+      ${g.started ? `<div class="sub">${esc(g.started)}</div>` : ""}
+      ${g.detail ? `<p class="infra-hint">${esc(g.detail)}</p>` : ""}
+    </article>`;
+  }).join("")}</section>`;
+}
+
 export function renderDoctor() {
   const unavailable = $("doctor-unavailable");
   if (unavailable) unavailable.hidden = !state.doctorUnavailable;
@@ -69,6 +85,7 @@ export function renderDoctor() {
       ${evidenceCard("Newest build", report.built, report.now)}
       ${evidenceCard("Installed binaries", report.running, report.now)}
     </section>
+    ${gatewaySection(report.openshell)}
     <section class="doctor-findings">
       <h3>Running findings <span class="sub">${counts.open} open · ${counts.assessed} assessed · ${counts.total} total</span></h3>
       ${findings.length ? `<div class="doctor-finding-list">${findings.map(findingCard).join("")}</div>`

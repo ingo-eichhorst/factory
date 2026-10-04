@@ -43,3 +43,19 @@ export function findingSummary(findings) {
     total: rows.length,
   };
 }
+
+/// One OpenShell gateway as L1 Doctor shows it (#234): whether it answers,
+/// and the last time the daemon found it down and started it -- which is
+/// worth seeing even once it is back.
+export function gatewaySummary(row) {
+  const connected = String(row?.status || "").toLowerCase() === "connected";
+  const facts = [row?.server, row?.version ? `v${row.version}` : null].filter(Boolean);
+  return {
+    level: connected ? "ok" : "bad",
+    label: connected ? "connected" : (row?.status || "unknown"),
+    name: row?.gateway || "(active)",
+    facts: facts.join(" · "),
+    started: row?.started_at ? `started by Factory at ${row.started_at}${row.started_with ? ` with ${row.started_with}` : ""}` : null,
+    detail: row?.detail || null,
+  };
+}

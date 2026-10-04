@@ -45,6 +45,7 @@ pub(crate) fn project(
         built,
         running,
         findings,
+        openshell: Vec::new(),
     }
 }
 
@@ -64,7 +65,11 @@ impl Engine {
             },
             Err(error) => return Err(error),
         };
-        Ok(project(dependencies, chrono::Utc::now()))
+        let mut report = project(dependencies, chrono::Utc::now());
+        // The OpenShell gateways sandboxed agents use, as the provisioner
+        // last found them -- and whether it had to start one (`#234`).
+        report.openshell = self.provision.gateway_rows();
+        Ok(report)
     }
 }
 
