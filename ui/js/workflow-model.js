@@ -174,7 +174,8 @@ export function reworkBadge(nodes, node) {
 // ------------------------------------------------------------------- saving
 
 /// What Save sends. Everything the canvas does not edit rides along
-/// untouched -- the category (#118) and pinned revision (#185) -- and what it does edit goes as it
+/// untouched -- the category (#118), pinned revision (#185) and a part
+/// workflow's `part:` roles (#235) -- and what it does edit goes as it
 /// stands: the declared inputs and each node's ordered exits, so saving a
 /// layout never drops what a file or the CLI put there.
 export function saveDraft(workflow) {
@@ -182,6 +183,7 @@ export function saveDraft(workflow) {
     name: workflow.name, description: workflow.description, scope: workflow.scope,
     category: workflow.category ?? null, inputs: workflow.inputs ?? [],
     ...(workflow.workspace_ref != null ? { workspace_ref: workflow.workspace_ref } : {}),
+    ...(workflow.part != null ? { part: workflow.part } : {}),
     nodes: workflow.nodes, edges: workflow.edges,
   };
 }

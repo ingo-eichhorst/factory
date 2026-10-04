@@ -500,17 +500,12 @@ impl Engine {
         // `owns`/`estimate_seconds` are the executable-plan marker. Old
         // assessments with only the legacy split shape remain proposals and
         // keep the explicit owner-approved `intake decide split` fallback.
-        let executable_plan = decide
-            && assessment
-                .split
-                .iter()
-                .any(|part| !part.owns.is_empty() || part.estimate_seconds.is_some());
+        let plan_shaped = assessment
+            .split
+            .iter()
+            .any(|part| !part.owns.is_empty() || part.estimate_seconds.is_some());
+        let executable_plan = decide && plan_shaped;
         if executable_plan {
-            if assessment.routing.workflow.is_some() {
-                return Err(FactoryError::BadRequest(
-                    "an executable decomposition creates its own tasks; leave routing.workflow out".into(),
-                ));
-            }
             intake::validate_plan(&assessment.split)
                 .map_err(|error| FactoryError::BadRequest(format!("the executable plan: {error}")))?;
         }
@@ -530,11 +525,28 @@ impl Engine {
         }
         if let Some(workflow) = &assessment.routing.workflow {
             let found = self.find_workflow(&scope, workflow).await?;
-            // Refused now rather than at release: an input the run needs,
-            // or a step that is not there, is the assessor's to fix.
-            found
-                .with_inputs(&assessment.routing.inputs)
-                .map_err(|e| FactoryError::BadRequest(format!("workflow {}: {e}", found.name)))?;
+            if plan_shaped {
+                // `#235`: on an executable plan the workflow is the part
+                // workflow every part runs through, filled with each part's
+                // own values -- held to its contract now, and again when the
+                // plan expands.
+                if !assessment.routing.inputs.is_empty() {
+                    return Err(FactoryError::BadRequest(format!(
+                        "part workflow {} is filled with each part's own values; leave routing.inputs out",
+                        found.name
+                    )));
+                }
+                found
+                    .validate()
+                    .and_then(|_| found.part_shape())
+                    .map_err(|e| FactoryError::BadRequest(format!("part workflow {}: {e}", found.name)))?;
+            } else {
+                // Refused now rather than at release: an input the run needs,
+                // or a step that is not there, is the assessor's to fix.
+                found
+                    .with_inputs(&assessment.routing.inputs)
+                    .map_err(|e| FactoryError::BadRequest(format!("workflow {}: {e}", found.name)))?;
+            }
             let mut agents = std::collections::BTreeMap::new();
             for (step, agent) in &assessment.routing.agents {
                 let node = found
@@ -699,6 +711,7 @@ impl Engine {
             at: now,
             workflow_run: None,
             parts: Vec::new(),
+            part_workflow: None,
         };
 
         match &decision {
@@ -872,8 +885,16 @@ impl Engine {
             .store
             .list(&TaskFilter { parent_task_id: Some(item.id.clone()), ..Default::default() })
             .await?;
+        // `#235`: which part workflow every part ran through, by name.
+        let through = match &triage.assessment.routing.workflow {
+            Some(id) => match self.workflow_definition(id).await {
+                Ok(template) => format!(", every part through part workflow {}", template.name),
+                Err(_) => format!(", every part through part workflow {id}"),
+            },
+            None => String::new(),
+        };
         let result = format!(
-            "expanded into {} tasks in workflow {}: {}",
+            "expanded into {} tasks in workflow {}{through}: {}",
             children.len(),
             workflow.id,
             children.iter().map(|task| format!("{} ({})", task.title, task.id)).collect::<Vec<_>>().join("; ")
@@ -885,6 +906,7 @@ impl Engine {
             at: now,
             workflow_run: Some(workflow.id.clone()),
             parts: children.iter().map(|task| task.id.clone()).collect(),
+            part_workflow: triage.assessment.routing.workflow.clone(),
         };
         let mut next = record;
         next.stage = IntakeStage::Split;
@@ -1164,7 +1186,7 @@ impl Engine {
         Ok(self.store.get_run(run_id).await?.is_some_and(|run| run.task_id == triage_task))
     }
 
-    async fn find_workflow(&self, scope: &str, wanted: &str) -> Result<factory_core::WorkflowDefinition> {
+    pub(crate) async fn find_workflow(&self, scope: &str, wanted: &str) -> Result<factory_core::WorkflowDefinition> {
         let definitions = self.workflows.definitions(Some(scope)).await?;
         definitions
             .iter()
@@ -2280,6 +2302,108 @@ mod tests {
         assert!(ready.is_empty(), "workflow release is graph-owned, not the generic scheduler's");
         engine.sync_workflow_for_task(&foundation.id).await;
         assert!(engine.require(&surface.id).await.unwrap().after.is_none(), "the graph consumes the upstream wait");
+    }
+
+    /// A two-part plan (`surface` after `foundation`) routed to `workflow`.
+    fn plan_through(workflow: &str) -> Assessment {
+        let mut plan = assessment("demo");
+        plan.complexity = 10;
+        plan.routing.workflow = Some(workflow.into());
+        plan.split = ["foundation", "surface"]
+            .into_iter()
+            .map(|id| factory_core::intake::SplitPart {
+                id: id.into(),
+                title: format!("Build {id}"),
+                instructions: "true".into(),
+                depends_on: if id == "surface" { vec!["foundation".into()] } else { Vec::new() },
+                acceptance: Some(format!("{id} tests pass")),
+                owns: vec![id.into()],
+                interface: Some(format!("{id} API")),
+                estimate_seconds: Some(600),
+            })
+            .collect();
+        plan
+    }
+
+    async fn part_flow(engine: &Arc<Engine>) {
+        let step = |id: &str, title: &str| WorkflowNode {
+            session: Default::default(),
+            id: id.into(),
+            position: CanvasPoint::default(),
+            kind: WorkflowNodeKind::Task,
+            task: NewTask {
+                title: title.into(),
+                instructions: "{{part_instructions}}".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(id == "implement"),
+                ..Default::default()
+            },
+            gate: None,
+            exits: Vec::new(),
+            expand: None,
+        };
+        engine
+            .create_workflow(WorkflowDraft {
+                name: "part-flow".into(),
+                scope: "demo".into(),
+                part: Some(factory_core::workflow::PartSpec::default()),
+                nodes: vec![step("implement", "Implement {{part_title}}"), step("review", "Review {{part_title}}")],
+                edges: vec![factory_core::workflow::WorkflowEdge {
+                    id: "implement-review".into(),
+                    from: "implement".into(),
+                    to: "review".into(),
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_complete_plan_can_run_every_part_through_a_part_workflow() {
+        let engine = engine();
+        part_flow(&engine).await;
+        issue_flow(&engine).await;
+        let item = add(&engine, "Build the whole subsystem").await;
+
+        // Not a part workflow: it takes an input of its own.
+        let why = engine.intake_assess(&Caller::Owner, &item.id, plan_through("issue-flow"), true).await.unwrap_err();
+        assert!(why.to_string().contains("part workflow issue-flow"), "{why}");
+        assert!(why.to_string().contains("takes no other input; it declares \"issue\""), "{why}");
+        // Factory fills in the part's values; the plan gives none.
+        let mut with_inputs = plan_through("part-flow");
+        with_inputs.routing.inputs.insert("part_id".into(), "x".into());
+        let why = engine.intake_assess(&Caller::Owner, &item.id, with_inputs, true).await.unwrap_err();
+        assert!(why.to_string().contains("leave routing.inputs out"), "{why}");
+        // A step the template does not have.
+        let mut unknown_step = plan_through("part-flow");
+        unknown_step.routing.agents.insert("ship".into(), "shell".into());
+        let why = engine.intake_assess(&Caller::Owner, &item.id, unknown_step, true).await.unwrap_err();
+        assert!(why.to_string().contains("no step \"ship\""), "{why}");
+        assert!(engine.require(&item.id).await.unwrap().intake.unwrap().triage.is_none(), "nothing was written");
+
+        let mut plan = plan_through("part-flow");
+        plan.routing.agents.insert("review".into(), "shell".into());
+        let expanded = engine.intake_assess(&Caller::Owner, &item.id, plan, true).await.unwrap();
+        assert_eq!(expanded.intake.as_ref().unwrap().stage, IntakeStage::Split);
+        let result = expanded.result.as_deref().unwrap();
+        assert!(result.starts_with("expanded into 4 tasks"), "{result}");
+        assert!(result.contains("every part through part workflow part-flow"), "{result}");
+        let template = engine.find_workflow("demo", "part-flow").await.unwrap();
+        let decision = expanded.intake.as_ref().unwrap().decision.clone().unwrap();
+        assert_eq!(decision.part_workflow.as_deref(), Some(template.id.as_str()), "the decision says which template");
+        assert_eq!(decision.parts.len(), 4);
+
+        let children: Vec<Task> = engine
+            .store
+            .list(&TaskFilter { parent_task_id: Some(item.id.clone()), ..Default::default() })
+            .await
+            .unwrap();
+        let mut titles: Vec<&str> = children.iter().map(|task| task.title.as_str()).collect();
+        titles.sort();
+        assert_eq!(titles, ["Implement Build foundation", "Implement Build surface", "Review Build foundation", "Review Build surface"]);
+        assert!(children.iter().all(|task| task.intake.is_none()));
     }
 
     #[tokio::test]

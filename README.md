@@ -1911,14 +1911,28 @@ immediately. Successors appear scheduled and are dispatched only after their
 prerequisites have completed and been merged; their prompts receive each
 prerequisite's result as upstream output. The normal L3 session limit still
 bounds dispatch. A failed or missing prerequisite never silently releases a
-child. Automatic plans are one level deep, leave `routing.workflow` empty,
-and do not create GitHub child issues.
+child. Automatic plans are one level deep and do not create GitHub child
+issues.
+
+Without `routing.workflow`, each part is one task. With it, an executable
+plan names a **part workflow** (`#235`) that every part runs through -- for
+example `workflows/epic-part.yaml`: implement, then an independent review that
+can send the work back up to five times, inside that part only. Factory copies
+the part workflow once per part into the same generated run, so a part is
+reviewed before the integrator merges it. The assessment is refused when the
+named workflow breaks the part-workflow contract, or when it gives
+`routing.inputs`: Factory fills each copy with the part's own values.
+`routing.agents` picks an agent per step of the template, for every part. The
+decision records which template was used (`decision.part_workflow`), and the
+release result names it. The contract, the reserved inputs and the per-part
+integration rule are described under [Workflows](#dynamic-expansion-and-integration-180).
 
 For a GitHub item, Factory fetches `origin/main` once and creates
 `factory/issue-<number>`. Each runnable child branches from that integration
 ref as it then stands. The workflow's single-writer integrator merges clean,
-committed child branches in dependency order; a conflict returns only that
-child with concrete rework feedback. After all merges, every part's acceptance
+committed child branches in dependency order -- a part once its last step is
+done, from the branch of the step that did the work; a conflict returns only
+that part, with concrete rework feedback. After all merges, every part's acceptance
 command runs again in the combined worktree. A failed combined check likewise
 returns its owning part, up to the expand node's rework limit. On success the
 integrator pushes without force and opens one PR to `main`, whose body lists
@@ -3200,6 +3214,108 @@ current integration ref. All of this state—the base ref, merge ledger, checks,
 PR URL and cleanup—is stored on the workflow run, so restart reconciliation
 continues rather than opening a second PR or losing which branches were
 accepted.
+
+**Part workflows (`#235`).** An executable plan's `routing.workflow` names a
+template that `start_decomposition_workflow` copies once per part, instead of
+emitting one task node per part. A definition declares itself one with a
+`part:` block, which says which node plays which role:
+
+```yaml
+# workflows/epic-part.yaml, abridged
+name: epic-part
+scope: factory
+part:
+  deliverable: implement   # its worktree branch is merged; rework goes to it
+  terminal: review         # its `done` releases the merge
+nodes:
+  - id: implement
+    task: { title: "Implement {{part_id}}: {{part_title}}", worktree: true, instructions: "..." }
+  - id: review
+    task: { title: "Review {{part_id}}: {{part_title}}", worktree: true, instructions: "..." }
+    exits: [{ to: implement, agent: "concrete findings the implementer can fix alone", max_rounds: 5 }]
+edges:
+  - { id: implement-review, from: implement, to: review }
+```
+
+- **The contract.** It is checked when a definition with `part:` is stored,
+  when an assessment names it, and again when the plan expands, so a
+  template edited in between fails with the same words.
+  - Exactly one **entry** node (no incoming edge) and exactly one
+    **terminal** node (no outgoing edge), both task nodes. `part.terminal`,
+    if given, has to be that node.
+  - Exactly one **deliverable**: a task node that works in a worktree.
+    `part.deliverable` names it. It may be left out only when one task node
+    is the only one with a worktree.
+  - No expand node: decomposition stays one level deep.
+  - Every exit stays inside the template, and a backward exit is bounded as
+    usual.
+  - No input but the reserved part inputs, whether declared or written as
+    `{{...}}`, and none of them spliced into a command the daemon runs (an
+    exit's `check:`, a gate's command).
+  - It must not open a pull request or mark one ready. The integrator owns
+    the one PR. Factory cannot see this, so the template's instructions
+    have to say it, as `epic-part.yaml`'s do.
+
+  Refusals name what is wrong, for example `a part workflow needs exactly
+  one terminal node (one with no outgoing edge); it has 2: review, docs`,
+  `node "review" exit 1 leads to "ship", which is outside this part
+  workflow`, or `node "implement" uses {{issue}}, which is not a part input`.
+- **Reserved inputs.** Each copy's titles, instructions and label values get
+  `{{part_id}}`, `{{part_title}}`, `{{part_instructions}}`,
+  `{{part_acceptance}}`, `{{part_owns}}`, `{{part_interface}}`,
+  `{{parent_title}}` and `{{parent_instructions}}`. Underscores, not dots:
+  an input name is `[A-Za-z_][A-Za-z0-9_-]*`, so `{{part.x}}` would not be a
+  placeholder. A task node that uses none of them still learns its part. Its
+  title gets `: <part title>` appended. The brief a part without a template is
+  given (its instructions, "Done when", owned surface, interface and the
+  parent request) follows the node's own instructions, or replaces them when
+  it has none.
+- **Expansion.** Every template node becomes `<part>-<node>`. Edges, exit
+  targets and gate `subject`s are rewritten to match. Two parts whose ids
+  would collide (`a` + `b-c` and `a-b` + `c`) are refused by name. `expand`
+  leads into every root part's entry. For each `depends_on`, the
+  prerequisite's terminal leads into the dependant's entry.
+  `expand.children` lists every copied task node. Each copied task node
+  carries `parent_task_id`, `decomposition_part` and the parent/part labels,
+  as a single-node part does. Its agent is `routing.agents[<step>]`, else
+  the template node's, else `routing.agent`. Its category is the node's,
+  else the template's, else the item's. The part's `estimate_seconds` goes
+  on the deliverable; other steps keep the template's estimates. In a scope
+  that cannot make worktrees, every copy runs without one, as single-node
+  parts do. Control-plan injection runs after expansion, so every copied
+  task node gets its locked gates. `factory workflow lint` on a part
+  workflow shows exactly that, over two sample parts (`b` after `a`), and so
+  does the Policy tab's workflow enforcement. Each part is laid out as one
+  row, and the canvas draws a labelled box around each part's nodes.
+- **Integration, per part.** `IntegrationPart.node_id` stays the
+  **deliverable**: the newest run of that node supplies the worktree and
+  branch to merge, `merged_nodes` is keyed by it, and a merge conflict or
+  failed combined check is sent back to it. The new `terminal_node` names
+  the node whose `done` releases the merge. A part is merged once its
+  terminal is done in the current round, with its exits decided, and every
+  part it depends on (read through the graph, gates included) is already
+  merged. A part's own later steps never wait for its earlier ones to be
+  merged. A dependant's entry waits until each prerequisite's terminal is
+  done **and** that part is merged.
+- **Rework after integration.** The deliverable is continued at once with
+  the integrator's feedback, as before. Every node of the part on the path
+  from the deliverable to the terminal goes back to `unstarted` for a new
+  round on its same task, and so do the part's gates below the terminal.
+  This reuses the #149 round machinery (`round`, the waiting `after`,
+  stale-run checks), so the review runs again on the fix before the part is
+  merged, and an old `done` never releases it. Integration rework counts
+  against `expand.max_rework_rounds` per part (`integration_rounds`), apart
+  from the review's own `max_rounds`. A review loop never spends integration
+  rework, and integration rework never spends the review's rounds. When the
+  budget is used up, the deliverable fails and the run fails, as before.
+- **Stored runs.** A run written before this change has no `terminal_node`.
+  Each of its parts is the one node `node_id`, which plays all three roles,
+  and it loads and integrates as it always did. A plan without a template
+  generates exactly the definition it always did.
+
+`workflows/github-issue.yaml` is not a part workflow and is refused as one: its
+`implement` opens its own PR, `ready` marks it ready (both collide with the
+integrator), and `triage` repeats what intake already did.
 
 ### Inputs and ordered exits (#140, #149)
 
