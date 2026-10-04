@@ -11,6 +11,14 @@ use factory_core::{
 };
 use factory_kernel::{CostGroupBy, CostReport, CostRow, L6};
 
+/// Outside-stack projection of the current scope chain. L6 compiles raw
+/// limits; assurance gathers spend and judges them through its own ports.
+pub(crate) fn check_budget_intent(snapshot: &factory_core::config::Factory, scope: &Scope, config: &budget::PolicyConfig) -> factory_assurance::evidence::BudgetIntent {
+    let mut chain = snapshot.config.ancestors_of(scope);
+    chain.push(scope);
+    budget::check_intent(config, chain.into_iter().map(|s| (s.id.clone(), s.name.clone())))
+}
+
 impl Engine {
     pub(crate) async fn budget_report(
         &self,
@@ -108,28 +116,6 @@ impl Engine {
             budgets,
             findings,
         })
-    }
-
-    /// Policy uses the same monthly spend read but sends authored limits
-    /// down as configuration, never consumes the L6 Budget report.
-    pub(crate) async fn budget_policy_input(&self, snapshot: &factory_core::config::Factory, scope: &Scope,
-        config: &budget::PolicyConfig, now: DateTime<Utc>) -> Result<budget::PolicyInput> {
-        let month = budget::Month::at(now).map_err(FactoryError::BadRequest)?;
-        let mut input = budget::PolicyInput { month, caps: Vec::new(), error: config.error.clone() };
-        if input.error.is_some() { return Ok(input); }
-        let Some(catalogue) = &config.catalogue else {
-            input.error = Some("authored monthly budget configuration was not resolved".into());
-            return Ok(input);
-        };
-        let mut chain = snapshot.config.ancestors_of(scope);
-        chain.push(scope);
-        for s in chain {
-            if let Some(limit) = catalogue.scopes.get(&s.id) {
-                let spend = self.month_spend(Some(s.name.clone()), CostGroupBy::Scope, &input.month).await?;
-                input.caps.push(budget::PolicyCap { scope: s.name.clone(), monthly_usd: limit.monthly_usd, spend });
-            }
-        }
-        Ok(input)
     }
 
     /// At the exact first instant of a month the logical window is empty.

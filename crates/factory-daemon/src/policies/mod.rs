@@ -1,11 +1,9 @@
 //! Where policy requests are served. Like `datasets.rs`: the authored
 //! catalogues under `<root>/.factory/policies/` are the source of truth for
 //! *what* a control is (`factory_core::policy`, pure and tested on its
-//! own), re-read on every request; this module only assembles the evidence
-//! that already lives elsewhere in the daemon -- the knowledge index, the
-//! attestations store, tasks, workflows, bench runs, the live config
-//! snapshot and the L2 Secrets tab's own credential inventory -- and folds
-//! it against them.
+//! own), re-read on every request. L6 supplies resolved declarations,
+//! receipts and budget intent; the physical L5 evidence service performs
+//! every live lower check read. Report/link composition remains here.
 //!
 //! The one piece of state this module owns is the attestations themselves,
 //! kept in `PolicyStore` (`store.rs`), append-only.
@@ -25,122 +23,19 @@ use factory_core::checks::CheckSource;
 use factory_core::protocol::{CatalogueSummary, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy, WorkflowEnforcement, WorkflowEnforcementFinding};
 use factory_core::reporting_clock::{self, ClockDeadlineState, ClockMark};
 use factory_core::task::Task;
-use factory_kernel::{DaemonConfigFact, BackupFact, SecretsPresence, AgentFact, TaskFact, WorkflowFact, DependenciesFact, AttestedRun, L5, L6};
-use crate::facts::{Facts, NamedQuery, AttestedQuery, TaskInventoryQuery};
+use factory_kernel::{SecretsPresence, L6};
+use crate::facts::{Facts, TaskInventoryQuery};
 use factory_kernel::TaskInventoryFact;
 
 use crate::access::Caller;
 use crate::engine::Engine;
 
-/// Every distinct dataset name a `gate` check among `applied`'s controls
-/// names -- what a caller resolving `gate` facts (`Engine::gate_facts_for`)
-/// has to ask about, and no more.
-fn gate_dataset_names(applied: &[impl CheckSource]) -> BTreeSet<String> {
-    applied
-        .iter()
-        .flat_map(|a| a.checks())
-        .filter_map(|check| match check {
-            policy::Check::Gate { dataset, .. } => Some(dataset.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Whether any check among `applied` is `roles` or `sandbox` -- both read
-/// `Evidence::agents`, so a scope whose catalogue never asks either
-/// question never pays for `Engine::agent_facts_for`'s `roles_for` lookup.
-fn needs_agent_facts(applied: &[impl CheckSource]) -> bool {
-    applied
-        .iter()
-        .flat_map(|a| a.checks())
-        .any(|check| matches!(check, policy::Check::Roles { .. } | policy::Check::Sandbox))
-}
-
-/// Whether any check among `applied` is `secrets` -- gates
-/// `Engine::credential_inventory`, the one part of this module's evidence
-/// gathering that touches the filesystem, behind an actual need for it.
-fn needs_secrets_facts(applied: &[impl CheckSource]) -> bool {
-    applied
-        .iter()
-        .flat_map(|a| a.checks())
-        .any(|check| matches!(check, policy::Check::Secrets { .. }))
-}
-
-/// Whether any check among `applied` is `daemon`.
-fn needs_daemon_facts(applied: &[impl CheckSource]) -> bool {
-    applied
-        .iter()
-        .flat_map(|a| a.checks())
-        .any(|check| matches!(check, policy::Check::Daemon { .. }))
-}
-
-/// Whether any check among `applied` is `daemon` naming one of the three
-/// `backup_*` facts (`#154`) -- gates `Engine::backup_fact`, the one part of
-/// this module's evidence gathering that reads the destination and the
-/// backup store, behind an actual need for it. Distinct from
-/// `needs_daemon_facts`: a catalogue asking only `power_assertion` must
-/// never pay for it.
-fn needs_backup_facts(applied: &[impl CheckSource]) -> bool {
-    applied.iter().flat_map(|a| a.checks()).any(|check| {
-        matches!(
-            check,
-            policy::Check::Daemon { fact } if matches!(fact.as_str(), "backup_recent" | "backup_offsite" | "backup_verified")
-        )
-    })
-}
-
-fn needs_dependencies_facts(applied: &[impl CheckSource]) -> bool {
-    applied.iter().flat_map(|a| a.checks())
-        .any(|check| matches!(check, policy::Check::Dependencies { .. }))
-}
-
-/// Whether any check among `applied` is `attested` -- gates
-/// `Engine::attested_runs`, the one part of this module's evidence
-/// gathering that reads finished runs and their `StepAttestation`s (`#158`).
-fn needs_attested_facts(applied: &[impl CheckSource]) -> bool {
-    applied
-        .iter()
-        .flat_map(|a| a.checks())
-        .any(|check| matches!(check, policy::Check::Attested { .. }))
-}
-
-fn needs_budget_facts(applied: &[impl CheckSource]) -> bool {
-    applied.iter().flat_map(|a| a.checks()).any(|check| matches!(check, policy::Check::BudgetWithin))
-}
-
-/// Every category an `attested` check among `applied`'s controls names, and
-/// the widest of those controls' own effective `max_age`
-/// (`Applied::max_age`, already folded and tightened) -- what
-/// `Engine::attested_runs`'s window covers, `now - 2*that`, so
-/// `direct_status`'s own `2*W` stale lookback never reads short of what was
-/// fetched, however many `attested` checks the scope's controls carry, each
-/// with its own window. `Applied::max_age` is always `Some` on a control
-/// carrying an `attested` check -- `Check::own_max_age` always returns one
-/// for it -- so this never has to fall back to a default.
-fn attested_categories(
-    applied: &[impl CheckSource],
-) -> (BTreeSet<String>, Option<factory_core::policy::Duration>) {
-    let mut categories = BTreeSet::new();
-    let mut widest: Option<factory_core::policy::Duration> = None;
-    for a in applied {
-        if !a
-            .checks()
-            .iter()
-            .any(|c| matches!(c, policy::Check::Attested { .. }))
-        {
-            continue;
-        }
-        for check in a.checks() {
-            if let policy::Check::Attested { category, .. } = check {
-                categories.insert(category.clone());
-            }
-        }
-        if let Some(w) = a.max_age() {
-            widest = Some(widest.map_or(w, |cur| cur.max(w)));
-        }
-    }
-    (categories, widest)
-}
+#[cfg(test)]
+use factory_assurance::evidence::{needs_backup_facts, needs_attested_facts};
+#[cfg(test)]
+use factory_kernel::{TaskFact, DaemonConfigFact};
+#[cfg(test)]
+use crate::facts::NamedQuery;
 
 pub(crate) use factory_core::config::subtree_scopes;
 
@@ -162,72 +57,26 @@ impl Engine {
         Ok((catalogues, findings, tags))
     }
 
-    /// Resolve every `task` and `workflow` check name `applied` actually
-    /// references into `Evidence`'s fact maps -- `factory_core::policy`
-    /// stays pure (`#81`), so this is where a check's name becomes a real
-    /// task or workflow run. Both are resolved against `scope` alone, per
-    /// the issue's own rule ("names a task in the evaluated scope"). Never
-    /// looks beyond the names `applied`'s own checks mention -- not every
-    /// task or workflow the scope has. `gate` facts are a separate call
-    /// (`gate_facts_for`): datasets are instance-wide, so a caller looping
-    /// over scopes resolves them once, not once per scope.
-    async fn resolve_task_and_workflow_facts(
+    /// L6 alone owns authored monthly intent; no spend or verdict is
+    /// included in this downward input. Read lazily only for BudgetWithin.
+    pub(crate) async fn check_budget_config<S: CheckSource>(
         &self,
-        scope: &str,
-        applied: &[impl CheckSource],
-    ) -> Result<(BTreeMap<String, Vec<policy::TaskFact>>, BTreeMap<String, Vec<policy::WorkflowFact>>)> {
-        let mut task_names: BTreeSet<&str> = BTreeSet::new();
-        let mut workflow_names: BTreeSet<&str> = BTreeSet::new();
-        for a in applied {
-            for check in a.checks() {
-                match check {
-                    policy::Check::Task { task, .. } => {
-                        task_names.insert(task.as_str());
-                    }
-                    policy::Check::Workflow { workflow, .. } => {
-                        workflow_names.insert(workflow.as_str());
-                    }
-                    _ => {}
-                }
-            }
+        per_scope: &[(&Scope, Vec<S>)],
+    ) -> Result<Option<factory_core::budget::PolicyConfig>> {
+        if !per_scope.iter().any(|(_, a)| factory_assurance::evidence::needs_budget_facts(a)) {
+            return Ok(None);
         }
-
-        let facts = Facts::<L5>::new(self);
-        let tasks = facts.get::<TaskFact>(&NamedQuery {
-            scope: scope.to_string(), names: task_names.into_iter().map(str::to_string).collect(),
-        }).await?;
-        let workflows = facts.get::<WorkflowFact>(&NamedQuery {
-            scope: scope.to_string(), names: workflow_names.into_iter().map(str::to_string).collect(),
-        }).await?;
-        Ok((tasks, workflows))
+        let root = self.factory_snapshot().root.clone();
+        let loaded = tokio::task::spawn_blocking(move || factory_core::budget::load(&root)).await
+            .map_err(|error| FactoryError::Other(anyhow::anyhow!("budget intent read: {error}")))?;
+        Ok(Some(match loaded {
+            Ok(catalogue) => factory_core::budget::PolicyConfig { catalogue: Some(catalogue), error: None },
+            Err(error) => factory_core::budget::PolicyConfig { catalogue: None, error: Some(error) },
+        }))
     }
 
-    /// The `gate` fact for every dataset name in `names` that has ever had a
-    /// settled bench run -- one lookup per name, however many scopes end up
-    /// sharing the result. Datasets have no scope of their own, so a caller
-    /// evaluating several scopes in one report calls this once, over the
-    /// union of every scope's `gate` checks, rather than once per scope.
-    async fn gate_facts_for(&self, names: &BTreeSet<String>) -> Result<BTreeMap<String, policy::GateFact>> {
-        crate::facts::assurance_gate_facts(self, names).await
-    }
-
-    /// The facts every scope in a report's subtree shares, resolved once
-    /// over the whole subtree rather than once per scope: every dataset a
-    /// `gate` check anywhere in `per_scope_applied` names (datasets have no
-    /// scope of their own, so a dataset named by two scopes' catalogues is
-    /// still only walked once), the `daemon` fact (the same for every scope,
-    /// resolved only when some scope's catalogue actually asks a `daemon`
-    /// question), the `backup_*` fact (`#154`, gated the same way but on its
-    /// own three names -- `needs_backup_facts` -- since it reads the
-    /// destination and the backup store, not just the config snapshot
-    /// `daemon_facts` does), and the credential inventory behind `secrets`
-    /// (the one part of this that touches the filesystem, gated the same
-    /// way). Shared by `policy_report` and `scenarios::Engine::scenarios_report`
-    /// (`#100`), which calls this once for the baseline `Applied` sets and
-    /// again for each scenario's own -- a scenario's overlay can name a
-    /// `gate`/`daemon`/`secrets` check the baseline never did (an
-    /// `add_frameworks` draft, say), and this is what picks up the extra
-    /// fact lazily rather than the caller having to know in advance.
+    /// Compatibility composition: L5 owns all live check-evidence gathering;
+    /// L6 supplies only authored budget configuration.
     pub(crate) async fn dataset_level_facts<S: CheckSource>(
         &self,
         per_scope_applied: &[(&Scope, Vec<S>)],
@@ -238,142 +87,34 @@ impl Engine {
         Option<factory_core::backup::BackupFact>,
         Option<factory_core::budget::PolicyConfig>,
     )> {
-        let mut dataset_names: BTreeSet<String> = BTreeSet::new();
-        for (_, applied) in per_scope_applied {
-            dataset_names.extend(gate_dataset_names(applied));
-        }
-        let gates = self.gate_facts_for(&dataset_names).await?;
-        let facts = Facts::<L5>::new(self);
-        let daemon_fact = if per_scope_applied.iter().any(|(_, applied)| needs_daemon_facts(applied)) {
-            Some(facts.get::<DaemonConfigFact>(&()).await?)
-        } else { None };
-        let credential_rows = if per_scope_applied.iter().any(|(_, applied)| needs_secrets_facts(applied)) {
-            let scopes = per_scope_applied.iter().filter(|(_, a)| needs_secrets_facts(a))
-                .map(|(s, _)| s.name.clone()).collect();
-            facts.get::<SecretsPresence>(&scopes).await?
-        } else {
-            BTreeMap::new()
-        };
-        let backup_fact = if per_scope_applied.iter().any(|(_, applied)| needs_backup_facts(applied)) {
-            Some(facts.get::<BackupFact>(&Utc::now()).await?)
-        } else {
-            None
-        };
-        let budget_config = if per_scope_applied.iter().any(|(_, applied)| needs_budget_facts(applied)) {
-            let root = self.factory_snapshot().root.clone();
-            let loaded = tokio::task::spawn_blocking(move || factory_core::budget::load(&root)).await
-                .map_err(|error| FactoryError::Other(anyhow::anyhow!("budget intent read: {error}")))?;
-            Some(match loaded {
-                Ok(catalogue) => factory_core::budget::PolicyConfig { catalogue: Some(catalogue), error: None },
-                Err(error) => factory_core::budget::PolicyConfig { catalogue: None, error: Some(error) },
-            })
-        } else { None };
-        Ok((gates, daemon_fact, credential_rows, backup_fact, budget_config))
+        let targets: Vec<_> = per_scope_applied.iter().map(|(scope, applied)| (scope.name.as_str(), applied.as_slice())).collect();
+        let shared = crate::facts::checks::service(self, self.factory_snapshot().scope_tree()).shared(&targets).await?;
+        let budget = self.check_budget_config(per_scope_applied).await?;
+        Ok((shared.gates, shared.daemon, shared.credentials, shared.backup, budget))
     }
 
-    /// `#158`: `scope`'s own `attested` evidence, gathered only when
-    /// `applied` actually names the check -- `None` when it does not,
-    /// distinct from the empty `Vec` a scope with nothing attested yet
-    /// would carry. Exact scope, no ancestor roll-up -- the same rule
-    /// `task`/`workflow` checks already follow -- over
-    /// `now - 2*widest(applied)`, so `direct_status`'s own stale lookback
-    /// (`2*W`) always has enough history behind it, whichever `attested`
-    /// check on this scope needs the longest window.
-    async fn attested_evidence(
-        &self,
-        scope: &str,
-        applied: &[impl CheckSource],
-    ) -> Result<Option<Vec<factory_core::conformance::AttestedRun>>> {
-        if !needs_attested_facts(applied) {
-            return Ok(None);
-        }
-        let (categories, widest) = attested_categories(applied);
-        let w = widest
-            .unwrap_or(factory_core::policy::Duration::from_hours(0))
-            .as_time_delta();
-        let now = Utc::now();
-        let window = factory_core::operations::Window {
-            from: now - (w + w),
-            to: now,
-        };
-        let scopes: BTreeSet<String> = std::iter::once(scope.to_string()).collect();
-        Ok(Some(
-            Facts::<L5>::new(self).get::<AttestedRun>(&AttestedQuery {
-                scopes: Some(scopes), categories: Some(categories), window,
-            })
-                .await?,
-        ))
-    }
-
-    /// One scope's own `Evidence`, built from `applied` (its own applicable
-    /// controls) plus the subtree-wide facts `dataset_level_facts` already
-    /// resolved -- task/workflow resolution and the `agents`/`secrets` facts
-    /// stay per scope, since a scope's own roster and its own `.env` are its
-    /// own, gathered only when `applied`'s own checks actually ask for them.
-    /// The body of `policy_report`'s former second pass, unchanged, so its
-    /// own tests (and `scenarios::Engine::scenarios_report`'s, `#100`) see
-    /// exactly the evidence a real request would.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn evidence_for_scope(
         &self,
         snapshot: &Factory,
-        t: &Scope,
+        scope: &Scope,
         applied: &[impl CheckSource],
         tags: &BTreeSet<String>,
-        all_attestations: &[Attestation],
+        attestations: &[Attestation],
         gates: &BTreeMap<String, policy::GateFact>,
-        daemon_fact: Option<policy::DaemonFact>,
-        credential_rows: &BTreeMap<String, SecretsPresence>,
-        backup_fact: Option<factory_core::backup::BackupFact>,
-        budget_config: Option<&factory_core::budget::PolicyConfig>,
+        daemon: Option<policy::DaemonFact>,
+        credentials: &BTreeMap<String, SecretsPresence>,
+        backup: Option<factory_core::backup::BackupFact>,
+        budget: Option<&factory_core::budget::PolicyConfig>,
         now: chrono::DateTime<Utc>,
     ) -> Result<policy::Evidence> {
-        let ancestor_names: BTreeSet<&str> = snapshot
-            .config
-            .ancestors_of(t)
-            .iter()
-            .map(|ancestor| ancestor.name.as_str())
-            .collect();
-        let (tasks, workflows) = self.resolve_task_and_workflow_facts(&t.name, applied).await?;
-        let facts = Facts::<L5>::new(self);
-        let agents = if needs_agent_facts(applied) {
-            Some(facts.get::<AgentFact>(&t.name).await?)
-        } else { None };
-        let secrets = if needs_secrets_facts(applied) {
-            credential_rows.get(&t.name).cloned().unwrap_or_default()
-        } else {
-            SecretsPresence::default()
-        };
-        let dependencies = if needs_dependencies_facts(applied) {
-            Some(facts.get::<DependenciesFact>(&t.name).await?)
-        } else {
-            None
-        };
-        let attested = self.attested_evidence(&t.name, applied).await?;
-        let budget = if needs_budget_facts(applied) {
-            match budget_config {
-                Some(config) => Some(self.budget_policy_input(snapshot, t, config, now).await?),
-                None => None,
-            }
-        } else { None };
-        Ok(policy::Evidence {
-            tags: tags.clone(),
-            attestations: all_attestations
-                .iter()
-                .filter(|att| att.scope == t.name || ancestor_names.contains(att.scope.as_str()))
-                .cloned()
-                .collect(),
-            tasks,
-            workflows,
-            gates: gates.clone(),
-            agents,
-            secrets,
-            daemon: daemon_fact,
-            dependencies,
-            backup: backup_fact,
-            attested,
-            budget,
-        })
+        let intent = budget.map(|config| crate::budgets::check_budget_intent(snapshot, scope, config));
+        crate::facts::checks::service(self, snapshot.scope_tree()).for_scope(
+            &factory_kernel::ScopeNode { name: scope.name.clone(), path: scope.path.clone() },
+            applied, tags, attestations,
+            &factory_assurance::evidence::Shared { gates: gates.clone(), daemon, credentials: credentials.clone(), backup },
+            intent.as_ref(), now,
+        ).await
     }
 
     async fn policy_workflow_enforcement(
@@ -604,54 +345,12 @@ impl Engine {
         // a `maps_to` neighbour's own `task`/`workflow`/`gate` check can
         // still decide this control's status, so its name has to resolve
         // too, or propagation would see it as wrongly `open`.
-        let (tasks, workflows) = self.resolve_task_and_workflow_facts(&scope_obj.name, &applied).await?;
-        let gates = self.gate_facts_for(&gate_dataset_names(&applied)).await?;
-        let facts = Facts::<L6>::new(self);
-        let agents = if needs_agent_facts(&applied) {
-            Some(facts.get::<AgentFact>(&scope_obj.name).await?)
-        } else { None };
-        let secrets = if needs_secrets_facts(&applied) {
-            facts.get::<SecretsPresence>(&std::iter::once(scope_obj.name.clone()).collect()).await?
-                .remove(&scope_obj.name).unwrap_or_default()
-        } else {
-            SecretsPresence::default()
-        };
-        let daemon = if needs_daemon_facts(&applied) {
-            Some(facts.get::<DaemonConfigFact>(&()).await?)
-        } else { None };
-        let backup = if needs_backup_facts(&applied) {
-            Some(facts.get::<BackupFact>(&Utc::now()).await?)
-        } else {
-            None
-        };
-        let dependencies = if needs_dependencies_facts(&applied) {
-            Some(facts.get::<DependenciesFact>(&scope_obj.name).await?)
-        } else {
-            None
-        };
-        let attested = self.attested_evidence(&scope_obj.name, &applied).await?;
+        let (gates, daemon, credentials, backup, config) = self.dataset_level_facts(&[(&scope_obj, applied.clone())]).await?;
         let now = Utc::now();
-        let budget = if needs_budget_facts(&applied) {
-            let (_, _, _, _, config) = self.dataset_level_facts(&[(&scope_obj, applied.clone())]).await?;
-            match config {
-                Some(config) => Some(self.budget_policy_input(&snapshot, &scope_obj, &config, now).await?),
-                None => None,
-            }
-        } else { None };
-        let evidence = policy::Evidence {
-            tags,
-            attestations: history.clone(),
-            tasks,
-            workflows,
-            gates,
-            agents,
-            secrets,
-            daemon,
-            dependencies,
-            backup,
-            attested,
-            budget,
-        };
+        let evidence = self.evidence_for_scope(
+            &snapshot, &scope_obj, &applied, &tags, &history, &gates,
+            daemon, &credentials, backup, config.as_ref(), now,
+        ).await?;
         let evaluated = policy::evaluate(&applied, &evidence, now)
             .into_iter()
             .find(|s| s.control == control)

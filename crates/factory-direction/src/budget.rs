@@ -155,11 +155,43 @@ pub struct PolicyConfig {
     pub error: Option<String>,
 }
 
+/// Project applicable authored limits into L5's command vocabulary. There
+/// is no spend read or assessment here; ids remain L6 catalogue identities.
+pub fn check_intent(config: &PolicyConfig, chain: impl IntoIterator<Item = (String, String)>) -> factory_assurance::evidence::BudgetIntent {
+    let mut intent = factory_assurance::evidence::BudgetIntent { caps: Vec::new(), error: config.error.clone() };
+    if intent.error.is_some() { return intent; }
+    let Some(catalogue) = &config.catalogue else {
+        intent.error = Some("authored monthly budget configuration was not resolved".into());
+        return intent;
+    };
+    for (id, scope) in chain {
+        if let Some(limit) = catalogue.scopes.get(&id) {
+            intent.caps.push((scope, limit.monthly_usd));
+        }
+    }
+    intent
+}
+
 pub use factory_assurance::budget::{within, PolicyCap, PolicyInput};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn check_intent_echoes_only_authored_caps_in_the_supplied_scope_chain() {
+        let catalogue = Catalogue::parse("version: 1\nscopes:\n  parent-id: {monthly_usd: 50}\n  child-id: {monthly_usd: 20}\n  sibling-id: {monthly_usd: 90}\n").unwrap();
+        let chain = || [("parent-id".into(), "renamed-parent".into()), ("missing-id".into(), "middle".into()), ("child-id".into(), "child".into())];
+        let config = PolicyConfig { catalogue: Some(catalogue), error: None };
+        let intent = check_intent(&config, chain());
+        assert_eq!(intent.caps, [("renamed-parent".into(), 50.0), ("child".into(), 20.0)]);
+        assert_eq!(intent.error, None);
+        let absent = check_intent(&PolicyConfig::default(), chain());
+        assert!(absent.caps.is_empty());
+        assert_eq!(absent.error.as_deref(), Some("authored monthly budget configuration was not resolved"));
+        let invalid = check_intent(&PolicyConfig { error: Some("authored error".into()), ..config }, chain());
+        assert!(invalid.caps.is_empty());
+        assert_eq!(invalid.error.as_deref(), Some("authored error"));
+    }
     #[test]
     fn authored_limits_are_strict_finite_and_unique_with_no_inferred_default() {
         assert!(Catalogue::default().scopes.is_empty());

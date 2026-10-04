@@ -3,17 +3,15 @@
 //! authored profiles under `<root>/.factory/quality/` are the source of
 //! truth for *what* matters where (`factory_core::quality`, pure and tested
 //! on its own), re-read on every request; this module resolves each scope's
-//! chain off the live config snapshot, gathers the evidence and metric
-//! values that already live elsewhere in the daemon, and hands them to
-//! `quality::evaluate`.
+//! chain off the live config snapshot and computes requested metrics. L5's
+//! physical evidence service gathers live check evidence and owns judgement.
 //!
 //! ## Reuse, not reimplementation
 //!
 //! A check measure is judged by L5's evaluator as an L5 subject, not an L6
 //! catalogue (`quality::check_subjects` builds its command inputs), so its
-//! evidence is gathered by `policies::Engine::dataset_level_facts`/
-//! `evidence_for_scope` -- the same two functions `policy_report` and
-//! `scenarios_report` call, lazy in the same way: a scope none of whose
+//! evidence is gathered by `factory_assurance::evidence::Service` -- the
+//! same service Policy and Scenarios use, lazy in the same way: a scope none of whose
 //! scenarios asks a `sandbox` question never pays for the agent roster, a
 //! report with no `gate` check never opens the bench store. A metric
 //! measure reads `Engine::metrics`, the one computation Goals' key results
@@ -49,7 +47,7 @@
 //! commands L4 through L5's remediation service; L6 policy/promotion first
 //! commands that same L5 service. Only the outside router reads task responses.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -60,6 +58,7 @@ use factory_core::config::{Factory, Scope};
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
 use factory_core::metrics::{MetricId, MetricSeries, MetricValue};
+#[cfg(test)]
 use factory_core::checks::Check;
 use factory_core::protocol::{CharacteristicView, QualityRemediation, QualityReport, ScopeQuality};
 use factory_core::quality::{self, Level, Measure, QualityCatalogue, QualityTree, ScenarioStatus, ScopeReport};
@@ -264,50 +263,15 @@ impl Engine {
         values: &BTreeMap<MetricId, MetricValue>,
         now: DateTime<Utc>,
     ) -> Result<(Vec<ScopeReport>, Vec<quality::Finding>)> {
-        let per_scope_applied: Vec<(&Scope, Vec<factory_core::checks::EvaluationSubject>)> =
-            inputs.trees.iter().map(|(t, tree)| (t, quality::check_subjects(tree))).collect();
+        let per_scope_applied: Vec<_> = inputs.trees.iter().map(|(scope, tree)| (scope, quality::check_subjects(tree))).collect();
+        let budget = self.check_budget_config(&per_scope_applied).await?;
+        let scopes: Vec<_> = inputs.trees.iter().map(|(scope, tree)| factory_assurance::evidence::QualityScope {
+            scope: factory_kernel::ScopeNode { name: scope.name.clone(), path: scope.path.clone() },
+            tree,
+            budget: budget.as_ref().map(|config| crate::budgets::check_budget_intent(&inputs.snapshot, scope, config)),
+        }).collect();
+        crate::facts::checks::service(self, inputs.snapshot.scope_tree()).judge_quality(&scopes, values, now).await
 
-        // The knowledge vault is walked only when some scenario asks a
-        // `knowledge` question -- a same-level L5 call to the existing
-        // provider, without reading L6's authored policy catalogues.
-        let needs_tags = per_scope_applied
-            .iter()
-            .flat_map(|(_, applied)| applied)
-            .flat_map(|a| &a.evidence)
-            .any(|c| matches!(c, Check::Knowledge { .. }));
-        let tags: BTreeSet<String> = if needs_tags {
-            crate::facts::assurance_knowledge_tags(self).await?.tags
-        } else {
-            BTreeSet::new()
-        };
-        let (gates, daemon_fact, credential_rows, backup_fact, budget_config) = self.dataset_level_facts(&per_scope_applied).await?;
-
-        let mut reports = Vec::new();
-        let mut findings = Vec::new();
-        for ((t, applied), (_, tree)) in per_scope_applied.iter().zip(&inputs.trees) {
-            let evidence = self
-                .evidence_for_scope(
-                    &inputs.snapshot,
-                    t,
-                    applied,
-                    &tags,
-                    &[],
-                    &gates,
-                    daemon_fact,
-                    &credential_rows,
-                    backup_fact.clone(),
-                    budget_config.as_ref(),
-                    now,
-                )
-                .await?;
-            findings.extend(factory_core::checks::evidence_findings(&evidence, &t.name).into_iter().map(|f| quality::Finding {
-                kind: quality::FindingKind::AmbiguousCheckTarget,
-                subject: f.subject,
-                detail: f.detail,
-            }));
-            reports.push(quality::evaluate(tree, values, &evidence, now));
-        }
-        Ok((reports, findings))
     }
 
     /// Load, compute the metrics the trees read, and judge -- the whole

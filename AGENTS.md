@@ -277,7 +277,14 @@ something impossible.
   producer's opaque classification. Quality supplies L5 subjects directly.
   Core keeps canonical compatibility paths, not another evaluator. Live
   lower evidence reads use the L5 Facts identity; knowledge and gate evidence
-  are same-level calls. L0 holds only shared receipt/identity data, not
+  are same-level calls. L5's physical evidence service now owns the actual
+  lazy gather and Quality judgement. Policy reports/details and Scenarios
+  share it; outside wiring supplies concrete owner capabilities, never an
+  Engine callback. L6 projects only applicable authored budget caps/errors
+  down; L5 reads their live spend. Preserve exact scope, path ancestry,
+  shared subtree reads, twice-window stale coverage and unknown evidence.
+  Metric gathering and the complete six-service split still remain.
+  L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.
   L6 still owns authored policy and budget intent. Policy remediation and
   scenario promotion command L5; L5 submits only through its adjacent L4
