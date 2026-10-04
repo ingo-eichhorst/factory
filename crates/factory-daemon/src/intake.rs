@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 /// The journal kind of a triage verdict -- the first attestation in a
 /// released task's evidence trail, until `#118` gives attestations a store.
-pub(crate) const TRIAGE_VERDICT_KIND: &str = "triage_verdict";
+pub(crate) use factory_process::intake::TRIAGE_VERDICT_KIND;
 
 impl Engine {
     /// `Request::IntakeAdd`. A relayed `email` or `chat` item (`#167`) is

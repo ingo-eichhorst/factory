@@ -471,6 +471,7 @@ impl Engine {
             .get::<factory_kernel::ProductionFact>(&crate::facts::ProductionQuery {
                 scope: asked.map(str::to_string), now, minutes: None,
                 bin: factory_kernel::ProductionBin::Day,
+                subtree: true,
             }).await?;
         Ok(fact.daily)
     }

@@ -60,6 +60,32 @@ fn direction_domains_and_goals_store_keep_their_canonical_core_paths() {
 }
 
 #[test]
+fn operations_run_arithmetic_is_canonical_process_behavior_and_preserves_json() {
+    let figure: factory_core::operations::Figure =
+        factory_process::operations::Figure::of(None, 0, "no evidence");
+    let owned: factory_process::operations::Figure = figure;
+    assert_eq!(
+        serde_json::to_value(owned).unwrap(),
+        json!({"value":null,"samples":0,"reason":"no evidence"})
+    );
+    let old: Option<factory_core::operations::AgePercentiles> = None;
+    let _: Option<factory_process::operations::AgePercentiles> = old;
+    let old: Option<factory_core::operations::Pace> = None;
+    let _: Option<factory_process::operations::Pace> = old;
+    let window: factory_core::operations::Window =
+        factory_process::window::Window::trailing("2026-09-25T12:00:00Z".parse().unwrap(), 28);
+    let _: factory_process::operations::Window = window;
+    assert_eq!(
+        factory_core::operations::registry_metric as *const (),
+        factory_process::operations::registry_metric as *const ()
+    );
+    assert_eq!(
+        factory_composition::operations::registry_metric_as_of as *const (),
+        factory_process::operations::registry_metric_as_of as *const ()
+    );
+}
+
+#[test]
 fn wire_policy_report_is_the_l6_report_with_identical_legacy_json() {
     let wire = json!({
         "scope":"demo", "rows":[{

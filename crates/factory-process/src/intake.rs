@@ -61,6 +61,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Canonical journal kind for a recorded triage assessment.
+pub const TRIAGE_VERDICT_KIND: &str = "triage_verdict";
+
 // ------------------------------------------------------------------ receipt
 
 /// How far an intake item has got. `Ready`, `Split` and `Wontfix` are where

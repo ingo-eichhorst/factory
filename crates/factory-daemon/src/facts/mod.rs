@@ -11,25 +11,17 @@ pub(crate) use factory_process::facts::{
 };
 pub(crate) use l4::{import_recovery_journal, process_security_reports};
 pub(crate) use l5::{assurance_gate_facts, assurance_knowledge_tags};
-mod process_metrics;
 
 use crate::engine::Engine;
 use chrono::{DateTime, Utc};
-use factory_core::{
-    error::{FactoryError, Result},
-    operations::Window,
-};
+use factory_core::error::{FactoryError, Result};
 use factory_kernel::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
 };
 
-pub(crate) struct AttestedQuery {
-    pub scopes: Option<BTreeSet<String>>,
-    pub categories: Option<BTreeSet<String>>,
-    pub window: Window,
-}
+pub(crate) use factory_process::measurements::{AttestedQuery, ProcessMetricsQuery, ProductionQuery};
 
 pub(crate) struct ReleaseSbomQuery {
     pub scope: String,
@@ -37,19 +29,6 @@ pub(crate) struct ReleaseSbomQuery {
     pub version: Option<String>,
 }
 
-pub(crate) struct ProductionQuery {
-    pub scope: Option<String>,
-    pub now: DateTime<Utc>,
-    pub minutes: Option<u32>,
-    pub bin: ProductionBin,
-}
-
-pub(crate) struct ProcessMetricsQuery {
-    pub scope: Option<String>,
-    pub now: DateTime<Utc>,
-    pub window: Option<factory_core::metrics::MetricsWindow>,
-    pub names: BTreeSet<String>,
-}
 
 /// Registered producer, with a response constrained to its own fact type.
 /// No serialization, Any downcasts or string-keyed provider lookup.
@@ -123,8 +102,8 @@ port!(
     ScheduledRunDatesFact,
     l4::provider
 );
-port!(ProductionFact, l4, ProductionQuery, ProductionFact);
-port!(ProcessMetricFact, l4, ProcessMetricsQuery, BTreeMap<String, ProcessMetricFact>);
+port!(ProductionFact, factory_process::measurements::MeasurementProvider<'a>, ProductionQuery, ProductionFact, l4::measurement_provider);
+port!(ProcessMetricFact, factory_process::measurements::MeasurementProvider<'a>, ProcessMetricsQuery, BTreeMap<String, ProcessMetricFact>, l4::measurement_provider);
 port!(
     BenchResolutionFact,
     factory_assurance::facts::Provider<'a>,
@@ -189,7 +168,7 @@ port!(
     l4::provenance_provider
 );
 port!(ReleaseSbomFact, l2, ReleaseSbomQuery, Vec<ReleaseSbomFact>);
-port!(AttestedRun, l4, AttestedQuery, Vec<AttestedRun>);
+port!(AttestedRun, factory_process::measurements::MeasurementProvider<'a>, AttestedQuery, Vec<AttestedRun>, l4::measurement_provider);
 port!(
     ArtifactProvenance,
     factory_process::facts::ProvenanceProvider<'a>,
@@ -197,7 +176,7 @@ port!(
     Vec<ArtifactProvenance>,
     l4::provenance_provider
 );
-port!(CostReport, l4, factory_core::usage::SpendQuery, CostReport);
+port!(CostReport, factory_process::measurements::MeasurementProvider<'a>, factory_core::usage::SpendQuery, CostReport, l4::measurement_provider);
 port!(
     ConfirmedSecurityReport,
     factory_process::facts::Provider<'a>,
@@ -220,6 +199,18 @@ mod tests {
     fn registered<F: Port>() {}
     #[test]
     fn isolated_live_fact_wiring_uses_the_actual_physical_owner_types() {
+        let _: fn(
+            <CostReport as Port>::Provider<'static>,
+        ) -> factory_process::measurements::MeasurementProvider<'static> = |provider| provider;
+        let _: fn(
+            <AttestedRun as Port>::Provider<'static>,
+        ) -> factory_process::measurements::MeasurementProvider<'static> = |provider| provider;
+        let _: fn(
+            <ProductionFact as Port>::Provider<'static>,
+        ) -> factory_process::measurements::MeasurementProvider<'static> = |provider| provider;
+        let _: fn(
+            <ProcessMetricFact as Port>::Provider<'static>,
+        ) -> factory_process::measurements::MeasurementProvider<'static> = |provider| provider;
         let _: fn(
             <GateFact as Port>::Provider<'static>,
         ) -> factory_assurance::facts::Provider<'static> = |provider| provider;
@@ -282,6 +273,10 @@ mod tests {
             "TaskFact",
             "WorkflowFact",
             "ConfirmedSecurityReport",
+            "CostReport",
+            "AttestedRun",
+            "ProductionFact",
+            "ProcessMetricFact",
         ] {
             assert!(
                 !l4.contains(&format!("impl Provide<{fact}>"))
@@ -303,6 +298,24 @@ mod tests {
                 && !artifact_owner.contains("factory_core")
                 && !artifact_owner.contains("dyn Fn")
         );
+        for owner in [
+            include_str!("../../../factory-process/src/measurements.rs"),
+            include_str!("../../../factory-process/src/process_metrics.rs"),
+            include_str!("../../../factory-process/src/occupancy_history.rs"),
+            include_str!("../../../factory-process/src/operations.rs"),
+        ] {
+            assert!(
+                !owner.contains("Engine")
+                    && !owner.contains("factory_core")
+                    && !owner.contains("dyn Fn")
+            );
+        }
+        let endpoint = include_str!("../production.rs");
+        assert!(endpoint.contains("get::<factory_kernel::ProductionFact>"));
+        assert!(!endpoint.contains("runs_between") && !endpoint.contains("fn totals"));
+        let operations = include_str!("../../../factory-composition/src/operations.rs");
+        assert!(operations.contains("pub use factory_process::operations::*;"));
+        assert!(!operations.contains("pub fn registry_metric("));
     }
     #[test]
     fn every_catalogued_fact_has_a_typed_producer_owned_port() {
@@ -397,7 +410,10 @@ mod tests {
         assert!(!costs.contains("fn spend(") && !costs.contains("fn costs_report("));
         let producer = include_str!("l4.rs");
         assert!(!producer.contains("policies::subtree_scopes"));
-        assert!(producer.contains("impl Provide<CostReport> for Provider"));
+        assert!(!producer.contains("impl Provide<CostReport>"));
+        let owner = include_str!("../../../factory-process/src/measurements.rs");
+        assert!(owner.contains("impl Provide<CostReport> for MeasurementProvider"));
+        assert!(!owner.contains("factory_core") && !owner.contains("Engine"));
         let metrics = include_str!("../metrics.rs")
             .split("#[cfg(test)]")
             .next()
@@ -436,13 +452,13 @@ mod tests {
         for fact in ["ProductionFact", "ProcessMetricFact", "BenchResolutionFact"] {
             assert!(metrics.contains(&format!("get::<factory_kernel::{fact}>")));
         }
-        let process = include_str!("process_metrics.rs")
+        let process = include_str!("../../../factory-process/src/process_metrics.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
-        assert!(process.contains("impl Provide<ProductionFact> for Provider"));
-        assert!(process.contains("impl Provide<ProcessMetricFact> for Provider"));
-        assert!(!process.contains("crate::metrics") && !process.contains("crate::policies"));
+        assert!(process.contains("impl Provide<ProductionFact> for MeasurementProvider"));
+        assert!(process.contains("impl Provide<ProcessMetricFact> for MeasurementProvider"));
+        assert!(!process.contains("factory_core") && !process.contains("Engine"));
         for file in [
             include_str!("../operations.rs"),
             include_str!("../intake.rs"),
