@@ -402,6 +402,63 @@ fn waiting_tasks_exist_before_release_and_survive_a_real_restart() {
 }
 
 #[test]
+fn workspace_files_survive_fresh_shell_retry_restart_and_are_released_only_after_close_is_safe() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision();
+    for args in [vec!["config", "user.email", "workspace@example.invalid"], vec!["config", "user.name", "Workspace QA"]] {
+        assert!(Command::new("git").current_dir(&daemon.root).args(args).status().unwrap().success());
+    }
+    std::fs::write(daemon.root.join(".gitignore"), ".factory/\n").unwrap();
+    for args in [vec!["add", ".gitignore"], vec!["commit", "-q", "-m", "base"]] {
+        assert!(Command::new("git").current_dir(&daemon.root).args(args).status().unwrap().success());
+    }
+    let base = daemon.base_url();
+    let created = expect_ok(&format!("{base}/api/tasks"), &post(&format!("{base}/api/tasks"), &json!({
+        "title": "Workspace continuity", "instructions": "printf 'unfinished work' > unfinished; exit 7",
+        "agent": "shell", "worktree": true,
+    })));
+    let id = created["task"]["id"].as_str().unwrap().to_string();
+    expect_ok(&format!("{base}/api/tasks/{id}/run"), &post(&format!("{base}/api/tasks/{id}/run"), &json!({})));
+    wait_for("first shell attempt fails", Duration::from_secs(25), || {
+        tasks(&base).into_iter().find(|task| task["id"] == id && task["status"] == "blocked")
+    });
+    let first = expect_ok(&format!("{base}/api/tasks/{id}/runs"), &get(&format!("{base}/api/tasks/{id}/runs")))["runs"][0].clone();
+    let path = PathBuf::from(first["worktree_path"].as_str().unwrap());
+    assert_eq!(std::fs::read_to_string(path.join("unfinished")).unwrap(), "unfinished work");
+    daemon.sigterm();
+    daemon.spawn();
+    assert!(path.exists());
+    let (_, patched) = raw_request("PATCH", &format!("{base}/api/tasks/{id}"), Some(&json!({
+        "instructions": "test \"$(cat unfinished)\" = 'unfinished work' && printf 'continued with existing files'"
+    }))).unwrap();
+    expect_ok("patch instructions", &serde_json::from_str::<Value>(&patched).unwrap());
+    expect_ok(&format!("{base}/api/tasks/{id}/run"), &post(&format!("{base}/api/tasks/{id}/run"), &json!({})));
+    wait_for("fresh shell retry completes", Duration::from_secs(25), || {
+        tasks(&base).into_iter().find(|task| task["id"] == id && task["status"] == "done")
+    });
+    let second = expect_ok(&format!("{base}/api/tasks/{id}/runs"), &get(&format!("{base}/api/tasks/{id}/runs")))["runs"][0].clone();
+    assert_eq!(second["worktree_path"], first["worktree_path"]);
+    assert_eq!(second["worktree_branch"], first["worktree_branch"]);
+    assert!(second["resumed_session"].is_null(), "shell starts a fresh conversation, not a fake resume");
+    assert!(path.exists(), "closed task with untracked work must be retained");
+    let saved = daemon.root.join("saved-work");
+    std::fs::rename(path.join("unfinished"), &saved).unwrap();
+    daemon.sigterm();
+    daemon.spawn();
+    wait_for("startup sweep releases safe closed workspace", Duration::from_secs(15), || {
+        (!path.exists()).then(|| json!({"released": true}))
+    });
+    assert_eq!(std::fs::read_to_string(saved).unwrap(), "unfinished work");
+    let entries = wait_for("release receipt is journalled", Duration::from_secs(10), || {
+        let entries = expect_ok(&format!("{base}/api/tasks/{id}/entries"), &get(&format!("{base}/api/tasks/{id}/entries")));
+        entries["entries"].as_array().unwrap().iter().any(|entry| entry["kind"] == "workspace_released").then_some(entries)
+    });
+    let entries = entries["entries"].as_array().unwrap();
+    assert!(entries.iter().any(|entry| entry["kind"] == "workspace_retained"));
+    assert!(entries.iter().any(|entry| entry["kind"] == "workspace_released"));
+}
+
+#[test]
 fn diamond_dag_and_restart_recovery_with_the_shell_agent() {
     if missing_prerequisites() {
         return;

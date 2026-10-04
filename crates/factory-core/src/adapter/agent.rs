@@ -458,6 +458,9 @@ impl AgentContext {
     /// them a second time in a second place.
     pub fn factory_guide(&self) -> String {
         let mut out = String::new();
+        if self.task.as_ref().is_some_and(|binding| binding.worktree_branch.is_some()) {
+            out.push_str("This git workspace belongs to the task, not this conversation. Keep intended changes on its branch; a new run can reuse these files even with a fresh session. Never remove the worktree yourself. Factory releases it only after the task closes, or its whole workflow ends with no live or person-held run; dirty, ignored or unpushed work is retained and journaled.\n\n");
+        }
 
         out.push_str(
             "You are running inside Factory, a daemon that hands tasks to \

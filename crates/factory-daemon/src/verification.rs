@@ -380,6 +380,9 @@ impl Engine {
             ));
         }
         let task = self.require(&run.task_id).await?;
+        let workflow_guard = if task.workflow_origin.is_some() {
+            Some(self.workflow_edit.lock().await)
+        } else { None };
         let actor = Self::decision_actor(caller);
         if actor == run.agent {
             return Err(FactoryError::Denied(
@@ -504,6 +507,7 @@ impl Engine {
             self.bus.publish(Event::WorkflowRunUpdated {
                 run: workflow.clone(),
             });
+            drop(workflow_guard);
             self.advance_workflow(&workflow.id).await?;
         } else {
             let instructions = format!(
@@ -2430,6 +2434,7 @@ mod tests {
         let failed = report_done(&engine, &task_id).await;
         assert_eq!(settled(&engine, &failed.id).await.status, RunStatus::Blocked);
 
+        let edit = engine.workflow_edit.lock().await;
         let mut exhausted = engine.workflow_run(&wf.id).await.unwrap();
         let gate = exhausted
             .nodes
@@ -2438,6 +2443,7 @@ mod tests {
             .unwrap();
         gate.round = 5;
         engine.workflows.put_run(&exhausted).await.unwrap();
+        drop(edit);
 
         let error = engine.accept_rework(&Caller::Owner, &failed.id).await.unwrap_err();
         assert!(error.to_string().contains("exhausted"), "{error}");

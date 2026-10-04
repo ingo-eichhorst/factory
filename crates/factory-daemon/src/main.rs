@@ -3,6 +3,7 @@
 
 mod access;
 mod artifacts;
+mod assignments;
 mod agents;
 mod backup;
 mod bench;
@@ -42,6 +43,7 @@ mod ui;
 mod verification;
 mod waiting;
 mod worktree;
+mod workspace_lifecycle;
 mod workflows;
 
 use anyhow::Context;
@@ -378,6 +380,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // Reconcile persisted workflow decisions only after runtimes and standing
     // agents are available. Recovery reuses task ids recorded before a crash.
     engine.recover_workflows().await;
+    engine.recover_workspaces().await;
     // The one place a bench attempt's gate actually runs -- started before
     // recovery below, so anything it enqueues has a consumer immediately.
     engine.spawn_bench_judge();

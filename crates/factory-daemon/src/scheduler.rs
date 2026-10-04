@@ -113,6 +113,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         // release reaches its waiting task immediately through that channel
         // on its own.
         engine.enqueue_capacity_sweep();
+        engine.sweep_workspaces().await;
 
         // -- bench runs ----------------------------------------------------
         // A periodic sweep, not just a reaction to a settle: it is what

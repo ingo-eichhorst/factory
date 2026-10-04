@@ -1923,9 +1923,10 @@ command runs again in the combined worktree. A failed combined check likewise
 returns its owning part, up to the expand node's rework limit. On success the
 integrator pushes without force and opens one PR to `main`, whose body lists
 the internal parts and closes the source issue. Factory never merges, approves
-or enables auto-merge on that PR. It records the PR before removing child and
-integration worktrees and merged local branches, so no unpushed result is
-discarded.
+or enables auto-merge on that PR. It records the PR and terminal outcome before
+asking the workspace owner to release child and integration worktrees. Dirty,
+ignored or unpushed results are retained and journaled, without turning a valid
+handoff into a failed workflow; a local-only integration stays until backed up.
 
 **Per-scope definitions of ready (`#169`).** The seven axes are fixed —
 compiled in, never removed — but a scope can add its own checks on top of
@@ -3002,7 +3003,8 @@ edges:
   and reviewers reuse the previous recorded conversation and worktree when
   the safety checks below allow it. Set `session: fresh` (also in the node
   inspector) for independent review; injected verification reviewers use
-  fresh sessions. Ordinary retries stay fresh. Every feedback run receives
+  fresh sessions. Ordinary retries start fresh conversations, but reuse the
+  task's workspace. Every feedback run receives
   new reporting commands and a new token, even when it resumes. Rework rate
   and first-pass yield count feedback runs as rework even after a successful
   previous attempt; healthy scheduled firings are not rework.
@@ -3368,11 +3370,42 @@ journal entry naming the one reason it fell back.
   automated tests exercise every fallback with stub adapters and runtimes,
   never a real harness login.
 
-Left out of this first slice (tracked on
-[#178](https://github.com/ingo-eichhorst/factory/issues/178)): resume as the
-default for workflow feedback rounds, a "what changed since" summary in the
-resumed prompt, `pi`'s own session-file resume, and any worktree lifetime or
-cleanup policy.
+### Workspace lifetime and release (#178)
+
+Conversation lifetime is independent of filesystem lifetime. L4 sends a
+`WorkspaceSpec` (`task` or `run`) in its assignment; L3 asks the L2 workspace
+owner to provision it. Ordinary tasks reuse one registered workspace across
+their runs, including fresh conversations and infrastructure retries. A
+missing workspace or changed branch permits a new workspace while preserving
+the old ownership receipt. Reuse is refused if an earlier process on those
+files is not confirmed gone. Bench attempts retain their fresh, reset,
+run-scoped workspaces as evidence until the owner's explicit bench cleanup.
+
+The owner persists receipts before git creation in
+`.factory/worktrees/.workspace-owner.json`. L4 sends release identities only
+when a standalone task closes (not when an attempt fails), or a workflow is
+terminal with no live, verifying, approval-held or person-blocked sibling.
+The owner alone checks and removes directories and branches. Git removal is
+never forced: uncommitted, untracked **and ignored** files, changed branches,
+or commits absent from both remote-tracking refs and the scope HEAD cause
+refusal, recorded as `workspace_retained` with the path and reason. Identical
+refusals do not flood the journal; successful deletion is `workspace_released`.
+Factory does not push salvage branches or discard ignored files on your behalf.
+Keep build output outside task workspaces when automatic reclamation is wanted.
+
+Startup after run/workflow reconciliation and each scheduler tick sweep the
+durable receipts. Unknown/manual directories are never swept; recorded legacy
+run workspaces are adopted on startup only at their exact generated run path,
+after registration, repository and branch validation (also when reused). Admission
+and owner locks serialize cleanup with new run reservations/provisioning.
+A hard **128-workspace cap per repository scope**, including retained and
+bench evidence, refuses new allocations rather than evicting live or unsaved
+work. Reuse remains available at the cap. Close and back up the retained work,
+or explicitly clean bench evidence, to free slots. Workspace commands do not
+change the five adapter traits; the broader crate-level ladder remains #193.
+
+The real Codex/Claude owner-run resume gate above remains open; automated
+runtime doubles and shell integration do not substitute for that evidence.
 
 ## Configuration
 
