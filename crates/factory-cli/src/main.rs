@@ -105,6 +105,10 @@ enum Command {
         #[arg(long)]
         deployment: String,
     },
+    /// Restart/repair an installed environment through an owner-approved task.
+    Recover { environment: String, #[arg(long)] reason: String },
+    /// Run declared health checks now and record their answers; failed checks exit nonzero.
+    EnvironmentCheck { environment: String },
     /// Record deployments as they start and finish, or list them.
     #[command(subcommand)]
     Deploy(DeployCmd),
@@ -1538,6 +1542,23 @@ async fn main() -> Result<()> {
                 Payload::WorkflowRun { run } => Some(format!("promotion workflow {}; deployment waits for owner approval", run.id)),
                 _ => None,
             })
+        }
+        Command::Recover { environment, reason } => {
+            let payload = client.send(Request::EnvironmentRecover(factory_core::environments::Recover { environment, reason })).await?;
+            print(&payload, cli.json, |payload| match payload {
+                Payload::WorkflowRun { run } => Some(format!("recovery workflow {}; command waits for owner approval", run.id)),
+                _ => None,
+            })
+        }
+        Command::EnvironmentCheck { environment } => {
+            let payload = client.send(Request::EnvironmentCheck { environment }).await?;
+            let passed = matches!(&payload, Payload::EnvironmentVerification { verification } if verification.ok && !verification.checks.is_empty());
+            print(&payload, cli.json, |payload| match payload {
+                Payload::EnvironmentVerification { verification } => Some(format!("{}: {} health checks", if passed { "passed" } else { "FAILED" }, verification.checks.len())),
+                _ => None,
+            })?;
+            if !passed { return Err(anyhow!("environment verification did not pass")); }
+            Ok(())
         }
         Command::Deploy(cmd) => match cmd {
             DeployCmd::Start { environment, strict_verification, scope, release, via, started_at } => {
@@ -6761,6 +6782,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recovery_requires_a_reason_and_health_check_is_a_separate_command() {
+        let parsed = Cli::try_parse_from(["factory", "recover", "production", "--reason", "restart installed system"]).unwrap();
+        assert!(matches!(parsed.command, Command::Recover { environment, reason } if environment == "production" && reason == "restart installed system"));
+        assert!(Cli::try_parse_from(["factory", "recover", "production"]).is_err());
+        let parsed = Cli::try_parse_from(["factory", "environment-check", "production"]).unwrap();
+        assert!(matches!(parsed.command, Command::EnvironmentCheck { environment } if environment == "production"));
+    }
+
     #[test]
     fn environment_promotion_requires_a_deployment_selection_and_strict_start_is_explicit() {
         let parsed = Cli::try_parse_from(["factory", "promote", "staging", "--deployment", "verified-id"]).unwrap();

@@ -7,6 +7,7 @@ import {
   MISSING,
   actorText,
   bucketTone,
+  bucketHasIncident,
   budgetLevel,
   budgetText,
   deployTone,
@@ -20,6 +21,9 @@ import {
   isEnvironmentsEvent,
   lastCheckText,
   promotionChoices,
+  recoveryStatus,
+  samplesSelection,
+  samplesQuery,
   releaseRows,
   releaseText,
   sloText,
@@ -33,7 +37,7 @@ import { readHash, setRouter } from "../js/scopes.js";
 
 const bare = { addEventListener() {}, getElementById: () => null };
 globalThis.document = bare;
-const { loadEnvironments, renderEnvironments, promoteEnvironment, wireEnvironments } = await import("../js/environments.js");
+const { loadEnvironments, renderEnvironments, promoteEnvironment, recoverEnvironment, loadEnvironmentSamples, wireEnvironments } = await import("../js/environments.js");
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
@@ -336,5 +340,127 @@ test("a refused promotion shows an escaped reason and does not claim success", a
   await promoteEnvironment("staging", "verified-source");
   assert.match(el.environments.innerHTML, /source changed &lt;refresh&gt;/);
   assert.doesNotMatch(el.environments.innerHTML, /Promotion created/);
+  state.scope = null;
+});
+
+test("sample selections cap the current bucket, encode names and mark only overlapping incidents", () => {
+  const report = { generated_at: "2026-10-04T12:05:00Z" };
+  const selection = samplesSelection(report, "staging", "/api/status", "2026-10-04T12:00:00Z");
+  assert.equal(selection.to, "2026-10-04T12:05:00.000Z", "current slot never asks for a future window");
+  const url = samplesQuery(selection, "projects/demo", 17);
+  assert.match(url, /check=%2Fapi%2Fstatus/);
+  assert.match(url, /scope=projects%2Fdemo/);
+  assert.match(url, /before=17/);
+  const incident = { checks: ["api"], started_at: "2026-10-04T12:03:00Z", ended_at: "2026-10-04T12:07:00Z" };
+  assert.equal(bucketHasIncident({ start: selection.from }, { name: "api" }, [incident]), true);
+  assert.equal(bucketHasIncident({ start: selection.from }, { name: "disk" }, [incident]), false);
+  assert.equal(bucketHasIncident({ start: "2026-10-04T12:30:00Z" }, { name: "api" }, [incident]), false);
+  assert.equal(recoveryStatus({ status: "running", run: { status: "failed" } }), "failed", "the reported run failure is not hidden by its open workflow");
+});
+
+test("sample drill-down pages the same fixed window and renders answers, latency and escaped details", async () => {
+  const el = stubPage(IDS);
+  state.environments = structuredClone(REPORT);
+  state.scope = "sample-scope";
+  state.environmentsError = null;
+  state.environmentsUnavailable = false;
+  const requested = [];
+  const pages = [
+    { next_before: 4, samples: [{ id: 5, at: NOW, ok: true, slow: true, latency_ms: 1000, detail: "slow <reason>" }] },
+    { samples: [{ id: 3, at: NOW, ok: false, slow: false, latency_ms: 5, detail: "failed earlier" }] },
+  ];
+  globalThis.fetch = async path => {
+    requested.push(path);
+    return { ok: true, json: async () => ({ status: "ok", data: { kind: "environment_samples", page: pages.shift() } }) };
+  };
+  const check = STAGING.checks[0].name;
+  await loadEnvironmentSamples("staging", check);
+  assert.match(el.environments.innerHTML, /Health samples: staging/);
+  assert.match(el.environments.innerHTML, /slow &lt;reason&gt;/);
+  assert.match(el.environments.innerHTML, /1000ms/);
+  assert.match(el.environments.innerHTML, /Older samples/);
+  await loadEnvironmentSamples("staging", check, null, 4);
+  const first = new URL(requested[0], "https://test.invalid").searchParams;
+  const second = new URL(requested[1], "https://test.invalid").searchParams;
+  assert.equal(second.get("from"), first.get("from"));
+  assert.equal(second.get("to"), first.get("to"));
+  assert.equal(second.get("before"), "4");
+  assert.match(el.environments.innerHTML, /failed earlier/);
+  state.scope = "another-scope";
+  renderEnvironments();
+  assert.doesNotMatch(el.environments.innerHTML, /Health samples:/);
+  state.scope = null;
+});
+
+test("stale sample responses cannot replace a newer selection or leak across scopes", async () => {
+  const el = stubPage(IDS);
+  state.environments = { ...REPORT, environments: [STAGING, { ...PRODUCTION, checks: STAGING.checks }] };
+  state.scope = "stale-samples";
+  const finishes = [];
+  globalThis.fetch = async () => {
+    const page = await new Promise(resolve => finishes.push(resolve));
+    return { ok: true, json: async () => ({ status: "ok", data: { page } }) };
+  };
+  const first = loadEnvironmentSamples("staging", STAGING.checks[0].name);
+  const second = loadEnvironmentSamples("production", STAGING.checks[0].name);
+  finishes[1]({ samples: [{ at: NOW, ok: true, slow: false, latency_ms: 1, detail: "new selection" }] });
+  await second;
+  finishes[0]({ samples: [{ at: NOW, ok: false, slow: false, latency_ms: 1, detail: "stale selection" }] });
+  await first;
+  assert.match(el.environments.innerHTML, /new selection/);
+  assert.doesNotMatch(el.environments.innerHTML, /stale selection/);
+  state.scope = "elsewhere";
+  renderEnvironments();
+  assert.doesNotMatch(el.environments.innerHTML, /new selection/);
+  state.scope = null;
+});
+
+test("recovery requires a reason, creates a workflow and leaves deployment history separate", async () => {
+  const el = stubPage(IDS);
+  const report = structuredClone(REPORT);
+  report.environments[1].recovery_ready = true;
+  report.recoveries = [{ scope: "factory", environment: "staging", workflow_id: "repair", workflow_run_id: "attempt", status: "running",
+    run: { status: "failed" }, reason: "repair <installed>", requested_at: NOW, requested_by: "owner", expected_commit: "a".repeat(40) }];
+  state.environments = report;
+  state.scope = "recovery-scope";
+  const calls = [];
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return { ok: true, json: async () => ({ status: "ok", data: options?.method === "POST"
+      ? { run: { scope: "factory", workflow_id: "repair", id: "new-attempt" } } : { report } }) };
+  };
+  await recoverEnvironment("staging", " ");
+  assert.equal(calls.length, 0);
+  await recoverEnvironment("staging", "restart installed system");
+  assert.equal(calls[0].path, "/api/environments/recover");
+  assert.deepEqual(JSON.parse(calls[0].options.body), { environment: "staging", reason: "restart installed system" });
+  assert.match(el.environments.innerHTML, /Recovery created/);
+  assert.match(el.environments.innerHTML, /Command waits for owner approval/);
+  assert.match(el.environments.innerHTML, /Recovery actions/);
+  assert.match(el.environments.innerHTML, /repair &lt;installed&gt;/);
+  assert.match(el.environments.innerHTML, /restarts and repairs, not deployments/);
+  assert.match(el.environments.innerHTML, /data-environment-recover="staging"/);
+  state.scope = null;
+});
+
+test("health strips are selectable with incident markers, and missing samples or read failures are explicit", async () => {
+  const el = stubPage(IDS);
+  const report = structuredClone(REPORT);
+  report.environments[1].incidents = [{ started_at: STAGING.checks[0].strip[1].start, checks: [STAGING.checks[0].name] }];
+  state.environments = report;
+  state.scope = "health-detail";
+  renderEnvironments();
+  assert.match(el.environments.innerHTML, /<button type="button" class="sys-slot"[^>]*data-incident="true"[^>]*data-samples-environment="staging"/);
+  assert.match(el.environments.innerHTML, /role="group"[^>]*select a slot to view samples/);
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ status: "ok", data: { page: { samples: [] } } }) });
+  await loadEnvironmentSamples("staging", STAGING.checks[0].name);
+  assert.match(el.environments.innerHTML, /No stored samples in this window/);
+  assert.doesNotMatch(el.environments.innerHTML, /data-samples-older/);
+  globalThis.fetch = async () => { throw new Error("sample read <failed>"); };
+  await loadEnvironmentSamples("staging", STAGING.checks[0].name);
+  assert.match(el.environments.innerHTML, /sample read &lt;failed&gt;/);
+  wireEnvironments();
+  el.environments.onclick({ target: { closest: selector => selector === "[data-samples-close]" ? {} : null } });
+  assert.doesNotMatch(el.environments.innerHTML, /sample read &lt;failed&gt;/);
   state.scope = null;
 });

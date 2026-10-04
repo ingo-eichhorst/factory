@@ -23,6 +23,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<AgentFact, L3>("AgentFact", "L3");
     assert_producer::<TaskFact, L4>("TaskFact", "L4");
     assert_producer::<WorkflowFact, L4>("WorkflowFact", "L4");
+    assert_producer::<EnvironmentRecoveryFact, L4>("EnvironmentRecoveryFact", "L4");
     assert_producer::<ConfirmedSecurityReport, L4>("ConfirmedSecurityReport", "L4");
     assert_producer::<AttestedRun, L4>("AttestedRun", "L4");
     assert_producer::<ArtifactProvenance, L4>("ArtifactProvenance", "L4");
@@ -44,6 +45,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "AgentFact",
         "TaskFact",
         "WorkflowFact",
+        "EnvironmentRecoveryFact",
         "ConfirmedSecurityReport",
         "AttestedRun",
         "ArtifactProvenance",
@@ -133,4 +135,16 @@ fn a_new_fact_impl_cannot_be_left_out_of_the_catalogue() {
     declared.sort_unstable();
     catalogued.sort_unstable();
     assert_eq!(declared, catalogued);
+}
+
+#[test]
+fn recovery_fact_preserves_actual_run_outcome_without_a_deployment_schema() {
+    let json = serde_json::json!({
+        "scope": "demo", "environment": "production", "workflow_id": "w", "workflow_run_id": "wr",
+        "status": "running", "requested_at": "2026-10-04T00:00:00Z", "requested_by": "owner", "reason": "repair",
+        "task_id": "t", "run": { "id": "r", "status": "failed", "started_at": "2026-10-04T00:01:00Z" }
+    });
+    let fact: EnvironmentRecoveryFact = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(fact.run.as_ref().unwrap().status, RunStatus::Failed);
+    assert_eq!(serde_json::to_value(fact).unwrap(), json);
 }

@@ -12,12 +12,14 @@
 //! import; this file only puts their answers on screen.
 
 import { $, api, esc, state } from "./core.js";
+import { scrim, dropModal, closeModal } from "./modal.js";
 import {
   CONFIG_SNIPPET,
   MISSING,
   budgetLevel,
   budgetText,
   bucketTone,
+  bucketHasIncident,
   deploymentRows,
   doraRows,
   environmentsFailure,
@@ -27,12 +29,15 @@ import {
   incidentText,
   lastCheckText,
   promotionChoices,
+  recoveryStatus,
   releaseRows,
   releaseText,
   sloText,
   statusLabel,
   statusText,
   statusTone,
+  samplesSelection,
+  samplesQuery,
   tierLabel,
   uptimeLevel,
 } from "./environments-model.js";
@@ -42,22 +47,67 @@ import {
 let asked = 0;
 const promoting = new Set();
 let promotionNotice = null;
+let sampleDetail = null;
+let sampleAsked = 0;
+const recovering = new Set();
+
+export async function recoverEnvironment(environment, reason) {
+  const card = state.environments?.environments?.find(card => card.name === environment);
+  if (!card?.recovery_ready || !reason.trim() || recovering.has(environment)) return;
+  await submitOperation("recover", { environment, reason }, recovering, "Recovery");
+}
+
+async function submitOperation(endpoint, body, pending, action) {
+  const environment = body.environment;
+  const scope = state.scope;
+  pending.add(environment);
+  renderEnvironments();
+  try {
+    const { run } = await api(`/api/environments/${endpoint}`, { method: "POST", body: JSON.stringify(body) });
+    promotionNotice = { scope, run, action };
+  } catch (error) {
+    promotionNotice = { scope, error: error.message };
+  } finally {
+    pending.delete(environment);
+    if (state.scope === scope) await refreshEnvironments();
+  }
+}
+
+function recoveryModal(environment) {
+  dropModal();
+  scrim(`<header><h2>Recover ${esc(environment)}</h2><button id="sys-recovery-close">×</button></header>
+    <p>Restart or repair the installed system, not deploy a new release. This creates a recovery workflow; its command still waits for owner approval.</p>
+    <form id="sys-recovery-form"><label>Reason<textarea id="sys-recovery-reason" required maxlength="4000"></textarea></label>
+    <button type="submit">Create recovery workflow</button></form>`);
+  $("sys-recovery-close").onclick = closeModal;
+  $("sys-recovery-form").onsubmit = event => {
+    event.preventDefault();
+    const reason = $("sys-recovery-reason").value.trim();
+    if (reason) { closeModal(); void recoverEnvironment(environment, reason); }
+  };
+  $("sys-recovery-reason").focus();
+}
+
+export async function loadEnvironmentSamples(environment, check, start = null, before = null) {
+  if (!state.environments?.environments?.some(card => card.name === environment && card.checks.some(item => item.name === check))) return;
+  const selection = before != null && sampleDetail ? sampleDetail.selection : samplesSelection(state.environments, environment, check, start);
+  const scope = state.scope;
+  const mine = ++sampleAsked;
+  sampleDetail = { scope, selection, loading: true };
+  renderEnvironments();
+  try {
+    const { page } = await api(samplesQuery(selection, scope, before));
+    if (mine === sampleAsked) sampleDetail = { scope, selection, page };
+  } catch (error) {
+    if (mine === sampleAsked) sampleDetail = { scope, selection, error: error.message };
+  }
+  if (state.scope === scope && mine === sampleAsked) renderEnvironments();
+}
 
 export async function promoteEnvironment(environment, deployment) {
   const card = state.environments?.environments?.find(card => card.name === environment);
   if (!card?.promotion_ready || card.current?.id !== deployment || promoting.has(environment)) return;
-  const scope = state.scope;
-  promoting.add(environment);
-  renderEnvironments();
-  try {
-    const { run } = await api("/api/environments/promote", { method: "POST", body: JSON.stringify({ environment, deployment }) });
-    promotionNotice = { scope, run };
-  } catch (error) {
-    promotionNotice = { scope, error: error.message };
-  } finally {
-    promoting.delete(environment);
-    if (state.scope === scope) await refreshEnvironments();
-  }
+  await submitOperation("promote", { environment, deployment }, promoting, "Promotion");
 }
 
 function promotionButton(choice) {
@@ -80,6 +130,7 @@ function promotionNoticeHTML() {
   if (promotionNotice.error) return `<p class="sys-promotion-notice bk-bad" role="status">${esc(promotionNotice.error)}</p>`;
   const { run } = promotionNotice;
   const href = `#${encodeURIComponent(run.scope)}/proc/workflows/${encodeURIComponent(run.workflow_id)}/run/${encodeURIComponent(run.id)}`;
+  if (promotionNotice.action === "Recovery") return `<p class="sys-promotion-notice" role="status">Recovery created. <a href="${href}">Open recovery workflow</a>. Command waits for owner approval.</p>`;
   return `<p class="sys-promotion-notice" role="status">Promotion created. <a href="${href}">Open release workflow</a>. Deployment waits for owner approval.</p>`;
 }
 
@@ -121,13 +172,63 @@ function fact(label, value, level) {
   return `<div class="infra-fact"><dt>${esc(label)}</dt><dd${level && level !== "none" ? ` class="bk-${level}"` : ""}>${v}</dd></div>`;
 }
 
-function strip(check) {
+function recoveryButton(card) {
+  if (!card.recovery_ready) return card.recovery_reason ? `<p class="sub">Recovery: ${esc(card.recovery_reason)}</p>` : "";
+  const disabled = recovering.has(card.name) ? " disabled" : "";
+  return `<p><button type="button" data-environment-recover="${esc(card.name)}"${disabled}>Recover installed system</button></p>`;
+}
+
+function recoveriesHTML(report) {
+  if (!report.recoveries?.length) return "";
+  const rows = report.recoveries.map(action => {
+    const status = recoveryStatus(action);
+    let tone = "warn";
+    if (status === "completed") tone = "ok";
+    if (["failed", "cancelled"].includes(status)) tone = "bad";
+    const href = `#${encodeURIComponent(action.scope)}/proc/workflows/${encodeURIComponent(action.workflow_id)}/run/${encodeURIComponent(action.workflow_run_id)}`;
+    return `<tr><td>${esc(action.environment)}</td><td class="bk-${tone}">${esc(status)}</td><td>${esc(action.reason)}</td>
+      <td>${esc(action.requested_by)} · ${esc(new Date(action.requested_at).toISOString())}</td>
+      <td class="mono">${esc(action.expected_commit?.slice(0, 10) || MISSING)}</td>
+      <td><a href="${href}">Workflow, approval and journal</a></td></tr>`;
+  }).join("");
+  return `<section class="bk-section"><h3>Recovery actions <span class="sub">restarts and repairs, not deployments</span></h3>
+    <div class="bk-scroll"><table><thead><tr><th>Environment</th><th>Outcome</th><th>Reason</th><th>Requested</th><th>Expected installed release</th><th>Evidence</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+}
+
+function samplesHTML() {
+  const detail = sampleDetail;
+  if (!detail || detail.scope !== state.scope) return "";
+  const heading = `Health samples: ${detail.selection.environment} / ${detail.selection.check}`;
+  const close = `<button type="button" data-samples-close>Close samples</button>`;
+  let body;
+  if (detail.loading) body = `<p role="status">Loading stored samples…</p>`;
+  else if (detail.error) body = `<p class="bk-bad" role="status">${esc(detail.error)}</p>`;
+  else {
+    const rows = detail.page.samples.map(sample => {
+      let outcome = "passed";
+      let tone = "ok";
+      if (sample.slow) { outcome = "slow"; tone = "warn"; }
+      if (!sample.ok) { outcome = "failed"; tone = "bad"; }
+      return `<tr><td>${esc(new Date(sample.at).toISOString())}</td><td class="bk-${tone}">${outcome}</td>
+        <td>${esc(String(sample.latency_ms))}ms</td><td>${esc(sample.detail || MISSING)}</td></tr>`;
+    }).join("");
+    const older = detail.page.next_before ? `<button type="button" data-samples-older>Older samples</button>` : "";
+    body = `<p class="sub">${esc(detail.selection.from)} — ${esc(detail.selection.to)} · newest recorded first · ${detail.page.samples.length} samples</p>
+      <div class="bk-scroll"><table><thead><tr><th>Time (UTC)</th><th>Answer</th><th>Latency</th><th>Detail</th></tr></thead><tbody>${rows}</tbody></table></div>${older}`;
+    if (!detail.page.samples.length) body = `<p>No stored samples in this window.</p>`;
+  }
+  return `<section class="bk-section sys-sample-detail"><h3>${esc(heading)}</h3>${close}${body}</section>`;
+}
+
+function strip(check, card) {
   const cells = (check.strip || []).map(b => {
     const tone = bucketTone(b);
-    const title = `${new Date(b.start).toISOString().slice(11, 16)} UTC · ${b.ok} ok (${b.slow || 0} slow), ${b.failed} failed`;
-    return `<span class="sys-slot" data-tone="${tone}" title="${esc(title)}"></span>`;
+    const incident = bucketHasIncident(b, check, card.incidents);
+    const title = `${new Date(b.start).toISOString().slice(11, 16)} UTC · ${b.ok} ok (${b.slow || 0} slow), ${b.failed} failed${incident ? " · incident" : ""} · view samples`;
+    return `<button type="button" class="sys-slot" data-tone="${tone}" data-incident="${incident}" data-samples-environment="${esc(card.name)}" data-check="${esc(check.name)}" data-start="${esc(b.start)}" title="${esc(title)}" aria-label="${esc(title)}"></button>`;
   }).join("");
-  return `<div class="sys-strip" role="img" aria-label="${esc(`${check.name}: the last 24 hours in half-hour slots`)}">${cells}</div>`;
+  const label = `${check.name}: the last 24 hours in half-hour slots; select a slot to view samples`;
+  return `<div class="sys-strip" role="group" aria-label="${esc(label)}">${cells}</div>`;
 }
 
 function checks(card, now) {
@@ -144,8 +245,9 @@ function checks(card, now) {
         <span class="tag">${esc(c.kind)}</span>
         <span class="sub mono" title="${esc(c.target)}">${esc(c.target)}</span>
       </div>
-      ${strip(c)}
+      ${strip(c, card)}
       <div class="sub">${esc(lastCheckText(c, now))} · every ${esc(String(c.every_seconds))}s${c.slow_after_ms ? ` · slow above ${esc(String(c.slow_after_ms))}ms` : ""}</div>
+      <button type="button" class="sys-samples-link" data-samples-environment="${esc(card.name)}" data-check="${esc(c.name)}">View latest samples</button>
     </div>`).join("")}</div>`;
 }
 
@@ -178,6 +280,7 @@ function card(c, now) {
     </header>
     <p class="sys-status">${esc(statusText(c, now))}</p>
     ${cardPromotion(c)}
+    ${recoveryButton(c)}
     ${running}
     <dl class="infra-facts">
       ${fact("Running", current)}
@@ -272,7 +375,7 @@ export function renderEnvironments() {
   const cards = report.environments.length
     ? `<div class="sys-cards">${report.environments.map(c => card(c, now)).join("")}</div>`
     : empty();
-  page.innerHTML = [promotionNoticeHTML(), cards, deployments(report), releases(report)].join("");
+  page.innerHTML = [promotionNoticeHTML(), cards, samplesHTML(), recoveriesHTML(report), deployments(report), releases(report)].join("");
 }
 
 export function wireEnvironments() {
@@ -282,5 +385,13 @@ export function wireEnvironments() {
   if (page) page.onclick = event => {
     const button = event.target.closest?.("[data-environment-promote]");
     if (button && !button.disabled) void promoteEnvironment(button.dataset.environmentPromote, button.dataset.deployment);
+    const recover = event.target.closest?.("[data-environment-recover]");
+    if (recover && !recover.disabled) recoveryModal(recover.dataset.environmentRecover);
+    const samples = event.target.closest?.("[data-samples-environment]");
+    if (samples && !samples.disabled) void loadEnvironmentSamples(samples.dataset.samplesEnvironment, samples.dataset.check, samples.dataset.start || null);
+    if (event.target.closest?.("[data-samples-older]") && sampleDetail?.page?.next_before) {
+      void loadEnvironmentSamples(sampleDetail.selection.environment, sampleDetail.selection.check, null, sampleDetail.page.next_before);
+    }
+    if (event.target.closest?.("[data-samples-close]")) { sampleAsked++; sampleDetail = null; renderEnvironments(); }
   };
 }

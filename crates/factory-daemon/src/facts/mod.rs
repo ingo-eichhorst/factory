@@ -32,6 +32,11 @@ pub(crate) struct AttestedQuery {
     pub window: Window,
 }
 
+pub(crate) struct RecoveryQuery {
+    pub scopes: Option<BTreeSet<String>>,
+    pub limit: u32,
+}
+
 /// Registered producer, with a response constrained to its own fact type.
 /// No serialization, Any downcasts or string-keyed provider lookup.
 pub(crate) trait Port: Fact + Sized {
@@ -81,6 +86,7 @@ port!(ExploitedFinding, l2, String, Vec<ExploitedFinding>);
 port!(AgentFact, l3, String, Vec<AgentFact>);
 port!(TaskFact, l4, NamedQuery, BTreeMap<String, Vec<TaskFact>>);
 port!(WorkflowFact, l4, NamedQuery, BTreeMap<String, Vec<WorkflowFact>>);
+port!(EnvironmentRecoveryFact, l4, RecoveryQuery, Vec<EnvironmentRecoveryFact>);
 port!(AttestedRun, l4, AttestedQuery, Vec<AttestedRun>);
 port!(ArtifactProvenance, l4, String, Vec<ArtifactProvenance>);
 port!(CostReport, l4, factory_core::usage::SpendQuery, CostReport);
@@ -109,6 +115,7 @@ mod tests {
         registered::<AgentFact>();
         registered::<TaskFact>();
         registered::<WorkflowFact>();
+        registered::<EnvironmentRecoveryFact>();
         registered::<AttestedRun>();
         registered::<ArtifactProvenance>();
         registered::<CostReport>();

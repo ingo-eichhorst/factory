@@ -260,6 +260,23 @@ impl WorkflowStore {
         .await
     }
 
+    /// Bounded history of one intent label, not the last N unrelated runs.
+    pub async fn tagged_runs(&self, label: &str, scope: Option<&str>, limit: u32) -> Result<Vec<WorkflowRun>> {
+        let path = format!("$.task.labels.\"{label}\"");
+        let scope = scope.map(str::to_string);
+        self.with_conn(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, data FROM workflow_runs WHERE (?1 IS NULL OR scope = ?1) \
+                 AND EXISTS (SELECT 1 FROM json_each(workflow_runs.data, '$.definition.nodes') AS node \
+                 WHERE json_extract(node.value, ?2) IS NOT NULL) ORDER BY updated_at DESC, id LIMIT ?3"
+            ).map_err(error)?;
+            let rows = statement.query_map(params![scope, path, limit.min(200)], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }).map_err(error)?.collect::<std::result::Result<Vec<_>, _>>().map_err(error)?;
+            Ok(decode_all(rows, "workflow_runs"))
+        }).await
+    }
+
     /// The most recently touched terminal runs, for one-off startup
     /// reconciliation of a node overlay a missed event or an older, buggier
     /// build left stale (see B2/R11) -- bounded rather than exhaustive: a

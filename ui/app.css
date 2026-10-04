@@ -1548,7 +1548,10 @@ button.linklike:hover { color: var(--signal); }
 .sys-check-name { font-weight: 600; }
 .sys-check .sub { font-size: 11px; color: var(--muted); }
 .sys-strip { display: grid; grid-template-columns: repeat(48, 1fr); gap: 1px; margin: 4px 0 3px; height: 12px; }
-.sys-slot { background: var(--sunk); border-radius: 1px; }
+.sys-slot { background: var(--sunk); border-radius: 1px; border: 0; padding: 0; min-width: 0; cursor: pointer; }
+.sys-slot[data-incident="true"] { box-shadow: inset 0 -3px var(--fault); }
+.sys-slot:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.sys-samples-link { margin-top: 6px; }
 .sys-slot[data-tone="ok"] { background: var(--run); }
 .sys-slot[data-tone="warn"] { background: var(--wait); }
 .sys-slot[data-tone="bad"] { background: var(--fault); }

@@ -364,6 +364,32 @@ impl Fact for TaskFact {
 impl Fact for WorkflowFact {
     type Producer = L4;
 }
+
+/// An explicit environment recovery is process work, not a deployment or
+/// an SLA sample. Its status comes from the workflow and reported task run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentRecoveryFact {
+    pub scope: String,
+    pub environment: String,
+    pub workflow_id: String,
+    pub workflow_run_id: String,
+    pub status: WorkflowRunStatus,
+    pub requested_at: DateTime<Utc>,
+    pub requested_by: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunFact>,
+}
+pub const RECOVERY_ENVIRONMENT_LABEL: &str = "factory.recovery.environment";
+pub const RECOVERY_REASON_LABEL: &str = "factory.recovery.reason";
+pub const RECOVERY_COMMIT_LABEL: &str = "factory.recovery.expected_commit";
+impl Fact for EnvironmentRecoveryFact {
+    type Producer = L4;
+}
 impl Fact for GateFact {
     type Producer = L5;
 }
@@ -566,6 +592,13 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         readers: &["L5 quality", "L6 policy (the `workflow` check)"],
         lives_in_kernel: true,
         note: "moved with its nested shared vocabulary in phase 2",
+    },
+    FactCatalogueEntry {
+        fact: "EnvironmentRecoveryFact",
+        producer: "L4",
+        readers: &["L6 Operations page facade"],
+        lives_in_kernel: true,
+        note: "reported recovery workflow/run evidence; never an L1 deployment or metric input",
     },
     FactCatalogueEntry {
         fact: "ConfirmedSecurityReport",

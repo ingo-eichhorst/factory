@@ -183,6 +183,10 @@ pub struct EnvironmentDecl {
     /// only as an approved category-release task, never by the health loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy: Option<ReleaseCommand>,
+    /// Explicit restart/repair recipe. Runs as an owner-approved recovery
+    /// workflow, never silently from the health loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover: Option<RecoveryCommand>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckDecl>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -220,6 +224,64 @@ impl ReleaseCommand {
 pub struct Promote {
     pub environment: String,
     pub deployment: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryCommand {
+    pub agent: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<Span>,
+}
+impl RecoveryCommand {
+    pub fn timeout_seconds(&self) -> u64 {
+        self.timeout.as_ref().map(Span::seconds).unwrap_or(300)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Recover {
+    pub environment: String,
+    pub reason: String,
+}
+
+/// A bounded read of one check's stored observations, not a trigger to run it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SampleQuery {
+    pub environment: String,
+    pub check: String,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub from: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub to: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub before: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SampleRecord {
+    pub id: i64,
+    #[serde(flatten)]
+    pub sample: Sample,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SamplePage {
+    pub environment: String,
+    pub check: String,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    /// Newest recorded first. The row cursor keeps equal timestamps stable.
+    pub samples: Vec<SampleRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -374,6 +436,11 @@ pub fn validate<'a>(scopes: impl IntoIterator<Item = (&'a str, &'a [EnvironmentD
     for (scope, envs) in &scopes {
         for env in envs.iter() {
             let here = format!("scope {scope:?}, environment {:?}", env.name);
+            if let Some(recover) = &env.recover {
+                if recover.agent.trim().is_empty() || recover.command.trim().is_empty() || recover.timeout_seconds() > 3600 {
+                    return bad(format!("{here}: recover needs agent, command and timeout at most 1h"));
+                }
+            }
             if let Some(deploy) = &env.deploy {
                 if deploy.agent.trim().is_empty() || deploy.command.trim().is_empty()
                     || deploy.prepare.as_ref().is_some_and(|command| command.trim().is_empty())
@@ -943,6 +1010,10 @@ pub struct EnvironmentCard {
     pub promotion_ready: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promotion_reason: Option<String>,
+    #[serde(default)]
+    pub recovery_ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_reason: Option<String>,
     /// `false` for an environment only deployments name -- an ad-hoc one
     /// nobody declared. It has no checks and no SLO.
     pub declared: bool,
@@ -982,6 +1053,10 @@ pub struct EnvironmentsReport {
     pub releases: Vec<Release>,
     /// Running ones first, then newest first; at most [`REPORT_DEPLOYMENTS`].
     pub deployments: Vec<Deployment>,
+    /// Process-owned evidence, read through L4's typed fact port by the page
+    /// facade only. Never part of L1 metric production or DORA deployments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recoveries: Vec<factory_kernel::EnvironmentRecoveryFact>,
 }
 
 /// How many deployments the report carries.
@@ -1069,6 +1144,8 @@ pub fn report(
             promotes_to: decl.and_then(|d| d.promotes_to.clone()),
             promotion_ready: false,
             promotion_reason: None,
+            recovery_ready: false,
+            recovery_reason: None,
             declared: decl.is_some(),
             paused,
             status,
@@ -1093,7 +1170,7 @@ pub fn report(
     let mut listed: Vec<Deployment> = deployments.iter().filter(|d| d.status == DeployStatus::Running).cloned().collect();
     listed.extend(deployments.iter().filter(|d| d.status != DeployStatus::Running).cloned());
     listed.truncate(REPORT_DEPLOYMENTS);
-    EnvironmentsReport { generated_at: now, environments: cards, releases, deployments: listed }
+    EnvironmentsReport { generated_at: now, environments: cards, releases, deployments: listed, recoveries: Vec::new() }
 }
 
 /// The catalogue: one row per `(scope, commit)`, from deployments (newest
@@ -1230,6 +1307,19 @@ mod tests {
             previous_commit: None,
             verification: None,
         }
+    }
+
+    #[test]
+    fn recovery_recipe_is_explicit_bounded_and_legacy_reports_need_no_recovery_fields() {
+        let envs = decls("- name: prod\n  recover: { agent: operator, command: './restart-installed' }\n");
+        validate([("demo", envs.as_slice())]).unwrap();
+        assert_eq!(envs[0].recover.as_ref().unwrap().timeout_seconds(), 300);
+        for recipe in ["{ agent: '', command: true }", "{ agent: operator, command: '' }", "{ agent: operator, command: true, timeout: 61m }"] {
+            let invalid = decls(&format!("- name: prod\n  recover: {recipe}\n"));
+            assert!(validate([("demo", invalid.as_slice())]).is_err());
+        }
+        let report: EnvironmentsReport = serde_json::from_value(serde_json::json!({"generated_at":"2026-10-04T00:00:00Z", "environments":[], "releases":[], "deployments":[]})).unwrap();
+        assert!(report.recoveries.is_empty());
     }
 
     #[test]
