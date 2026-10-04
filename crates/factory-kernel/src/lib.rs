@@ -37,6 +37,7 @@ pub use workspace::{WorkspaceLifetime, WorkspaceSpec};
 pub use spend::{CostGroupBy, CostReport, CostRow, DailySpend, FinishedSpend, SpendBasis, SpendFigure, TokenSums};
 pub use facts::{EnvironmentMetricFact, KnowledgeTags, ScopeCapacityFact};
 pub use facts::{EnvironmentRecoveryFact, RECOVERY_COMMIT_LABEL, RECOVERY_ENVIRONMENT_LABEL, RECOVERY_REASON_LABEL};
+pub use facts::{ReleaseBuildFact, ReleaseSbomFact};
 pub use ports::{FactProvider, FactValue, Provide};
 
 pub use duration::Duration;

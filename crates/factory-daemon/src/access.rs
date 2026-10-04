@@ -297,6 +297,8 @@ impl Engine {
             // Samples and deployments folded on read; writes nothing.
             | Request::Environments { .. }
             | Request::EnvironmentSamples(_)
+            | Request::ReleaseDetail(_)
+            | Request::DependencyDocument { .. }
             | Request::Knowledge
             | Request::KnowledgeSearch { .. }
             | Request::Benchmarks

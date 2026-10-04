@@ -424,6 +424,10 @@ pub enum Request {
     EnvironmentCheck { environment: String },
     #[serde(rename = "environment.samples")]
     EnvironmentSamples(crate::environments::SampleQuery),
+    #[serde(rename = "release.detail")]
+    ReleaseDetail(crate::environments::ReleaseQuery),
+    #[serde(rename = "dependency.document")]
+    DependencyDocument { scope: String, id: String },
     /// A deployment has begun (`#185`). `deploy.record`, checked against
     /// the environment's scope. Answers the recorded `Deployment`, whose
     /// `id` the matching `deploy.finish` names.
@@ -1105,6 +1109,10 @@ pub enum Payload {
     EnvironmentVerification { verification: crate::environments::DeployVerification },
     #[serde(rename = "environment_samples")]
     EnvironmentSamples { page: crate::environments::SamplePage },
+    #[serde(rename = "release_detail")]
+    ReleaseDetail { detail: Box<crate::environments::ReleaseDetail> },
+    #[serde(rename = "dependency_document")]
+    DependencyDocument { attachment: factory_kernel::Attachment, document: serde_json::Value },
     /// A deployment as recorded: the answer to `deploy.start` and
     /// `deploy.finish`.
     Deployment { deployment: Box<crate::environments::Deployment> },

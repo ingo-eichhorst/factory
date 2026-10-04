@@ -25,6 +25,9 @@ import {
   samplesSelection,
   samplesQuery,
   releaseRows,
+  releaseEffectiveness,
+  releaseDetailQuery,
+  releaseRepositoryURL,
   releaseText,
   sloText,
   statusText,
@@ -37,7 +40,7 @@ import { readHash, setRouter } from "../js/scopes.js";
 
 const bare = { addEventListener() {}, getElementById: () => null };
 globalThis.document = bare;
-const { loadEnvironments, renderEnvironments, promoteEnvironment, recoverEnvironment, loadEnvironmentSamples, wireEnvironments } = await import("../js/environments.js");
+const { loadEnvironments, renderEnvironments, promoteEnvironment, recoverEnvironment, loadEnvironmentSamples, loadReleaseDetail, wireEnvironments } = await import("../js/environments.js");
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
@@ -462,5 +465,83 @@ test("health strips are selectable with incident markers, and missing samples or
   wireEnvironments();
   el.environments.onclick({ target: { closest: selector => selector === "[data-samples-close]" ? {} : null } });
   assert.doesNotMatch(el.environments.innerHTML, /sample read &lt;failed&gt;/);
+  state.scope = null;
+});
+
+test("release evidence queries keep exact scope/commit/deployment, repository links are safe and unknown CFR stays unknown", () => {
+  assert.equal(releaseDetailQuery("projects/demo", "a b", "deploy/1"), "/api/releases/detail?scope=projects%2Fdemo&commit=a+b&deployment=deploy%2F1");
+  assert.equal(releaseRepositoryURL({ repository: "owner/repo" }, "pull/90"), "https://github.com/owner/repo/pull/90");
+  for (const repository of ["javascript:evil", "../..", "owner/repo/extra", "owner@evil/repo", "owner/repo?evil"]) {
+    assert.equal(releaseRepositoryURL({ repository }, "pull/90"), null);
+  }
+  assert.equal(releaseEffectiveness({}), MISSING);
+  assert.equal(releaseEffectiveness({ effectiveness: { change_failure_rate: null } }), MISSING);
+  assert.equal(releaseEffectiveness({ effectiveness: { change_failure_rate: 0.5, failed_changes: 1, finished: 2, window_days: 28, observing: 1 } }), "50.0% · 1/2 changes · 28d · 1 still observing");
+});
+
+function detailFixture() {
+  return {
+    release: { ...REPORT.releases[2], commit: "b".repeat(40), scope: "factory" },
+    changes: { base: "a".repeat(40), commit: "b".repeat(40), repository: "owner/repo", truncated: true,
+      commits: [{ commit: "b".repeat(40), subject: "release <unsafe>", pull_requests: [90], issues: [91], references: [92] }] },
+    build: { scope: "factory", task_id: "build/task", run: { id: "build/run", status: "done" }, attestations: [{ id: "a" }],
+      artifacts: [{ artifact: { name: "product <unsafe>", sha256: "c".repeat(64), size_bytes: 12 } }] },
+    sboms: [{ scope: "factory", commit: "b".repeat(40), version: "v1", attachment: { id: "sbom/id", filename: "build.cdx.json", attached_at: NOW } }],
+  };
+}
+
+test("release details render captured changes, real build evidence, SBOM links and weekly effectiveness", async () => {
+  const el = stubPage(IDS);
+  const report = structuredClone(REPORT);
+  report.releases[2].commit = "b".repeat(40);
+  report.environments[1].effectiveness = [{ from: "2026-09-19T12:00:00Z", to: NOW, dora: { deploy_frequency: 1, lead_time_p50: 60,
+    change_failure_rate: 0, time_to_restore_p50: null, observing_changes: 1 } }];
+  report.releases[2].effectiveness = { window_days: 28, finished: 2, failed_changes: 1, observing: 1, change_failure_rate: 0.5 };
+  state.environments = report;
+  state.scope = "release-detail";
+  const paths = [];
+  globalThis.fetch = async path => { paths.push(path); return { ok: true, json: async () => ({ status: "ok", data: { detail: detailFixture() } }) }; };
+  await loadReleaseDetail("factory", "b".repeat(40), "d1");
+  assert.equal(paths[0], releaseDetailQuery("factory", "b".repeat(40), "d1"));
+  const html = el.environments.innerHTML;
+  assert.match(html, /Captured changes/);
+  assert.match(html, /release &lt;unsafe&gt;/);
+  assert.match(html, /github\.com\/owner\/repo\/pull\/90/);
+  assert.match(html, /Issue reference #91/);
+  assert.match(html, /Reference #92/);
+  assert.match(html, /bounded list truncated at 200 commits/);
+  assert.match(html, /\/api\/runs\/build%2Frun\/provenance/);
+  assert.match(html, /1 recorded attestations/);
+  assert.match(html, /product &lt;unsafe&gt;/);
+  assert.match(html, /\/api\/dependencies\/documents\/sbom%2Fid\?scope=factory/);
+  assert.match(html, /Release effectiveness over time/);
+  assert.match(html, /1 still observing; provisional CFR/);
+  assert.match(html, /50.0% · 1\/2 changes · 28d · 1 still observing/);
+  state.scope = "elsewhere";
+  renderEnvironments();
+  assert.doesNotMatch(el.environments.innerHTML, /Captured changes/);
+  state.scope = null;
+});
+
+test("late release evidence cannot replace a newer selection, and missing evidence is explicit", async () => {
+  const el = stubPage(IDS);
+  state.environments = REPORT;
+  state.scope = "release-race";
+  const finishes = [];
+  globalThis.fetch = async () => { const detail = await new Promise(resolve => finishes.push(resolve));
+    return { ok: true, json: async () => ({ status: "ok", data: { detail } }) }; };
+  const first = loadReleaseDetail("factory", REPORT.releases[0].commit);
+  const second = loadReleaseDetail("factory", REPORT.releases[2].commit);
+  const missing = { release: REPORT.releases[2], sboms: [], build_reason: "no matching build <proof>", sbom_reason: "no matching SBOM" };
+  finishes[1](missing);
+  await second;
+  finishes[0](detailFixture());
+  await first;
+  assert.match(el.environments.innerHTML, /no matching build &lt;proof&gt;/);
+  assert.match(el.environments.innerHTML, /No Git comparison was captured/);
+  assert.doesNotMatch(el.environments.innerHTML, /Captured changes/);
+  wireEnvironments();
+  el.environments.onclick({ target: { closest: selector => selector === "[data-release-close]" ? {} : null } });
+  assert.doesNotMatch(el.environments.innerHTML, /no matching build/);
   state.scope = null;
 });

@@ -31,6 +31,9 @@ import {
   promotionChoices,
   recoveryStatus,
   releaseRows,
+  releaseDetailQuery,
+  releaseBuildHref,
+  releaseRepositoryURL,
   releaseText,
   sloText,
   statusLabel,
@@ -50,6 +53,104 @@ let promotionNotice = null;
 let sampleDetail = null;
 let sampleAsked = 0;
 const recovering = new Set();
+let releaseDetail = null;
+let releaseAsked = 0;
+
+export async function loadReleaseDetail(scope, commit, deployment = null) {
+  const report = state.environments;
+  if (!report?.releases?.some(release => release.scope === scope && release.commit === commit)) return;
+  const selectedScope = state.scope;
+  const mine = ++releaseAsked;
+  releaseDetail = { scope: selectedScope, loading: true };
+  renderEnvironments();
+  try {
+    const { detail } = await api(releaseDetailQuery(scope, commit, deployment));
+    if (mine === releaseAsked) releaseDetail = { scope: selectedScope, detail };
+  } catch (error) {
+    if (mine === releaseAsked) releaseDetail = { scope: selectedScope, error: error.message };
+  }
+  if (state.scope === selectedScope && mine === releaseAsked) renderEnvironments();
+}
+
+function releaseReference(changes, kind, number) {
+  let label = `Reference #${number}`;
+  let tail = `issues/${number}`;
+  if (kind === "pull") { label = `PR #${number}`; tail = `pull/${number}`; }
+  if (kind === "issue") label = `Issue reference #${number}`;
+  const href = releaseRepositoryURL(changes, tail);
+  if (!href) return esc(label);
+  return `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(label)}</a>`;
+}
+
+function releaseChangesHTML(changes) {
+  if (!changes) return `<p class="sub">No Git comparison was captured on this older record.</p>`;
+  if (changes.unavailable) return `<p class="sub">Git comparison unavailable: ${esc(changes.unavailable)}</p>`;
+  const range = `${changes.base?.slice(0, 10) || MISSING} → ${changes.commit.slice(0, 10)}`;
+  const compare = releaseRepositoryURL(changes, `compare/${encodeURIComponent(changes.base)}...${encodeURIComponent(changes.commit)}`);
+  let heading = esc(range);
+  if (compare) heading = `<a href="${esc(compare)}" target="_blank" rel="noopener">${heading}</a>`;
+  const directionRows = (commits, direction) => commits.map(change => {
+    const refs = [
+      ...change.pull_requests.map(number => releaseReference(changes, "pull", number)),
+      ...change.issues.map(number => releaseReference(changes, "issue", number)),
+      ...change.references.map(number => releaseReference(changes, "reference", number)),
+    ].join(" · ");
+    return `<tr><td>${direction}</td><td class="mono">${esc(change.commit.slice(0, 10))}</td><td>${esc(change.subject)}</td><td>${refs || MISSING}</td></tr>`;
+  }).join("");
+  const removed = changes.removed_commits || [];
+  const rows = directionRows(changes.commits, "Added to target history") + directionRows(removed, "Removed from target history");
+  const limit = changes.truncated ? " · bounded list truncated at 200 commits per direction" : "";
+  const diffstat = changes.diffstat ?? "direct file comparison not recorded";
+  return `<h4>Captured changes · ${heading}</h4><p class="sub">${changes.commits.length} added / ${removed.length} removed listed commits${limit}. Reference kinds are inferred from commit messages, not GitHub issue state.</p>
+    <p class="sub">Direct file comparison: ${esc(diffstat || "no file changes")}</p>
+    <div class="bk-scroll"><table><thead><tr><th>Direction</th><th>Commit</th><th>Subject</th><th>References</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function releaseBuildHTML(detail) {
+  const build = detail.build;
+  if (!build) return `<p class="sub">Build evidence: ${esc(detail.build_reason || "not recorded")}</p>`;
+  const id = encodeURIComponent(build.run.id);
+  const artifacts = build.artifacts.map(record => `<li>${esc(record.artifact.name)} · <code>${esc(record.artifact.sha256)}</code> · ${esc(String(record.artifact.size_bytes))} bytes</li>`).join("");
+  return `<h4>Producing build</h4><p><a href="${esc(releaseBuildHref(build))}">Task/run and journal</a> · ${esc(build.scope)} · ${esc(build.run.status)}
+    · <a href="/api/runs/${id}/provenance" target="_blank" rel="noopener">Artifact provenance</a>
+    · <a href="/api/runs/${id}/attestations" target="_blank" rel="noopener">${build.attestations.length} recorded attestations</a></p><ul>${artifacts}</ul>`;
+}
+
+function releaseSbomsHTML(detail) {
+  if (!detail.sboms.length) return `<p class="sub">SBOM evidence: ${esc(detail.sbom_reason || "not recorded")}</p>`;
+  const links = detail.sboms.map(fact => {
+    const query = new URLSearchParams({ scope: fact.scope });
+    const href = `/api/dependencies/documents/${encodeURIComponent(fact.attachment.id)}?${query}`;
+    return `<li><a href="${esc(href)}" target="_blank" rel="noopener">${esc(fact.attachment.filename)}</a> · ${esc(fact.version)} · ${esc(fact.scope)} · build lifecycle · ${esc(fact.attachment.attached_at)}</li>`;
+  }).join("");
+  return `<h4>Matching build SBOMs</h4><ul>${links}</ul>`;
+}
+
+function releaseDetailHTML() {
+  if (!releaseDetail || releaseDetail.scope !== state.scope) return "";
+  let body;
+  if (releaseDetail.loading) body = `<p role="status">Loading release evidence…</p>`;
+  else if (releaseDetail.error) body = `<p class="bk-bad" role="status">${esc(releaseDetail.error)}</p>`;
+  else {
+    const detail = releaseDetail.detail;
+    body = `<p>${esc(detail.release.scope)} · ${esc(releaseText(detail.release))}</p>${releaseChangesHTML(detail.changes)}${releaseBuildHTML(detail)}${releaseSbomsHTML(detail)}`;
+  }
+  return `<section class="bk-section"><h3>Release evidence</h3><button type="button" data-release-close>Close release evidence</button>${body}</section>`;
+}
+
+function effectivenessHTML(report) {
+  const sections = report.environments.filter(card => card.effectiveness?.length).map(card => {
+    const rows = card.effectiveness.map(period => {
+      const values = doraRows(period.dora).slice(0, 4).map(row => `<td>${esc(row.value)}</td>`).join("");
+      const observing = period.dora.observing_changes || 0;
+      const note = observing ? `${observing} still observing; provisional CFR` : "";
+      return `<tr><td>${esc(period.from)} — ${esc(period.to)}</td>${values}<td>${esc(note)}</td></tr>`;
+    }).join("");
+    return `<h4>${esc(card.name)}</h4><div class="bk-scroll"><table><thead><tr><th>Period (UTC)</th><th>Deploys/week</th><th>Lead time p50</th><th>Change failures</th><th>Restore p50</th><th>Coverage</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }).join("");
+  if (!sections) return "";
+  return `<section class="bk-section"><h3>Release effectiveness over time</h3><p class="sub">Nonoverlapping weekly cohorts; a final shorter period is normalised to deployments/week. Failure attribution uses the recorded one-hour horizon and stops at the next deployment, including a running one. Missing observations remain missing.</p>${sections}</section>`;
+}
 
 export async function recoverEnvironment(environment, reason) {
   const card = state.environments?.environments?.find(card => card.name === environment);
@@ -307,7 +408,8 @@ function deployments(report) {
   }
   const body = rows.map(r => `<tr class="${r.standsOut ? "sys-failed" : ""}">
       <td class="bk-nowrap">${esc(r.environment)}</td>
-      <td><div class="mono">${esc(r.release)}</div>${r.previous ? `<div class="sub mono">was ${esc(r.previous)}</div>` : ""}</td>
+      <td><div class="mono">${esc(r.release)}</div>${r.previous ? `<div class="sub mono">was ${esc(r.previous)}</div>` : ""}
+        <button type="button" data-release-scope="${esc(r.scope)}" data-release-commit="${esc(r.commit)}" data-release-deployment="${esc(r.id)}">Changes and evidence</button></td>
       <td><span class="tag sys-badge" data-tone="${r.tone}">${esc(r.status)}</span></td>
       <td class="bk-nowrap">${esc(r.duration)}</td>
       <td>${esc(r.who)}</td>
@@ -331,11 +433,13 @@ function releases(report) {
       <td class="bk-nowrap">${esc(r.firstSeen)}</td>
       <td>${r.runningOn.length ? r.runningOn.map(e => `<span class="tag sys-badge" data-tone="ok">${esc(e)}</span>`).join(" ") : `<span class="sub">not running anywhere</span>`}</td>
       <td class="bk-nowrap">${r.deployments}${r.failed ? ` <span class="bk-bad">(${r.failed} failed)</span>` : ""}</td>
+      <td>${esc(r.effectiveness)}</td>
+      <td><button type="button" data-release-scope="${esc(r.scope)}" data-release-commit="${esc(r.fullCommit)}">Changes and evidence</button></td>
       <td>${promotionChoices(report, report.releases[index]).map(promotionButton).join(" ")}</td>
     </tr>`).join("");
   return `<section class="bk-section"><h3>Releases <span class="sub">newest first</span></h3>
     <div class="bk-scroll"><table>
-      <thead><tr><th>Commit</th><th>Version</th><th>Scope</th><th>First seen</th><th>Running on</th><th>Deployments</th><th>Promote</th></tr></thead>
+      <thead><tr><th>Commit</th><th>Version</th><th>Scope</th><th>First seen</th><th>Running on</th><th>Deployments</th><th>Change failures (28d)</th><th>Evidence</th><th>Promote</th></tr></thead>
       <tbody>${body}</tbody>
     </table></div></section>`;
 }
@@ -375,23 +479,30 @@ export function renderEnvironments() {
   const cards = report.environments.length
     ? `<div class="sys-cards">${report.environments.map(c => card(c, now)).join("")}</div>`
     : empty();
-  page.innerHTML = [promotionNoticeHTML(), cards, samplesHTML(), recoveriesHTML(report), deployments(report), releases(report)].join("");
+  page.innerHTML = [promotionNoticeHTML(), cards, samplesHTML(), recoveriesHTML(report), releaseDetailHTML(), effectivenessHTML(report), deployments(report), releases(report)].join("");
 }
 
 export function wireEnvironments() {
   const refresh = $("environments-refresh");
   if (refresh) refresh.onclick = () => { void refreshEnvironments(); };
   const page = $("environments");
+  const actions = [
+    ["[data-environment-promote]", button => { void promoteEnvironment(button.dataset.environmentPromote, button.dataset.deployment); }],
+    ["[data-environment-recover]", button => recoveryModal(button.dataset.environmentRecover)],
+    ["[data-samples-environment]", button => { void loadEnvironmentSamples(button.dataset.samplesEnvironment, button.dataset.check, button.dataset.start || null); }],
+    ["[data-samples-older]", () => {
+      if (sampleDetail?.page?.next_before) void loadEnvironmentSamples(sampleDetail.selection.environment, sampleDetail.selection.check, null, sampleDetail.page.next_before);
+    }],
+    ["[data-samples-close]", () => { sampleAsked++; sampleDetail = null; renderEnvironments(); }],
+    ["[data-release-commit]", button => { void loadReleaseDetail(button.dataset.releaseScope, button.dataset.releaseCommit, button.dataset.releaseDeployment || null); }],
+    ["[data-release-close]", () => { releaseAsked++; releaseDetail = null; renderEnvironments(); }],
+  ];
   if (page) page.onclick = event => {
-    const button = event.target.closest?.("[data-environment-promote]");
-    if (button && !button.disabled) void promoteEnvironment(button.dataset.environmentPromote, button.dataset.deployment);
-    const recover = event.target.closest?.("[data-environment-recover]");
-    if (recover && !recover.disabled) recoveryModal(recover.dataset.environmentRecover);
-    const samples = event.target.closest?.("[data-samples-environment]");
-    if (samples && !samples.disabled) void loadEnvironmentSamples(samples.dataset.samplesEnvironment, samples.dataset.check, samples.dataset.start || null);
-    if (event.target.closest?.("[data-samples-older]") && sampleDetail?.page?.next_before) {
-      void loadEnvironmentSamples(sampleDetail.selection.environment, sampleDetail.selection.check, null, sampleDetail.page.next_before);
+    for (const [selector, action] of actions) {
+      const button = event.target.closest?.(selector);
+      if (!button || button.disabled) continue;
+      action(button);
+      return;
     }
-    if (event.target.closest?.("[data-samples-close]")) { sampleAsked++; sampleDetail = null; renderEnvironments(); }
   };
 }

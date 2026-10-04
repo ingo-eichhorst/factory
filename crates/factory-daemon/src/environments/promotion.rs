@@ -270,6 +270,8 @@ impl Engine {
             ("--version", &current.release.version),
             ("--profile", &current.release.profile),
             ("--source", &current.release.source),
+            ("--build-run", &current.release.build_run),
+            ("--build-scope", &current.release.build_scope),
         ] {
             if let Some(value) = value {
                 args.push_str(&format!(" {flag} {}", word(value)));

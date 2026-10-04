@@ -2495,6 +2495,48 @@ The **release catalogue** is every `(scope, commit)` a deployment or
 `release add` recorded -- builds that actually happened, not git tags --
 with where each is running now and how many of its deployments failed.
 
+**Changes and evidence** on a catalogue or deployment row opens
+`GET /api/releases/detail?scope=S&commit=SHA[&deployment=ID]`. Deployment
+selection uses that attempt's own frozen comparison, not another deployment
+of the same version. New records resolve a locally available Git revision
+to its full commit and capture a comparison once. `--compare-to SHA` selects
+the base explicitly; otherwise a deployment uses its previous installed
+release and `release add` uses the previous recorded release in its scope.
+Added and removed history are both shown, so rollback and divergent releases
+do not look like an empty change. The direct file-change summary is captured
+with external diff/text-conversion helpers disabled. Commit subjects and
+references are captured too: merge messages identify PR references, closing
+keywords identify issue references, and ambiguous bare numbers stay plain
+references. These are inferences from Git messages, not verified GitHub issue
+state. A recognised GitHub origin supplies history/PR/issue links; no network
+fetch or GitHub write is needed. Each direction lists at most 200 commits,
+Git output and execution time are bounded, and truncation or unavailable
+Git evidence is explicit. Reads never recalculate this evidence after a
+branch edit or repository removal, and old records remain honestly unknown.
+
+Record the actual producing run separately from the deploying actor:
+
+```sh
+factory release add --scope demo --commit "$SHA" --version v1 \
+  --build-run "$BUILD_RUN" --compare-to "$BASE"
+factory deploy start --env staging --commit "$SHA" --build-run "$BUILD_RUN"
+```
+
+`--build-scope` names the producer when different; otherwise the recording
+scope is frozen. Promotion preserves this origin. The release-detail facade
+reads L4's typed `ReleaseBuildFact`, which requires a completed run and clean,
+immutable artifact provenance matching that producing scope and exact
+source commit. It links the task/run journal, artifact digests, SLSA
+statements and recorded attestations. Missing artifacts or mismatched,
+unfinished or unknown runs are not treated as build proof. L2 independently
+produces `ReleaseSbomFact` from build-lifecycle CycloneDX attachments whose
+own product identity matches the exact commit and, when given, version.
+Older matching attachments remain visible after newer scans. Each SBOM links
+to `GET /api/dependencies/documents/ID?scope=S`; the supplied scope must own
+that attachment. Declared/operations SBOMs and unrelated products are not
+silently substituted for the build. These live evidence reads occur only on
+the detail facade, never inside L1 metric production or a recording command.
+
 **Promotion** is an owner action from an environment card or the release
 catalogue, or `factory promote staging --deployment <verified-deployment-id>`.
 `POST /api/environments/promote` takes `{ "environment": "staging",
@@ -2620,6 +2662,21 @@ tab, the Scenarios drivers and dashboard tiles can read them:
 DORA's keys are read per environment; the one at the end of a promotion path
 (production) is the one that speaks for the path. A figure with nothing to
 compute it from is `None` with the reason -- no samples is not 100%.
+
+The **effectiveness panel** shows nonoverlapping weekly deployment cohorts
+over each environment's SLO window (a final shorter period is normalised to
+deployments/week), with all four keys and explicit missing values. A failure
+within the recorded one-hour horizon remains attached to its original
+deployment's period, even across a period boundary; the next deployment's
+start, including one still running, ends that attribution. Future incident
+or restore observations never enter an earlier observation. The catalogue
+also shows per-release change-failure rate over a common 28-day cohort,
+including post-deploy incidents, not merely failed deployment commands.
+Successful changes still within their observation horizon are marked
+`still observing`; their rate is provisional. These are figures from recorded
+deployments and sampled incidents, not proof of uninterrupted monitoring.
+No finished deployments is unknown, not a 0% failure rate. Recovery actions
+remain outside all deployment/change cohorts.
 
 **The tab** is L1 › Operations (`#<scope>/infra/environments`), narrowed by
 the rail's scope: environment cards in promotion order (status and since,
