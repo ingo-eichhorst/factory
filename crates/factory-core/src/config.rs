@@ -1,7 +1,6 @@
 use crate::agent::Lifetime;
 use crate::dashboard::DashboardConfig;
 use crate::policy::{ControlRef, NotApplicable, PolicyLayer, Tighten};
-use factory_kernel::Duration;
 use crate::quality::QualityLayer;
 use crate::ready::IntakeLayer;
 use crate::role::{Role, RoleOrigin, RoleSpec, Roles};
@@ -17,59 +16,9 @@ pub const FACTORY_DIR: &str = ".factory";
 pub const CONFIG_FILE: &str = "config.yaml";
 pub const PLUGINS_DIR: &str = "plugins";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DependenciesConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scan_workflow: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_age: Option<Duration>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub services: Vec<DependencyService>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DependencyTransport { Network, Socket, File }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DependencyDirection { In, Out, Both }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DependencyEffect { Read, Write }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DependencyService {
-    pub name: String,
-    pub transport: DependencyTransport,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub endpoints: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direction: Option<DependencyDirection>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "one_or_many")]
-    pub effects: Vec<DependencyEffect>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub data: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<String>,
-}
-
-fn one_or_many<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
-where D: Deserializer<'de>, T: Deserialize<'de> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum OneOrMany<T> { One(T), Many(Vec<T>) }
-    Ok(match Option::<OneOrMany<T>>::deserialize(deserializer)? {
-        None => Vec::new(), Some(OneOrMany::One(v)) => vec![v], Some(OneOrMany::Many(v)) => v,
-    })
-}
+pub use factory_environment::declarations::{
+    DependenciesConfig, DependencyDirection, DependencyEffect, DependencyService, DependencyTransport,
+};
 
 /// What one config file -- the instance root's top-level `policies:`, or a
 /// scope's own `scope.policies` -- declares about which frameworks apply.
@@ -1691,12 +1640,6 @@ pub struct Scope {
     pub renewals: Vec<crate::renewals::RenewalDecl>,
 }
 
-impl DependenciesConfig {
-    pub fn is_empty(&self) -> bool {
-        self.scan_workflow.is_none() && self.max_age.is_none() && self.services.is_empty()
-    }
-}
-
 /// The last `/`-separated segment of `s`, or all of `s` when it has none.
 /// This is what a bare scope name -- one written before a scope's identity
 /// became its path -- is compared against: see `Factory::scope` and the
@@ -1717,33 +1660,7 @@ impl Scope {
     fn validate_dependencies(&self) -> Result<()> {
         let declared: std::collections::BTreeSet<String> =
             self.declared_agents().into_iter().map(|agent| agent.name()).collect();
-        let mut names = std::collections::BTreeSet::new();
-        for service in &self.dependencies.services {
-            if service.name.trim().is_empty() {
-                return Err(FactoryError::BadRequest(format!(
-                    "scope {:?} declares a dependency service with an empty name", self.name
-                )));
-            }
-            if !names.insert(&service.name) {
-                return Err(FactoryError::BadRequest(format!(
-                    "scope {:?} declares dependency service {:?} more than once", self.name, service.name
-                )));
-            }
-            for agent in &service.agents {
-                if !declared.contains(agent) {
-                    return Err(FactoryError::BadRequest(format!(
-                        "dependency service {:?} names agent {:?}, which scope {:?} does not declare",
-                        service.name, agent, self.name
-                    )));
-                }
-            }
-            match service.transport {
-                DependencyTransport::Network if service.endpoints.is_empty() => return Err(FactoryError::BadRequest(format!("network dependency service {:?} needs endpoints", service.name))),
-                DependencyTransport::Socket | DependencyTransport::File if service.path.is_none() => return Err(FactoryError::BadRequest(format!("{:?} dependency service {:?} needs path", service.transport, service.name))),
-                _ => {}
-            }
-        }
-        Ok(())
+        self.dependencies.validate_services(&self.name, &declared)
     }
 
     /// The adapter a task in this scope runs on unless it says otherwise.

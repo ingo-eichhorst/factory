@@ -1139,7 +1139,7 @@ mod tests {
             fs::write(f.join("policies/broken.yaml"), "framework: [unclosed").unwrap();
             fs::write(
                 f.join("vex/demo/review.cdx.json"),
-                include_bytes!("../../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json"),
+                include_bytes!("../../../factory-environment/tests/fixtures/dependencies/vulnerabilities.cdx.json"),
             )
             .unwrap();
             std::os::unix::fs::symlink(f.join("secrets.yaml"), f.join("knowledge/link.md")).unwrap();
@@ -1358,7 +1358,7 @@ mod tests {
         assert_eq!(fs::read_to_string(into.join(".factory/knowledge/company/README.md")).unwrap(), "---\ntitle: readme\n---\n# Company\n");
         assert_eq!(
             fs::read(into.join(".factory/vex/demo/review.cdx.json")).unwrap(),
-            include_bytes!("../../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json")
+            include_bytes!("../../../factory-environment/tests/fixtures/dependencies/vulnerabilities.cdx.json")
         );
         assert!(into.join("projects/demo/.factory/config.yaml").is_file());
         assert!(!into.join(".factory/secrets.yaml").exists());

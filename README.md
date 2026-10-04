@@ -5005,12 +5005,27 @@ which can read all six producers and cannot itself be a producing level.
 An external-crate compiler test checks every pair against the actual `get`
 method, including rejection of attempts to extend the relation. This is a
 read-direction constraint, not authorization or completed service isolation.
-The remaining signpost reader move, level-crate split, protocol/router
-migration and strict command ladder are still ahead in #193.
+The first physical owners are `factory-infrastructure` (L1: backup,
+running environments, renewals) and `factory-environment` (L2: sandbox
+plans, secrets, dependencies and their declarations). They contain the
+actual validation and decision code, not forwarding modules. Shared
+schedule, launch, time-span and error values live in L0, so backup and
+sandbox planning do not import L4/L3 domain types. Existing core paths
+re-export the same types; whole-instance configuration tests stay in core
+outside the ladder. Cargo metadata guards every normal, dev, build and
+target-specific edge by canonical package name, including renamed
+dependencies: a level may name only L0 or its directly lower level.
+
+This is a partial physical migration: live providers, storage and runtime
+services remain in the daemon, and the rest of core has not moved. The
+remaining signpost reader move, L3–L6 and protocol/router migration, and
+strict command ladder are still ahead in #193.
 
 ## Layout
 
     crates/factory-kernel    L0: pure shared vocabulary and every live fact schema (Level/Fact, nested statuses, grants and evidence); no other factory-* dependency
+    crates/factory-infrastructure L1: backup, running environments and renewal domain behaviour
+    crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary

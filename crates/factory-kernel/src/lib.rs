@@ -26,6 +26,14 @@
 //!   identifies page/API composition outside the six-level ladder.
 
 mod duration;
+pub mod error;
+pub use error::{FactoryError, Result};
+mod launch;
+pub use launch::{LaunchKind, LaunchSpec};
+mod schedule;
+pub use schedule::{CronSchedule, Schedule};
+mod span;
+pub use span::{parse_span, Span};
 mod process_metrics;
 pub use process_metrics::{ProductionBin, ProductionBucket, ProductionFact, ProcessMetricFact, BenchResolutionFact};
 mod fact_vocabulary;

@@ -131,9 +131,9 @@ mod tests {
     }
 
     const BUILT: &[u8] =
-        include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
+        include_bytes!("../../factory-environment/tests/fixtures/dependencies/build-sbom.cdx.json");
     const RUNNING: &[u8] =
-        include_bytes!("../../factory-core/tests/fixtures/dependencies/operations-sbom.cdx.json");
+        include_bytes!("../../factory-environment/tests/fixtures/dependencies/operations-sbom.cdx.json");
 
     #[test]
     fn matching_build_and_running_identity_is_current() {
