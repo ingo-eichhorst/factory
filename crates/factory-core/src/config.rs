@@ -639,7 +639,7 @@ pub fn refuse_bad_openshell(scope: &Scope, agent: &ScopeAgent) -> Result<()> {
     };
     match (agent.sandbox, &agent.openshell) {
         (Sandbox::Openshell, None) => refuse(
-            "sandbox: openshell without an openshell: block; it needs at least an image and a policy".to_string(),
+            "sandbox: openshell without an openshell: block; it needs at least a policy".to_string(),
         ),
         (other, Some(_)) if other != Sandbox::Openshell => refuse(format!(
             "an openshell: block but sandbox: {}; set sandbox: openshell or remove the block",
@@ -3190,8 +3190,8 @@ mod tests {
         for agent in &declared {
             assert_eq!(agent.sandbox, Sandbox::Openshell, "{}", agent.name());
             let os = agent.openshell.as_ref().expect("the block is kept");
-            assert_eq!(os.image, "img:1");
-            assert_eq!(os.providers, ["claude"]);
+            assert_eq!(os.image.as_deref(), Some("img:1"));
+            assert_eq!(os.providers, [crate::openshell::ProviderDecl::Named("claude".into())]);
         }
         assert!(Sandbox::Openshell.is_enforced() && !Sandbox::Docker.is_enforced() && !Sandbox::Srt.is_enforced());
         let bare = ScopeAgent { openshell: None, sandbox: Sandbox::None, ..declared[0].clone() };

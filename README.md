@@ -434,8 +434,16 @@ scope:
     harness: claude-code
     sandbox: openshell
     openshell:
-      image: /Users/you/.local/share/factory/openshell/factory-agent-rootfs.tar.gz
-      providers: [factory-claude, factory-github]   # by name; created once on the host
+      # image: omitted -- Factory builds and keeps its own; or name one, which it never rebuilds
+      providers:             # kept by the daemon from a credential source -- by reference, never by value
+        - name: factory-claude
+          type: claude-code-oauth
+          credential: { from: file, path: ~/.config/factory/secrets/claude-oauth-token }
+          # expires: 2027-10-04   # optional; the Inbox warns 30 days ahead
+        - name: factory-github
+          type: github-publish
+          credential: { from: command, run: "gh auth token" }
+        # - factory-legacy   # a bare name: created by hand on the gateway
       upload: workdir        # the run's directory -> /sandbox/work/<its name> (default)
       download: none         # or `workdir`: copy the tree back, never .git
       fast_forward: true     # afterwards, git merge --ff-only @{u} on the host checkout
@@ -453,10 +461,77 @@ awesome-herdr curator's weekly audit, policy included; a test loads it, so it
 stays one this build accepts.
 
 The block is refused at load, naming the scope's path, when it is present
-without `sandbox: openshell` or the other way round, when it misspells a key,
-names no image or no policy, or gives a policy that is not version 1. It
-holds no secret: providers are named, and their credentials live in
-OpenShell's credential store.
+without `sandbox: openshell` or the other way round, when it misspells a key
+(a credential source's included), names no policy, gives a policy that is not
+version 1, or a credential source that cannot work. It holds no secret: a
+provider is a name, or a name with the place its credential is read from, and
+credentials live in OpenShell's credential store.
+
+**Declaring it is the whole setup (`#234`).** For every agent that declares
+`sandbox: openshell`, the daemon keeps the prerequisites of its runs in place
+in the background -- once at startup (never holding startup up), within
+fifteen seconds of a declaration changing, and every five minutes -- and each
+agent is `ready`, `preparing`, or `needs` one named thing, with the exact
+command that supplies it, on L2 Sandboxes and the roster:
+
+1. **Gateway.** `openshell status`; when a local gateway is not connected,
+   `launchctl kickstart gui/<uid>/sh.brew.openshell` (bootstrapping the
+   Homebrew plist first if the job is not loaded -- never `-k`, which would
+   restart a healthy gateway and its sandboxes), at most once every two
+   minutes. L1 Doctor shows the gateway and when Factory last started it.
+2. **Image.** With no `image:`, Factory's own: the recipe the daemon carries
+   (`examples/openshell/`, herdr/jq pins and the base digest included) and the
+   installed `factory` CLI's digest name it, so a change to either is a new
+   image, built in the background with `build-image.sh rootfs` into
+   `<instance>/.factory/openshell-images/<key>/` and renamed into place when
+   complete. Runs keep using the previous image until then, and the previous
+   one is kept after; older ones are removed. The in-image CLI is
+   cross-compiled from the Factory checkout the daemon was built from (or
+   `FACTORY_OPENSHELL_SOURCE`), into a cargo target directory under
+   `openshell-images/`, never the checkout's own `target/`. Needs `cargo` with
+   `rustup`, `crane` and `bsdtar` on the host; the build log is beside the
+   image. A named `image:` is only checked, never built.
+3. **Profiles.** The two Factory ships (`claude-code-oauth`,
+   `github-publish`) are imported when a provider names them.
+4. **Providers.** An entry with a `credential:` is created when missing and
+   updated when its source's value changes (rotation), the value read fresh
+   each pass from `{ from: file, path }` (`~` is the daemon's home; refused
+   unless a regular file of the daemon's user that nobody else can read or
+   write -- `chmod 600`), `{ from: command, run }` (`sh -c`, with Homebrew's
+   and `/usr/local`'s `bin` added to launchd's bare PATH, so `gh auth token`
+   works), `{ from: env, name }` (the daemon's own environment -- under
+   launchd, only what the plist gives it) or `{ from: keychain, service,
+   account }`. The value goes to `openshell provider create/update
+   --credential <VAR>` through that one child's environment and nowhere else:
+   not the config, journal, logs, task records or any command line. A bare
+   name is created by hand and only checked for. Failed credential-source
+   and credential-bearing provider commands report their exit status,
+   never their stdout or stderr; those streams may themselves contain secrets.
+5. **Smoke.** After any of that changed, a no-model run in a throwaway
+   `factory-s…` sandbox from the image, the agent's own policy (plus one
+   read-only `curl` rule for the probes) and its providers: each provider's
+   placeholder is present; `api.anthropic.com/v1/models` for a Claude
+   provider and `api.github.com/user` for a GitHub one answer through the
+   proxy; `git ls-remote` of the scope's GitHub repository works. It fails
+   only on what proves a problem -- a transport failure, or a 401/403 saying
+   the credential is invalid, expired or revoked; any other answer reached
+   the endpoint and passes with a note. The sandbox is deleted (and swept on
+   the next start if a crash left it). Only then is the agent `ready`.
+
+**Never a fallback.** A run of an agent whose image or providers the daemon
+keeps starts only when that agent is `ready`; otherwise it fails with the
+same reason the page shows (an agent not judged yet is waited for, up to 45
+seconds). A scheduled task whose agent `needs` something raises a
+`sandbox not ready` item in the Inbox as soon as that is known -- not at the
+due time -- and an `expires:` within 30 days raises `credential expiring`.
+
+**Instances never touch each other's.** Every profile and provider the
+daemon writes carries this instance's suffix -- the first eight characters
+of its id: `factory-claude` is `factory-claude-1a2b3c4d` on the gateway,
+`claude-code-oauth` is `claude-code-oauth-1a2b3c4d` -- and nothing without
+that suffix is ever created, updated or deleted. A throwaway instance on the
+same host and gateway therefore cannot change the live instance's providers,
+and providers and profiles a person made by hand stay as they are.
 
 **What a run does.** At dispatch, after the run row exists and before any
 session:
@@ -529,8 +604,9 @@ conversation and answerability, is still a lifecycle follow-up in #218.
   finished onboarding and trusts `/sandbox/work`. `docker` mode tags an image
   (`examples/openshell/Dockerfile`); `rootfs` mode needs no container engine
   -- `crane export` flattens the base and bsdtar lays the overlay on top --
-  and writes a rootfs tar the MicroVM driver takes as `image:`. Rebuild it
-  whenever Factory's CLI changes.
+  and writes a rootfs tar the MicroVM driver takes as `image:`. The daemon
+  rebuilds its own when Factory's CLI or the recipe changes; a named
+  `image:` is rebuilt by hand.
 - **The working directory.** OpenShell has no bind mounts. The tree goes in
   by upload; work comes back through git's remote, with `fast_forward`
   leaving the host checkout level with what was published, or, for output
@@ -566,8 +642,16 @@ proven inside a sandbox. Any other is refused at dispatch rather than guessed
 at. OpenShell requires `lifetime: task`; permanent and temporary standing
 agents are refused at load, since their separate launch path is not sandboxed.
 
-**Host setup, once.** The prerequisites are the CLI with a gateway and a
-runtime, the image, the provider profiles, and the providers:
+**Host setup, once.** The CLI with a gateway and a runtime, and the one
+credential only a person can mint; the daemon does the rest. Steps 2-4 below
+are what it does for a declaration with credential sources, and what a
+person does by hand for one with a named `image:` and bare provider names:
+
+```sh
+claude setup-token                                 # a browser login, once a year
+mkdir -p ~/.config/factory/secrets
+(umask 077; cat > ~/.config/factory/secrets/claude-oauth-token)   # paste the token, Ctrl-D
+```
 
 ```sh
 # 1. CLI + gateway (Homebrew formula; MicroVM driver needs e2fsprogs)

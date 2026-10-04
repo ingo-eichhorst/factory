@@ -28,6 +28,7 @@ mod interfaces;
 mod metrics;
 mod occupancy;
 mod openshell;
+mod provision;
 mod operations;
 mod recovery_journal;
 mod policies;
@@ -407,6 +408,11 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // The health checks of every declared environment (`#185`), on their
     // own loop for the same reason: a check can take its whole timeout.
     let health = tokio::spawn(environments::run(engine.clone(), shutdown_rx.clone()));
+    // `sandbox: openshell` prerequisites (`#234`): gateway, image, profiles,
+    // providers, smoke. Its own loop, started after the reconcile above,
+    // and never awaited: a build takes minutes and a gateway start seconds,
+    // and neither may hold up startup or any dispatch but its own agent's.
+    let provisioning = tokio::spawn(provision::run(engine.clone(), shutdown_rx.clone()));
     let recovery_receipts = tokio::spawn(recovery_journal::run(engine.clone(), shutdown_rx.clone()));
 
     engine.bus.publish(Event::DaemonStarted {
@@ -447,6 +453,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     github_intake.abort();
     backups.abort();
     health.abort();
+    provisioning.abort();
     recovery_receipts.abort();
     engine.registry.shutdown().await;
     Ok(())

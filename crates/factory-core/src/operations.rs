@@ -551,6 +551,20 @@ pub struct OperationsInput<'a> {
     /// Every harness binary the daemon knows about (`#131`); the unhealthy
     /// ones are exceptions.
     pub harnesses: Vec<crate::harness::HarnessRow>,
+    /// Every `sandbox: openshell` agent's readiness (`#234`), with the
+    /// scheduled tasks it would run.
+    pub sandboxes: Vec<SandboxAttention>,
+}
+
+/// One sandboxed agent, for the attention queue.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SandboxAttention {
+    pub scope: String,
+    pub agent: String,
+    pub readiness: crate::openshell::Readiness,
+    /// `(task id, title)` of each task with an active schedule that
+    /// dispatches to this agent.
+    pub scheduled: Vec<(String, String)>,
 }
 
 /// The scope a report was asked for, and the subtree it covers: that scope
@@ -628,6 +642,14 @@ pub enum ExceptionKind {
     /// A harness binary does not start (`#131`): one per binary, however
     /// many tasks are held on it, naming the repair command.
     HarnessUnhealthy,
+    /// A `sandbox: openshell` agent with scheduled work needs something
+    /// before its next run can start (`#234`): one per agent, raised as
+    /// soon as it is known rather than at the due time, naming the one
+    /// missing thing and the command that supplies it.
+    SandboxNotReady,
+    /// A managed provider's declared credential expires within
+    /// `openshell::EXPIRY_WARNING_DAYS`, or already has.
+    CredentialExpiring,
 }
 
 impl ExceptionKind {
@@ -642,6 +664,8 @@ impl ExceptionKind {
             Self::LivenessLost => "liveness_lost",
             Self::TriggeredSignpost => "triggered_signpost",
             Self::HarnessUnhealthy => "harness_unhealthy",
+            Self::SandboxNotReady => "sandbox_not_ready",
+            Self::CredentialExpiring => "credential_expiring",
         }
     }
 }
@@ -1418,6 +1442,72 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
         });
     }
 
+    // -- sandboxed agents that are not ready (#234) ------------------------
+    for sb in &input.sandboxes {
+        if input.scope.as_ref().is_some_and(|s| !s.covers(&sb.scope)) {
+            continue;
+        }
+        let single = |list: &[(String, String)]| (list.len() == 1).then(|| list[0].0.clone());
+        if sb.readiness.state == crate::openshell::ReadinessState::Needs && !sb.scheduled.is_empty() {
+            let mut reason = sb.readiness.reason();
+            match sb.scheduled.len() {
+                1 => reason.push_str(&format!(". Its scheduled task {:?} cannot run until then", sb.scheduled[0].1)),
+                n => reason.push_str(&format!(". {n} scheduled tasks cannot run until then")),
+            }
+            attention.push(Exception {
+                kind: ExceptionKind::SandboxNotReady,
+                severity: Severity::High,
+                scope: Some(sb.scope.clone()),
+                task_id: single(&sb.scheduled),
+                title: Some(sb.agent.clone()),
+                run_id: None,
+                agent: Some(sb.agent.clone()),
+                since: sb.readiness.since,
+                age_s: seconds(now - sb.readiness.since),
+                reason,
+                actions: Vec::new(),
+                suspicion: false,
+                observation: false,
+                also: Vec::new(),
+            });
+        }
+        for expiring in &sb.readiness.expiring {
+            let when = if expiring.days_left < 0 {
+                format!("expired on {}", expiring.expires)
+            } else {
+                format!("expires on {} ({} days)", expiring.expires, expiring.days_left)
+            };
+            // Since the warning window opened: the same item, ageing, on
+            // every read -- not a new one each time.
+            let since = expiring
+                .expires
+                .and_hms_opt(0, 0, 0)
+                .map(|midnight| midnight.and_utc() - Duration::days(crate::openshell::EXPIRY_WARNING_DAYS))
+                .unwrap_or(now)
+                .min(now);
+            attention.push(Exception {
+                kind: ExceptionKind::CredentialExpiring,
+                severity: if expiring.days_left < 7 { Severity::High } else { Severity::Medium },
+                scope: Some(sb.scope.clone()),
+                task_id: single(&sb.scheduled),
+                title: Some(expiring.provider.clone()),
+                run_id: None,
+                agent: Some(sb.agent.clone()),
+                since,
+                age_s: seconds(now - since),
+                reason: format!(
+                    "the credential of the OpenShell provider {} {when}; renew it and put the new value in {}, \
+                     then update expires: in the agent's openshell block",
+                    expiring.provider, expiring.source
+                ),
+                actions: Vec::new(),
+                suspicion: false,
+                observation: false,
+                also: Vec::new(),
+            });
+        }
+    }
+
     // -- signposts: observations ------------------------------------------
     for sp in &input.signposts {
         attention.push(Exception {
@@ -2176,6 +2266,54 @@ mod tests {
         }];
         let r = report(&inp);
         assert!(r.attention[0].reason.ends_with("never fired: nothing was running to fire them"), "{}", r.attention[0].reason);
+    }
+
+    #[test]
+    fn a_sandboxed_agent_that_needs_something_is_in_the_inbox_before_its_slot() {
+        use crate::openshell::{Expiring, Readiness, ReadinessState};
+        let since = ago(5);
+        let readiness = |state| Readiness {
+            state,
+            thing: Some("the credential for factory-claude from the file ~/t (it is empty)".into()),
+            command: Some("claude setup-token".into()),
+            since,
+            checked_at: now(),
+            image: None,
+            notes: vec![],
+            expiring: vec![],
+        };
+        let sandboxed = |state, scheduled: Vec<(String, String)>| SandboxAttention {
+            scope: "herdr".into(),
+            agent: "curator".into(),
+            readiness: readiness(state),
+            scheduled,
+        };
+        let weekly = vec![("t1".to_string(), "Weekly audit".to_string())];
+        let inp = OperationsInput { now: now(), sandboxes: vec![sandboxed(ReadinessState::Needs, weekly.clone())], ..Default::default() };
+        let r = report(&inp);
+        assert_eq!(r.attention.len(), 1);
+        let e = &r.attention[0];
+        assert_eq!((e.kind, e.severity), (ExceptionKind::SandboxNotReady, Severity::High));
+        assert_eq!(e.task_id.as_deref(), Some("t1"));
+        assert!(e.reason.contains("needs the credential for factory-claude") && e.reason.contains("`claude setup-token`"), "{}", e.reason);
+        assert!(e.reason.contains("\"Weekly audit\" cannot run"), "{}", e.reason);
+        assert_eq!(e.age_s, 300.0, "since it was known, not since the slot");
+
+        for quiet in [sandboxed(ReadinessState::Needs, vec![]), sandboxed(ReadinessState::Preparing, weekly.clone()), sandboxed(ReadinessState::Ready, weekly.clone())] {
+            let r = report(&OperationsInput { now: now(), sandboxes: vec![quiet], ..Default::default() });
+            assert!(r.attention.is_empty(), "nothing scheduled, or nothing missing: {:?}", r.attention);
+        }
+        let mut expiring = sandboxed(ReadinessState::Ready, weekly);
+        expiring.readiness.expiring = vec![Expiring {
+            provider: "factory-claude".into(),
+            expires: chrono::NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
+            days_left: 12,
+            source: "the file ~/t".into(),
+        }];
+        let r = report(&OperationsInput { now: now(), sandboxes: vec![expiring], scope: Some(ScopeFilter::exactly("herdr")), ..Default::default() });
+        assert_eq!(r.attention[0].kind, ExceptionKind::CredentialExpiring);
+        assert!(r.attention[0].reason.contains("expires on 2027-01-01 (12 days)") && r.attention[0].reason.contains("the file ~/t"), "{}", r.attention[0].reason);
+        assert!(report(&OperationsInput { now: now(), sandboxes: vec![sandboxed(ReadinessState::Needs, vec![("t".into(), "x".into())])], scope: Some(ScopeFilter::exactly("other")), ..Default::default() }).attention.is_empty());
     }
 
     #[test]

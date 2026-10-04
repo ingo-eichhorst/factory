@@ -33,6 +33,8 @@ export const KIND_LABELS = {
   liveness_lost: "session gone",
   triggered_signpost: "signpost triggered",
   harness_unhealthy: "harness does not start",
+  sandbox_not_ready: "sandbox not ready",
+  credential_expiring: "credential expiring",
 };
 
 export const ACTION_LABELS = {

@@ -301,7 +301,18 @@ async fn rpc(State(engine): State<Arc<Engine>>, Json(env): Json<Envelope>) -> Ax
     // future sits on axum's own frames, and a debug build overflows the
     // worker's stack on it. This is the route a sandboxed run reports
     // through (`#218`), so it must hold up as well as the socket does.
-    let response = Box::pin(engine.handle(env)).await;
+    //
+    // And in a task of its own, so it runs to the end whatever happens to
+    // the caller (`#234`). A sandboxed run's `task report --status done`
+    // closes the run's session, whose teardown deletes the very sandbox the
+    // reporting CLI is still waiting in; the dropped connection would
+    // otherwise cancel this handler between closing the session and
+    // recording `done`, and the watchdog would fail a finished run as
+    // `session_gone`.
+    let response = match tokio::spawn(async move { Box::pin(engine.handle(env)).await }).await {
+        Ok(response) => response,
+        Err(e) => Response::error("internal", format!("the request failed: {e}")),
+    };
     let code = status_for(&response);
     (code, Json(response)).into_response()
 }
@@ -2399,6 +2410,88 @@ mod tests {
         let status: u16 = text.split(' ').nth(1).unwrap().parse().unwrap();
         let (_, payload) = text.split_once("\r\n\r\n").unwrap();
         (status, serde_json::from_str(payload).unwrap_or(serde_json::Value::Null))
+    }
+
+    /// A runtime whose `stop` takes a while, the way closing a sandboxed
+    /// run's pane and starting its teardown does.
+    struct SlowStop;
+
+    #[async_trait::async_trait]
+    impl factory_core::adapter::AgentRuntime for SlowStop {
+        fn name(&self) -> &str {
+            "slow-stop"
+        }
+        async fn start(&self, req: &factory_core::adapter::runtime::StartRequest) -> Result<factory_core::task::SessionRef> {
+            Ok(factory_core::task::SessionRef { runtime: "slow-stop".into(), handle: req.id.clone(), meta: Default::default() })
+        }
+        async fn submit(&self, _: &factory_core::task::SessionRef, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn status(&self, _: &factory_core::task::SessionRef) -> Result<factory_core::adapter::runtime::RuntimeStatus> {
+            Ok(factory_core::adapter::runtime::RuntimeStatus::Working)
+        }
+        async fn send_text(&self, _: &factory_core::task::SessionRef, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn send_keys(&self, _: &factory_core::task::SessionRef, _: &[String]) -> Result<()> {
+            Ok(())
+        }
+        async fn read(&self, _: &factory_core::task::SessionRef, _: u32) -> Result<String> {
+            Ok(String::new())
+        }
+        async fn stop(&self, _: &factory_core::task::SessionRef) -> Result<()> {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            Ok(())
+        }
+        async fn watch(&self) -> Result<Option<factory_core::adapter::runtime::RuntimeEventStream>> {
+            Ok(None)
+        }
+    }
+
+    /// `#234`: a caller that goes away mid-request -- a sandboxed run's
+    /// CLI, in the sandbox its own `done` is tearing down -- does not
+    /// cancel the request. A `done` dropped while its session closes is
+    /// still recorded, rather than leaving the run for the watchdog to fail
+    /// as `session_gone`.
+    #[tokio::test]
+    async fn a_done_whose_caller_disconnects_while_its_session_closes_is_still_recorded() {
+        use futures_util::FutureExt;
+        let base = engine_with_quality();
+        let mut registry = Registry::with_builtins();
+        registry.add_runtime(Arc::new(SlowStop), "test");
+        let engine = Arc::new(Engine::new(base.factory_snapshot(), registry, base.store.clone(), PathBuf::from("factory"), Vec::new()));
+        let task = engine
+            .create(factory_core::task::NewTask {
+                title: "reports from a sandbox".into(),
+                instructions: "true".into(),
+                scope: Some("company".into()),
+                agent: Some("shell".into()),
+                runtime: Some("slow-stop".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let run = engine
+            .dispatch(&task.id, factory_core::run::Trigger::Manual, crate::engine::Due::now(), None)
+            .await
+            .unwrap();
+        let envelope: Envelope = serde_json::from_value(serde_json::json!({
+            "op": "task.report",
+            "params": { "id": task.id, "report": { "status": "done", "message": "finished", "token": run.token } },
+            "token": run.token,
+        }))
+        .unwrap();
+        assert!(rpc(State(engine.clone()), Json(envelope)).now_or_never().is_none(), "still in flight when dropped");
+        let mut status = None;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            status = engine.store.get_run(&run.id).await.unwrap().map(|r| r.status);
+            if status == Some(factory_core::run::RunStatus::Done) {
+                break;
+            }
+        }
+        assert_eq!(status, Some(factory_core::run::RunStatus::Done), "the dropped report was cancelled half way");
     }
 
     #[tokio::test]

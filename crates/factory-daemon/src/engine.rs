@@ -341,6 +341,8 @@ pub struct Engine {
     /// Whether each harness binary starts, probed before a dispatch and
     /// cached -- see `crate::harness_health` and issue #131.
     pub(crate) harness: crate::harness_health::HarnessHealth,
+    /// `sandbox: openshell` prerequisites, kept in the background (`#234`).
+    pub(crate) provision: crate::provision::Provisioner,
     /// The fingerprint of what the last successful `Request::Quality`
     /// loaded -- every profile in `.factory/quality/` and every scope's
     /// quality chain -- with when it loaded them, so the next read can tell
@@ -452,6 +454,7 @@ impl Engine {
             site_memory: Default::default(),
             power,
             harness: crate::harness_health::HarnessHealth::new(),
+            provision: crate::provision::Provisioner::default(),
             quality_seen: Default::default(),
             quality_guide_cache: Default::default(),
             schedule_lock: tokio::sync::Mutex::new(()),
@@ -1606,6 +1609,7 @@ impl Engine {
                     sandbox: av.sandbox.clone(),
                     enforced: av.sandbox == Sandbox::Openshell.as_str(),
                     worktree_capable: sv.worktree_capable,
+                    readiness: av.readiness.clone(),
                 });
             }
         }
@@ -2134,6 +2138,9 @@ impl Engine {
                         .get(&(scope.name.clone(), name.clone()))
                         .cloned()
                         .unwrap_or_default(),
+                    readiness: (decl.sandbox == Sandbox::Openshell)
+                        .then(|| self.provision.readiness(&(scope.name.clone(), name.clone())))
+                        .flatten(),
                 });
             }
 
@@ -2171,6 +2178,7 @@ impl Engine {
                             .get(&(scope.name.clone(), default_agent.clone()))
                             .cloned()
                             .unwrap_or_default(),
+                        readiness: None,
                     },
                 );
             }
@@ -2206,6 +2214,7 @@ impl Engine {
                     started_at: None,
                     error: None,
                     active: jobs.clone(),
+                    readiness: None,
                 });
             }
 
@@ -3390,9 +3399,16 @@ impl Engine {
             // Its own boxed future: everything the sandbox needs lives in
             // that frame, not in this one, which is already deep.
             Some((config, callback)) => {
+                // `#234`: what the daemon keeps for this agent -- its image,
+                // its providers -- is ready, or the run fails with the one
+                // thing it needs. Never a fallback to the host.
+                let key = (factory.canonical_scope_name(&task.scope), agent_name.clone());
+                let resolved = self.sandbox_gate(&key, config).await.map_err(|reason| {
+                    FactoryError::BadRequest(format!("{reason}. The run was not started on the host instead"))
+                })?;
                 let prompt = agent.prompt(&ctx).await?;
                 let (plan, teardown) = Box::pin(self.prepare_sandbox(
-                    &factory, &task, &run.id, &cwd, &launch, &prompt, config, callback,
+                    &factory, &task, &run.id, &cwd, &launch, &prompt, config, callback, &resolved,
                 ))
                 .await?;
                 launch = plan.launch.clone();
@@ -4726,11 +4742,14 @@ impl Engine {
         prompt: &str,
         config: &factory_core::openshell::OpenshellConfig,
         callback: &factory_core::openshell::CallbackTarget,
+        resolved: &crate::provision::Resolved,
     ) -> Result<(factory_core::openshell::Plan, crate::openshell::Teardown)> {
         let cli = crate::openshell::resolve_cli(config.cli.as_deref())?;
         let plan = factory_core::openshell::plan(&factory_core::openshell::PlanInput {
             config,
             cli: &cli,
+            image: &resolved.image,
+            providers: &resolved.providers,
             instance_id: &factory.config.instance.id,
             run_id,
             task_id: &task.id,
@@ -4746,7 +4765,7 @@ impl Engine {
             TaskEntry::new(
                 "daemon",
                 "sandbox",
-                format!("creating OpenShell sandbox {} from {}", plan.sandbox, config.image),
+                format!("creating OpenShell sandbox {} from {}", plan.sandbox, resolved.image),
             )
             .in_run(run_id),
         )
@@ -4759,7 +4778,7 @@ impl Engine {
             base: plan.base.clone(),
             teardown: teardown.clone(),
         }.save().map_err(|e| FactoryError::BadRequest(format!("could not persist OpenShell cleanup record: {e}")))?;
-        Box::pin(crate::openshell::prepare(&plan, &config.providers)).await?;
+        Box::pin(crate::openshell::prepare(&plan, &resolved.providers)).await?;
         self.entry(
             &task.id,
             TaskEntry::new(
@@ -4770,8 +4789,8 @@ impl Engine {
             .in_run(run_id)
             .with_data(serde_json::json!({
                 "sandbox": plan.sandbox,
-                "image": config.image,
-                "providers": config.providers,
+                "image": resolved.image,
+                "providers": resolved.providers,
                 "workdir": plan.workdir,
             })),
         )
@@ -9592,6 +9611,82 @@ edges: [{id: next, from: implement, to: review}]
             assert_eq!(run.status, RunStatus::Failed);
             let error = run.error.clone().unwrap_or_default();
             assert!(error.contains("openshell") && error.contains("does not exist"), "{error}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        /// `#234`: an agent whose prerequisites the daemon keeps is
+        /// dispatched only when they are ready, and fails closed -- with the
+        /// one missing thing -- when they are not.
+        #[tokio::test]
+        async fn a_managed_agent_runs_only_when_ready_and_fails_closed_with_what_it_needs() {
+            use factory_core::openshell::{Readiness, ReadinessState};
+            let scope_dir = temp_dir("openshell-gate");
+            let tools = temp_dir("openshell-gate-cli");
+            let cli = fake_cli(&tools);
+            let (engine, runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let mut factory = engine.factory_snapshot();
+            let template = factory.config.scopes[0].agents.last().unwrap().clone();
+            factory.config.scopes[0].agents.push(ScopeAgent {
+                name: Some("boxed-managed".into()),
+                openshell: Some(
+                    serde_yaml_ng::from_str(&format!(
+                        "cli: {}\nproviders:\n  - {{ name: factory-claude, type: claude-code-oauth, credential: {{ from: file, path: /nonexistent/token }} }}\npolicy:\n  network_policies: {{}}\n",
+                        cli.display()
+                    ))
+                    .unwrap(),
+                ),
+                ..template
+            });
+            *engine.factory.write().unwrap() = factory;
+            let key = ("demo".to_string(), "boxed-managed".to_string());
+            let at = Utc::now();
+            let readiness = |state, thing: Option<&str>, image: Option<&str>| Readiness {
+                state,
+                thing: thing.map(str::to_string),
+                command: thing.map(|_| "claude setup-token, then (umask 077; cat > /nonexistent/token)".to_string()),
+                since: at,
+                checked_at: at,
+                image: image.map(str::to_string),
+                notes: vec![],
+                expiring: vec![],
+            };
+            engine.provision.set_for_test(&key, readiness(ReadinessState::Needs, Some("the credential for factory-claude from the file /nonexistent/token"), None));
+            let task = engine
+                .create(NewTask {
+                    title: "managed".into(),
+                    instructions: "echo hi".into(),
+                    scope: Some("demo".into()),
+                    agent: Some("boxed-managed".into()),
+                    runtime: Some("stub-os".into()),
+                    worktree: Some(false),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            engine.start_run(&task.id, Trigger::Manual).await;
+            assert!(runtime.starts.lock().unwrap().is_empty(), "nothing ran on the host in its place");
+            let run = engine.store.runs(&task.id, 10).await.unwrap().into_iter().max_by_key(|r| r.attempt).unwrap();
+            assert_eq!(run.status, RunStatus::Failed);
+            let error = run.error.clone().unwrap_or_default();
+            assert!(error.contains("needs the credential for factory-claude") && error.contains("claude setup-token") && error.contains("not started on the host"), "{error}");
+            assert!(!std::fs::read_to_string(tools.join("calls")).unwrap_or_default().contains("sandbox create"));
+
+            // Ready, with the image the daemon built: the run is made from it.
+            // (A ready agent's managed sources are re-read at dispatch; the
+            // provisioner's own tests cover that, and the suffixed names.)
+            let mut factory = engine.factory_snapshot();
+            let agent = factory.config.scopes[0].agents.iter_mut().find(|a| a.name.as_deref() == Some("boxed-managed")).unwrap();
+            agent.openshell = Some(
+                serde_yaml_ng::from_str(&format!("cli: {}\nproviders: [by-hand]\npolicy:\n  network_policies: {{}}\n", cli.display())).unwrap(),
+            );
+            *engine.factory.write().unwrap() = factory;
+            engine.provision.set_for_test(&key, readiness(ReadinessState::Ready, None, Some("/images/built/factory-agent-rootfs.tar.gz")));
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            assert_eq!(runtime.starts.lock().unwrap().len(), 1);
+            let calls = std::fs::read_to_string(tools.join("calls")).unwrap();
+            let create = calls.lines().find(|l| l.starts_with("sandbox create")).unwrap();
+            assert!(create.contains("--from /images/built/factory-agent-rootfs.tar.gz") && create.contains("--provider by-hand"), "{create}");
+            let _ = run;
             std::fs::remove_dir_all(&scope_dir).ok();
         }
 

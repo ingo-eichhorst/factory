@@ -1,8 +1,19 @@
 # The awesome-herdr scope's config with the curator sandboxed (#218) -- what
-# projects/awesome-herdr/.factory/config.yaml becomes once a build with
-# `sandbox: openshell` is installed and the host setup in the README's
-# Sandboxes section is done. Kept here, not in that repository: its AGENTS.md
-# forbids new files, and a scope owns only its own config file.
+# projects/awesome-herdr/.factory/config.yaml becomes. Kept here, not in that
+# repository: its AGENTS.md forbids new files, and a scope owns only its own
+# config file.
+#
+# Declaring it is the whole setup (#234). With no `image:`, the daemon builds
+# Factory's own image and rebuilds it when the recipe or the installed
+# `factory` CLI changes; it imports the two provider profiles, creates both
+# providers from the credential sources below (under this instance's suffix,
+# e.g. factory-claude-1a2b3c4d), keeps the OpenShell gateway running, and
+# smoke-tests the result before the curator is `ready`. The one human step:
+# `claude setup-token` (a browser login, once a year), with the token written
+# to the file below, owner-only:
+#
+#   mkdir -p ~/.config/factory/secrets
+#   (umask 077; cat > ~/.config/factory/secrets/claude-oauth-token)   # paste, Ctrl-D
 #
 # The weekly audit is `--no-worktree`, so its working directory is the scope
 # itself: the tree and its .git go in by upload, the run publishes by pushing
@@ -22,11 +33,19 @@ scope:
     harness: claude-code
     sandbox: openshell
     openshell:
-      image: /Users/factory/.local/share/factory/openshell/factory-agent-rootfs.tar.gz
-      # factory-claude: claude-code-oauth profile, from `claude setup-token`.
-      # factory-github: github-publish profile -- GitHub reads, git
-      # clone/fetch, and the createPullRequest/mergePullRequest mutations.
-      providers: [factory-claude, factory-github]
+      # No image: -- Factory's own, built and kept by the daemon.
+      providers:
+        # claude-code-oauth profile, from `claude setup-token`.
+        - name: factory-claude
+          type: claude-code-oauth
+          credential: { from: file, path: ~/.config/factory/secrets/claude-oauth-token }
+          # expires: 2027-10-04   # a year after setup-token; the Inbox warns 30 days ahead
+        # github-publish profile -- GitHub reads, git clone/fetch, and the
+        # createPullRequest/mergePullRequest mutations. `gh` is found under
+        # launchd through Homebrew's bin, which the daemon adds to PATH.
+        - name: factory-github
+          type: github-publish
+          credential: { from: command, run: "gh auth token" }
       upload: workdir
       download: none
       fast_forward: true

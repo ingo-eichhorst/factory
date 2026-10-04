@@ -274,6 +274,10 @@ pub struct DoctorReport {
     pub running: Option<LifecycleDocuments>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<DependencyFinding>,
+    /// Every OpenShell gateway a `sandbox: openshell` agent uses, as the
+    /// daemon last found it -- and when it last had to start one (`#234`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openshell: Vec<crate::openshell::GatewayRow>,
 }
 
 pub use factory_kernel::ExploitedFinding;

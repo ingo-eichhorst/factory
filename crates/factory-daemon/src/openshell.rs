@@ -863,9 +863,12 @@ mod tests {
             port: 8787,
         };
         let state = dir.join("state/run-1");
+        let providers: Vec<String> = config.providers.iter().map(|p| p.gateway_name("inst")).collect();
         let plan = plan(&PlanInput {
             config: &config,
             cli: &cli.display().to_string(),
+            image: config.image.as_deref().unwrap_or_default(),
+            providers: &providers,
             instance_id: "inst",
             run_id: "aaaabbbb-run",
             task_id: "t1",

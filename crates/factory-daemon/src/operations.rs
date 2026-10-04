@@ -318,8 +318,28 @@ impl Engine {
             // -- what the model's own default means, at this instance's tick.
             late_after_seconds: Some(2 * capacity.tick_seconds as i64),
             harnesses: self.harness.rows(&[], snapshot.config.daemon.harness_health.repair_script.as_deref()),
+            sandboxes: self.sandbox_attention(&snapshot, &tasks),
         };
         Ok(operations::report(&input))
+    }
+
+    /// Every sandboxed agent's readiness (`#234`), with the scheduled tasks
+    /// that would run it -- what raises `sandbox_not_ready` the moment the
+    /// provisioner knows, instead of at the due time.
+    fn sandbox_attention(&self, snapshot: &factory_core::config::Factory, tasks: &[factory_core::task::Task]) -> Vec<factory_core::operations::SandboxAttention> {
+        self.provision
+            .all()
+            .into_iter()
+            .map(|((scope, agent), readiness)| {
+                let scheduled = tasks
+                    .iter()
+                    .filter(|t| t.schedule.is_some() && !t.schedule_paused && t.next_run_at.is_some())
+                    .filter(|t| t.agent == agent && snapshot.canonical_scope_name(&t.scope) == scope)
+                    .map(|t| (t.id.clone(), t.title.clone()))
+                    .collect();
+                factory_core::operations::SandboxAttention { scope, agent, readiness, scheduled }
+            })
+            .collect()
     }
 
     /// `Engine::triggered_signposts`, reused for [`SIGNPOST_TTL`] while the

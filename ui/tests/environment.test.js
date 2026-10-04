@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { state } from "../js/core.js";
-import { sandboxTag, visibleSandboxes } from "../js/sandboxes.js";
+import { readinessDetail, readinessTag, sandboxTag, visibleSandboxes } from "../js/sandboxes.js";
 import { visibleCredentials } from "../js/secrets.js";
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
@@ -68,4 +68,25 @@ test("a failed fetch gets its own element and never takes the reachability note'
   // constant in the view, not a field of the payload, so it is unaffected.
   assert.deepEqual(visibleCredentials(state.environment && state.environment.credentials), []);
   state.environmentError = null;
+});
+
+test("an openshell row says whether its sandbox could be made now, and what it needs", () => {
+  assert.equal(readinessTag({ sandbox: "docker" }), "", "only openshell has prerequisites the daemon keeps");
+  assert.match(readinessTag({ sandbox: "openshell" }), />checking</);
+  const needs = {
+    state: "needs",
+    thing: "the credential for factory-claude from the file ~/.config/factory/secrets/claude-oauth-token (it cannot be read)",
+    command: "claude setup-token, then (umask 077; cat > ~/.config/factory/secrets/claude-oauth-token)",
+  };
+  const tag = readinessTag({ sandbox: "openshell", readiness: needs });
+  assert.match(tag, /data-tone="bad"/);
+  assert.match(tag, />needs</);
+  const detail = readinessDetail(needs);
+  assert.match(detail, /needs the credential for factory-claude/);
+  assert.match(detail, /<code>claude setup-token, then \(umask 077; cat &gt; ~\/.config/);
+  assert.match(readinessTag({ sandbox: "openshell", readiness: { state: "ready" } }), /data-tone="ok"/);
+  const ready = readinessDetail({ state: "ready", notes: ["a new image is being built"], expiring: [{ provider: "factory-claude", expires: "2027-01-01", days_left: 9 }] });
+  assert.match(ready, /a new image is being built/);
+  assert.match(ready, /factory-claude's credential expires on 2027-01-01 \(9 days\)/);
+  assert.equal(readinessDetail(undefined), "");
 });

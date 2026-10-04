@@ -82,14 +82,21 @@ pub const LABEL_RUN: &str = "factory.run";
 pub struct OpenshellConfig {
     /// What the sandbox is made from: an OCI image reference the gateway's
     /// driver can pull or find locally, or a rootfs tar (`.tar`, `.tar.gz`,
-    /// `.tgz`) for the VM driver. Passed to `--from` as written.
-    pub image: String,
-    /// OpenShell providers attached by name with `--provider`. They are
-    /// created once on the host (`openshell provider create`); their
-    /// credentials live in OpenShell's store and the agent only ever sees
-    /// placeholders. Never a secret here.
+    /// `.tgz`) for the VM driver. Passed to `--from` as written, and never
+    /// rebuilt by Factory. Absent is Factory's own image (`#234`): the
+    /// daemon builds it from `examples/openshell/` in the background and
+    /// rebuilds it when its inputs change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// OpenShell providers attached with `--provider`. A bare name is one
+    /// created by hand on the gateway (`openshell provider create`). An
+    /// entry with a `credential:` source is kept by the daemon (`#234`):
+    /// created when missing, updated when the source's value changes. Its
+    /// credential lives in OpenShell's store and the agent only ever sees a
+    /// placeholder. Never a secret here -- a source says where the value
+    /// is, never what it is.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub providers: Vec<String>,
+    pub providers: Vec<ProviderDecl>,
     /// Whether the run's working directory is copied into the sandbox.
     #[serde(default = "Transfer::workdir")]
     pub upload: Transfer,
@@ -154,12 +161,20 @@ impl OpenshellConfig {
     /// openshell: block that ...". Empty means a sandbox can be made from it.
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if self.image.trim().is_empty() {
-            out.push("names no image".to_string());
+        if self.image.as_deref().is_some_and(|image| image.trim().is_empty()) {
+            out.push("names an empty image; leave image: out for the one Factory builds".to_string());
         }
+        let mut seen = std::collections::BTreeSet::new();
         for provider in &self.providers {
-            if provider.trim().is_empty() || provider.starts_with('-') || provider.contains(char::is_whitespace) {
-                out.push(format!("names a provider {provider:?}, which is not a provider name"));
+            let name = provider.name();
+            if !is_object_name(name) {
+                out.push(format!("names a provider {name:?}, which is not a provider name"));
+            }
+            if !seen.insert(name) {
+                out.push(format!("names the provider {name:?} twice"));
+            }
+            if let ProviderDecl::Managed(managed) = provider {
+                out.extend(managed.problems());
             }
         }
         if !self.factory_bin.starts_with('/') {
@@ -286,6 +301,581 @@ impl CallbackTarget {
     }
 }
 
+// ======================================================= provisioning (#234)
+//
+// Declaring `sandbox: openshell` is the whole setup: the daemon keeps the
+// gateway up, builds the image, imports the provider profiles Factory ships,
+// creates and rotates the providers an agent names with a credential source,
+// and proves the result with a no-model smoke run. What follows is the pure
+// half -- the declarations, the names the daemon may write under, and the
+// smoke's script and verdict. The daemon's `provision` module runs it.
+
+/// One `openshell.providers` entry: a bare name, created by hand, or a
+/// provider the daemon keeps from a declared credential source.
+///
+/// ```yaml
+/// providers:
+///   - factory-legacy                                  # by hand
+///   - name: factory-github
+///     type: github-publish
+///     credential: { from: command, run: "gh auth token" }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProviderDecl {
+    Named(String),
+    Managed(ManagedProvider),
+}
+
+/// A provider the daemon keeps. Its name on the gateway is not `name` as
+/// written but `name` and this instance's suffix (`gateway_name`), so a
+/// second instance on the same host -- a throwaway one for a test -- can
+/// never create, update or delete the live instance's providers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedProvider {
+    pub name: String,
+    /// The provider profile: one Factory ships (`claude-code-oauth`,
+    /// `github-publish`), which the daemon imports itself, or one already
+    /// on the gateway.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Where the value comes from. By reference, never by value.
+    pub credential: CredentialSource,
+    /// When the credential stops working, if it says. The Inbox says so
+    /// [`EXPIRY_WARNING_DAYS`] ahead -- a `claude setup-token` token lasts
+    /// a year, and nothing on the host can tell when that year ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<chrono::NaiveDate>,
+}
+
+/// How far ahead an expiring credential is raised in the Inbox.
+pub const EXPIRY_WARNING_DAYS: i64 = 30;
+
+/// Where a managed provider's credential is read from, each time the daemon
+/// reconciles. The value is held in memory only as long as it takes to hand
+/// it to `openshell provider create/update` through that child's
+/// environment; it is never written to config, the journal, a log, a task
+/// record or a command line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "from", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CredentialSource {
+    /// A variable in the daemon's own environment. A daemon started by
+    /// launchd has only what its plist's `EnvironmentVariables` give it.
+    Env { name: String },
+    /// A file holding the value (surrounding whitespace trimmed). `~` is the
+    /// daemon's home. Refused unless it is a regular file owned by the
+    /// daemon's user and readable by nobody else (0600 or 0400).
+    File { path: String },
+    /// A command whose stdout is the value, run with `sh -c` and a PATH
+    /// that includes Homebrew's and `/usr/local`'s `bin` -- what `gh auth
+    /// token` needs under launchd.
+    Command { run: String },
+    /// A macOS Keychain generic password, read with `security
+    /// find-generic-password -w`.
+    Keychain {
+        service: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
+}
+
+impl CredentialSource {
+    /// Where the value comes from, in words: what a readiness line names.
+    /// Never the value.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Env { name } => format!("the daemon's environment variable {name}"),
+            Self::File { path } => format!("the file {path}"),
+            Self::Command { run } => format!("the command `{run}`"),
+            Self::Keychain { service, account: None } => format!("the Keychain item {service:?}"),
+            Self::Keychain { service, account: Some(account) } => {
+                format!("the Keychain item {service:?} for {account:?}")
+            }
+        }
+    }
+
+    fn problems(&self, provider: &str) -> Vec<String> {
+        let blank = |what: &str| format!("gives the provider {provider:?} a credential with no {what}");
+        match self {
+            Self::Env { name } if !is_env_name(name) => {
+                vec![format!("gives the provider {provider:?} a credential from {name:?}, which is not an environment variable name")]
+            }
+            Self::File { path } if path.trim().is_empty() => vec![blank("path")],
+            Self::File { path } if !(path.starts_with('/') || path.starts_with("~/")) => vec![format!(
+                "gives the provider {provider:?} a credential file {path:?}, which is not an absolute path or one under ~/"
+            )],
+            Self::Command { run } if run.trim().is_empty() => vec![blank("command")],
+            Self::Keychain { service, .. } if service.trim().is_empty() => vec![blank("Keychain service")],
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl ManagedProvider {
+    fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !is_object_name(&self.kind) {
+            out.push(format!("gives the provider {:?} a type {:?}, which is not a profile id", self.name, self.kind));
+        }
+        out.extend(self.credential.problems(&self.name));
+        out
+    }
+
+    /// Days left before `expires`, when it is within the warning window or
+    /// already past.
+    pub fn expiring(&self, today: chrono::NaiveDate) -> Option<i64> {
+        let left = (self.expires? - today).num_days();
+        (left <= EXPIRY_WARNING_DAYS).then_some(left)
+    }
+}
+
+impl ProviderDecl {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Named(name) => name,
+            Self::Managed(managed) => &managed.name,
+        }
+    }
+
+    /// What `--provider` names on the gateway: a bare name as written, a
+    /// managed one with this instance's suffix.
+    pub fn gateway_name(&self, suffix: &str) -> String {
+        match self {
+            Self::Named(name) => name.clone(),
+            Self::Managed(managed) => managed_name(&managed.name, suffix),
+        }
+    }
+}
+
+/// `<name>-<suffix>`: every gateway object the daemon writes carries it.
+pub fn managed_name(name: &str, suffix: &str) -> String {
+    format!("{name}-{suffix}")
+}
+
+/// Whether the daemon may write a gateway object of this name: only one
+/// that ends in this instance's suffix. The one check every create, update
+/// and import goes through before it runs.
+pub fn owned_by_instance(object: &str, suffix: &str) -> bool {
+    !suffix.is_empty() && object.len() > suffix.len() + 1 && object.ends_with(&format!("-{suffix}"))
+}
+
+/// This instance's suffix on the gateway: the first eight alphanumerics of
+/// its id, lowercased. Instance ids are UUIDs, so two instances on one host
+/// share a suffix with odds of one in four billion.
+pub fn instance_suffix(instance_id: &str) -> String {
+    instance_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+impl Serialize for ProviderDecl {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Self::Named(name) => serializer.serialize_str(name),
+            Self::Managed(managed) => managed.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderDecl {
+    /// A string, or a map read strictly -- through a value first, so a
+    /// misspelt key in the map is refused by name rather than as "did not
+    /// match any variant".
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error;
+        match serde_yaml_ng::Value::deserialize(deserializer)? {
+            serde_yaml_ng::Value::String(name) => Ok(Self::Named(name)),
+            map @ serde_yaml_ng::Value::Mapping(_) => serde_yaml_ng::from_value(map)
+                .map(Self::Managed)
+                .map_err(|e| D::Error::custom(format!("an openshell provider: {e}"))),
+            other => Err(D::Error::custom(format!(
+                "an openshell provider is a name or {{ name, type, credential }}, not {}",
+                serde_yaml_ng::to_string(&other).unwrap_or_default().trim()
+            ))),
+        }
+    }
+}
+
+/// The provider profiles Factory ships, by id. The daemon imports each one
+/// a managed provider names, under this instance's suffix
+/// (`profile_id`), so it never changes a profile another instance -- or a
+/// person -- put on the gateway.
+pub const SHIPPED_PROFILES: &[(&str, &str)] = &[
+    ("claude-code-oauth", include_str!("../../../examples/openshell/claude-code-oauth.yaml")),
+    ("github-publish", include_str!("../../../examples/openshell/github-publish.yaml")),
+];
+
+pub fn shipped_profile(kind: &str) -> Option<&'static str> {
+    SHIPPED_PROFILES.iter().find(|(id, _)| *id == kind).map(|(_, yaml)| *yaml)
+}
+
+/// The profile id a managed provider of this type is created with: a
+/// shipped profile's suffixed id, or the type as written.
+pub fn profile_id(kind: &str, suffix: &str) -> String {
+    if shipped_profile(kind).is_some() {
+        managed_name(kind, suffix)
+    } else {
+        kind.to_string()
+    }
+}
+
+/// A shipped profile as this instance imports it: its `id` suffixed and
+/// everything else as shipped.
+pub fn profile_for_import(kind: &str, suffix: &str) -> Option<String> {
+    let yaml = shipped_profile(kind)?;
+    let id = profile_id(kind, suffix);
+    Some(
+        yaml.lines()
+            .map(|line| if line.starts_with("id:") { format!("id: {id}") } else { line.to_string() })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+}
+
+/// The environment variable a profile reads its first credential from --
+/// what `provider create --credential KEY` names and the sandbox sees as a
+/// placeholder. From a profile as `profile list -o json` lists it, or as a
+/// shipped YAML parses.
+pub fn profile_credential_env(profile: &serde_json::Value) -> Option<String> {
+    profile
+        .get("credentials")?
+        .as_array()?
+        .first()?
+        .get("env_vars")?
+        .as_array()?
+        .first()?
+        .as_str()
+        .filter(|name| is_env_name(name))
+        .map(str::to_string)
+}
+
+/// `profile_credential_env` of a shipped profile.
+pub fn shipped_credential_env(kind: &str) -> Option<String> {
+    let value: serde_json::Value = serde_yaml_ng::from_str(shipped_profile(kind)?).ok()?;
+    profile_credential_env(&value)
+}
+
+/// Factory's own image recipe, as this build carries it: the files the
+/// daemon writes out and runs to build the image, by name. Their digest is
+/// part of what makes an image stale -- the herdr and jq pins and the base
+/// image digest live in `build-image.sh`.
+pub const RECIPE: &[(&str, &str)] = &[
+    ("build-image.sh", include_str!("../../../examples/openshell/build-image.sh")),
+    ("Dockerfile", include_str!("../../../examples/openshell/Dockerfile")),
+    ("managed-settings.json", include_str!("../../../examples/openshell/managed-settings.json")),
+    ("claude.json", include_str!("../../../examples/openshell/claude.json")),
+];
+
+/// The image Factory builds is named by what it was built from: the recipe
+/// and the `factory` CLI the host has installed. Any change to either is a
+/// new key, and so a new image beside the old one.
+pub fn image_key(cli_digest: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for (name, contents) in RECIPE {
+        hash.update(name.as_bytes());
+        hash.update([0]);
+        hash.update(contents.as_bytes());
+        hash.update([0]);
+    }
+    hash.update(b"factory-cli\0");
+    hash.update(cli_digest.as_bytes());
+    hash.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// The file name of the rootfs `build-image.sh rootfs` writes.
+pub const IMAGE_FILE: &str = "factory-agent-rootfs.tar.gz";
+
+/// Where an agent stands, ahead of any run (`#234`): what L2 Sandboxes and
+/// the roster show, what raises the Inbox item, and what dispatch checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessState {
+    Ready,
+    Preparing,
+    Needs,
+}
+
+impl ReadinessState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Preparing => "preparing",
+            Self::Needs => "needs",
+        }
+    }
+}
+
+/// An agent's readiness. For `needs`, `thing` is the one missing thing and
+/// `command` the exact command that supplies it; for `preparing`, `thing`
+/// is what the daemon is doing about it. Never a credential value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Readiness {
+    pub state: ReadinessState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thing: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// When it entered this state.
+    pub since: chrono::DateTime<chrono::Utc>,
+    pub checked_at: chrono::DateTime<chrono::Utc>,
+    /// The image a run would be made from now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// What else is true and worth a glance: an image rebuilding in the
+    /// background, a smoke that reached its endpoint without confirming.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// Managed providers whose declared `expires` is within the warning
+    /// window or past: `(provider, expires, days left)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expiring: Vec<Expiring>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Expiring {
+    pub provider: String,
+    pub expires: chrono::NaiveDate,
+    pub days_left: i64,
+    /// Where the renewed value goes.
+    pub source: String,
+}
+
+impl Readiness {
+    /// One sentence: why a run of this agent cannot start now.
+    pub fn reason(&self) -> String {
+        let thing = self.thing.as_deref().unwrap_or("its sandbox prerequisites");
+        match self.state {
+            ReadinessState::Ready => "ready".into(),
+            ReadinessState::Preparing => format!("the sandbox is not ready yet: {thing}"),
+            ReadinessState::Needs => match &self.command {
+                Some(command) => format!("the sandbox needs {thing}; supply it with `{command}`"),
+                None => format!("the sandbox needs {thing}"),
+            },
+        }
+    }
+}
+
+/// The OpenShell gateway as the daemon last found it, for L1 Doctor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GatewayRow {
+    /// `-g`'s name, or `(active)` for the CLI's active gateway.
+    pub gateway: String,
+    pub cli: String,
+    /// `connected`, or what `openshell status` said instead.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub checked_at: chrono::DateTime<chrono::Utc>,
+    /// The last time the daemon found it down and started it, and how.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_with: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// What a smoke run probes, per managed provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmokeProvider {
+    /// The provider's declared name, for the verdict.
+    pub name: String,
+    pub kind: String,
+    /// The placeholder's variable inside the sandbox.
+    pub env: String,
+}
+
+/// Which endpoint a provider type is probed at, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Endpoint {
+    AnthropicBearer,
+    AnthropicApiKey,
+    GitHub,
+}
+
+fn endpoint_for(kind: &str) -> Option<Endpoint> {
+    let kind = kind.to_ascii_lowercase();
+    if kind.contains("claude") || kind.contains("anthropic") {
+        Some(if kind.contains("oauth") { Endpoint::AnthropicBearer } else { Endpoint::AnthropicApiKey })
+    } else if kind.contains("github") {
+        Some(Endpoint::GitHub)
+    } else {
+        None
+    }
+}
+
+/// The rule the smoke sandbox adds to the agent's own policy: `curl` may
+/// make read-only requests to the endpoints the probes ask. The agent's
+/// own policy is otherwise exactly what its runs get, so a policy the
+/// gateway will not activate fails the smoke, not Monday's run.
+pub const SMOKE_RULE: &str = "factory_smoke";
+
+/// The policy a smoke sandbox is made with.
+pub fn smoke_policy(config: &OpenshellConfig, callback: &CallbackTarget, providers: &[SmokeProvider]) -> Result<String> {
+    let mut hosts: Vec<&str> = Vec::new();
+    for provider in providers {
+        let more: &[&str] = match endpoint_for(&provider.kind) {
+            Some(Endpoint::AnthropicBearer | Endpoint::AnthropicApiKey) => &["api.anthropic.com"],
+            Some(Endpoint::GitHub) => &["api.github.com"],
+            None => &[],
+        };
+        for host in more {
+            if !hosts.contains(host) {
+                hosts.push(host);
+            }
+        }
+    }
+    let base = config.policy_yaml(callback)?;
+    if hosts.is_empty() {
+        return Ok(base);
+    }
+    let mut policy: serde_yaml_ng::Value = serde_yaml_ng::from_str(&base)
+        .map_err(|e| FactoryError::Other(anyhow::anyhow!("re-reading the openshell policy: {e}")))?;
+    let rule = serde_json::json!({
+        "endpoints": hosts.iter().map(|host| serde_json::json!({
+            "host": host, "port": 443, "protocol": "rest", "access": "read-only", "enforcement": "enforce",
+        })).collect::<Vec<_>>(),
+        "binaries": [{ "path": "/usr/bin/curl" }],
+    });
+    let rule: serde_yaml_ng::Value = serde_yaml_ng::to_value(rule)
+        .map_err(|e| FactoryError::Other(anyhow::anyhow!("encoding the smoke rule: {e}")))?;
+    if let Some(serde_yaml_ng::Value::Mapping(rules)) = policy.get_mut("network_policies") {
+        rules.insert(SMOKE_RULE.into(), rule);
+    }
+    serde_yaml_ng::to_string(&policy).map_err(|e| FactoryError::Other(anyhow::anyhow!("encoding the smoke policy: {e}")))
+}
+
+/// The script a smoke runs inside its sandbox: every managed provider's
+/// placeholder is present, each known endpoint answers its request, and
+/// the scope's GitHub repository can be listed. It prints one
+/// `factory-smoke` line per probe and nothing else of note. It never sees a
+/// credential: inside the sandbox there is only the placeholder, which the
+/// proxy resolves on the way to the provider's own endpoint.
+pub fn smoke_script(providers: &[SmokeProvider], git_url: Option<&str>) -> String {
+    let mut out = String::from(
+        "say() { printf 'factory-smoke %s\\n' \"$*\"; }\n\
+         probe() { name=$1; shift; code=$(curl -sS -m 20 -o /tmp/factory-smoke.body -w '%{http_code}' \"$@\" 2>/tmp/factory-smoke.err) || code=000; \
+         if [ \"${code#2}\" = \"$code\" ]; then body=$(cat /tmp/factory-smoke.body /tmp/factory-smoke.err 2>/dev/null | tr -s ' \\r\\n\\t' ' ' | head -c 300); else body=; fi; \
+         say \"http $name $code $body\"; }\n",
+    );
+    for provider in providers {
+        let env = &provider.env;
+        let name = &provider.name;
+        out.push_str(&format!(
+            "if [ -n \"$(printenv {env})\" ]; then say \"env {name} ok\"; else say \"env {name} missing\"; fi\n"
+        ));
+        match endpoint_for(&provider.kind) {
+            Some(Endpoint::AnthropicBearer) => out.push_str(&format!(
+                "probe {name} https://api.anthropic.com/v1/models -H \"Authorization: Bearer ${env}\" \
+                 -H 'anthropic-version: 2023-06-01' -H 'anthropic-beta: oauth-2025-04-20'\n"
+            )),
+            Some(Endpoint::AnthropicApiKey) => out.push_str(&format!(
+                "probe {name} https://api.anthropic.com/v1/models -H \"x-api-key: ${env}\" -H 'anthropic-version: 2023-06-01'\n"
+            )),
+            Some(Endpoint::GitHub) => out.push_str(&format!(
+                "probe {name} https://api.github.com/user -H \"Authorization: Bearer ${env}\" \
+                 -H 'Accept: application/vnd.github+json' -H 'User-Agent: factory-smoke'\n"
+            )),
+            None => {}
+        }
+    }
+    if let Some(url) = git_url.filter(|url| url.starts_with("https://github.com/")) {
+        if providers.iter().any(|p| endpoint_for(&p.kind) == Some(Endpoint::GitHub)) {
+            out.push_str(&format!(
+                "if git ls-remote --heads {} >/dev/null 2>/tmp/factory-smoke.err; then say 'git ok'; \
+                 else say \"git failed $(head -c 300 /tmp/factory-smoke.err | tr '\\n' ' ')\"; fi\n",
+                sh_quote(url)
+            ));
+        }
+    }
+    out.push_str("say done\n");
+    out
+}
+
+/// An error body without what changes on every request (`request_id`), so
+/// the same rejection reads the same each time -- one Inbox item, with an
+/// age, not a new one per smoke.
+fn without_volatile(body: &str) -> String {
+    let mut out = body.to_string();
+    for key in ["\"request_id\"", "\"requestId\""] {
+        while let Some(at) = out.find(key) {
+            let after = &out[at + key.len()..];
+            let Some(open) = after.find('"') else { break };
+            let Some(close) = after[open + 1..].find('"') else { break };
+            let mut end = at + key.len() + open + 1 + close + 1;
+            let mut start = at;
+            if out[end..].trim_start().starts_with(',') {
+                end += out[end..].find(',').unwrap() + 1;
+            } else if out[..start].trim_end().ends_with(',') {
+                start = out[..start].rfind(',').unwrap();
+            }
+            out.replace_range(start..end, "");
+        }
+    }
+    out.trim().to_string()
+}
+
+/// What a smoke's output means: `Ok(notes)` when every probe passed (a
+/// note for each that reached its endpoint without confirming the
+/// credential), `Err(reason)` naming the first that did not.
+///
+/// An HTTP probe fails only on a transport failure or a 401/403 whose
+/// body says the credential is invalid, expired or revoked. Any other
+/// answer reached the provider's endpoint through the proxy, which is what
+/// the smoke is for; whether every endpoint accepts this kind of token for
+/// this request is not something Factory can know, and a valid credential
+/// must never be turned away on a guess.
+pub fn judge_smoke(output: &str) -> std::result::Result<Vec<String>, String> {
+    let mut notes = Vec::new();
+    let mut finished = false;
+    for line in output.lines() {
+        let Some(rest) = line.trim().strip_prefix("factory-smoke ") else { continue };
+        let mut words = rest.splitn(4, ' ');
+        match (words.next(), words.next(), words.next(), words.next()) {
+            (Some("done"), ..) => finished = true,
+            (Some("env"), Some(name), Some("missing"), _) => {
+                return Err(format!("the provider {name}'s credential is not in the sandbox; the provider is not attached"))
+            }
+            (Some("git"), Some("failed"), detail, more) => {
+                let detail = [detail.unwrap_or(""), more.unwrap_or("")].join(" ");
+                return Err(format!("git could not list the scope's repository from the sandbox: {}", detail.trim()));
+            }
+            (Some("http"), Some(name), Some(code), body) => {
+                let body = body.unwrap_or("").trim();
+                let lower = body.to_ascii_lowercase();
+                match code {
+                    "000" => return Err(format!("the provider {name}'s endpoint could not be reached from the sandbox: {body}")),
+                    c if c.starts_with('2') => {}
+                    "401" | "403"
+                        if ["invalid", "bad credentials", "expired", "revoked"].iter().any(|w| lower.contains(w)) =>
+                    {
+                        return Err(format!(
+                            "the provider {name}'s credential was rejected by its endpoint (HTTP {code}: {})",
+                            without_volatile(body).chars().take(200).collect::<String>()
+                        ))
+                    }
+                    other => notes.push(format!(
+                        "the provider {name}'s endpoint answered HTTP {other}; reached through the proxy, the credential itself not confirmed"
+                    )),
+                }
+            }
+            _ => {}
+        }
+    }
+    if finished {
+        Ok(notes)
+    } else {
+        Err("the smoke run did not finish".into())
+    }
+}
+
 /// The sandbox's name for a run: `factory-` and the run id's first eight
 /// characters, lowercased -- OpenShell allows lowercase letters, digits and
 /// hyphens, nineteen at most.
@@ -335,6 +925,11 @@ pub struct PlanInput<'a> {
     pub config: &'a OpenshellConfig,
     /// The `openshell` CLI, resolved.
     pub cli: &'a str,
+    /// What `--from` names: the block's `image`, or the one Factory built.
+    pub image: &'a str,
+    /// What `--provider` names, as the gateway knows them
+    /// (`ProviderDecl::gateway_name`).
+    pub providers: &'a [String],
     pub instance_id: &'a str,
     pub run_id: &'a str,
     pub task_id: &'a str,
@@ -546,9 +1141,12 @@ pub fn plan(input: &PlanInput<'_>) -> Result<Plan> {
 
     let policy_path = input.state_dir.join("policy.yaml");
     let mut create = cmd(&[
-        "sandbox", "create", "--name", &sandbox, "--from", &cfg.image, "--policy", &path_str(&policy_path)?,
+        "sandbox", "create", "--name", &sandbox, "--from", input.image, "--policy", &path_str(&policy_path)?,
     ]);
-    for provider in &cfg.providers {
+    if input.image.trim().is_empty() {
+        return Err(FactoryError::BadRequest("the run's sandbox has no image to be made from".into()));
+    }
+    for provider in input.providers {
         create.push("--provider".into());
         create.push(provider.clone());
     }
@@ -620,6 +1218,15 @@ fn path_str(path: &Path) -> Result<String> {
         .ok_or_else(|| FactoryError::BadRequest(format!("{} is not valid UTF-8", path.display())))
 }
 
+/// A name OpenShell accepts for a provider or profile, and nothing a
+/// command line could read as a flag.
+fn is_object_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name.len() <= 63
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 fn is_env_name(k: &str) -> bool {
     let mut chars = k.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
@@ -675,7 +1282,9 @@ policy:
         let e = serde_yaml_ng::from_str::<OpenshellConfig>(&typo).unwrap_err().to_string();
         assert!(e.contains("provider"), "{e}");
         let no_image = BLOCK.replace("image: ghcr.io/example/claude-agent:1.0\n", "");
-        assert!(serde_yaml_ng::from_str::<OpenshellConfig>(&no_image).unwrap_err().to_string().contains("image"));
+        let managed = serde_yaml_ng::from_str::<OpenshellConfig>(&no_image).unwrap();
+        assert_eq!(managed.image, None, "no image is Factory's own (#234)");
+        assert!(managed.problems().is_empty(), "{:?}", managed.problems());
         let no_policy = BLOCK[..BLOCK.find("policy:").unwrap()].to_string();
         assert!(serde_yaml_ng::from_str::<OpenshellConfig>(&no_policy).unwrap_err().to_string().contains("policy"));
         let bad_transfer = format!("{BLOCK}download: everything\n");
@@ -685,12 +1294,12 @@ policy:
     #[test]
     fn a_block_a_sandbox_cannot_be_made_from_says_why() {
         let mut c = config();
-        c.image = " ".into();
+        c.image = Some(" ".into());
         c.factory_bin = "factory".into();
         c.callback = Some("https://x:1".into());
         c.policy = serde_yaml_ng::from_str("version: 2").unwrap();
         let problems = c.problems().join("; ");
-        for expected in ["no image", "absolute path", "plain http", "version 1"] {
+        for expected in ["empty image", "absolute path", "plain http", "version 1"] {
             assert!(problems.contains(expected), "{problems}");
         }
         c.policy = serde_yaml_ng::Value::Sequence(Vec::new());
@@ -808,9 +1417,12 @@ policy:
 
     fn plan_for(f: &Fixture, launch: &LaunchSpec, prompt: &str, config: &OpenshellConfig) -> Result<Plan> {
         let target = CallbackTarget { host: HOST_ALIAS.into(), port: 8787 };
+        let providers: Vec<String> = config.providers.iter().map(|p| p.gateway_name("inst1")).collect();
         plan(&PlanInput {
             config,
             cli: "/opt/homebrew/bin/openshell",
+            image: config.image.as_deref().unwrap_or("/images/managed.tar.gz"),
+            providers: &providers,
             instance_id: "inst-1",
             run_id: "0a1b2c3d-run",
             task_id: "t1",
@@ -977,7 +1589,16 @@ policy:
         crate::config::refuse_bad_openshell(&scope, &agent).unwrap();
         let block = agent.openshell.unwrap();
         assert!(block.fast_forward && block.download == Transfer::None && block.upload == Transfer::Workdir);
-        assert_eq!(block.providers, ["factory-claude", "factory-github"]);
+        assert_eq!(block.image, None, "Factory builds the curator's image (#234)");
+        let names: Vec<&str> = block.providers.iter().map(ProviderDecl::name).collect();
+        assert_eq!(names, ["factory-claude", "factory-github"]);
+        let [ProviderDecl::Managed(claude), ProviderDecl::Managed(github)] = block.providers.as_slice() else {
+            panic!("both providers are the daemon's: {:?}", block.providers)
+        };
+        assert_eq!(claude.kind, "claude-code-oauth");
+        assert_eq!(claude.credential, CredentialSource::File { path: "~/.config/factory/secrets/claude-oauth-token".into() });
+        assert_eq!(github.kind, "github-publish");
+        assert_eq!(github.credential, CredentialSource::Command { run: "gh auth token".into() });
         let target = block.callback_target(Some("192.168.188.92:8791")).unwrap();
         let policy: serde_yaml_ng::Value = serde_yaml_ng::from_str(&block.policy_yaml(&target).unwrap()).unwrap();
         for rule in ["github_read", "awesome_herdr_publish", "sources", CALLBACK_RULE] {
@@ -1017,5 +1638,185 @@ policy:
         f.cwd = f.guides.parent().unwrap().to_path_buf();
         let error = plan_for(&f, &claude_launch(&f), "go", &config()).unwrap_err().to_string();
         assert!(error.contains("daemon-owned runtime state"), "{error}");
+    }
+
+    // -- #234: declared prerequisites --------------------------------------
+
+    const MANAGED: &str = "\
+providers:
+  - factory-legacy
+  - name: factory-claude
+    type: claude-code-oauth
+    credential: { from: file, path: ~/.config/factory/secrets/claude-oauth-token }
+    expires: 2027-10-04
+  - name: factory-github
+    type: github-publish
+    credential: { from: command, run: gh auth token }
+  - name: ci
+    type: generic
+    credential: { from: env, name: CI_TOKEN }
+  - name: kc
+    type: generic
+    credential: { from: keychain, service: factory-ci, account: me }
+policy: {}
+";
+
+    #[test]
+    fn providers_are_bare_names_or_credential_sources_and_round_trip() {
+        let c: OpenshellConfig = serde_yaml_ng::from_str(MANAGED).unwrap();
+        assert!(c.problems().is_empty(), "{:?}", c.problems());
+        assert_eq!(c.providers[0], ProviderDecl::Named("factory-legacy".into()));
+        let ProviderDecl::Managed(claude) = &c.providers[1] else { panic!() };
+        assert_eq!(claude.expires, chrono::NaiveDate::from_ymd_opt(2027, 10, 4));
+        assert_eq!(c.providers[4], ProviderDecl::Managed(ManagedProvider {
+            name: "kc".into(),
+            kind: "generic".into(),
+            credential: CredentialSource::Keychain { service: "factory-ci".into(), account: Some("me".into()) },
+            expires: None,
+        }));
+        let again: OpenshellConfig = serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&c).unwrap()).unwrap();
+        assert_eq!(again, c, "what the roster writes back reads the same");
+        let json: OpenshellConfig = serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
+        assert_eq!(json, c, "and over the wire");
+    }
+
+    #[test]
+    fn a_misspelt_or_unknown_credential_source_is_refused_by_name() {
+        for (bad, expected) in [
+            ("credential: { from: file, pth: /x }", "pth"),
+            ("credential: { from: vault, path: /x }", "vault"),
+            ("credentail: { from: env, name: X }", "credentail"),
+            ("credential: { from: env, name: X, value: hunter2 }", "value"),
+        ] {
+            let yaml = format!("providers:\n  - name: p\n    type: t\n    {bad}\npolicy: {{}}\n");
+            let e = serde_yaml_ng::from_str::<OpenshellConfig>(&yaml).unwrap_err().to_string();
+            assert!(e.contains(expected), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_credential_source_that_cannot_work_is_a_problem() {
+        for (source, expected) in [
+            ("{ from: env, name: 'NOT A NAME' }", "not an environment variable name"),
+            ("{ from: file, path: relative/token }", "not an absolute path"),
+            ("{ from: command, run: '  ' }", "no command"),
+            ("{ from: keychain, service: '' }", "no Keychain service"),
+        ] {
+            let yaml = format!("providers:\n  - name: p\n    type: t\n    credential: {source}\npolicy: {{}}\n");
+            let c: OpenshellConfig = serde_yaml_ng::from_str(&yaml).unwrap();
+            assert!(c.problems().join(";").contains(expected), "{source}: {:?}", c.problems());
+        }
+        let twice: OpenshellConfig = serde_yaml_ng::from_str("providers: [a, a]\npolicy: {}\n").unwrap();
+        assert!(twice.problems().join(";").contains("twice"));
+        let flag: OpenshellConfig = serde_yaml_ng::from_str("providers: ['--provider=x']\npolicy: {}\n").unwrap();
+        assert!(!flag.problems().is_empty(), "nothing a command line reads as a flag");
+    }
+
+    #[test]
+    fn the_daemon_writes_only_names_that_carry_this_instances_suffix() {
+        let suffix = instance_suffix("9F1A2B3C-0000-4000-8000-000000000000");
+        assert_eq!(suffix, "9f1a2b3c");
+        let c: OpenshellConfig = serde_yaml_ng::from_str(MANAGED).unwrap();
+        let names: Vec<String> = c.providers.iter().map(|p| p.gateway_name(&suffix)).collect();
+        assert_eq!(names, ["factory-legacy", "factory-claude-9f1a2b3c", "factory-github-9f1a2b3c", "ci-9f1a2b3c", "kc-9f1a2b3c"]);
+        assert!(owned_by_instance("factory-claude-9f1a2b3c", &suffix));
+        for foreign in ["factory-claude", "factory-claude-0a0a0a0a", "9f1a2b3c", "-9f1a2b3c", "factory-claude-9f1a2b3cX"] {
+            assert!(!owned_by_instance(foreign, &suffix), "{foreign}");
+        }
+        assert!(!owned_by_instance("x-", ""), "an empty suffix owns nothing");
+    }
+
+    #[test]
+    fn shipped_profiles_are_imported_under_the_suffix_and_name_their_variable() {
+        let yaml = profile_for_import("claude-code-oauth", "9f1a2b3c").unwrap();
+        assert!(yaml.contains("\nid: claude-code-oauth-9f1a2b3c\n"), "{yaml}");
+        assert!(!yaml.contains("\nid: claude-code-oauth\n"));
+        assert_eq!(profile_id("claude-code-oauth", "9f1a2b3c"), "claude-code-oauth-9f1a2b3c");
+        assert_eq!(profile_id("github", "9f1a2b3c"), "github", "a profile Factory does not ship is used as named");
+        assert!(profile_for_import("github", "9f1a2b3c").is_none());
+        assert_eq!(shipped_credential_env("claude-code-oauth").as_deref(), Some("CLAUDE_CODE_OAUTH_TOKEN"));
+        assert_eq!(shipped_credential_env("github-publish").as_deref(), Some("GITHUB_TOKEN"));
+        let listed = serde_json::json!({"credentials": [{"env_vars": ["QA_TOKEN"]}]});
+        assert_eq!(profile_credential_env(&listed).as_deref(), Some("QA_TOKEN"));
+    }
+
+    #[test]
+    fn the_image_key_moves_with_the_installed_cli() {
+        assert_eq!(image_key("aaaa"), image_key("aaaa"));
+        assert_ne!(image_key("aaaa"), image_key("bbbb"));
+        assert_eq!(image_key("aaaa").len(), 16);
+        assert!(RECIPE.iter().any(|(name, body)| *name == "build-image.sh" && body.contains("FACTORY_SOURCE")));
+    }
+
+    #[test]
+    fn the_smoke_probes_each_provider_and_never_holds_a_value() {
+        let providers = vec![
+            SmokeProvider { name: "factory-claude".into(), kind: "claude-code-oauth".into(), env: "CLAUDE_CODE_OAUTH_TOKEN".into() },
+            SmokeProvider { name: "factory-github".into(), kind: "github-publish".into(), env: "GITHUB_TOKEN".into() },
+            SmokeProvider { name: "ci".into(), kind: "generic".into(), env: "CI_TOKEN".into() },
+        ];
+        let script = smoke_script(&providers, Some("https://github.com/not-ingo/awesome-herdr.git"));
+        assert!(script.contains("https://api.anthropic.com/v1/models -H \"Authorization: Bearer $CLAUDE_CODE_OAUTH_TOKEN\""), "{script}");
+        assert!(script.contains("https://api.github.com/user -H \"Authorization: Bearer $GITHUB_TOKEN\""), "{script}");
+        assert!(script.contains("git ls-remote --heads 'https://github.com/not-ingo/awesome-herdr.git'"), "{script}");
+        assert!(script.contains("printenv CI_TOKEN"), "{script}");
+        assert!(!script.contains("https://api.anthropic.com/v1/models -H \"x-api-key"));
+        let mut c = config();
+        c.policy = serde_yaml_ng::from_str("network_policies: {}").unwrap();
+        let target = CallbackTarget { host: HOST_ALIAS.into(), port: 8787 };
+        let policy: serde_yaml_ng::Value = serde_yaml_ng::from_str(&smoke_policy(&c, &target, &providers).unwrap()).unwrap();
+        let rule = &policy["network_policies"][SMOKE_RULE];
+        assert_eq!(rule["binaries"][0]["path"], serde_yaml_ng::Value::from("/usr/bin/curl"));
+        assert_eq!(rule["endpoints"][0]["access"], serde_yaml_ng::Value::from("read-only"));
+        assert!(policy["network_policies"].get(CALLBACK_RULE).is_some(), "the agent's own policy, as its runs get it");
+    }
+
+    #[test]
+    fn a_smoke_fails_only_on_what_proves_a_problem() {
+        let ok = "factory-smoke env factory-claude ok\nfactory-smoke http factory-claude 200 \nfactory-smoke git ok\nfactory-smoke done\n";
+        assert_eq!(judge_smoke(ok), Ok(vec![]));
+        let rejected = "factory-smoke http factory-claude 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"Invalid bearer token\"},\"request_id\":\"req_011CfgoiWhwkxoqyq6LY9Gf2\"}\nfactory-smoke done\n";
+        let e = judge_smoke(rejected).unwrap_err();
+        assert!(e.contains("provider factory-claude's credential was rejected") && e.contains("HTTP 401"), "{e}");
+        assert!(!e.contains("req_011"), "the same rejection reads the same every time: {e}");
+        assert_eq!(judge_smoke(&rejected.replace("req_011CfgoiWhwkxoqyq6LY9Gf2", "req_other")), Err(e));
+        let github = "factory-smoke http factory-github 401 {\"message\":\"Bad credentials\"}\nfactory-smoke done\n";
+        assert!(judge_smoke(github).unwrap_err().contains("factory-github"));
+        // Reached, and the endpoint did not say the credential is bad: a
+        // valid token is never turned away on a guess.
+        let unsure = "factory-smoke http factory-claude 404 {\"error\":\"not_found\"}\nfactory-smoke done\n";
+        let notes = judge_smoke(unsure).unwrap();
+        assert!(notes[0].contains("HTTP 404") && notes[0].contains("not confirmed"), "{notes:?}");
+        assert!(judge_smoke("factory-smoke http x 000 curl: (6) could not resolve\nfactory-smoke done\n").unwrap_err().contains("could not be reached"));
+        assert!(judge_smoke("factory-smoke env factory-claude missing\nfactory-smoke done\n").unwrap_err().contains("not attached"));
+        assert!(judge_smoke("factory-smoke git failed fatal: denied\nfactory-smoke done\n").unwrap_err().contains("fatal: denied"));
+        assert!(judge_smoke("factory-smoke env a ok\n").unwrap_err().contains("did not finish"));
+    }
+
+    #[test]
+    fn readiness_says_the_one_thing_and_its_command() {
+        let at = chrono::Utc::now();
+        let r = Readiness {
+            state: ReadinessState::Needs,
+            thing: Some("the credential for factory-claude".into()),
+            command: Some("claude setup-token".into()),
+            since: at,
+            checked_at: at,
+            image: None,
+            notes: vec![],
+            expiring: vec![],
+        };
+        assert_eq!(r.reason(), "the sandbox needs the credential for factory-claude; supply it with `claude setup-token`");
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["state"], "needs");
+        let m = ManagedProvider {
+            name: "p".into(),
+            kind: "t".into(),
+            credential: CredentialSource::Env { name: "X".into() },
+            expires: chrono::NaiveDate::from_ymd_opt(2027, 1, 31),
+        };
+        assert_eq!(m.expiring(chrono::NaiveDate::from_ymd_opt(2026, 12, 1).unwrap()), None);
+        assert_eq!(m.expiring(chrono::NaiveDate::from_ymd_opt(2027, 1, 21).unwrap()), Some(10));
+        assert_eq!(m.expiring(chrono::NaiveDate::from_ymd_opt(2027, 2, 2).unwrap()), Some(-2));
     }
 }
