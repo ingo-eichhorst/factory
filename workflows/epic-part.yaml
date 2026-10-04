@@ -1,0 +1,156 @@
+# The epic-part workflow (#235): the steps every part of a decomposed
+# Intake item runs through before Factory's integrator merges it.
+#
+#   implement ──► review
+#       ▲           │
+#       └── agent exit ┘   at most 5 times
+#
+# Not started by hand. An executable intake plan names it in
+# `routing.workflow`, and Factory copies both nodes once per part into the
+# one generated decomposition run -- `<part>-implement`, `<part>-review` --
+# with each part's own values written in ({{part_id}}, {{part_title}},
+# {{part_instructions}}, {{part_acceptance}}, {{part_owns}},
+# {{part_interface}}, {{parent_title}}, {{parent_instructions}}; nothing else
+# may be used). `expand` leads into every root part's `implement`, and a
+# prerequisite part's `review` into its dependant's `implement`.
+#
+# `part:` makes it a part workflow, and says which node does what:
+#   * deliverable -- `implement`. Its worktree branch is what the integrator
+#     merges, and a merge conflict or a failed combined check is sent back to
+#     it. Both nodes work in a worktree, so it has to be named.
+#   * terminal -- `review`, the one node nothing follows. Its `done` (this
+#     round's, with its exits decided) is what releases the merge; after
+#     integration rework it runs again before the part is merged.
+#
+# There is no pull request per part, and neither step may open one or mark
+# one ready: the integrator merges every part into factory/issue-<n> in
+# dependency order, runs every part's acceptance on the combined tree, and
+# opens the one PR. That rule lives in the instructions below because
+# Factory cannot see it.
+#
+# Stored in the daemon, not read from here. After editing this file, apply it:
+#   factory workflow create --file workflows/epic-part.yaml      # first time
+#   factory workflow update <id> --file workflows/epic-part.yaml
+# A plan uses it with `"routing": {"scope": "factory", "workflow": "epic-part"}`.
+name: epic-part
+description: >-
+  Per-part steps for a decomposed epic: implement the part on its branch
+  (no PR), then an independent review that can send it back up to five
+  times. Factory's integrator merges the reviewed parts and opens one PR.
+scope: factory
+part:
+  deliverable: implement
+  terminal: review
+nodes:
+  - id: implement
+    position: { x: 0, y: 0 }
+    task:
+      title: "Implement {{part_id}}: {{part_title}}"
+      agent: builder
+      worktree: true
+      timeout_seconds: 14400
+      labels: { workflow: epic-part, step: implement }
+      instructions: |
+        Implement one part of a larger change that Factory split into parts: {{part_title}}
+        (part {{part_id}}). Other parts are implemented and reviewed alongside yours. Factory
+        merges every reviewed part into one integration branch and opens the single pull request
+        for the whole change -- you do not.
+
+        ## Your part
+
+        {{part_instructions}}
+
+        Done when: {{part_acceptance}}
+
+        You own: {{part_owns}}. Change nothing outside it unless the part cannot be done without
+        it, and then say so in your result.
+
+        What you promise the parts that build on yours: {{part_interface}}
+
+        ## The whole change, for context
+
+        {{parent_title}}
+
+        {{parent_instructions}}
+
+        ## How to work
+
+        - Your worktree is on a branch Factory cut from the integration branch, which already holds
+          every part this one depends on; what they reported is in the upstream output above. Work
+          and commit on that branch. Do not switch branches, rebase onto main, or push.
+        - Open no pull request and mark none ready. The integrator owns the one PR.
+        - Run the acceptance check and the tests that cover what you own. In this repository run
+          cargo with HERDR_SESSION=qa-none and HERDR_SOCKET_PATH unset, so nothing opens panes in
+          the live herdr session.
+        - Commit every intended change before you report: the integrator refuses a dirty worktree.
+
+        Rework: if the upstream output includes an entry that says "sent this work back", this is
+        another round on the same task and branch.
+        - From the review: address every finding, commit, and say what you changed for each.
+        - From Integration: either your branch no longer merges cleanly into the integration branch
+          or the combined acceptance check failed. The integration branch is the local
+          `factory/...` branch yours was cut from (`git branch --list 'factory/*'`). Merge it into
+          your branch, resolve, re-run the check, and commit. The review runs again before your
+          part is merged.
+
+        Report `done` with --result: your branch (`git branch --show-current`), the commits, what
+        changed, and the checks you ran with their results. If you are stuck on a question only a
+        person can answer, report `blocked` with it.
+
+  - id: review
+    position: { x: 320, y: 0 }
+    exits:
+      - to: implement
+        agent: concrete findings the implementer can fix alone
+        max_rounds: 5
+    task:
+      title: "Review {{part_id}}: {{part_title}}"
+      agent: builder
+      # It detaches HEAD onto the part's branch: never the implementer's
+      # checkout, and never the primary one.
+      worktree: true
+      timeout_seconds: 5400
+      labels: { workflow: epic-part, step: review }
+      instructions: |
+        Review one part of a larger change that Factory split into parts: {{part_title}} (part
+        {{part_id}}). You review this part only; every other part has a review of its own. There is
+        no pull request for it: once you pass it, Factory's integrator merges it and opens the one
+        PR for the whole change.
+
+        ## The part
+
+        {{part_instructions}}
+
+        Done when: {{part_acceptance}}
+
+        Owned surface: {{part_owns}}
+
+        What it promises the parts that build on it: {{part_interface}}
+
+        ## How to review
+
+        1. The implementer's result is in the upstream output above: its branch and what changed.
+           Your worktree shares the repository with theirs, so no fetch is needed. Note where you
+           start -- the integration branch as it stands -- then check their branch out detached,
+           so it stays theirs:
+             base=$(git rev-parse HEAD)
+             git switch --detach <branch>
+             git diff "$base"...HEAD
+        2. Run the acceptance check and the tests that cover the owned surface. In this repository
+           run cargo with HERDR_SESSION=qa-none and HERDR_SOCKET_PATH unset.
+        3. Review for correctness against the part's instructions and acceptance, tests that prove
+           it, changes outside the owned surface, and the interface the dependent parts rely on.
+           Do not change the code yourself, and post nothing anywhere: there is no PR to post on.
+
+        Then report exactly one of:
+        - `done`: nothing blocking is left. --result: the branch you reviewed and a short summary.
+        - `done --send-to implement`: concrete findings the implementer can fix alone. Put them in
+          --result as a numbered list, each with file:line and what "fixed" looks like. That sends
+          the part back for another round; the other parts are not affected.
+        - `blocked`: something only a person can settle (a design or product decision, a conflict
+          with the part as written, a missing credential), or a question. State it exactly.
+        If `--send-to implement` is refused because no rounds remain, report `blocked` with the
+        findings still open, so a person decides.
+
+edges:
+  - { id: implement-review, from: implement, to: review }

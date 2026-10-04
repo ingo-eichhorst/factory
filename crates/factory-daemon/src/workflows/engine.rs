@@ -2431,6 +2431,12 @@ impl Engine {
     /// The definition is generated from the validated plan, while the run
     /// owns the fetched integration branch, merge ledger, combined checks
     /// and final PR hand-off.
+    ///
+    /// Each part is one task node, or -- when `routing.workflow` names a
+    /// part workflow (`#235`) -- a copy of that workflow's whole graph,
+    /// namespaced `<part>-<node>`. Either way `expand` leads into each
+    /// root part's entry, a prerequisite's terminal into its dependant's
+    /// entry, and control-plan injection runs afterwards, over every node.
     pub(crate) async fn start_decomposition_workflow(
         self: &Arc<Self>,
         item: &Task,
@@ -2452,10 +2458,27 @@ impl Engine {
                 worktree_reason.unwrap_or_else(|| "unknown reason".into())
             )));
         }
+        // Held to the contract again here, not only when the plan was
+        // assessed: the template may have been edited since.
+        let template = match &routing.workflow {
+            Some(wanted) => {
+                let found = self.find_workflow(&scope.name, wanted).await?;
+                let shape = found
+                    .validate()
+                    .and_then(|_| found.part_shape())
+                    .map_err(|error| FactoryError::BadRequest(format!("part workflow {}: {error}", found.name)))?;
+                Some((found, shape))
+            }
+            None => None,
+        };
         let mut labels = item.labels.clone();
         labels.insert(factory_core::intake::PARENT_LABEL.into(), item.id.clone());
+        let category = item
+            .intake
+            .as_ref()
+            .and_then(|record| record.triage.as_ref())
+            .map(|triage| triage.assessment.category.clone());
 
-        let child_ids: Vec<String> = parts.iter().map(|part| part.id.clone()).collect();
         let mut nodes = vec![WorkflowNode {
             session: Default::default(),
             id: "expand".into(),
@@ -2472,12 +2495,25 @@ impl Engine {
             expand: Some(ExpandSpec {
                 join: ExpandJoin { tolerate: 0 },
                 cancel: ExpandCancelPolicy::Terminate,
-                children: child_ids.clone(),
+                children: Vec::new(),
                 max_rework_rounds: 3,
             }),
         }];
         let mut edges = Vec::new();
         let mut integration_parts = Vec::new();
+        // Each part's (entry, terminal), which its dependency edges join.
+        let mut ends: BTreeMap<String, (String, String)> = BTreeMap::new();
+        // Which part's which template node each generated id came from, so
+        // two that namespace to the same id are refused by name.
+        let mut origins: BTreeMap<String, String> = BTreeMap::from([("expand".to_string(), "the expand node".to_string())]);
+        // One row per part on the canvas, as tall as the template's graph.
+        let (min_x, min_y, row) = template.as_ref().map_or((0.0, 0.0, 0.0), |(template, _)| {
+            let xs = template.nodes.iter().map(|node| node.position.x);
+            let ys: Vec<f64> = template.nodes.iter().map(|node| node.position.y).collect();
+            let min_y = ys.iter().copied().fold(f64::INFINITY, f64::min);
+            let max_y = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            (xs.fold(f64::INFINITY, f64::min), min_y, max_y - min_y + 260.0)
+        });
         for (index, part) in parts.iter().enumerate() {
             let acceptance = part.acceptance.as_deref().unwrap_or_default().trim();
             let ownership = part
@@ -2500,69 +2536,157 @@ impl Engine {
             );
             let mut part_labels = labels.clone();
             part_labels.insert(factory_core::intake::PART_LABEL.into(), part.id.clone());
-            nodes.push(WorkflowNode {
-                session: Default::default(),
-                id: part.id.clone(),
-                position: CanvasPoint {
-                    x: 240.0 + index as f64 * 180.0,
-                    y: 140.0,
-                },
-                kind: WorkflowNodeKind::Task,
-                task: factory_core::NewTask {
-                    title: part.title.trim().to_string(),
-                    instructions,
-                    scope: Some(scope.name.clone()),
-                    agent: routing.agent.clone(),
-                    parent_task_id: Some(item.id.clone()),
-                    decomposition_part: Some(part.id.clone()),
-                    estimate_seconds: part.estimate_seconds,
-                    labels: part_labels,
-                    worktree: Some(worktree_capable),
-                    category: item
-                        .intake
-                        .as_ref()
-                        .and_then(|record| record.triage.as_ref())
-                        .map(|triage| triage.assessment.category.clone()),
-                    ..Default::default()
-                },
-                gate: None,
-                exits: Vec::new(),
-                expand: None,
-            });
+            let Some((template, shape)) = &template else {
+                nodes.push(WorkflowNode {
+                    session: Default::default(),
+                    id: part.id.clone(),
+                    position: CanvasPoint {
+                        x: 240.0 + index as f64 * 180.0,
+                        y: 140.0,
+                    },
+                    kind: WorkflowNodeKind::Task,
+                    task: factory_core::NewTask {
+                        title: part.title.trim().to_string(),
+                        instructions,
+                        scope: Some(scope.name.clone()),
+                        agent: routing.agent.clone(),
+                        parent_task_id: Some(item.id.clone()),
+                        decomposition_part: Some(part.id.clone()),
+                        estimate_seconds: part.estimate_seconds,
+                        labels: part_labels,
+                        worktree: Some(worktree_capable),
+                        category: category.clone(),
+                        ..Default::default()
+                    },
+                    gate: None,
+                    exits: Vec::new(),
+                    expand: None,
+                });
+                integration_parts.push(IntegrationPart {
+                    node_id: part.id.clone(),
+                    part_id: part.id.clone(),
+                    acceptance: acceptance.to_string(),
+                    owns: part.owns.clone(),
+                    terminal_node: None,
+                });
+                ends.insert(part.id.clone(), (part.id.clone(), part.id.clone()));
+                continue;
+            };
+
+            let values: BTreeMap<String, String> = [
+                ("part_id", part.id.as_str()),
+                ("part_title", part.title.trim()),
+                ("part_instructions", part.instructions.trim()),
+                ("part_acceptance", acceptance),
+                ("part_owns", ownership.as_str()),
+                ("part_interface", interface),
+                ("parent_title", item.title.as_str()),
+                ("parent_instructions", item.instructions.trim()),
+            ]
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+            let copy = template.expand_part(shape, &part.id, &values, &instructions);
+            for (step, mut node) in template.nodes.iter().zip(copy.nodes) {
+                if let Some(earlier) = origins.insert(node.id.clone(), format!("part {}'s node {}", part.id, step.id)) {
+                    return Err(FactoryError::BadRequest(format!(
+                        "part workflow {}: part {}'s node {} becomes {}, which is already {earlier}; rename a part so the ids stay apart",
+                        template.name, part.id, step.id, node.id
+                    )));
+                }
+                node.position = CanvasPoint {
+                    x: 240.0 + node.position.x - min_x,
+                    y: 140.0 + index as f64 * row + node.position.y - min_y,
+                };
+                node.task.scope = Some(scope.name.clone());
+                if node.kind == WorkflowNodeKind::Task {
+                    node.task.agent = routing
+                        .agents
+                        .get(&step.id)
+                        .cloned()
+                        .or(node.task.agent)
+                        .or_else(|| routing.agent.clone());
+                    node.task.parent_task_id = Some(item.id.clone());
+                    node.task.decomposition_part = Some(part.id.clone());
+                    let mut merged = labels.clone();
+                    merged.extend(std::mem::take(&mut node.task.labels));
+                    merged.insert(factory_core::intake::PARENT_LABEL.into(), item.id.clone());
+                    merged.insert(factory_core::intake::PART_LABEL.into(), part.id.clone());
+                    node.task.labels = merged;
+                    if !worktree_capable {
+                        node.task.worktree = Some(false);
+                    }
+                    // The part's estimate is for its deliverable; the other
+                    // steps keep whatever the template estimates for them.
+                    if node.id == copy.shape.deliverable && part.estimate_seconds.is_some() {
+                        node.task.estimate = None;
+                        node.task.estimate_seconds = part.estimate_seconds;
+                    }
+                    if node.task.category.is_none() {
+                        node.task.category = category.clone();
+                    }
+                }
+                nodes.push(node);
+            }
+            edges.extend(copy.edges);
             integration_parts.push(IntegrationPart {
-                node_id: part.id.clone(),
+                node_id: copy.shape.deliverable.clone(),
                 part_id: part.id.clone(),
                 acceptance: acceptance.to_string(),
                 owns: part.owns.clone(),
+                terminal_node: Some(copy.shape.terminal.clone()),
             });
+            ends.insert(part.id.clone(), (copy.shape.entry, copy.shape.terminal));
+        }
+        // A dependency may name a part listed after it, so the parts are
+        // joined once every one of them exists.
+        let templated = template.is_some();
+        for part in parts {
+            let entry = ends[&part.id].0.clone();
             if part.depends_on.is_empty() {
                 edges.push(WorkflowEdge {
-                    id: format!("expand-{}", part.id),
+                    id: if templated { format!("expand->{entry}") } else { format!("expand-{}", part.id) },
                     from: "expand".into(),
-                    to: part.id.clone(),
+                    to: entry,
                 });
             } else {
                 for dependency in &part.depends_on {
+                    let terminal = ends
+                        .get(dependency)
+                        .map(|(_, terminal)| terminal.clone())
+                        .unwrap_or_else(|| dependency.clone());
                     edges.push(WorkflowEdge {
-                        id: format!("{}-{}", dependency, part.id),
-                        from: dependency.clone(),
-                        to: part.id.clone(),
+                        id: if templated { format!("{terminal}->{entry}") } else { format!("{}-{}", dependency, part.id) },
+                        from: terminal,
+                        to: entry.clone(),
                     });
                 }
             }
         }
+        let children: Vec<String> = nodes
+            .iter()
+            .filter(|node| node.kind == WorkflowNodeKind::Task)
+            .map(|node| node.id.clone())
+            .collect();
+        if let Some(expand) = nodes[0].expand.as_mut() {
+            expand.children = children;
+        }
 
+        let description = match &template {
+            Some((template, _)) => format!(
+                "Generated from approved intake task {}; every part runs part workflow {} ({}, revision {})",
+                item.id, template.name, template.id, template.revision
+            ),
+            None => format!("Generated from approved intake task {}", item.id),
+        };
         let draft = WorkflowDraft {
             name: format!("Decomposition: {}", item.title),
-            description: format!("Generated from approved intake task {}", item.id),
+            description,
             scope: scope.name.clone(),
             workspace_ref: None,
-            category: item
-                .intake
-                .as_ref()
-                .and_then(|record| record.triage.as_ref())
-                .map(|triage| triage.assessment.category.clone()),
+            category,
             inputs: Vec::new(),
+            part: None,
             nodes,
             edges,
         };
@@ -2711,7 +2835,7 @@ impl Engine {
             .nodes
             .iter()
             .find(|node| node.node_id == origin.node_id)
-            .map_or(0, |node| node.round);
+            .map_or(0, |node| node.exit_rounds());
         if exit.max_rounds.is_some_and(|max| used >= max) {
             return Err(FactoryError::BadRequest(format!(
                 "agent exit to {to} has no rounds left: report `blocked` with the open findings"
@@ -2952,6 +3076,11 @@ impl Engine {
     /// or combined-gate feedback.  The same task gets a new run, preserving
     /// its real parent/dependency identity; the caller resumes its harness
     /// session and exact worktree when the adapter can.
+    ///
+    /// `node_id` is the part's deliverable. When the part ran through a
+    /// part workflow (`#235`), the rest of it down to the terminal goes back
+    /// to `unstarted` for the next round too (`WorkflowRun::rework_part_body`),
+    /// so what was fixed is reviewed again before the integrator merges it.
     async fn request_integration_rework(
         &self,
         run: &mut WorkflowRun,
@@ -2959,6 +3088,12 @@ impl Engine {
         feedback: String,
     ) -> Result<Option<(String, factory_core::Run)>> {
         let limit = Self::integration_rework_limit(run);
+        let part = run
+            .integration
+            .as_ref()
+            .and_then(|integration| integration.parts.iter().find(|part| part.node_id == node_id))
+            .cloned();
+        let templated = part.as_ref().is_some_and(|part| part.terminal_node.is_some());
         let Some(node) = run.nodes.iter_mut().find(|node| node.node_id == node_id) else {
             return Ok(None);
         };
@@ -2967,7 +3102,11 @@ impl Engine {
             node.error = Some(feedback);
             return Ok(None);
         };
-        if node.round >= limit {
+        // A single-node part counts its rounds as it always has. A part
+        // workflow's deliverable also runs again for its own review loop,
+        // and those rounds are not the integrator's to spend.
+        let used = if templated { node.integration_rounds } else { node.round };
+        if used >= limit {
             node.status = WorkflowNodeStatus::Failed;
             node.error = Some(format!(
                 "integration rework exhausted after {limit} rounds: {feedback}"
@@ -2983,19 +3122,24 @@ impl Engine {
             return Ok(None);
         };
         node.round += 1;
+        node.integration_rounds += 1;
         node.status = WorkflowNodeStatus::Pending;
         node.error = Some(feedback.clone());
         node.exits_evaluated = false;
         node.rework_request = Some(ReworkRequest {
             from_node: "integration".into(),
             from_task: task_id.clone(),
-            round: node.round,
+            round: used + 1,
             max_rounds: limit,
             feedback: Some(feedback.clone()),
         });
+        let round = used + 1;
         if let Some(integration) = run.integration.as_mut() {
             integration.merged_nodes.retain(|merged| merged != node_id);
             integration.checks_passed = false;
+        }
+        if let Some(part) = &part {
+            run.rework_part_body(part);
         }
         self.store
             .update(
@@ -3015,10 +3159,7 @@ impl Engine {
             TaskEntry::new(
                 "daemon",
                 "integration_rework",
-                format!(
-                    "integration sent this child back (round {} of {limit}): {feedback}",
-                    node.round
-                ),
+                format!("integration sent this child back (round {round} of {limit}): {feedback}"),
             ),
         )
         .await;
@@ -3036,38 +3177,48 @@ impl Engine {
             return Ok(Vec::new());
         };
         let integration_dir = PathBuf::from(&integration.worktree_path);
-        let part_nodes: std::collections::BTreeSet<String> = integration
-            .parts
-            .iter()
-            .map(|part| part.node_id.clone())
-            .collect();
         let mut merged = integration.merged_nodes.clone();
         let order = run
             .definition
             .validate()
             .map_err(FactoryError::BadRequest)?;
+        let mut parts = integration.parts.clone();
+        parts.sort_by_key(|part| order.iter().position(|id| id == &part.node_id).unwrap_or(usize::MAX));
         let mut rework = Vec::new();
 
-        for node_id in order.into_iter().filter(|node| part_nodes.contains(node)) {
+        // Per part, not per node (#235): a part is merged once its terminal
+        // node is done -- in this round, with its exits decided -- and every
+        // part it depends on is already on the branch. Its deliverable's
+        // newest run says which branch that is. A part without a template
+        // is one node playing all three roles, as before.
+        for part in parts {
+            let node_id = part.node_id.clone();
             if merged.contains(&node_id) {
                 continue;
             }
-            let parents_merged = run
-                .definition
-                .edges
+            let prerequisites_merged = run.prerequisite_parts(&part).iter().all(|prerequisite| {
+                run.integration.as_ref().is_some_and(|integration| {
+                    integration
+                        .parts
+                        .iter()
+                        .any(|candidate| &candidate.part_id == prerequisite && merged.contains(&candidate.node_id))
+                })
+            });
+            if !prerequisites_merged {
+                continue;
+            }
+            let terminal_done = run.nodes.iter().find(|node| node.node_id == part.terminal()).is_some_and(|node| {
+                node.status == WorkflowNodeStatus::Done && node.exits_evaluated
+            });
+            if !terminal_done {
+                continue;
+            }
+            let Some(task_id) = run
+                .nodes
                 .iter()
-                .filter(|edge| edge.to == node_id && part_nodes.contains(&edge.from))
-                .all(|edge| merged.contains(&edge.from));
-            if !parents_merged {
-                continue;
-            }
-            let Some(node) = run.nodes.iter().find(|node| node.node_id == node_id) else {
-                continue;
-            };
-            if node.status != WorkflowNodeStatus::Done {
-                continue;
-            }
-            let Some(task_id) = node.task_id.clone() else {
+                .find(|node| node.node_id == node_id)
+                .and_then(|node| node.task_id.clone())
+            else {
                 continue;
             };
             let Some(attempt) = self.store.runs(&task_id, 1).await?.into_iter().next() else {
@@ -3565,9 +3716,18 @@ impl Engine {
                     .iter()
                     .any(|n| n.id == node.node_id && n.kind == WorkflowNodeKind::Task)
             })
+            // An integrated decomposition starts a part's work only once
+            // every part it depends on is on the integration branch. Per
+            // part (#235): a part workflow's own earlier steps are never
+            // merged before its later ones run.
             .filter(|node| {
-                run.integration.as_ref().is_none_or(|integration| {
-                    run.definition
+                run.integration.as_ref().is_none_or(|integration| match run.part_of(&node.node_id) {
+                    Some(part) => run
+                        .prerequisite_parts(part)
+                        .iter()
+                        .all(|prerequisite| run.part_merged(prerequisite)),
+                    None => run
+                        .definition
                         .prerequisite_edges(&node.node_id)
                         .into_iter()
                         .filter(|edge| {
@@ -3576,7 +3736,7 @@ impl Engine {
                                     && candidate.kind == WorkflowNodeKind::Task
                             })
                         })
-                        .all(|edge| integration.merged_nodes.contains(&edge.from))
+                        .all(|edge| integration.merged_nodes.contains(&edge.from)),
                 })
             })
             .filter(|node| {

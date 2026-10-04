@@ -254,6 +254,60 @@ pub struct WorkflowEdge {
     pub to: String,
 }
 
+/// Declares a definition a **part workflow** (`#235`): the steps every part
+/// of an Intake decomposition runs through before the integrator merges it.
+/// `start_decomposition_workflow` copies the definition once per part into
+/// the one generated run. Either field may be left out when the graph makes
+/// it unambiguous -- see [`WorkflowDefinition::part_shape`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartSpec {
+    /// The task node whose worktree branch is integrated, and which merge
+    /// conflicts and failed combined checks are sent back to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverable: Option<String>,
+    /// The node whose `done` releases the merge: the one node nothing
+    /// follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
+}
+
+/// The reserved inputs a part workflow is filled with, once per part
+/// (`#235`). Nothing else may be written `{{...}}` in one.
+pub const PART_INPUTS: [&str; 8] = [
+    "part_id",
+    "part_title",
+    "part_instructions",
+    "part_acceptance",
+    "part_owns",
+    "part_interface",
+    "parent_title",
+    "parent_instructions",
+];
+
+/// A part workflow's three roles, resolved: the node `expand` and every
+/// prerequisite part lead into, the node whose branch is merged, and the
+/// node whose `done` releases that merge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartShape {
+    pub entry: String,
+    pub deliverable: String,
+    pub terminal: String,
+}
+
+/// One part's copy of a part workflow, namespaced `<part>-<node>`, with the
+/// part's values written in. See [`WorkflowDefinition::expand_part`].
+#[derive(Debug, Clone)]
+pub struct PartCopy {
+    pub nodes: Vec<WorkflowNode>,
+    pub edges: Vec<WorkflowEdge>,
+    pub shape: PartShape,
+}
+
+/// The id a part workflow's node `node` gets in part `part`'s copy.
+pub fn part_node_id(part: &str, node: &str) -> String {
+    format!("{part}-{node}")
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkflowDraft {
     pub name: String,
@@ -271,6 +325,9 @@ pub struct WorkflowDraft {
     /// What a run of it must be started with (`#140`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<WorkflowInput>,
+    /// Present on a part workflow (`#235`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<PartSpec>,
     #[serde(default)]
     pub nodes: Vec<WorkflowNode>,
     #[serde(default)]
@@ -292,6 +349,9 @@ pub struct WorkflowDefinition {
     /// See `WorkflowDraft::inputs`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<WorkflowInput>,
+    /// See `WorkflowDraft::part`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<PartSpec>,
     pub nodes: Vec<WorkflowNode>,
     pub edges: Vec<WorkflowEdge>,
     pub revision: u64,
@@ -310,6 +370,7 @@ impl WorkflowDefinition {
             workspace_ref: draft.workspace_ref,
             category: draft.category,
             inputs: draft.inputs,
+            part: draft.part,
             nodes: draft.nodes,
             edges: draft.edges,
             revision: 1,
@@ -325,6 +386,7 @@ impl WorkflowDefinition {
         self.category = draft.category;
         self.workspace_ref = draft.workspace_ref;
         self.inputs = draft.inputs;
+        self.part = draft.part;
         self.nodes = draft.nodes;
         self.edges = draft.edges;
         self.revision += 1;
@@ -510,14 +572,11 @@ impl WorkflowDefinition {
                         node.id
                     ));
                 }
-                if !self.edges.iter().any(|edge| {
-                    edge.to == *child
-                        && (edge.from == node.id
-                            || expand
-                                .children
-                                .iter()
-                                .any(|candidate| candidate == &edge.from))
-                }) {
+                // Joined means reached from the expand node. Not necessarily
+                // by an edge straight from it or from a sibling: control-plan
+                // injection puts gates between a child and what follows it,
+                // and a part workflow's steps follow one another (#235).
+                if !self.ancestors(child).contains(&node.id) {
                     return Err(format!(
                         "expand node {:?} child {child:?} is not joined to the expand graph",
                         node.id
@@ -560,6 +619,11 @@ impl WorkflowDefinition {
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(format!("workflow contains a cycle involving {cyclic}"));
+        }
+        // A part workflow's contract (#235) speaks first: "an exit that
+        // leaves the part" says more than the generic "missing node".
+        if self.part.is_some() {
+            self.part_shape()?;
         }
         self.validate_inputs()?;
         self.validate_exits()?;
@@ -888,6 +952,7 @@ impl WorkflowDefinition {
             workspace_ref: None,
             category: task.category.clone(),
             inputs: Vec::new(),
+            part: None,
             nodes: vec![WorkflowNode {
                 session: Default::default(),
                 id: IMPLICIT_NODE.into(),
@@ -1198,6 +1263,245 @@ impl WorkflowDefinition {
     }
 }
 
+/// `{{part_id}}, {{part_title}}, ...` -- the list a refusal names.
+fn part_inputs_words() -> String {
+    PART_INPUTS
+        .iter()
+        .map(|name| format!("{{{{{name}}}}}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl WorkflowDefinition {
+    /// Check this definition against the part-workflow contract (`#235`)
+    /// and say which node plays each role:
+    ///
+    /// * exactly one **entry** node (no incoming edge), a task node;
+    /// * exactly one **terminal** node (no outgoing edge), a task node --
+    ///   `part.terminal`, if given, has to be that node;
+    /// * exactly one **deliverable**: `part.deliverable`, or else the only
+    ///   task node that works in a worktree. Its branch is what the
+    ///   integrator merges, so it may not opt out of one;
+    /// * no expand node -- decomposition is one level deep;
+    /// * every exit stays inside the workflow;
+    /// * no input but the reserved [`PART_INPUTS`], declared or written
+    ///   `{{...}}`, and none of those spliced into a command the daemon
+    ///   runs (an exit's `check:` or a gate's command).
+    ///
+    /// That it opens no PR of its own is the template's instructions' job;
+    /// nothing here can see it. [`validate`](Self::validate) calls this for
+    /// a definition that declares `part:`; the daemon calls it again at
+    /// expansion, so a template edited after a plan named it still fails
+    /// with these words. It assumes the graph itself is sound -- unique
+    /// ids, edges between real nodes, no cycle.
+    pub fn part_shape(&self) -> Result<PartShape, String> {
+        let spec = self.part.clone().unwrap_or_default();
+        if let Some(node) = self.nodes.iter().find(|n| n.kind == WorkflowNodeKind::Expand) {
+            return Err(format!(
+                "a part workflow cannot contain expand node {:?}: decomposition is one level deep",
+                node.id
+            ));
+        }
+        let ids: BTreeSet<&str> = self.nodes.iter().map(|n| n.id.as_str()).collect();
+        for node in &self.nodes {
+            for (index, exit) in node.exits.iter().enumerate() {
+                if !ids.contains(exit.to.as_str()) {
+                    return Err(format!(
+                        "node {:?} exit {} leads to {:?}, which is outside this part workflow; a part's exits stay inside it",
+                        node.id,
+                        index + 1,
+                        exit.to
+                    ));
+                }
+            }
+        }
+        let one = |role: &str, rule: &str, found: Vec<&str>| -> Result<String, String> {
+            match found.as_slice() {
+                [only] => Ok(only.to_string()),
+                [] => Err(format!("a part workflow needs exactly one {role} node ({rule}); it has none")),
+                many => Err(format!(
+                    "a part workflow needs exactly one {role} node ({rule}); it has {}: {}",
+                    many.len(),
+                    many.join(", ")
+                )),
+            }
+        };
+        let entry = one(
+            "entry",
+            "one with no incoming edge",
+            self.nodes
+                .iter()
+                .filter(|n| !self.edges.iter().any(|e| e.to == n.id))
+                .map(|n| n.id.as_str())
+                .collect(),
+        )?;
+        let terminal = one(
+            "terminal",
+            "one with no outgoing edge",
+            self.nodes
+                .iter()
+                .filter(|n| !self.edges.iter().any(|e| e.from == n.id))
+                .map(|n| n.id.as_str())
+                .collect(),
+        )?;
+        if let Some(declared) = &spec.terminal {
+            if declared != &terminal {
+                return Err(format!(
+                    "part.terminal names {declared:?}, but the node nothing follows is {terminal:?}"
+                ));
+            }
+        }
+        for (role, id) in [("entry", &entry), ("terminal", &terminal)] {
+            if self.node(id).is_some_and(|n| n.kind != WorkflowNodeKind::Task) {
+                return Err(format!("the part workflow's {role} node {id:?} has to be a task node"));
+            }
+        }
+        let deliverable = match &spec.deliverable {
+            Some(id) => {
+                let node = self
+                    .node(id)
+                    .ok_or_else(|| format!("part.deliverable names {id:?}, which is not a node of this workflow"))?;
+                if node.kind != WorkflowNodeKind::Task {
+                    return Err(format!("part.deliverable {id:?} has to be a task node"));
+                }
+                if node.task.worktree == Some(false) {
+                    return Err(format!(
+                        "part.deliverable {id:?} works without a worktree, but its branch is what the integrator merges; give it `worktree: true`"
+                    ));
+                }
+                id.clone()
+            }
+            None => {
+                let candidates: Vec<&str> = self
+                    .nodes
+                    .iter()
+                    .filter(|n| n.kind == WorkflowNodeKind::Task && n.task.worktree != Some(false))
+                    .map(|n| n.id.as_str())
+                    .collect();
+                match candidates.as_slice() {
+                    [only] => only.to_string(),
+                    [] => {
+                        return Err(
+                            "no task node of this part workflow works in a worktree, but the deliverable's branch is what the integrator merges".into(),
+                        )
+                    }
+                    many => {
+                        return Err(format!(
+                            "{} task nodes work in a worktree ({}); name the one whose branch is integrated with part.deliverable",
+                            many.len(),
+                            many.join(", ")
+                        ))
+                    }
+                }
+            }
+        };
+        for input in &self.inputs {
+            if !PART_INPUTS.contains(&input.name.as_str()) {
+                return Err(format!(
+                    "a part workflow is filled with each part's own values and takes no other input; it declares {:?}, but only {} exist",
+                    input.name,
+                    part_inputs_words()
+                ));
+            }
+        }
+        for node in &self.nodes {
+            let texts = [&node.task.title, &node.task.instructions].into_iter().chain(node.task.labels.values());
+            for text in texts {
+                if let Some(unknown) = placeholders(text).into_iter().find(|name| !PART_INPUTS.contains(name)) {
+                    return Err(format!(
+                        "node {:?} uses {{{{{unknown}}}}}, which is not a part input; a part workflow may only use {}",
+                        node.id,
+                        part_inputs_words()
+                    ));
+                }
+            }
+            let commands = node
+                .exits
+                .iter()
+                .filter_map(|exit| exit.check.as_deref())
+                .chain(node.gate.as_ref().and_then(|gate| gate.command.as_deref()));
+            for command in commands {
+                if let Some(name) = placeholders(command).into_iter().next() {
+                    return Err(format!(
+                        "node {:?} writes {{{{{name}}}}} into a command; part values are never spliced into a command the daemon runs",
+                        node.id
+                    ));
+                }
+            }
+        }
+        Ok(PartShape { entry, deliverable, terminal })
+    }
+
+    /// This part workflow's copy for one part (`#235`): every node and edge
+    /// namespaced `<part>-<id>` ([`part_node_id`]), exit targets and gate
+    /// subjects rewritten to match, and `values` (the [`PART_INPUTS`])
+    /// written into each node's title and label values and each task
+    /// node's instructions. A task node that uses no part input is not
+    /// left blind to its part: its title gets `: <part title>` appended and
+    /// `brief` -- what a part without a template is told -- follows its own
+    /// instructions (or is them, when it has none). Commands are never
+    /// substituted. `shape` is [`part_shape`](Self::part_shape)'s answer;
+    /// this assumes the contract holds.
+    pub fn expand_part(
+        &self,
+        shape: &PartShape,
+        part: &str,
+        values: &BTreeMap<String, String>,
+        brief: &str,
+    ) -> PartCopy {
+        let ns = |id: &str| part_node_id(part, id);
+        let uses_part = |text: &str| placeholders(text).iter().any(|name| PART_INPUTS.contains(name));
+        let part_title = values.get("part_title").map(String::as_str).unwrap_or(part);
+        let nodes = self
+            .nodes
+            .iter()
+            .map(|node| {
+                let mut copy = node.clone();
+                copy.id = ns(&node.id);
+                for exit in &mut copy.exits {
+                    exit.to = ns(&exit.to);
+                }
+                if let Some(subject) = copy.gate.as_mut().and_then(|gate| gate.subject.as_mut()) {
+                    *subject = ns(subject);
+                }
+                let task_node = node.kind == WorkflowNodeKind::Task;
+                copy.task.title = if task_node && !uses_part(&node.task.title) {
+                    format!("{}: {part_title}", node.task.title.trim())
+                } else {
+                    substitute(&node.task.title, values)
+                };
+                if task_node {
+                    copy.task.instructions = if uses_part(&node.task.instructions) {
+                        substitute(&node.task.instructions, values)
+                    } else if node.task.instructions.trim().is_empty() {
+                        brief.to_string()
+                    } else {
+                        format!("{}\n\n---\n{brief}", node.task.instructions.trim_end())
+                    };
+                }
+                for value in copy.task.labels.values_mut() {
+                    *value = substitute(value, values);
+                }
+                copy
+            })
+            .collect();
+        let edges = self
+            .edges
+            .iter()
+            .map(|edge| WorkflowEdge { id: ns(&edge.id), from: ns(&edge.from), to: ns(&edge.to) })
+            .collect();
+        PartCopy {
+            nodes,
+            edges,
+            shape: PartShape {
+                entry: ns(&shape.entry),
+                deliverable: ns(&shape.deliverable),
+                terminal: ns(&shape.terminal),
+            },
+        }
+    }
+}
+
 /// An input's name: `[A-Za-z_][A-Za-z0-9_-]*`.
 fn is_input_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -1316,9 +1620,17 @@ pub struct WorkflowNodeRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// How many times work was sent back through this node: 0 on its first
-    /// pass; otherwise the backwards-exit rounds it has used.
+    /// pass; otherwise the rounds it has run again for, which every run of
+    /// its task records as `workflow_round` -- strictly increasing, so a
+    /// newer round never mistakes the last one's `done` for its own.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub round: u32,
+    /// How many of those rounds the integrator sent it back for (`#235`):
+    /// a merge conflict or a failed combined check on its part. Counted
+    /// apart so a part's review loop and its integration rework each keep
+    /// their own budget -- see [`exit_rounds`](Self::exit_rounds).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub integration_rounds: u32,
     /// Legacy tasks earlier rounds spawned here, oldest first. Kept so their
     /// history stays findable; never mirrored, never recreated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1337,6 +1649,15 @@ pub struct WorkflowNodeRun {
     /// Human-readable route reason for `SkippedByRoute` nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
+}
+
+impl WorkflowNodeRun {
+    /// The rounds this node's own backwards exits have used: every round
+    /// but the ones integration rework added (`#235`). What an exit's
+    /// `max_rounds` is checked against.
+    pub fn exit_rounds(&self) -> u32 {
+        self.round.saturating_sub(self.integration_rounds)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1446,6 +1767,7 @@ impl WorkflowRun {
                     task_created: false,
                     error: None,
                     round: 0,
+                    integration_rounds: 0,
                     superseded_task_ids: Vec::new(),
                     rework_request: None,
                     exits_evaluated: false,
@@ -1469,11 +1791,27 @@ impl WorkflowRun {
 /// One child slice's contract at the integration boundary.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntegrationPart {
+    /// The part's **deliverable**: the task node whose newest run's branch
+    /// is merged, and which a merge conflict or a failed combined check is
+    /// sent back to. `merged_nodes` is keyed by it.
     pub node_id: String,
     pub part_id: String,
     pub acceptance: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owns: Vec<String>,
+    /// The part's **terminal** node, whose `done` releases the merge, when
+    /// the part ran through a part workflow (`#235`). Absent means the
+    /// part is the one node `node_id` -- every run stored before #235, and
+    /// every plan without a template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_node: Option<String>,
+}
+
+impl IntegrationPart {
+    /// The node whose `done` releases this part's merge.
+    pub fn terminal(&self) -> &str {
+        self.terminal_node.as_deref().unwrap_or(&self.node_id)
+    }
 }
 
 /// Durable state for the single-writer integration phase of a decomposed
@@ -1535,7 +1873,12 @@ impl WorkflowRun {
         else {
             return SendBack::NoExit;
         };
-        let Some(used) = self.nodes.iter().find(|n| n.node_id == from).map(|n| n.round) else {
+        let Some((used, sequence)) = self
+            .nodes
+            .iter()
+            .find(|n| n.node_id == from)
+            .map(|n| (n.exit_rounds(), n.round))
+        else {
             return SendBack::NoExit;
         };
         let max_rounds = spec.max_rounds.unwrap_or(0);
@@ -1544,7 +1887,12 @@ impl WorkflowRun {
         }
         let from_task = self.nodes.iter().find(|n| n.node_id == from).and_then(|n| n.task_id.clone()).unwrap_or_default();
         let downstream = self.definition.descendants(from);
+        // `round` counts this exit's rounds against its budget; `next` is
+        // the run sequence every node in the body moves to. They are the
+        // same number unless integration rework (#235) has sent this part
+        // round before, which never spends a review's budget.
         let round = used + 1;
+        let next = sequence + 1;
         for id in self.definition.route_back_body(from, to) {
             let Some(node) = self.nodes.iter_mut().find(|n| n.node_id == id) else {
                 continue;
@@ -1562,7 +1910,7 @@ impl WorkflowRun {
             // Leave legacy superseded ids untouched rather than rewriting history.
             node.status = WorkflowNodeStatus::Unstarted;
             node.error = None;
-            node.round = round;
+            node.round = next;
             node.exits_evaluated = false;
             node.routed_to = None;
             node.skip_reason = None;
@@ -1576,6 +1924,88 @@ impl WorkflowRun {
         }
         self.updated_at = Utc::now();
         SendBack::Sent { round, max_rounds }
+    }
+
+    /// The integration part `node_id` belongs to (`#235`): the one a task
+    /// node's `decomposition_part` names, or the one of the task node a
+    /// control node judges. `None` outside an integrated decomposition.
+    pub fn part_of(&self, node_id: &str) -> Option<&IntegrationPart> {
+        let integration = self.integration.as_ref()?;
+        let node = self.definition.node(node_id)?;
+        let work = if node.kind == WorkflowNodeKind::Task {
+            node
+        } else {
+            self.definition.node(&self.definition.gate_subject(node_id)?)?
+        };
+        let part = work.task.decomposition_part.as_deref()?;
+        integration.parts.iter().find(|candidate| candidate.part_id == part)
+    }
+
+    /// The parts that have to be merged before any of `part`'s work may
+    /// start: every other part one of its nodes descends from. With a part
+    /// workflow, the edge between two parts runs from the prerequisite's
+    /// terminal to the dependant's entry, and neither end is a deliverable,
+    /// so this reads ancestry rather than direct edges.
+    pub fn prerequisite_parts(&self, part: &IntegrationPart) -> BTreeSet<String> {
+        self.definition
+            .ancestors(&part.node_id)
+            .iter()
+            .filter_map(|id| self.definition.node(id))
+            .filter(|node| node.kind == WorkflowNodeKind::Task)
+            .filter_map(|node| node.task.decomposition_part.clone())
+            .filter(|id| id != &part.part_id)
+            .collect()
+    }
+
+    /// Whether the part with id `part_id` is on the integration branch.
+    pub fn part_merged(&self, part_id: &str) -> bool {
+        self.integration.as_ref().is_some_and(|integration| {
+            integration.parts.iter().any(|part| {
+                part.part_id == part_id && integration.merged_nodes.contains(&part.node_id)
+            })
+        })
+    }
+
+    /// Integration sent `part`'s deliverable back (`#235`): put every node
+    /// of the part between the deliverable and its terminal back to
+    /// `unstarted` for another round on the same task -- so the fix made
+    /// during integration is reviewed before it is merged -- and the
+    /// part's own not-yet-started nodes below the terminal (its gates)
+    /// with them, so none of them keeps showing the previous round's
+    /// `done`. The deliverable itself is the caller's: it is continued at
+    /// once rather than waiting for the graph. A part with no
+    /// `terminal_node` is the one deliverable node, and nothing else moves
+    /// -- exactly what integration rework always did.
+    pub fn rework_part_body(&mut self, part: &IntegrationPart) {
+        if part.terminal_node.is_none() {
+            return;
+        }
+        let terminal = part.terminal().to_string();
+        let below_deliverable = self.definition.descendants(&part.node_id);
+        let above_terminal = self.definition.ancestors(&terminal);
+        let below_terminal = self.definition.descendants(&terminal);
+        let ids: Vec<String> = self.nodes.iter().map(|node| node.node_id.clone()).collect();
+        for id in ids {
+            if id == part.node_id || self.part_of(&id).is_none_or(|owner| owner.part_id != part.part_id) {
+                continue;
+            }
+            let on_path = below_deliverable.contains(&id) && (id == terminal || above_terminal.contains(&id));
+            let Some(node) = self.nodes.iter_mut().find(|node| node.node_id == id) else { continue };
+            if on_path {
+                node.status = WorkflowNodeStatus::Unstarted;
+                node.error = None;
+                node.round += 1;
+                node.integration_rounds += 1;
+                node.exits_evaluated = false;
+                node.routed_to = None;
+                node.skip_reason = None;
+                node.rework_request = None;
+            } else if below_terminal.contains(&id) && node.task_id.is_none() {
+                node.status = WorkflowNodeStatus::Unstarted;
+                node.error = None;
+            }
+        }
+        self.updated_at = Utc::now();
     }
 
     /// Take a forward exit exclusively. Nodes downstream of `from` that are
@@ -2401,5 +2831,351 @@ mod tests {
             definition.edges.is_empty(),
             "source analysis cannot describe the separate release/installed scans"
         );
+    }
+
+    // --- #235: part workflows -------------------------------------------
+
+    /// implement (its own worktree) -> review (none), review sending the
+    /// work back at most `max_rounds` times: the smallest part workflow.
+    fn part_template(max_rounds: u32) -> WorkflowDefinition {
+        let mut implement = node("implement");
+        implement.task.worktree = Some(true);
+        implement.task.title = "Implement {{part_title}}".into();
+        implement.task.instructions = "Do {{part_instructions}}; done when {{part_acceptance}}".into();
+        implement.task.labels.insert("part".into(), "{{part_id}}".into());
+        let mut review = node("review");
+        review.task.worktree = Some(false);
+        review.exits = vec![WorkflowExit {
+            to: "implement".into(),
+            check: None,
+            agent: Some("fixable findings".into()),
+            max_rounds: Some(max_rounds),
+        }];
+        let mut template = definition(vec![implement, review], vec![e("implement", "review")]);
+        template.part = Some(PartSpec::default());
+        template
+    }
+
+    #[test]
+    fn the_epic_part_example_is_a_valid_part_workflow() {
+        let draft: WorkflowDraft =
+            serde_yaml_ng::from_str(include_str!("../../../workflows/epic-part.yaml")).unwrap();
+        let definition = WorkflowDefinition::from_draft(draft);
+        assert_eq!(definition.validate().unwrap(), vec!["implement", "review"]);
+        assert_eq!(
+            definition.part_shape().unwrap(),
+            PartShape { entry: "implement".into(), deliverable: "implement".into(), terminal: "review".into() }
+        );
+        let review = definition.nodes.iter().find(|n| n.id == "review").unwrap();
+        assert_eq!(review.exits[0].max_rounds, Some(5));
+        assert_eq!(review.task.worktree, Some(true), "review detaches onto the part branch in a worktree of its own");
+        for node in &definition.nodes {
+            assert!(!node.task.instructions.contains("gh pr create"), "a part opens no PR of its own");
+        }
+    }
+
+    #[test]
+    fn a_part_workflow_derives_its_roles_when_the_graph_says_them() {
+        let template = part_template(5);
+        template.validate().unwrap();
+        assert_eq!(
+            template.part_shape().unwrap(),
+            PartShape { entry: "implement".into(), deliverable: "implement".into(), terminal: "review".into() }
+        );
+        // One node is all three roles.
+        let mut single = definition(vec![node("work")], vec![]);
+        single.part = Some(PartSpec::default());
+        assert_eq!(single.part_shape().unwrap().terminal, "work");
+    }
+
+    #[test]
+    fn the_part_workflow_contract_refuses_with_words() {
+        let refused = |change: &dyn Fn(&mut WorkflowDefinition)| {
+            let mut template = part_template(5);
+            change(&mut template);
+            template.validate().unwrap_err()
+        };
+
+        let two_terminals = refused(&|t| {
+            t.nodes.push(node("docs"));
+            t.nodes.last_mut().unwrap().task.worktree = Some(false);
+            t.edges.push(e("implement", "docs"));
+        });
+        assert!(two_terminals.contains("exactly one terminal node"), "{two_terminals}");
+        assert!(two_terminals.contains("docs") && two_terminals.contains("review"), "{two_terminals}");
+
+        let two_entries = refused(&|t| {
+            t.nodes.push(node("plan"));
+            t.nodes.last_mut().unwrap().task.worktree = Some(false);
+            t.edges.push(e("plan", "review"));
+        });
+        assert!(two_entries.contains("exactly one entry node"), "{two_entries}");
+
+        let leaves = refused(&|t| t.nodes[1].exits[0].to = "ship".into());
+        assert!(leaves.contains("outside this part workflow"), "{leaves}");
+
+        let unknown = refused(&|t| t.nodes[0].task.title = "Implement #{{issue}}".into());
+        assert!(unknown.contains("{{issue}}") && unknown.contains("not a part input"), "{unknown}");
+        assert!(unknown.contains("{{part_title}}"), "the refusal lists what may be used: {unknown}");
+
+        let declared = refused(&|t| t.inputs.push(WorkflowInput { name: "issue".into(), description: String::new() }));
+        assert!(declared.contains("takes no other input"), "{declared}");
+
+        let spliced = refused(&|t| {
+            t.nodes[1].exits.insert(0, WorkflowExit {
+                to: "implement".into(),
+                check: Some("test -f {{part_id}}.txt".into()),
+                agent: None,
+                max_rounds: Some(1),
+            });
+        });
+        assert!(spliced.contains("into a command"), "{spliced}");
+
+        let ambiguous = refused(&|t| t.nodes[1].task.worktree = None);
+        assert!(ambiguous.contains("name the one whose branch is integrated with part.deliverable"), "{ambiguous}");
+
+        let no_worktree = refused(&|t| {
+            t.nodes[0].task.worktree = Some(false);
+            t.part = Some(PartSpec { deliverable: Some("implement".into()), terminal: None });
+        });
+        assert!(no_worktree.contains("worktree: true"), "{no_worktree}");
+
+        let wrong_terminal = refused(&|t| t.part = Some(PartSpec { deliverable: None, terminal: Some("implement".into()) }));
+        assert!(wrong_terminal.contains("the node nothing follows is \"review\""), "{wrong_terminal}");
+
+        // The contract is only a part workflow's: the same graph with two
+        // ends is an ordinary workflow.
+        let mut ordinary = part_template(5);
+        ordinary.part = None;
+        ordinary.nodes.push(node("docs"));
+        ordinary.edges.push(e("implement", "docs"));
+        ordinary.validate().unwrap();
+
+        // One level deep: an expand node is no part.
+        let mut nested = part_template(5);
+        nested.nodes.push(WorkflowNode {
+            kind: WorkflowNodeKind::Expand,
+            expand: Some(ExpandSpec { max_rework_rounds: 3, ..Default::default() }),
+            ..node("inner")
+        });
+        assert!(nested.part_shape().unwrap_err().contains("one level deep"));
+    }
+
+    #[test]
+    fn expanding_a_part_namespaces_every_reference_and_writes_the_part_in() {
+        let mut template = part_template(5);
+        template.nodes[1].task.title = "Review".into();
+        template.nodes[1].task.instructions = "Look hard.".into();
+        let mut tests = gate_node("tests", "tests");
+        tests.gate.as_mut().unwrap().command = Some("cargo test".into());
+        tests.gate.as_mut().unwrap().subject = Some("implement".into());
+        template.nodes.push(tests);
+        template.edges.push(e("implement", "tests"));
+        template.edges.push(e("tests", "review"));
+        template.edges.retain(|edge| edge.id != "implement-review");
+        let shape = template.part_shape().unwrap();
+        let values: BTreeMap<String, String> = [
+            ("part_id", "api"),
+            ("part_title", "The API"),
+            ("part_instructions", "add the endpoint"),
+            ("part_acceptance", "cargo test api"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+
+        let copy = template.expand_part(&shape, "api", &values, "THE BRIEF");
+        let ids: Vec<&str> = copy.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["api-implement", "api-review", "api-tests"]);
+        assert_eq!(
+            copy.shape,
+            PartShape { entry: "api-implement".into(), deliverable: "api-implement".into(), terminal: "api-review".into() }
+        );
+        let implement = &copy.nodes[0];
+        assert_eq!(implement.task.title, "Implement The API");
+        assert_eq!(implement.task.instructions, "Do add the endpoint; done when cargo test api");
+        assert_eq!(implement.task.labels["part"], "api");
+        let review = &copy.nodes[1];
+        assert_eq!(review.exits[0].to, "api-implement");
+        assert_eq!(review.task.title, "Review: The API", "a title with no part input still names the part");
+        assert_eq!(review.task.instructions, "Look hard.\n\n---\nTHE BRIEF");
+        let gate = copy.nodes[2].gate.as_ref().unwrap();
+        assert_eq!(gate.subject.as_deref(), Some("api-implement"));
+        assert_eq!(gate.command.as_deref(), Some("cargo test"), "commands are never substituted");
+        let edges: Vec<(&str, &str, &str)> =
+            copy.edges.iter().map(|e| (e.id.as_str(), e.from.as_str(), e.to.as_str())).collect();
+        assert!(edges.contains(&("api-implement-tests", "api-implement", "api-tests")), "{edges:?}");
+        assert!(edges.contains(&("api-tests-review", "api-tests", "api-review")), "{edges:?}");
+
+        // A step with no instructions of its own is the brief.
+        let mut bare = part_template(5);
+        bare.nodes[1].task.instructions = String::new();
+        let shape = bare.part_shape().unwrap();
+        assert_eq!(bare.expand_part(&shape, "api", &values, "THE BRIEF").nodes[1].task.instructions, "THE BRIEF");
+    }
+
+    /// Two parts of `part_template`, `b` after `a`, under one expand node --
+    /// what `start_decomposition_workflow` generates, minus the task fields.
+    fn two_part_run(category: &str) -> WorkflowRun {
+        let template = part_template(1);
+        let shape = template.part_shape().unwrap();
+        let mut nodes = vec![WorkflowNode {
+            kind: WorkflowNodeKind::Expand,
+            expand: Some(ExpandSpec { max_rework_rounds: 3, ..Default::default() }),
+            ..node("expand")
+        }];
+        let mut edges = vec![e("expand", "a-implement")];
+        for part in ["a", "b"] {
+            let copy = template.expand_part(&shape, part, &BTreeMap::new(), "brief");
+            for mut copied in copy.nodes {
+                copied.task.decomposition_part = Some(part.into());
+                nodes.push(copied);
+            }
+            edges.extend(copy.edges);
+        }
+        edges.push(e("a-review", "b-implement"));
+        let children = ["a-implement", "a-review", "b-implement", "b-review"].map(String::from).to_vec();
+        nodes[0].expand.as_mut().unwrap().children = children;
+        let mut def = definition(nodes, edges);
+        def.category = Some(category.into());
+        let mut run = WorkflowRun::new(def, WorkflowActor::Owner);
+        with_tasks(&mut run);
+        run.integration = Some(WorkflowIntegration {
+            parts: ["a", "b"]
+                .map(|part| IntegrationPart {
+                    node_id: format!("{part}-implement"),
+                    part_id: part.into(),
+                    acceptance: "true".into(),
+                    owns: Vec::new(),
+                    terminal_node: Some(format!("{part}-review")),
+                })
+                .to_vec(),
+            ..Default::default()
+        });
+        run
+    }
+
+    /// Every executable node has its task from the start, as the expand
+    /// node materialises them.
+    fn with_tasks(run: &mut WorkflowRun) {
+        for node in &mut run.nodes {
+            let executable = run.definition.nodes.iter().any(|n| {
+                n.id == node.node_id && matches!(n.kind, WorkflowNodeKind::Task | WorkflowNodeKind::Review)
+            });
+            if executable {
+                node.task_id = Some(format!("task-{}", node.node_id));
+            }
+        }
+    }
+
+    #[test]
+    fn injection_reaches_every_copied_task_node_and_the_expand_graph_stays_joined() {
+        let run = two_part_run("feature");
+        run.definition.validate().unwrap();
+        let plans = plan("feature", &[("tests", Some("cargo test"), None)]);
+        let (injected, notes) = run.definition.inject(&plans);
+        injected.validate().expect("gates between a part's steps keep every child joined to expand");
+        for work in ["a-implement", "a-review", "b-implement", "b-review"] {
+            let gate = injected.nodes.iter().find(|n| n.id == format!("{work}.tests")).unwrap();
+            assert_eq!(gate.gate.as_ref().unwrap().subject.as_deref(), Some(work));
+            assert!(notes.iter().any(|note| note.node_id == work && note.gate_node_id == gate.id));
+        }
+        // The edge between the parts now leaves a's review's gate.
+        assert!(injected.edges.iter().any(|edge| edge.from == "a-review.tests" && edge.to == "b-implement"));
+
+        let mut injected_run = run.clone();
+        injected_run.definition = injected;
+        let b = injected_run.integration.as_ref().unwrap().parts[1].clone();
+        assert_eq!(injected_run.prerequisite_parts(&b), BTreeSet::from(["a".to_string()]), "read through the gates");
+        let a = injected_run.integration.as_ref().unwrap().parts[0].clone();
+        assert!(injected_run.prerequisite_parts(&a).is_empty(), "its own steps are not a prerequisite");
+        assert_eq!(injected_run.part_of("b-review.tests").map(|p| p.part_id.as_str()), Some("b"));
+        assert_eq!(injected_run.part_of("expand"), None);
+    }
+
+    #[test]
+    fn integration_rework_sends_the_part_down_to_its_terminal_and_nothing_else() {
+        let mut run = two_part_run("feature");
+        let plans = plan("feature", &[("tests", Some("cargo test"), None)]);
+        run.definition = run.definition.inject(&plans).0;
+        run.nodes = WorkflowRun::new(run.definition.clone(), WorkflowActor::Owner).nodes;
+        with_tasks(&mut run);
+        for node in &mut run.nodes {
+            node.status = WorkflowNodeStatus::Done;
+            node.exits_evaluated = true;
+        }
+        let a = run.integration.as_ref().unwrap().parts[0].clone();
+        run.rework_part_body(&a);
+
+        let status = |run: &WorkflowRun, id: &str| node_status_of(run, id);
+        assert_eq!(status(&run, "a-implement"), WorkflowNodeStatus::Done, "the deliverable is the caller's");
+        for id in ["a-implement.tests", "a-review"] {
+            assert_eq!(status(&run, id), WorkflowNodeStatus::Unstarted, "{id}");
+        }
+        assert_eq!(status(&run, "a-review.tests"), WorkflowNodeStatus::Unstarted, "no stale done below the terminal");
+        let review = run.nodes.iter().find(|n| n.node_id == "a-review").unwrap();
+        assert_eq!((review.round, review.integration_rounds, review.exit_rounds()), (1, 1, 0));
+        assert!(!review.exits_evaluated);
+        for id in ["b-implement", "b-implement.tests", "b-review", "b-review.tests"] {
+            assert_eq!(status(&run, id), WorkflowNodeStatus::Done, "another part is untouched: {id}");
+        }
+
+        // A single-node part is what integration rework always moved: the
+        // deliverable, which is the caller's -- nothing here.
+        let mut legacy = run.clone();
+        for node in &mut legacy.nodes {
+            node.status = WorkflowNodeStatus::Done;
+        }
+        let mut single = legacy.integration.as_ref().unwrap().parts[1].clone();
+        single.terminal_node = None;
+        legacy.rework_part_body(&single);
+        assert!(legacy.nodes.iter().all(|n| n.status == WorkflowNodeStatus::Done));
+    }
+
+    fn node_status_of(run: &WorkflowRun, id: &str) -> WorkflowNodeStatus {
+        run.nodes.iter().find(|n| n.node_id == id).unwrap_or_else(|| panic!("no node {id}")).status
+    }
+
+    #[test]
+    fn integration_rework_never_spends_a_reviews_rounds() {
+        let mut run = two_part_run("feature");
+        for node in &mut run.nodes {
+            node.status = WorkflowNodeStatus::Done;
+        }
+        // Integration sent part a back once: the deliverable and the
+        // review both moved a round on, neither by its own exit.
+        for id in ["a-implement", "a-review"] {
+            let node = run.nodes.iter_mut().find(|n| n.node_id == id).unwrap();
+            node.round = 1;
+            node.integration_rounds = 1;
+        }
+        assert_eq!(
+            run.send_back("a-review", "a-implement"),
+            SendBack::Sent { round: 1, max_rounds: 1 },
+            "the review still has its one round"
+        );
+        let implement = run.nodes.iter().find(|n| n.node_id == "a-implement").unwrap();
+        assert_eq!(implement.round, 2, "the run sequence still moves forward");
+        assert_eq!(implement.rework_request.as_ref().unwrap().round, 1);
+        assert_eq!(node_status_of(&run, "b-implement"), WorkflowNodeStatus::Done, "the loop stays inside its part");
+        run.nodes.iter_mut().find(|n| n.node_id == "a-review").unwrap().status = WorkflowNodeStatus::Done;
+        assert_eq!(run.send_back("a-review", "a-implement"), SendBack::Exhausted { max_rounds: 1 });
+    }
+
+    #[test]
+    fn a_run_stored_before_part_workflows_reads_each_part_as_its_own_terminal() {
+        let part: IntegrationPart =
+            serde_json::from_value(serde_json::json!({ "node_id": "api", "part_id": "api", "acceptance": "true" })).unwrap();
+        assert_eq!(part.terminal(), "api");
+        assert!(serde_json::to_value(&part).unwrap().get("terminal_node").is_none(), "nothing new is written for it");
+        let node: WorkflowNodeRun =
+            serde_json::from_value(serde_json::json!({ "node_id": "api", "status": "done", "round": 2 })).unwrap();
+        assert_eq!((node.round, node.integration_rounds, node.exit_rounds()), (2, 0, 2));
+        let definition: WorkflowDefinition = serde_json::from_value(serde_json::to_value(definition(vec![node_named("a")], vec![])).unwrap()).unwrap();
+        assert!(definition.part.is_none());
+    }
+
+    fn node_named(id: &str) -> WorkflowNode {
+        node(id)
     }
 }

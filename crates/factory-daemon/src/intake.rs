@@ -500,17 +500,12 @@ impl Engine {
         // `owns`/`estimate_seconds` are the executable-plan marker. Old
         // assessments with only the legacy split shape remain proposals and
         // keep the explicit owner-approved `intake decide split` fallback.
-        let executable_plan = decide
-            && assessment
-                .split
-                .iter()
-                .any(|part| !part.owns.is_empty() || part.estimate_seconds.is_some());
+        let plan_shaped = assessment
+            .split
+            .iter()
+            .any(|part| !part.owns.is_empty() || part.estimate_seconds.is_some());
+        let executable_plan = decide && plan_shaped;
         if executable_plan {
-            if assessment.routing.workflow.is_some() {
-                return Err(FactoryError::BadRequest(
-                    "an executable decomposition creates its own tasks; leave routing.workflow out".into(),
-                ));
-            }
             intake::validate_plan(&assessment.split)
                 .map_err(|error| FactoryError::BadRequest(format!("the executable plan: {error}")))?;
         }
@@ -530,11 +525,28 @@ impl Engine {
         }
         if let Some(workflow) = &assessment.routing.workflow {
             let found = self.find_workflow(&scope, workflow).await?;
-            // Refused now rather than at release: an input the run needs,
-            // or a step that is not there, is the assessor's to fix.
-            found
-                .with_inputs(&assessment.routing.inputs)
-                .map_err(|e| FactoryError::BadRequest(format!("workflow {}: {e}", found.name)))?;
+            if plan_shaped {
+                // `#235`: on an executable plan the workflow is the part
+                // workflow every part runs through, filled with each part's
+                // own values -- held to its contract now, and again when the
+                // plan expands.
+                if !assessment.routing.inputs.is_empty() {
+                    return Err(FactoryError::BadRequest(format!(
+                        "part workflow {} is filled with each part's own values; leave routing.inputs out",
+                        found.name
+                    )));
+                }
+                found
+                    .validate()
+                    .and_then(|_| found.part_shape())
+                    .map_err(|e| FactoryError::BadRequest(format!("part workflow {}: {e}", found.name)))?;
+            } else {
+                // Refused now rather than at release: an input the run needs,
+                // or a step that is not there, is the assessor's to fix.
+                found
+                    .with_inputs(&assessment.routing.inputs)
+                    .map_err(|e| FactoryError::BadRequest(format!("workflow {}: {e}", found.name)))?;
+            }
             let mut agents = std::collections::BTreeMap::new();
             for (step, agent) in &assessment.routing.agents {
                 let node = found
@@ -699,6 +711,7 @@ impl Engine {
             at: now,
             workflow_run: None,
             parts: Vec::new(),
+            part_workflow: None,
         };
 
         match &decision {
@@ -872,8 +885,16 @@ impl Engine {
             .store
             .list(&TaskFilter { parent_task_id: Some(item.id.clone()), ..Default::default() })
             .await?;
+        // `#235`: which part workflow every part ran through, by name.
+        let through = match &triage.assessment.routing.workflow {
+            Some(id) => match self.workflow_definition(id).await {
+                Ok(template) => format!(", every part through part workflow {}", template.name),
+                Err(_) => format!(", every part through part workflow {id}"),
+            },
+            None => String::new(),
+        };
         let result = format!(
-            "expanded into {} tasks in workflow {}: {}",
+            "expanded into {} tasks in workflow {}{through}: {}",
             children.len(),
             workflow.id,
             children.iter().map(|task| format!("{} ({})", task.title, task.id)).collect::<Vec<_>>().join("; ")
@@ -885,6 +906,7 @@ impl Engine {
             at: now,
             workflow_run: Some(workflow.id.clone()),
             parts: children.iter().map(|task| task.id.clone()).collect(),
+            part_workflow: triage.assessment.routing.workflow.clone(),
         };
         let mut next = record;
         next.stage = IntakeStage::Split;
@@ -1164,7 +1186,7 @@ impl Engine {
         Ok(self.store.get_run(run_id).await?.is_some_and(|run| run.task_id == triage_task))
     }
 
-    async fn find_workflow(&self, scope: &str, wanted: &str) -> Result<factory_core::WorkflowDefinition> {
+    pub(crate) async fn find_workflow(&self, scope: &str, wanted: &str) -> Result<factory_core::WorkflowDefinition> {
         let definitions = self.workflows.definitions(Some(scope)).await?;
         definitions
             .iter()

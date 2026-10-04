@@ -3714,6 +3714,11 @@ impl Engine {
                 // failed before it was its turn) -- nothing to report.
                 continue;
             };
+            // A decomposition's dependency is usually its workflow parent
+            // too; say what it reported once.
+            if outputs.iter().any(|output| output.task_id == parent_task_id) {
+                continue;
+            }
             match self.store.get(&parent_task_id).await {
                 Ok(Some(parent)) => outputs.push(UpstreamOutput {
                     node_id: edge.from.clone(),
@@ -3803,7 +3808,7 @@ impl Engine {
             .nodes
             .iter()
             .find(|node| node.node_id == origin.node_id)
-            .map_or(0, |node| node.round);
+            .map_or(0, |node| node.exit_rounds());
         run.definition
             .nodes
             .iter()
