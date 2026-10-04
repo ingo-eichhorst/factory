@@ -140,8 +140,8 @@ pub struct Run {
     /// own: the branch it is on and the path it was checked out at. `None`
     /// for a run that worked in the scope directly, and for any run this
     /// daemon made before the field existed. Set once, when the worktree is
-    /// made, and never cleared -- the daemon does not clean these up, so this
-    /// is the only record of where the work went once the run ends.
+    /// made, and never cleared -- the historical receipt remains after the
+    /// workspace owner safely releases the directory and branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

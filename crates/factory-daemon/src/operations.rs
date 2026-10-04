@@ -530,6 +530,7 @@ impl Engine {
         )
         .await;
         self.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
+        self.sweep_workspaces().await;
         Ok(updated)
     }
 

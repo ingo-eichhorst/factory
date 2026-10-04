@@ -32,6 +32,8 @@ mod provenance;
 pub use provenance::*;
 mod stats;
 mod spend;
+mod workspace;
+pub use workspace::{WorkspaceLifetime, WorkspaceSpec};
 pub use spend::{CostGroupBy, CostReport, CostRow, DailySpend, FinishedSpend, SpendBasis, SpendFigure, TokenSums};
 pub use facts::{EnvironmentMetricFact, KnowledgeTags, ScopeCapacityFact};
 pub use ports::{FactProvider, FactValue, Provide};

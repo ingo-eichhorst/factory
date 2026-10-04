@@ -1,7 +1,6 @@
-//! A run's own git worktree: made before the agent starts and never inside
-//! the scope. Ordinary runs retain their worktrees for continuation; a
-//! decomposition workflow removes its child and integration worktrees only
-//! after the combined branch is safely handed off.
+//! L2 workspace ownership: ordinary tasks reuse a worktree across runs;
+//! benchmarks keep run-scoped evidence. The owner persists receipts and
+//! safely releases eligible closed workspaces, refusing unsaved work.
 //!
 //! Two separate questions live here, and they are answered two separate ways
 //! on purpose. Whether a scope *can* have a worktree at all is advisory: it
@@ -13,6 +12,9 @@
 
 use std::path::Path;
 use tokio::process::Command;
+
+mod owner;
+pub use owner::{Owner, OwnedWorkspace};
 
 async fn git_output(scope_path: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     Command::new("git")

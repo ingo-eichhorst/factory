@@ -101,6 +101,26 @@ impl WorkflowStore {
         }).await
     }
 
+    /// Merge only the cleanup receipt into the newest row, never overwrite a
+    /// concurrent node-state update with the sweep's earlier snapshot.
+    pub async fn mark_workspace_cleanup(&self, id: &str) -> Result<Option<WorkflowRun>> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(error)?;
+            let json: Option<String> = tx.query_row("SELECT data FROM workflow_runs WHERE id = ?1", [&id], |row| row.get(0))
+                .optional().map_err(error)?;
+            let Some(json) = json else { return Ok(None); };
+            let mut run: WorkflowRun = decode(json)?;
+            if !run.status.is_terminal() { return Ok(None); }
+            let Some(integration) = run.integration.as_mut() else { return Ok(None); };
+            if integration.cleanup_complete { return Ok(None); }
+            integration.cleanup_complete = true;
+            tx.execute("UPDATE workflow_runs SET data = ?2 WHERE id = ?1", params![id, serde_json::to_string(&run).map_err(error)?]).map_err(error)?;
+            tx.commit().map_err(error)?;
+            Ok(Some(run))
+        }).await
+    }
+
     pub async fn get_definition(&self, id: &str) -> Result<Option<WorkflowDefinition>> {
         let id = id.to_string();
         self.with_conn(move |conn| {

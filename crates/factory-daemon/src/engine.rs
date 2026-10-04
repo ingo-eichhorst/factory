@@ -82,7 +82,8 @@ pub(crate) enum CapacityEvent {
 /// itself only ever carries one out (`#178`).
 enum Workspace {
     /// Today's behaviour: `git worktree add` a new one, or work in the scope
-    /// directly when the task has no worktree of its own.
+    /// directly when the task has no worktree of its own. The owner may reuse
+    /// a task-lifetime workspace even though its conversation starts fresh.
     Fresh,
     /// `factory task run --continue`, having confirmed the previous run's
     /// worktree is still one of the scope's registered worktrees
@@ -369,6 +370,8 @@ pub struct Engine {
     /// fallible steps dispatch takes afterward (the worktree, the harness's
     /// own launch).
     pub(crate) admission_lock: tokio::sync::Mutex<()>,
+    pub(crate) workspaces: worktree::Owner,
+    run_lifecycle_locks: std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     /// Serializes an intake receipt's identity lookup with its create
     /// (`#167`): whether an item with the same `(kind, provider, reference)`
     /// already exists, and minting a new one if not, all under one lock --
@@ -402,6 +405,8 @@ impl Engine {
         let (capacity_release_tx, capacity_release_rx) = tokio::sync::mpsc::unbounded_channel();
         let power = crate::power::PowerAssertions::new(factory.config.daemon.power_assertion);
         Self {
+            workspaces: worktree::Owner::new(factory.worktrees_dir()),
+            run_lifecycle_locks: Default::default(),
             factory: std::sync::RwLock::new(factory),
             configuration_edit: Default::default(),
             registry,
@@ -3225,9 +3230,9 @@ impl Engine {
         // this point may hand the agent the scope itself when the checkbox is
         // on: a failure here ends the run right here, with git's own
         // complaint, rather than quietly falling back to the scope. A
-        // `--continue` that resumed and has a worktree of its own to go back
-        // to reuses it instead (`Workspace::Reuse`); every other case is
-        // `Fresh`, today's behaviour unchanged.
+        // A compatible conversation carries its exact reuse hint. Otherwise
+        // the workspace owner applies task lifetime independently of the
+        // fresh conversation; only bench attempts are fresh per run.
         let workspace = match &continue_outcome {
             Some(ContinueOutcome::Resume(plan)) => match &plan.workspace {
                 Some((path, branch)) => Workspace::Reuse { path: path.clone(), branch: branch.clone() },
@@ -3378,6 +3383,14 @@ impl Engine {
             None => None,
         };
 
+        // A close during a slow launch must not leave a new pane attached to
+        // an already-ended run. Serialize just this run's launch/report close.
+        let lifecycle = self.run_lifecycle_lock(&run.id);
+        let _launching = lifecycle.lock().await;
+        if self.require_run(&run.id).await?.status.is_terminal() {
+            if let Some((_, plan)) = &sandboxed { Box::pin(crate::openshell::discard(plan)).await; }
+            return Err(FactoryError::DispatchSuperseded("the run ended before its session was launched".into()));
+        }
         let started = runtime
             .start(&StartRequest {
                 id: run.id.clone(),
@@ -3421,6 +3434,9 @@ impl Engine {
         // that spent tokens coming up -- is not this run's (#117). Never a
         // `?`: a runtime with no usage to give must not fail the run.
         Box::pin(self.snapshot_usage(&run, factory_core::usage::SnapshotPoint::Dispatch)).await;
+        drop(_launching);
+        let current = self.require_run(&run.id).await?;
+        if current.status.is_terminal() { return Ok(current); }
 
         // A sandboxed run was handed its prompt at launch.
         if sandboxed.is_none() {
@@ -3532,40 +3548,31 @@ impl Engine {
     /// function refuses to have: it is checked once, here, and every path out
     /// of it either returns the scope path unchanged or a worktree that
     /// `git worktree add` actually made (`Workspace::Fresh`) or that a
-    /// previous run already made and `--continue` (`#178`) is reusing
+    /// previous run already made and the task lifetime (`#178`) is reusing
     /// (`Workspace::Reuse`). There is no other path.
     async fn place_run(&self, task: &Task, run: Run, scope_path: &Path, workspace: Workspace) -> Result<(PathBuf, Run)> {
         if !task.worktree {
             return Ok((scope_path.to_path_buf(), run));
         }
-        if let Workspace::Reuse { path, branch } = workspace {
-            // Already confirmed still registered by `resolve_continue` --
-            // nothing here runs `git worktree add` again, and nothing resets
-            // it: a bench reset on a tree an agent is about to pick back up
-            // would wipe exactly the work `--continue` exists to save.
-            let run = self
-                .store
-                .update_run(
-                    &run.id,
-                    &RunPatch {
-                        worktree_path: Some(path.display().to_string()),
-                        worktree_branch: Some(branch.clone()),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            self.bus.publish(Event::RunUpdated { run: run.clone() });
-            self.entry(
-                &run.task_id,
-                TaskEntry::new(
-                    "daemon",
-                    "worktree",
-                    format!("resuming in {} on {branch}", path.display()),
-                )
-                .in_run(&run.id),
-            )
-            .await;
-            return Ok((path, run));
+        // A fresh harness conversation does not discard the task's files.
+        // Bench attempts remain explicitly run-scoped and reset only on creation.
+        let previous = match workspace {
+            Workspace::Reuse { path, branch } => Some((path, branch)),
+            Workspace::Fresh if task.bench_origin.is_none() => {
+                let mut previous = None;
+                for attempt in self.store.runs(&task.id, u32::MAX).await?.into_iter().filter(|attempt| attempt.id != run.id) {
+                    if let (Some(path), Some(branch)) = (attempt.worktree_path, attempt.worktree_branch) {
+                        if Path::new(&path).exists() && crate::resume::on_branch(Path::new(&path), &branch).await {
+                            previous = Some((PathBuf::from(path), branch)); break;
+                        }
+                    }
+                }
+                previous
+            },
+            Workspace::Fresh => None,
+        };
+        if let Some((path, _)) = &previous {
+            self.require_workspace_quiet(&task.id, path, Some(&run.id)).await?;
         }
         let branch = worktree::branch_name(&task.id, &task.title, run.attempt);
         let dir = self.factory_snapshot().worktrees_dir().join(&run.id);
@@ -3577,9 +3584,19 @@ impl Engine {
                 .and_then(|origin| origin.workspace.as_ref())
                 .map(|workspace| workspace.base_ref.clone()),
         };
-        worktree::create(scope_path, &dir, &branch, base.as_deref())
-            .await
-            .map_err(|e| FactoryError::adapter("git", e))?;
+        let assignment = crate::assignments::AssignmentWorkspace {
+            spec: factory_kernel::WorkspaceSpec {
+                task_id: task.id.clone(),
+                workflow_run_id: task.workflow_origin.as_ref().map(|origin| origin.workflow_run_id.clone()),
+                lifetime: if task.bench_origin.is_some() { factory_kernel::WorkspaceLifetime::Run } else { factory_kernel::WorkspaceLifetime::Task },
+            },
+            candidate: dir, branch, base, previous,
+        };
+        let (placed, reused) = assignment.provision(&self.workspaces, scope_path).await
+            .map_err(|e| FactoryError::adapter("workspace", e))?;
+        if reused { self.require_workspace_quiet(&task.id, &placed.path, Some(&run.id)).await?; }
+        let dir = placed.path;
+        let branch = placed.branch;
         let run = self
             .store
             .update_run(
@@ -3597,7 +3614,7 @@ impl Engine {
             TaskEntry::new(
                 "daemon",
                 "worktree",
-                format!("working in {} on {branch}", dir.display()),
+                format!("{} in {} on {branch}", if reused { "reusing task workspace" } else { "working" }, dir.display()),
             )
             .in_run(&run.id),
         )
@@ -3611,6 +3628,7 @@ impl Engine {
         // settle the attempt `skipped` rather than `error`, without ever
         // dispatching the agent.
         if let Some(origin) = &task.bench_origin {
+            if reused { return Ok((dir, run)); }
             if let Some(reset) = self.bench_case_reset(origin).await {
                 if let Err(detail) = self.run_bench_reset(&dir, &reset).await {
                     return Err(FactoryError::BadRequest(format!("reset failed: {detail}")));
@@ -4013,6 +4031,11 @@ impl Engine {
         patch: RunPatch,
         _why: &str,
     ) -> Result<Run> {
+        let lifecycle = self.run_lifecycle_lock(run_id);
+        let _closing = lifecycle.lock().await;
+        if self.require_run(run_id).await?.status.is_terminal() {
+            return Err(FactoryError::BadRequest("the run already ended".into()));
+        }
         let ended_at = Utc::now();
         if status == RunStatus::Done {
             let mut candidate = self.require_run(run_id).await?;
@@ -4053,6 +4076,12 @@ impl Engine {
                 return Err(FactoryError::BadRequest("the run changed while publishing artifacts; completion was not recorded".into()));
             }
             self.close_session(&candidate).await;
+        }
+        if status != RunStatus::Done {
+            // A cancel may have read the row before its slow runtime.start.
+            // Close the current session, not that earlier session-less copy.
+            let candidate = self.require_run(run_id).await?;
+            if candidate.session.is_some() { self.close_session(&candidate).await; }
         }
         // `#178`: what `token` is about to lose to `clear_token` below,
         // carried forward as a digest (`spent_token_sha256`) -- never the
@@ -4131,6 +4160,7 @@ impl Engine {
         }
         self.mirror_to_task(&run).await;
         self.settle_retry(&run).await;
+        self.sweep_workspaces().await;
         if status != RunStatus::Done {
             if let Ok(Some(task)) = self.store.get(&run.task_id).await {
                 if let Some(subject) = task.labels.get(crate::verification::REVIEW_RUN_LABEL) {
@@ -4142,6 +4172,15 @@ impl Engine {
     }
 
     // -- max_sessions: releasing a slot (#179) ------------------------------
+
+    fn run_lifecycle_lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.run_lifecycle_locks.lock().expect("run lifecycle mutex");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(id).and_then(std::sync::Weak::upgrade) { return lock; }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(id.to_string(), Arc::downgrade(&lock));
+        lock
+    }
 
     /// A run just stopped using a slot: send `(scope, agent)` to the capacity
     /// worker so whatever is waiting on it wakes right away. `&self`
@@ -4496,6 +4535,7 @@ impl Engine {
         let Ok(run) = self.require_run(run_id).await else {
             return;
         };
+        if run.status.is_terminal() { return; }
         self.close_session(&run).await;
         self.entry(
             &run.task_id,
@@ -8566,11 +8606,12 @@ mod tests {
         struct RecordingRuntime {
             status: Mutex<RuntimeStatus>,
             starts: Mutex<Vec<StartRequest>>,
+            launch_pause: Mutex<Option<Arc<tokio::sync::Notify>>>,
         }
 
         impl RecordingRuntime {
             fn new(status: RuntimeStatus) -> Self {
-                Self { status: Mutex::new(status), starts: Mutex::new(Vec::new()) }
+                Self { status: Mutex::new(status), starts: Mutex::new(Vec::new()), launch_pause: Mutex::new(None) }
             }
         }
 
@@ -8581,6 +8622,8 @@ mod tests {
             }
             async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
                 self.starts.lock().unwrap().push(req.clone());
+                let pause = self.launch_pause.lock().unwrap().clone();
+                if let Some(pause) = pause { pause.notified().await; }
                 Ok(SessionRef { runtime: "stub-run".into(), handle: format!("stub-{}", req.id), meta: Default::default() })
             }
             async fn submit(&self, _session: &SessionRef, _text: &str) -> Result<()> {
@@ -8783,6 +8826,140 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn workspace_lifetime_keeps_failed_attempt_files_for_fresh_retry_and_releases_on_close() {
+            let scope_dir = git_scope_dir("workspace-task-lifetime").await;
+            let (engine, _) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, true).await;
+            let first = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            let path = PathBuf::from(first.worktree_path.as_ref().unwrap());
+            std::fs::write(path.join("unfinished"), "keep across fresh sessions").unwrap();
+            engine.fail_run(&first.id, FailKind::AckTimeout, "outage").await;
+            assert!(path.exists(), "a failed attempt is not a closed task");
+            let second = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            assert_eq!(second.worktree_path, first.worktree_path);
+            assert_eq!(second.worktree_branch, first.worktree_branch);
+            assert!(second.resumed_session.is_none());
+            assert_eq!(std::fs::read_to_string(path.join("unfinished")).unwrap(), "keep across fresh sessions");
+            engine.fail_run(&second.id, FailKind::AckTimeout, "outage again").await;
+            // Remove only this fixture's ownership ledger to emulate an older
+            // daemon. Recovery proves ownership from the recorded run path.
+            std::fs::remove_file(engine.factory_snapshot().worktrees_dir().join(".workspace-owner.json")).unwrap();
+            engine.recover_workspaces().await;
+            assert_eq!(engine.workspaces.records().await.unwrap().len(), 1);
+            assert!(path.exists(), "recovering a failed task does not close it");
+            let response = engine.handle_request(Request::TaskClose {
+                id: task.id.clone(), reason: factory_core::task::CloseReason::NotPlanned,
+                duplicate_of: None, note: Some("test close".into()),
+            }).await;
+            assert!(!matches!(response, Response::Error { .. }), "{response:?}");
+            assert!(path.exists(), "untracked work is retained even after close");
+            assert!(engine.store.entries(&task.id, 100).await.unwrap().iter().any(|entry| entry.kind == "workspace_retained"));
+            // Simulate the person moving their unfinished data out of the tree.
+            let saved = scope_dir.join("saved-work");
+            std::fs::rename(path.join("unfinished"), &saved).unwrap();
+            engine.sweep_workspaces().await;
+            assert!(!path.exists());
+            assert_eq!(std::fs::read_to_string(saved).unwrap(), "keep across fresh sessions");
+            assert!(engine.store.entries(&task.id, 100).await.unwrap().iter().any(|entry| entry.kind == "workspace_released"));
+            let root = engine.factory_snapshot().root;
+            std::fs::remove_dir_all(root).ok();
+            std::fs::remove_dir_all(scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn workspace_cancel_during_slow_launch_cannot_attach_a_pane_to_a_terminal_run() {
+            let scope_dir = temp_dir("workspace-cancel-launch");
+            let (engine, runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            let pause = Arc::new(tokio::sync::Notify::new());
+            *runtime.launch_pause.lock().unwrap() = Some(pause.clone());
+            let launched = { let engine = engine.clone(); let id = task.id.clone();
+                tokio::spawn(async move { engine.dispatch(&id, Trigger::Manual, Due::now(), None).await }) };
+            for _ in 0..100 {
+                if !runtime.starts.lock().unwrap().is_empty() { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(runtime.starts.lock().unwrap().len(), 1);
+            let cancelled = { let engine = engine.clone(); let id = task.id.clone();
+                tokio::spawn(async move { engine.cancel_task_run(&id, None, FailKind::CancelledByPerson).await }) };
+            tokio::task::yield_now().await;
+            pause.notify_one();
+            launched.await.unwrap().unwrap();
+            let cancelled = cancelled.await.unwrap().unwrap();
+            assert_eq!(cancelled.status, RunStatus::Cancelled);
+            let final_run = engine.require_run(&cancelled.id).await.unwrap();
+            assert!(final_run.last_session.is_some(), "the session that came up late is still recorded for safety checks");
+            assert!(final_run.session.is_none(), "no late launch reattaches a pane after completion");
+            engine.fail_run(&cancelled.id, FailKind::DispatchFailed, "late submit failed").await;
+            assert_eq!(engine.require_run(&cancelled.id).await.unwrap().status, RunStatus::Cancelled);
+            std::fs::remove_dir_all(scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn workspace_sweep_racing_new_admission_never_removes_its_live_tree() {
+            let scope_dir = git_scope_dir("workspace-admission-sweep").await;
+            let (engine, _) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, true).await;
+            let previous = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            // A crash between closing intent and sending release leaves this
+            // clean tree eligible for the next sweep, while manual retry races.
+            engine.store.update(&task.id, &TaskPatch { status: Some(TaskStatus::Done), ..Default::default() }).await.unwrap();
+            let (started, ()) = tokio::join!(engine.dispatch(&task.id, Trigger::Manual, Due::now(), None), engine.sweep_workspaces());
+            let started = started.unwrap();
+            let path = PathBuf::from(started.worktree_path.unwrap());
+            assert!(path.exists());
+            assert!(worktree::is_registered(&scope_dir, &path).await);
+            assert!(!engine.require_run(&started.id).await.unwrap().status.is_terminal());
+            assert!(previous.worktree_path.is_some());
+            engine.cancel_task_run(&task.id, None, FailKind::CancelledByPerson).await.unwrap();
+            std::fs::remove_dir_all(engine.factory_snapshot().root).ok();
+            std::fs::remove_dir_all(scope_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn workspace_terminal_workflow_waits_for_blocked_sibling_and_confirmed_process_exit() {
+            let scope_dir = git_scope_dir("workspace-blocked-sibling").await;
+            let (engine, runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let draft = serde_yaml_ng::from_str::<factory_core::workflow::WorkflowDraft>(r#"
+name: workspace siblings
+scope: demo
+nodes:
+  - id: a
+    task: {title: A, instructions: a, scope: demo, agent: recording, runtime: stub-run, worktree: true}
+  - id: b
+    task: {title: B, instructions: b, scope: demo, agent: recording, runtime: stub-run, worktree: true}
+edges: []
+"#).unwrap();
+            let definition = engine.create_workflow(draft).await.unwrap();
+            let workflow = engine.start_workflow(&definition.id, Default::default(), &crate::access::Caller::Owner).await.unwrap();
+            let (a, first) = wait_node_attempt(&engine, "a", 1).await;
+            let (b, sibling) = wait_node_attempt(&engine, "b", 1).await;
+            let first_path = PathBuf::from(first.worktree_path.clone().unwrap());
+            let sibling_path = PathBuf::from(sibling.worktree_path.clone().unwrap());
+            engine.report(&b.id, TaskReport {
+                status: Some(RunStatus::Blocked), result: None, token: sibling.token.clone(),
+                artifacts: Vec::new(), message: Some("need a person".into()), send_to: None, error: None,
+            }).await.unwrap();
+            engine.fail_run(&first.id, FailKind::AckTimeout, "upstream outage").await;
+            engine.sync_workflow_for_task(&a.id).await;
+            assert!(engine.workflow_run(&workflow.id).await.unwrap().status.is_terminal());
+            engine.sweep_workspaces().await;
+            assert!(first_path.exists() && sibling_path.exists(), "terminal workflow must keep all trees while a sibling waits on a person");
+            // Even a terminal report does not prove that a failed stop worked.
+            *runtime.status.lock().unwrap() = RuntimeStatus::Working;
+            engine.cancel_task_run(&b.id, None, FailKind::CancelledByPerson).await.unwrap();
+            engine.sync_workflow_for_task(&b.id).await;
+            engine.sweep_workspaces().await;
+            assert!(first_path.exists() && sibling_path.exists());
+            *runtime.status.lock().unwrap() = RuntimeStatus::Gone;
+            engine.sweep_workspaces().await;
+            assert!(!first_path.exists() && !sibling_path.exists());
+            let root = engine.factory_snapshot().root;
+            std::fs::remove_dir_all(root).ok();
+            std::fs::remove_dir_all(scope_dir).ok();
+        }
+
+        #[tokio::test]
         async fn workflow_feedback_fresh_review_policy_keeps_task_but_not_conversation() {
             workflow_feedback_round(true).await;
         }
@@ -8844,7 +9021,7 @@ edges: [{id: next, from: implement, to: review}]
             assert!(matches!(duplicate, FactoryError::DispatchSuperseded(_)), "a settled feedback round cannot be replayed");
             assert_eq!(engine.store.runs(&implement.id, 50).await.unwrap().len(), 2);
             if fresh_review {
-                assert_ne!(review_second.worktree_path, review_first.worktree_path);
+                assert_eq!(review_second.worktree_path, review_first.worktree_path, "fresh conversation, same task files");
                 assert!(review_second.resumed_session.is_none());
                 assert!(continue_fallback_reasons(&engine, &review.id).await.iter().any(|reason| reason.contains("session: fresh")));
             } else {
@@ -9038,7 +9215,7 @@ edges: [{id: next, from: implement, to: review}]
             let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
 
             assert!(run.resumed_session.is_none());
-            assert_ne!(run.worktree_path, prev.worktree_path, "a fresh worktree, not one reused with a guessed branch");
+            assert_eq!(run.worktree_path, prev.worktree_path, "the durable owner receipt can prove the workspace without guessing its branch");
             let reasons = continue_fallback_reasons(&engine, &task.id).await;
             assert!(reasons.iter().any(|r| r.contains("worktree branch was not recorded")), "{reasons:?}");
             std::fs::remove_dir_all(&scope_dir).ok();

@@ -47,7 +47,10 @@ mod tests {
     use factory_plugins::{Registry, SqliteStore};
     use std::path::PathBuf;
 
-    struct QuietRuntime;
+    #[derive(Default)]
+    struct QuietRuntime {
+        stopped: std::sync::Mutex<std::collections::HashSet<String>>,
+    }
     #[async_trait::async_trait]
     impl AgentRuntime for QuietRuntime {
         fn name(&self) -> &str {
@@ -63,8 +66,10 @@ mod tests {
         async fn submit(&self, _: &SessionRef, _: &str) -> Result<()> {
             Ok(())
         }
-        async fn status(&self, _: &SessionRef) -> Result<factory_core::adapter::RuntimeStatus> {
-            Ok(factory_core::adapter::RuntimeStatus::Working)
+        async fn status(&self, session: &SessionRef) -> Result<factory_core::adapter::RuntimeStatus> {
+            Ok(if self.stopped.lock().unwrap().contains(&session.handle) {
+                factory_core::adapter::RuntimeStatus::Gone
+            } else { factory_core::adapter::RuntimeStatus::Working })
         }
         async fn send_text(&self, _: &SessionRef, _: &str) -> Result<()> {
             Ok(())
@@ -75,7 +80,8 @@ mod tests {
         async fn read(&self, _: &SessionRef, _: u32) -> Result<String> {
             Ok(String::new())
         }
-        async fn stop(&self, _: &SessionRef) -> Result<()> {
+        async fn stop(&self, session: &SessionRef) -> Result<()> {
+            self.stopped.lock().unwrap().insert(session.handle.clone());
             Ok(())
         }
     }
@@ -189,7 +195,7 @@ mod tests {
             plugins_dir: None,
         };
         let mut registry = Registry::with_builtins();
-        registry.add_runtime(Arc::new(QuietRuntime), "test");
+        registry.add_runtime(Arc::new(QuietRuntime::default()), "test");
         Arc::new(Engine::new(
             Factory { root, config },
             registry,
@@ -241,7 +247,7 @@ mod tests {
             plugins_dir: None,
         };
         let mut registry = Registry::with_builtins();
-        registry.add_runtime(Arc::new(QuietRuntime), "test");
+        registry.add_runtime(Arc::new(QuietRuntime::default()), "test");
         Arc::new(Engine::new(
             Factory { root, config },
             registry,
@@ -254,13 +260,13 @@ mod tests {
     async fn wait_for_worktree_run(engine: &Engine, task_id: &str) -> factory_core::Run {
         for _ in 0..200 {
             if let Some(run) = engine.store.active_run(task_id).await.unwrap() {
-                if run.worktree_path.is_some() && run.token.is_some() {
+                if run.worktree_path.is_some() && run.token.is_some() && run.session.is_some() {
                     return run;
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        panic!("task {task_id} never acquired a worktree");
+        panic!("task {task_id} never acquired a worktree; task {:?}, runs {:?}", engine.require(task_id).await.unwrap(), engine.store.runs(task_id, 10).await.unwrap());
     }
 
     async fn git_ok(dir: &Path, args: &[&str]) {
@@ -293,7 +299,7 @@ mod tests {
         config.daemon.power_assertion = false;
         config.validate().unwrap();
         let mut registry = Registry::with_builtins();
-        registry.add_runtime(Arc::new(QuietRuntime), "test");
+        registry.add_runtime(Arc::new(QuietRuntime::default()), "test");
         Arc::new(Engine::new(
             Factory { root, config },
             registry,
@@ -1324,7 +1330,7 @@ mod tests {
                 plugins_dir: None,
             };
             let mut registry = Registry::with_builtins();
-            registry.add_runtime(Arc::new(QuietRuntime), "test");
+            registry.add_runtime(Arc::new(QuietRuntime::default()), "test");
             Arc::new(
                 Engine::new(
                     Factory {
@@ -2096,11 +2102,22 @@ mod tests {
         let integration = finished.integration.unwrap();
         assert_eq!(integration.merged_nodes, vec!["foundation", "surface"]);
         assert!(integration.checks_passed);
-        assert!(integration.cleanup_complete);
+        assert!(!integration.cleanup_complete, "a local-only integration has not backed up its commits");
+        assert!(integration_path.exists());
+        assert!(foundation_path.exists());
+        assert!(surface_path.exists());
+        assert_eq!(rework_path, surface_path, "rework keeps the same task workspace");
+        let remote = root.join("backup.git");
+        std::fs::create_dir(&remote).unwrap();
+        git_ok(&remote, &["init", "-q", "--bare"]).await;
+        git_ok(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]).await;
+        git_ok(&integration_path, &["push", "-q", "-u", "origin", &integration.branch]).await;
+        engine.sweep_workspaces().await;
+        assert!(engine.workflow_run(&workflow.id).await.unwrap().integration.unwrap().cleanup_complete,
+            "retained receipts: {:?}", engine.workspaces.records().await.unwrap());
         assert!(!integration_path.exists());
         assert!(!foundation_path.exists());
         assert!(!surface_path.exists());
-        assert!(!rework_path.exists());
         assert!(engine
             .require(&parent.id)
             .await
@@ -2548,8 +2565,14 @@ impl Engine {
             let integration_dir = factory
                 .worktrees_dir()
                 .join(format!("integration-{}", run.id));
-            worktree::create(&scope_path, &integration_dir, &branch, Some(&base_ref))
-                .await
+            crate::assignments::AssignmentWorkspace {
+                spec: factory_kernel::WorkspaceSpec {
+                    task_id: item.id.clone(), workflow_run_id: Some(run.id.clone()),
+                    lifetime: factory_kernel::WorkspaceLifetime::Task,
+                },
+                candidate: integration_dir.clone(), branch: branch.clone(),
+                base: Some(base_ref.clone()), previous: None,
+            }.provision(&self.workspaces, &scope_path).await
                 .map_err(|error| FactoryError::adapter("git", error))?;
             run.integration = Some(WorkflowIntegration {
                 parent_task_id: item.id.clone(),
@@ -2579,12 +2602,8 @@ impl Engine {
 
         if let Err(error) = self.workflows.put_definition(&definition).await {
             if let Some(integration) = &run.integration {
-                let _ = worktree::remove(
-                    &scope_path,
-                    Path::new(&integration.worktree_path),
-                    &integration.branch,
-                )
-                .await;
+                let _ = crate::assignments::release(&self.workspaces,
+                    &[PathBuf::from(&integration.worktree_path)]).await;
             }
             return Err(error);
         }
@@ -3209,59 +3228,6 @@ impl Engine {
         Ok(Some(url))
     }
 
-    async fn cleanup_integration_worktrees(&self, run: &WorkflowRun) -> Result<()> {
-        let Some(integration) = run.integration.as_ref() else {
-            return Ok(());
-        };
-        let factory = self.factory_snapshot();
-        let scope_path = factory.scope_path(&run.scope)?;
-        let mut workspaces = std::collections::BTreeSet::new();
-        for node in &run.nodes {
-            let Some(task_id) = &node.task_id else {
-                continue;
-            };
-            for attempt in self.store.runs(task_id, u32::MAX).await? {
-                if let (Some(path), Some(branch)) = (attempt.worktree_path, attempt.worktree_branch)
-                {
-                    workspaces.insert((path, branch));
-                }
-            }
-        }
-        // Preflight every directory before removing any of them.  Cleanup is
-        // all-or-nothing with respect to uncommitted work: a late edit in
-        // one child, or a check that modified the combined tree, preserves
-        // every workspace for inspection instead of deleting some first.
-        for path in workspaces
-            .iter()
-            .map(|(path, _)| Path::new(path))
-            .chain(std::iter::once(Path::new(&integration.worktree_path)))
-        {
-            if path.exists() {
-                if let Some(status) = worktree::dirty(path)
-                    .await
-                    .map_err(|error| FactoryError::adapter("git cleanup", error))?
-                {
-                    return Err(FactoryError::adapter(
-                        "git cleanup",
-                        format!("refusing to remove dirty worktree {}:\n{status}", path.display()),
-                    ));
-                }
-            }
-        }
-        for (path, branch) in workspaces {
-            worktree::remove(&scope_path, Path::new(&path), &branch)
-                .await
-                .map_err(|error| FactoryError::adapter("git cleanup", error))?;
-        }
-        worktree::remove(
-            &scope_path,
-            Path::new(&integration.worktree_path),
-            &integration.branch,
-        )
-        .await
-        .map_err(|error| FactoryError::adapter("git cleanup", error))
-    }
-
     async fn handoff_integration(&self, run: &mut WorkflowRun) -> Result<()> {
         let Some(integration) = run.integration.as_ref() else {
             return Ok(());
@@ -3285,10 +3251,8 @@ impl Engine {
         // interrupted, without opening a duplicate.
         run.updated_at = Utc::now();
         self.workflows.put_run(run).await?;
-        self.cleanup_integration_worktrees(run).await?;
-        if let Some(current) = run.integration.as_mut() {
-            current.cleanup_complete = true;
-        }
+        // Release happens only after the workflow outcome is durable and all
+        // siblings have stopped. A refused cleanup never fails a valid handoff.
         let result = match pr_url {
             Some(url) => format!("Implemented in {url}"),
             None => format!("Integrated on {}", run.integration.as_ref().unwrap().branch),
@@ -3396,6 +3360,7 @@ impl Engine {
             run.updated_at = Utc::now();
             self.workflows.put_run(&run).await?;
             self.bus.publish(Event::WorkflowRunUpdated { run });
+            self.sweep_workspaces().await;
             return Ok(());
         }
 
@@ -3512,6 +3477,7 @@ impl Engine {
             self.close_workflow_waits(&run).await?;
             self.workflows.put_run(&run).await?;
             self.bus.publish(Event::WorkflowRunUpdated { run });
+            self.sweep_workspaces().await;
             return Ok(());
         }
 
@@ -4080,6 +4046,7 @@ impl Engine {
                 "could not advance workflow: {error}"
             );
         }
+        self.sweep_workspaces().await;
     }
 
     /// Mirror dispatch progress without recursively advancing the graph. The

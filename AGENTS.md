@@ -99,7 +99,7 @@ directory and removes the whole class of problem:
     cd ../worktrees/some-branch-name
 
 Factory itself now works this way for the tasks it dispatches, for exactly the
-same reason -- one worktree per run, made before the agent starts. If it is
+same reason -- one worktree per task, made before its first run starts. If it is
 right for an agent Factory drives, it is right for one writing Factory.
 
 When the branch is merged, `git worktree remove` it. A worktree left behind is

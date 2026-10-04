@@ -747,6 +747,8 @@ impl Engine {
             let Ok(scope_path) = factory.scope_path(&case.scope) else { continue };
             if let Err(e) = worktree::remove(&scope_path, Path::new(path), branch).await {
                 tracing::warn!(bench_run = run_id, attempt = attempt.id, "could not remove worktree: {e}");
+            } else {
+                let _ = crate::assignments::release(&self.workspaces, &[std::path::PathBuf::from(path)]).await;
             }
         }
         Ok(run)
