@@ -36,8 +36,8 @@
 //!
 //! [`Engine::scenarios_report`] and [`Engine::scenario_whatif`] are fully
 //! read-only. [`Engine::scenario_promote`] writes ordinary tasks, through
-//! the exact `Engine::create` path `Request::TaskCreate`/`policy_remediate`
-//! themselves use -- never a scope's own `.factory/config.yaml`, never a
+//! the L6 → L5 → L4 command chain and the same L4-owned creation service as
+//! `Request::TaskCreate` -- never a scope's own `.factory/config.yaml`, never a
 //! scenario file, never a real policy catalogue. A scenario is data a
 //! person authored and Factory only ever reads; turning one into real work
 //! is always this one explicit, owner/agent-driven action (design §8).
@@ -71,6 +71,7 @@ use factory_core::protocol::{
     SkippedControl, TriggeredSignpost,
 };
 use factory_core::scenario::{self, DriverId, Scenario};
+#[cfg(test)]
 use factory_core::task::NewTask;
 use factory_kernel::{L6, TaskInventoryFact};
 use crate::facts::{Facts, TaskInventoryQuery};
@@ -774,51 +775,25 @@ impl Engine {
         let scenario_statuses = policy::evaluate(&scenario_applied, &evidence, now);
         let delta = scenario::policy_delta(&baseline_statuses, &scenario_statuses);
 
-        let existing_tasks = Facts::<L6>::new(self)
-            .get::<TaskInventoryFact>(&TaskInventoryQuery::Exact(scope_obj.name.clone()))
+        let observer = crate::commands::CreationObserver(self.bus.clone());
+        let receipt = crate::commands::direction(self, &observer)
+            .promote(&s.name, &scope_obj.name, agent, &scenario_applied, &scenario_statuses, &delta)
             .await?;
-
         let mut created = Vec::new();
-        let mut skipped = Vec::new();
-        for control in &delta.newly_open {
-            let label = control.to_string();
-            if let Some(existing) = existing_tasks
-                .iter()
-                .find(|t| t.open && t.labels.get("policy").map(String::as_str) == Some(label.as_str()))
-            {
-                skipped.push(SkippedControl { control: control.clone(), existing_task: existing.id.clone() });
-                continue;
-            }
-
-            let applied_entry = scenario_applied
-                .iter()
-                .find(|a| &a.control == control)
-                .expect("a newly_open control is always in the scenario's own applied set");
-            let status_entry = scenario_statuses
-                .iter()
-                .find(|status| &status.control == control)
-                .expect("a newly_open control is always in the scenario's own evaluated statuses");
-
-            let mut labels = BTreeMap::new();
-            labels.insert("policy".to_string(), label);
-            labels.insert("scenario".to_string(), s.name.clone());
-            let new_task = NewTask {
-                title: format!("Prepare {control} for scenario {}: {}", s.name, applied_entry.title),
-                instructions: policy::remediation_instructions(control, applied_entry.remediation.as_deref(), &status_entry.status, &applied_entry.evidence),
-                scope: Some(scope_obj.name.clone()),
-                agent: agent.clone(),
-                labels,
-                ..Default::default()
-            };
-            let task = self.create(new_task).await?;
-            created.push(PromotedControl { control: control.clone(), task });
+        for entry in receipt.created {
+            created.push(PromotedControl {
+                control: entry.control,
+                task: crate::commands::task_snapshot(self, entry.task.id).await?,
+            });
         }
-
         Ok(ScenarioPromoteResult {
-            scenario: s.name,
-            scope: scope_obj.name,
+            scenario: receipt.scenario,
+            scope: receipt.scope,
             created,
-            skipped,
+            skipped: receipt.skipped.into_iter().map(|entry| SkippedControl {
+                control: entry.control,
+                existing_task: entry.existing_task,
+            }).collect(),
         })
     }
 

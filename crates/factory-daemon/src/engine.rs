@@ -2233,42 +2233,8 @@ impl Engine {
     /// and the adapter behind it follows from the config. An adapter name
     /// still works for a scope that declares nothing, or for a one-off with
     /// `--agent claude-code`.
-    pub fn resolve_agent(
-        &self,
-        scope_name: &str,
-        name: &str,
-    ) -> Result<(String, String, Option<ScopeAgent>)> {
-        let factory = self.factory_snapshot();
-        let scope = factory.scope(scope_name)?;
-        let declared_here = scope.agents_with(&factory.config.daemon.foreman);
-        if let Some(declared) = declared_here.iter().find(|a| a.name() == name).cloned() {
-            // The name resolves; the adapter behind it still has to exist.
-            self.registry.agent(&declared.harness)?;
-            return Ok((
-                declared.name(),
-                declared.harness.clone(),
-                Some(declared),
-            ));
-        }
-        if self.registry.agent(name).is_ok() {
-            return Ok((name.to_string(), name.to_string(), None));
-        }
-
-        let declared: Vec<String> = declared_here.iter().map(|a| a.name()).collect();
-        let adapters: Vec<String> = self
-            .registry
-            .list()
-            .adapters
-            .into_iter()
-            .filter(|a| a.kind == "agent")
-            .map(|a| a.name)
-            .collect();
-        Err(FactoryError::BadRequest(format!(
-            "scope {scope_name:?} has no agent named {name:?}. It declares: {}. \
-             Any adapter also works: {}.",
-            if declared.is_empty() { "none".into() } else { declared.join(", ") },
-            adapters.join(", "),
-        )))
+    pub fn resolve_agent(&self, scope_name: &str, name: &str) -> Result<(String, String, Option<ScopeAgent>)> {
+        crate::commands::agents(self).resolve_agent(scope_name, name)
     }
 
     /// Edit a task. Anything that has to stay true of a task is checked here
@@ -2551,115 +2517,19 @@ impl Engine {
 
     async fn create_task(
         &self,
-        mut new: NewTask,
+        new: NewTask,
         workflow_origin: Option<WorkflowOrigin>,
         bench_origin: Option<factory_core::bench::BenchOrigin>,
         id: Option<String>,
         intake: Option<factory_core::intake::Intake>,
         internal_review: bool,
     ) -> Result<Task> {
-        let factory = self.factory_snapshot();
-        if new.after.is_some() && new.schedule.is_some() {
-            return Err(FactoryError::BadRequest("after and schedule are exclusive triggers".into()));
-        }
-        if workflow_origin.is_none() && new.after.as_ref().is_some_and(Vec::is_empty) {
-            return Err(FactoryError::BadRequest("after needs at least one upstream task".into()));
-        }
-        if workflow_origin.is_none() {
-            if let Some(after) = &new.after {
-                self.validate_after(id.as_deref(), after).await?;
-            }
-        }
-        if new.title.trim().is_empty() {
-            return Err(FactoryError::BadRequest("a task needs a title".into()));
-        }
-        if new.estimate_seconds == Some(0) {
-            return Err(FactoryError::BadRequest(
-                "a task estimate must be at least one second".into(),
-            ));
-        }
-        if !internal_review
-            && (new.labels.contains_key(crate::verification::REVIEW_RUN_LABEL)
-                || new.labels.contains_key(crate::verification::REVIEW_STEP_LABEL)
-                || new.labels.contains_key(crate::verification::REVIEW_DIGEST_LABEL))
-        {
-            return Err(FactoryError::BadRequest(
-                "factory.review_* labels are reserved for daemon-created review tasks".into(),
-            ));
-        }
-        if let Some(estimate) = &new.estimate {
-            estimate.validate().map_err(FactoryError::BadRequest)?;
-            new.estimate_seconds = Some(estimate.time.expected);
-        } else if let Some(seconds) = new.estimate_seconds {
-            new.estimate = Some(factory_core::task::Estimate::point(seconds));
-        }
-        // A retry policy governs what happens after a *scheduled* run fails
-        // (`Engine::settle_retry` never looks at it for a task with no
-        // `schedule`) -- refused here, at creation, rather than accepted and
-        // silently ignored until whoever set it notices nothing ever
-        // retries.
-        if new.retry.is_some() && new.schedule.is_none() {
-            return Err(FactoryError::BadRequest(
-                "a retry policy only means something for a scheduled task; add a schedule too, or drop retry".into(),
-            ));
-        }
-        if let Some(category) = &new.category {
-            factory_core::control_plan::check_category(category).map_err(FactoryError::BadRequest)?;
-        }
-
-        let scope = match new.scope.clone() {
-            Some(s) => s,
-            None => factory
-                .config
-                .scopes
-                .first()
-                .map(|s| s.name.clone())
-                .ok_or_else(|| {
-                    FactoryError::BadRequest("no scope given and the instance declares none".into())
-                })?,
-        };
-        let declared = factory.scope(&scope)?.clone();
-
-        let agent = new
-            .agent
-            .clone()
-            .or_else(|| declared.agent_adapter().map(str::to_string))
-            .unwrap_or_else(|| factory.config.daemon.default_agent.clone());
-        let runtime = new
-            .runtime
-            .clone()
-            .or_else(|| declared.runtime.clone())
-            .unwrap_or_else(|| factory.config.daemon.default_runtime.clone());
-
-        // Refuse now, with the list of what this scope offers, rather than at
-        // dispatch time when whoever asked has stopped watching.
-        let (agent, _adapter, _) = self.resolve_agent(&scope, &agent)?;
-        self.registry.runtime(&runtime)?;
-
-        // The scope's canonical identity, not necessarily what the caller
-        // typed -- `declared` is already resolved through the bare-name
-        // fallback above, and storing its own name keeps a freshly created
-        // task from starting life needing that fallback itself.
-        let mut task = factory_core::adapter::store::task_from_new(new, declared.name.clone(), agent, runtime);
-        if let Some(id) = id { task.id = id; }
-        task.workflow_origin = workflow_origin;
-        task.bench_origin = bench_origin.map(Into::into);
-        if let Some(intake) = intake {
-            task.status = TaskStatus::Intake;
-            task.intake = Some(intake);
-        }
-        if let Some(s) = &task.schedule {
-            task.next_run_at = Some(schedule::next_after(s, Utc::now())?);
-        }
-
-        let task = self.store.create(&task).await?;
-        self.entry(
-            &task.id,
-            TaskEntry::new("daemon", "created", format!("created: {}", task.title)),
-        )
-        .await;
-        self.bus.publish(Event::TaskCreated { task: task.clone() });
-        Ok(task)
+        let observer = crate::commands::CreationObserver(self.bus.clone());
+        let process = crate::commands::process(self, &observer);
+        let receipt = process
+            .create_extended(new, workflow_origin, bench_origin.map(Into::into), id, intake, internal_review)
+            .await?;
+        crate::commands::task_snapshot(self, receipt.id).await
     }
 
     /// Human-readable dependencies that are not successfully complete.
@@ -5458,6 +5328,67 @@ mod tests {
             PathBuf::from("factory"),
             Vec::new(),
         ))
+    }
+
+    #[tokio::test]
+    async fn process_command_persists_journal_and_events_then_people_reads_a_live_task_fact() {
+        use factory_process::creation::TaskCommands;
+        use factory_kernel::{People, TaskSnapshotFact};
+        let engine = test_engine(PathBuf::from("/tmp/command-demo"));
+        let observer = crate::commands::CreationObserver(engine.bus.clone());
+        let mut events = engine.bus.subscribe();
+        let service = crate::commands::process(&engine, &observer);
+        let receipt = service.submit(NewTask {
+            title: "Owned creation".into(),
+            instructions: "Exact payload".into(),
+            scope: Some("command-demo".into()),
+            agent: Some("shell".into()),
+            estimate_seconds: Some(23),
+            labels: std::collections::BTreeMap::from([("quality".into(), "demo/reliability/restore".into())]),
+            ..Default::default()
+        }).await.unwrap();
+        let task = engine.store.get(&receipt.id).await.unwrap().unwrap();
+        assert_eq!(task.scope, "demo");
+        assert_eq!(task.estimate.as_ref().unwrap().time.expected, 23);
+        let journal = engine.store.entries(&task.id, 10).await.unwrap();
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].kind, "created");
+        assert_eq!(journal[0].message, "created: Owned creation");
+        assert!(matches!(events.try_recv().unwrap(), Event::TaskEntry { id, .. } if id == task.id));
+        assert!(matches!(events.try_recv().unwrap(), Event::TaskCreated { task: t } if t.id == task.id));
+        let fact = crate::facts::Facts::<People>::new(&engine)
+            .get::<TaskSnapshotFact>(&receipt.id).await.unwrap();
+        assert_eq!(fact.0, serde_json::to_value(&task).unwrap());
+        let updated = engine.store.update(&task.id, &TaskPatch {
+            title: Some("Changed after acknowledgement".into()),
+            status: Some(TaskStatus::Cancelled),
+            ..Default::default()
+        }).await.unwrap();
+        let live = crate::commands::task_snapshot(&engine, receipt.id.clone()).await.unwrap();
+        assert_eq!(serde_json::to_value(live).unwrap(), serde_json::to_value(updated).unwrap());
+        assert!(engine.store.delete(&receipt.id).await.unwrap());
+        assert!(matches!(crate::commands::task_snapshot(&engine, receipt.id.clone()).await,
+            Err(FactoryError::TaskNotFound(id)) if id == receipt.id));
+    }
+
+    #[tokio::test]
+    async fn owned_creation_refuses_invalid_runtime_or_reserved_review_labels_without_persisting() {
+        use factory_process::creation::TaskCommands;
+        let engine = test_engine(PathBuf::from("/tmp/command-demo"));
+        let observer = crate::commands::CreationObserver(engine.bus.clone());
+        let mut events = engine.bus.subscribe();
+        let service = crate::commands::process(&engine, &observer);
+        assert!(service.submit(NewTask {
+            title: "Invalid runtime".into(), agent: Some("shell".into()),
+            runtime: Some("unregistered".into()), ..Default::default()
+        }).await.is_err());
+        assert!(service.submit(NewTask {
+            title: "Reserved".into(),
+            labels: std::collections::BTreeMap::from([(factory_process::creation::REVIEW_RUN_LABEL.into(), "run".into())]),
+            ..Default::default()
+        }).await.is_err());
+        assert!(engine.store.list(&TaskFilter::default()).await.unwrap().is_empty());
+        assert!(events.try_recv().is_err());
     }
 
     fn temp_dir(name: &str) -> PathBuf {

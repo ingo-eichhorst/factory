@@ -12,36 +12,8 @@ use factory_core::workflow::{
 use std::collections::BTreeSet;
 
 impl Engine {
-    pub(crate) async fn validate_after(
-        &self,
-        task_id: Option<&str>,
-        after: &[String],
-    ) -> Result<()> {
-        if after.is_empty() {
-            return Err(FactoryError::BadRequest(
-                "after needs at least one upstream task".into(),
-            ));
-        }
-        let mut pending = after.to_vec();
-        let mut seen = BTreeSet::new();
-        while let Some(id) = pending.pop() {
-            if task_id == Some(id.as_str()) {
-                return Err(FactoryError::BadRequest(
-                    "after must not create a dependency cycle".into(),
-                ));
-            }
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            let parent = self
-                .store
-                .get(&id)
-                .await?
-                .ok_or_else(|| FactoryError::BadRequest(format!("no upstream task {id}")))?;
-            pending.extend(parent.after.into_iter().flatten());
-            pending.extend(parent.depends_on);
-        }
-        Ok(())
+    pub(crate) async fn validate_after(&self,task_id:Option<&str>,after:&[String])->Result<()>{
+        factory_process::creation::validate_after(self.store.as_ref(),task_id,after).await
     }
     pub(crate) async fn waiting_description(&self, task: &Task) -> Result<String> {
         let mut names = Vec::new();

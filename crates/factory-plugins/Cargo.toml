@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 factory-core = { path = "../factory-core" }
+factory-agents = { path = "../factory-agents" }
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

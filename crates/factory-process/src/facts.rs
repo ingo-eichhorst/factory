@@ -24,11 +24,7 @@ pub struct NamedQuery {
     pub names: BTreeSet<String>,
 }
 /// Exact selection never expands a subtree. Members are explicit caller selections.
-pub enum TaskInventoryQuery {
-    All,
-    Exact(String),
-    Members(BTreeSet<String>),
-}
+pub use factory_kernel::TaskInventoryQuery;
 pub struct RecoveryQuery {
     pub scopes: Option<BTreeSet<String>>,
     pub limit: u32,
@@ -154,6 +150,20 @@ impl Provide<factory_kernel::TaskInventoryFact> for Provider<'_> {
                 labels: task.labels,
             })
             .collect())
+    }
+}
+
+#[async_trait]
+impl Provide<factory_kernel::TaskSnapshotFact> for Provider<'_> {
+    type Query = String;
+    type Value = factory_kernel::TaskSnapshotFact;
+    type Error = FactoryError;
+    async fn get(&self, id: &String) -> Result<Self::Value> {
+        let task = self.store.get(id).await?
+            .ok_or_else(|| FactoryError::TaskNotFound(id.clone()))?;
+        Ok(factory_kernel::TaskSnapshotFact(
+            serde_json::to_value(task).map_err(|e| FactoryError::Other(e.into()))?
+        ))
     }
 }
 

@@ -279,8 +279,17 @@ something impossible.
   lower evidence reads use the L5 Facts identity; knowledge and gate evidence
   are same-level calls. L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.
-  L6 still owns authored policy and budget intent. Signposts, remediation,
-  live service isolation remain separate #193 requirements.
+  L6 still owns authored policy and budget intent. Policy remediation and
+  scenario promotion command L5; L5 submits only through its adjacent L4
+  creation port. Quality owns its own refusal/deduplication rules in L5.
+  Both use live inventory facts, not TaskStore or command-response task state.
+  L4 owns full creation validation/persistence/journalling; L3 owns selection
+  and runtime validation behind L4's adjacent port. Commands return ids only.
+  The router hydrates legacy task payloads through People's live L4
+  TaskSnapshotFact, never a level service. The sealed Commands relation allows
+  exactly five adjacent edges; no callback into Engine supplies creation.
+  Signposts, the other command paths and full live service isolation remain
+  separate #193 requirements.
 - Benchmark/dataset/knowledge behavior and the KnowledgeProvider seam belong
   to L5. Core's configuration adapter projects resolved agents into L5's
   `ConfigurationInput`; it must never serialize or debug-print raw arguments.

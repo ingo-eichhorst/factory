@@ -46,8 +46,8 @@
 //!
 //! Nothing here starts, stops or gates any work (design §8).
 //! [`Engine::quality_remediate`] is the one write, an explicit action that
-//! creates an ordinary task through `Engine::create`, the same door
-//! `policy_remediate` and `scenario_promote` use.
+//! commands L4 through L5's remediation service; L6 policy/promotion first
+//! commands that same L5 service. Only the outside router reads task responses.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
@@ -63,6 +63,7 @@ use factory_core::metrics::{MetricId, MetricSeries, MetricValue};
 use factory_core::checks::Check;
 use factory_core::protocol::{CharacteristicView, QualityRemediation, QualityReport, ScopeQuality};
 use factory_core::quality::{self, Level, Measure, QualityCatalogue, QualityTree, ScenarioStatus, ScopeReport};
+#[cfg(test)]
 use factory_core::task::{NewTask, TaskFilter};
 
 use crate::engine::Engine;
@@ -74,9 +75,7 @@ use factory_core::config::subtree_scopes;
 /// and [`Engine::quality_remediate`] look it up by. The scope is part of it
 /// (unlike `policy=<framework>/<id>`) because one profile's scenario applies
 /// in every scope that inherits it, and each scope's gap is its own.
-pub(crate) fn remediation_label(scope: &str, attribute: &str, scenario: &str) -> String {
-    format!("{scope}/{attribute}/{scenario}")
-}
+pub(crate) use factory_assurance::remediation::remediation_label;
 
 /// A fingerprint of everything a report's *shape* depends on that a person
 /// authors: every loaded profile, every load finding, and every scope's
@@ -156,51 +155,6 @@ pub(crate) fn guide_context(report: &ScopeReport) -> Vec<QualityAttributeContext
         .collect()
 }
 
-/// The instructions a remediation task carries: the scenario's six parts
-/// as a sentence, what it is measured by, and why it is not met -- the
-/// reasons exactly as the report shows them, so the task never says
-/// something the evaluation did not. `policy::remediation_instructions`'
-/// counterpart; there is no `remediation:` text to lead with, since a
-/// quality scenario has none.
-fn remediation_instructions(scope: &str, attribute: &str, result: &quality::ScenarioResult) -> String {
-    let s = &result.scenario.scenario;
-    let mut out = format!(
-        "Quality scenario {attribute}/{} in scope {scope} is {}.\n",
-        s.id,
-        result.status.as_str().replace('_', " ")
-    );
-    let parts = [
-        ("Source", &s.source),
-        ("Stimulus", &s.stimulus),
-        ("Artifact", &s.artifact),
-        ("Environment", &s.environment),
-        ("Response", &s.response),
-    ];
-    let written: Vec<String> = parts
-        .iter()
-        .filter_map(|(name, value)| value.as_ref().map(|v| format!("- {name}: {v}")))
-        .collect();
-    if !written.is_empty() {
-        out.push_str("\nThe scenario:\n");
-        out.push_str(&written.join("\n"));
-        out.push('\n');
-    }
-    if let Some(measure) = &s.measure {
-        out.push_str(&format!("\nResponse measure: {}\n", quality::describe_measure(measure)));
-    }
-    if !result.reasons.is_empty() {
-        out.push_str("\nWhy it is not met:\n");
-        for reason in &result.reasons {
-            out.push_str(&format!("- {reason}\n"));
-        }
-    }
-    out.push_str(
-        "\nMake the response measure hold, then report done. A quality attribute gates nothing, \
-         so say in your result what changed and how the measure reads now.",
-    );
-    out
-}
-
 /// Everything a quality evaluation reads before any evidence or metric:
 /// the snapshot, the loaded profiles and their fingerprint, and each scope's
 /// merged tree. Built by [`Engine::quality_inputs`]; the metric values its
@@ -223,25 +177,6 @@ impl QualityInputs {
     /// Every metric id the trees measure by -- see [`metric_ids`].
     pub(crate) fn metric_ids(&self) -> Vec<MetricId> {
         metric_ids(self.trees.iter().map(|(_, t)| t))
-    }
-}
-
-/// Why a `no_data` scenario's measure can never produce data, whatever any
-/// task does -- an `attestation` check (nothing can record one), or a metric
-/// measure on a `quality.*`, unknown or unavailable metric. `None` when the
-/// missing data is the kind work can supply: a task not yet run, a metric
-/// with no finished runs behind it yet.
-fn unfixable_by_a_task(measure: Option<&Measure>) -> Option<String> {
-    match measure? {
-        Measure::Check(Check::Attestation) => Some(quality::ATTESTATION_UNSUPPORTED.to_string()),
-        Measure::Check(_) => None,
-        Measure::Metric(m) if quality::is_quality_metric(&m.metric) => {
-            Some(format!("{} is computed from quality scenarios themselves, so it cannot measure one", m.metric))
-        }
-        Measure::Metric(m) => match factory_core::metrics::resolve(&m.metric) {
-            Ok(_) => None,
-            Err(e) => Some(e.to_string()),
-        },
     }
 }
 
@@ -505,14 +440,14 @@ impl Engine {
     }
 
     /// Close one scenario's gap: `Request::QualityRemediate`. Creates the task
-    /// through `Engine::create`, the exact path `Request::TaskCreate`,
-    /// `policy_remediate` and `scenario_promote` use, so every validation it
-    /// does and its `Event::TaskCreated` apply here too.
+    /// through L5's adjacent L4 port, using the same owned creation service as
+    /// `Request::TaskCreate`, policy remediation and scenario promotion.
+    /// Every creation validation and `Event::TaskCreated` applies here too.
     ///
     /// Refused when the scenario is `met` (no gap), a `draft` (no measure,
     /// so only a measure to write), or `no_data` for a reason no task can
     /// change (an `attestation` check, a `quality.*`, unknown or unavailable
-    /// metric -- [`unfixable_by_a_task`]); each of the last two is an edit
+    /// metric -- [`factory_assurance::remediation::unfixable_by_a_task`]); each of the last two is an edit
     /// to a profile, and the refusal says so. When a non-terminal task
     /// labelled `quality=<scope>/<attribute>/<scenario>` is already open in
     /// `scope`, that task is answered with `created: false` and nothing is
@@ -533,65 +468,13 @@ impl Engine {
             .quality_for_scope(inputs, false)
             .await?
             .ok_or_else(|| FactoryError::BadRequest(format!("no quality profile applies at {scope:?}")))?;
-        let result = report
-            .attributes
-            .iter()
-            .find(|a| a.id == attribute)
-            .and_then(|a| a.scenarios.iter().find(|s| s.scenario.scenario.id == scenario))
-            .ok_or_else(|| {
-                FactoryError::BadRequest(format!("{attribute}/{scenario} is not a quality scenario that applies at {scope:?}"))
-            })?;
-
-        match result.status {
-            ScenarioStatus::Met => {
-                return Err(FactoryError::BadRequest(format!(
-                    "{attribute}/{scenario} is already met at {scope:?}; nothing to remediate"
-                )));
-            }
-            ScenarioStatus::Draft => {
-                return Err(FactoryError::BadRequest(format!(
-                    "{attribute}/{scenario} at {scope:?} is a draft with no response measure; give it a \
-                     measure in its profile first -- there is no gap to close until there is"
-                )));
-            }
-            ScenarioStatus::NoData => {
-                if let Some(why) = unfixable_by_a_task(result.scenario.scenario.measure.as_ref()) {
-                    return Err(FactoryError::BadRequest(format!(
-                        "{attribute}/{scenario} at {scope:?} has no data, and no task can change that: {why}. \
-                         The fix is an edit to its measure in the profile, not a task"
-                    )));
-                }
-            }
-            ScenarioStatus::NotMet | ScenarioStatus::Stale => {}
-        }
-
-        let label = remediation_label(&scope, &attribute, &scenario);
-        let existing = self
-            .store
-            .list(&TaskFilter {
-                scope: Some(scope.clone()),
-                ..Default::default()
-            })
-            .await?
-            .into_iter()
-            .find(|t| !t.status.is_terminal() && t.labels.get("quality").map(String::as_str) == Some(label.as_str()));
-        if let Some(task) = existing {
-            return Ok(QualityRemediation { task, created: false });
-        }
-
-        let mut labels = BTreeMap::new();
-        labels.insert("quality".to_string(), label);
-        let new_task = NewTask {
-            title: format!("Meet quality scenario {attribute}/{scenario}"),
-            instructions: remediation_instructions(&scope, &attribute, result),
-            scope: Some(scope),
-            agent,
-            labels,
-            ..Default::default()
-        };
+        let observer = crate::commands::CreationObserver(self.bus.clone());
+        let receipt = crate::commands::assurance(self, &observer)
+            .quality(&scope, &attribute, &scenario, agent, &report)
+            .await?;
         Ok(QualityRemediation {
-            task: self.create(new_task).await?,
-            created: true,
+            task: crate::commands::task_snapshot(self, receipt.task.id).await?,
+            created: receipt.created,
         })
     }
 }

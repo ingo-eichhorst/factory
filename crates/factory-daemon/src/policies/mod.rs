@@ -24,7 +24,7 @@ use factory_core::policy_export;
 use factory_core::checks::CheckSource;
 use factory_core::protocol::{CatalogueSummary, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy, WorkflowEnforcement, WorkflowEnforcementFinding};
 use factory_core::reporting_clock::{self, ClockDeadlineState, ClockMark};
-use factory_core::task::{NewTask, Task};
+use factory_core::task::Task;
 use factory_kernel::{DaemonConfigFact, BackupFact, SecretsPresence, AgentFact, TaskFact, WorkflowFact, DependenciesFact, AttestedRun, L5, L6};
 use crate::facts::{Facts, NamedQuery, AttestedQuery, TaskInventoryQuery};
 use factory_kernel::TaskInventoryFact;
@@ -849,49 +849,11 @@ impl Engine {
         // the catalogue and the evidence stores.
         let detail = self.policy_control(control.clone(), &scope).await?;
 
-        match detail.status.kind() {
-            policy::StatusKind::Satisfied => {
-                return Err(FactoryError::BadRequest(format!(
-                    "{control} is already satisfied at {scope:?}; nothing to remediate"
-                )));
-            }
-            policy::StatusKind::Attested => {
-                return Err(FactoryError::BadRequest(format!(
-                    "{control} is already attested at {scope:?}; nothing to remediate"
-                )));
-            }
-            policy::StatusKind::NotApplicable => {
-                let rationale = detail.not_applicable.as_ref().map(|na| na.rationale.as_str()).unwrap_or("");
-                return Err(FactoryError::BadRequest(format!(
-                    "{control} is not applicable at {scope:?}: {rationale}"
-                )));
-            }
-            policy::StatusKind::Open | policy::StatusKind::Stale => {}
-        }
-
-        if let Some(task) = self.open_policy_task(&control, &scope).await? {
-            return Err(FactoryError::BadRequest(format!(
-                "a task to close {control} at {scope:?} is already open: {} ({:?})",
-                task.id, task.title
-            )));
-        }
-
-        let mut labels = BTreeMap::new();
-        labels.insert("policy".to_string(), control.to_string());
-        let new_task = NewTask {
-            title: format!("Close {control}: {}", detail.title),
-            instructions: policy::remediation_instructions(
-                &control,
-                detail.remediation.as_deref(),
-                &detail.status,
-                &detail.checks,
-            ),
-            scope: Some(scope),
-            agent,
-            labels,
-            ..Default::default()
-        };
-        self.create(new_task).await
+        let observer = crate::commands::CreationObserver(self.bus.clone());
+        let receipt = crate::commands::direction(self, &observer)
+            .policy(control, &scope, agent, &detail)
+            .await?;
+        crate::commands::task_snapshot(self, receipt.id).await
     }
 
     /// The non-terminal task in `scope` labelled `policy=<control>`, if one
@@ -987,12 +949,7 @@ pub(crate) fn caller_name(caller: &Caller) -> String {
 /// terminal, or when it carries no such label. The one predicate
 /// `policy_report`'s `open_tasks` and `open_policy_task` both read, so the
 /// tab's "Task open" and the remediation refusal can never disagree.
-fn open_policy_label(task: &TaskInventoryFact) -> Option<&str> {
-    if !task.open {
-        return None;
-    }
-    task.labels.get("policy").map(String::as_str)
-}
+use factory_direction::remediation::open_policy_label;
 
 #[cfg(test)]
 mod tests {

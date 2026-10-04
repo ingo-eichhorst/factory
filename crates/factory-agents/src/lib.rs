@@ -12,5 +12,6 @@ pub mod harness;
 pub mod role;
 pub mod role_chain;
 pub mod roster;
+pub mod selection;
 pub mod runtime;
 pub mod usage;

@@ -5273,11 +5273,25 @@ work or inferred-liveness decorations. The chart's full view remains outside
 this provider. Original production fixtures moved with the implementation;
 there is no second metric evaluator or new status table.
 
+Remediation now follows the actual L6 → L5 → L4 command chain. L6 owns
+policy refusals, promotion ordering and duplicate selection; L5 owns Quality
+refusals/deduplication and turns remediation intent into a task submission.
+L4 owns the complete creation validation, store write, creation journal and
+outward notifications; L3 owns agent selection and runtime validation behind
+its adjacent selection port. No owner calls back into Engine to create a task.
+The sealed `Commands<Caller, Port>` boundary permits exactly the five adjacent
+edges, tested by compiling all level pairs. Ports return acknowledgements/ids,
+not task state. Duplicate checks are live `Facts<L5/L6>` inventory reads; the
+outside router alone reconstructs legacy task responses through L4's opaque
+live `TaskSnapshotFact`. Authorization remains at the one existing entry.
+This does not complete isolation of every live service, timer or command.
+
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),
-with ADR 0004 amended to name the evidence channel. The remaining signpost
-reader move, six live services and other Engine-backed providers, adjacent
-command ports and remediation/promotion routing are still ahead in #193.
+with ADR 0004 amended to name the evidence channel. Every registered fact
+provider has a physical producing-level owner. The signpost producer/reader
+move, six complete live services and the other adjacent command paths remain
+in #193.
 
 ## Layout
 

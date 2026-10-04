@@ -338,6 +338,24 @@ impl Fact for TaskInventoryFact {
     type Producer = L4;
 }
 
+/// Live stored task JSON for people-side compatibility responses. Opaque to
+/// the level services: commands return ids, and decision logic uses the
+/// selective inventory/history facts instead of decoding an L4 task record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TaskSnapshotFact(pub serde_json::Value);
+
+impl Fact for TaskSnapshotFact {
+    type Producer = L4;
+}
+
+/// Plain scope selection for the live process inventory; no task lifecycle logic.
+pub enum TaskInventoryQuery {
+    All,
+    Exact(String),
+    Members(std::collections::BTreeSet<String>),
+}
+
 /// Shared WorkflowRunFact evidence schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowRunFact {
@@ -782,6 +800,13 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         readers: &["L5 quality remediation inventory", "L6 policy and scenario task inventory"],
         lives_in_kernel: true,
         note: "live standing intent metadata; no run history or task command payload",
+    },
+    FactCatalogueEntry {
+        fact: "TaskSnapshotFact",
+        producer: "L4",
+        readers: &["People (legacy task response composition after command acknowledgements)"],
+        lives_in_kernel: true,
+        note: "live opaque own-store record; never a task record carried by a command port",
     },
     FactCatalogueEntry {
         fact: "WorkflowFact",
