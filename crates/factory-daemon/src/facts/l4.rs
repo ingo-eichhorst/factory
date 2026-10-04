@@ -57,7 +57,11 @@ impl Provider<'_> {
             .runs_between(from, to)
             .await?
             .into_iter()
-            .filter(|r| r.started_at >= from && r.started_at < to)
+            .filter(|r| match q.basis {
+                factory_kernel::SpendBasis::Started => r.started_at >= from && r.started_at < to,
+                factory_kernel::SpendBasis::Finished => r.status.is_terminal()
+                    && r.ended_at.is_some_and(|end| end > from && end <= to),
+            })
             .collect();
         let mut tasks: BTreeMap<String, Option<Task>> = BTreeMap::new();
         for run in &runs {
@@ -108,6 +112,7 @@ impl Provider<'_> {
         let mut ratios: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         let mut total_ratios: Vec<f64> = Vec::new();
         let mut daily: BTreeMap<chrono::NaiveDate, factory_kernel::DailySpend> = BTreeMap::new();
+        let mut cohort = Vec::new();
         for run in &runs {
             let task = tasks.get(&run.task_id).and_then(Option::as_ref);
             let day = run.started_at.date_naive();
@@ -124,6 +129,7 @@ impl Provider<'_> {
                 }
             }
             let (key, label) = group_key(q.group_by, run, task, |s| snapshot.canonical_scope_name(s), &workflow_names);
+            if q.basis == factory_kernel::SpendBasis::Finished { cohort.push(run.clone()); }
             let terminal_wall = run
                 .status
                 .is_terminal()
@@ -156,7 +162,28 @@ impl Provider<'_> {
         total.median_actual_over_expected = median(&mut total_ratios);
         let mut rows: Vec<CostRow> = rows.into_values().collect();
         CostReport::sort_rows(&mut rows);
+        let finished = if q.basis == factory_kernel::SpendBasis::Finished {
+            let figure = |id: &str, missing: u32| {
+                let mut f = factory_core::usage::usage_metric_in_window(id, &cohort, from, to)
+                    .expect("the two usage metric names are compiled-in vocabulary");
+                let unattributed = if scope_name.is_some() { unattributed_runs } else { 0 };
+                if missing > 0 || total.runs_partial > 0 || unattributed > 0 {
+                    let coverage = format!("{missing} unmeasured, {} partial, {unattributed} unattributed finished runs; measured-subset figures are not a complete forecasting baseline", total.runs_partial);
+                    f.reason = Some(match f.reason { Some(reason) => format!("{reason}; {coverage}"), None => coverage });
+                }
+                if f.value.is_some_and(|v| !v.is_finite() || v < 0.0) {
+                    f.value = None;
+                    f.reason = Some("the measured result is not finite and nonnegative".into());
+                }
+                factory_kernel::SpendFigure { value: f.value, reason: f.reason, as_of: f.as_of }
+            };
+            Some(factory_kernel::FinishedSpend {
+                unit_cost: figure("unit_cost", total.runs_unknown.saturating_add(total.runs_cost_unknown)),
+                tokens_per_run: figure("tokens_per_run", total.runs_unknown.saturating_add(total.runs_tokens_incomplete)),
+            })
+        } else { None };
         Ok(CostReport {
+            basis: q.basis, finished,
             group_by: q.group_by,
             from,
             to,

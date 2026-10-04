@@ -1239,6 +1239,8 @@ async fn scenario_promote(State(engine): State<Arc<Engine>>, Json(body): Json<Sc
 #[derive(serde::Deserialize)]
 struct ScenarioWhatIfBody {
     #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
     scenario: Option<String>,
     /// Driver id to its raw, as-authored override (`×2`, `+20%`, `+5`,
     /// `=0.9`) -- the same syntax a scenario file's own `drivers:` map uses,
@@ -1257,6 +1259,7 @@ async fn scenario_whatif(State(engine): State<Arc<Engine>>, Json(body): Json<Sce
     run(
         &engine,
         Request::ScenarioWhatIf {
+            scope: body.scope,
             scenario: body.scenario,
             drivers: body.drivers,
         },

@@ -136,7 +136,7 @@ fn is_operations_metric(id: &str) -> bool {
 const OPERATIONS_WINDOW_DAYS: i64 = 28;
 
 fn is_usage_metric(id: &str) -> bool {
-    matches!(id, "unit_cost" | "tokens_per_run" | "estimate_accuracy")
+    id == "estimate_accuracy"
 }
 
 fn is_hours_metric(id: &str) -> bool {
@@ -269,6 +269,15 @@ impl Engine {
         let needs_runs = computing
             .iter()
             .any(|(id, r)| r.is_ok() && (is_operations_metric(id.as_str()) || is_usage_metric(id.as_str())));
+        let needs_spend = computing.iter().any(|(id, r)| r.is_ok() && matches!(id.as_str(), "unit_cost" | "tokens_per_run"));
+        let spend = if needs_spend {
+            Some(crate::facts::Facts::<factory_kernel::L6>::new(self).get::<factory_kernel::CostReport>(&factory_core::usage::SpendQuery {
+                basis: factory_kernel::SpendBasis::Finished,
+                scope: canonical_scope.map(str::to_string),
+                from: Some(now - chrono::Duration::days(window.map(MetricsWindow::days).unwrap_or(OPERATIONS_WINDOW_DAYS))),
+                to: Some(now), group_by: factory_core::usage::CostGroupBy::Scope,
+            }).await?)
+        } else { None };
         let needs_hours = computing.iter().any(|(id, r)| r.is_ok() && is_hours_metric(id.as_str()));
         let needs_intake = computing.iter().any(|(id, r)| r.is_ok() && is_intake_metric(id.as_str()));
         let needs_backup = computing.iter().any(|(id, r)| r.is_ok() && is_backup_metric(id.as_str()));
@@ -352,6 +361,7 @@ impl Engine {
         } else { None };
 
         let sources = ComputeSources {
+            spend: spend.as_ref(),
             production: production.as_ref(),
             policy_report: policy_report.as_ref(),
             runs: runs.as_deref(),
@@ -562,6 +572,10 @@ impl Engine {
                 operations_value(id, runs.expect("needs_runs set"), now, window.map(MetricsWindow::days).unwrap_or(OPERATIONS_WINDOW_DAYS)),
                 None,
             )
+        } else if matches!(id.as_str(), "unit_cost" | "tokens_per_run") {
+            let cohort = sources.spend.expect("needs_spend set").finished.as_ref().expect("finished spend query");
+            let figure = if id.as_str() == "unit_cost" { &cohort.unit_cost } else { &cohort.tokens_per_run };
+            (MetricValue { id: id.clone(), value: figure.value, as_of: figure.as_of.unwrap_or(now), reason: figure.reason.clone() }, None)
         } else if is_usage_metric(id.as_str()) {
             (
                 usage_value(id, runs.expect("needs_runs set"), now, window.map(MetricsWindow::days).unwrap_or(OPERATIONS_WINDOW_DAYS)),
@@ -782,6 +796,7 @@ impl Engine {
                 from: Some(now - chrono::Duration::days(days)),
                 to: Some(now),
                 group_by: factory_core::usage::CostGroupBy::Scope,
+                ..Default::default()
             })
             .await?;
         let total = &report.total;
@@ -1166,6 +1181,7 @@ fn usage_value(
 /// `compute_one` takes one reference instead of one parameter per family --
 /// each field `Some` exactly when some asked id needed it.
 struct ComputeSources<'a> {
+    spend: Option<&'a factory_kernel::CostReport>,
     production: Option<&'a factory_core::protocol::Production>,
     policy_report: Option<&'a PolicyReport>,
     runs: Option<&'a [factory_core::run::Run]>,
@@ -2736,6 +2752,70 @@ mod tests {
     // ----------------------------------------------------------- cost_week (#164)
 
     #[tokio::test]
+    async fn scenario_cost_baselines_share_the_finished_spend_port_and_scope_not_started_cohorts() {
+        let (engine, database) = scoped_engine();
+        let now = Utc::now();
+        let from = now - chrono::Duration::days(28);
+        for (title, scope, status, start, end, usd, tokens) in [
+            ("long measured", "work", RunStatus::Done, now - chrono::Duration::days(40), Some(now - chrono::Duration::hours(2)), 2.0, 1000),
+            ("failed nested", "nested", RunStatus::Failed, now - chrono::Duration::hours(3), Some(now - chrono::Duration::hours(1)), 1.0, 3000),
+            ("outside", "side", RunStatus::Done, now - chrono::Duration::hours(3), Some(now - chrono::Duration::hours(1)), 100.0, 90000),
+            ("boundary excluded", "work", RunStatus::Done, from - chrono::Duration::hours(1), Some(from), 50.0, 50000),
+            ("still running", "work", RunStatus::Running, now - chrono::Duration::hours(1), None, 20.0, 20000),
+        ] {
+            timed_run(&engine, &database, title, scope, status, start, end, Some(measured(usd, tokens))).await;
+        }
+        let port = crate::facts::Facts::<factory_kernel::L6>::new(&engine).get::<factory_core::usage::CostReport>(&factory_core::usage::SpendQuery {
+            basis: factory_kernel::SpendBasis::Finished, scope: Some("work".into()), from: Some(from), to: Some(now), ..Default::default()
+        }).await.unwrap();
+        let facts = port.finished.unwrap();
+        assert_eq!(port.total.runs, 2);
+        assert_eq!(facts.unit_cost.value, Some(3.0));
+        assert_eq!(facts.tokens_per_run.value, Some(2000.0));
+        assert!(facts.unit_cost.reason.is_none());
+        let ids = [MetricId::new("unit_cost").unwrap(), MetricId::new("tokens_per_run").unwrap()];
+        let metrics = engine.metrics_for(&ids, now, Some("work"), None).await.unwrap();
+        assert_eq!(metric(&metrics, "unit_cost").value, facts.unit_cost.value);
+        assert_eq!(metric(&metrics, "tokens_per_run").value, facts.tokens_per_run.value);
+        let report = engine.scenarios_report(Some("work")).await.unwrap();
+        assert_eq!(report.baseline.drivers["unit_cost"], 3.0);
+        let result = engine.scenario_whatif(None, BTreeMap::from([("throughput_week".into(), "=10".into()), ("first_pass_yield".into(), "=1".into())]), Some("work")).await.unwrap();
+        assert_eq!(result.drivers.outcomes_after["weekly_cost"], 30.0);
+        assert_eq!(result.drivers.outcomes_after["weekly_tokens"], 20000.0);
+        assert!(result.drivers.tornados["weekly_cost"].iter().find(|bar| bar.driver == "unit_cost").unwrap().span > 0.0);
+        timed_run(&engine, &database, "unknown nested", "nested", RunStatus::Done, now - chrono::Duration::hours(2), Some(now - chrono::Duration::minutes(30)), None).await;
+        let result = engine.scenario_whatif(None, BTreeMap::from([("unit_cost".into(), "=0".into())]), Some("work")).await.unwrap();
+        assert!(!result.drivers.outcomes_after.contains_key("weekly_cost"));
+        assert!(result.drivers.outcome_reasons_after["weekly_cost"].contains("unmeasured"));
+    }
+
+    #[tokio::test]
+    async fn budget_policy_uses_full_ancestor_spend_and_preserves_unknown_in_report_and_detail() {
+        let (engine, database) = scoped_engine();
+        let snapshot = engine.factory_snapshot();
+        std::fs::create_dir_all(snapshot.root.join(".factory/budgets")).unwrap();
+        let catalogue = snapshot.root.join(".factory/budgets/limits.yaml");
+        std::fs::write(&catalogue, "version: 1\nscopes:\n  root-id: {monthly_usd: 5}\n  work-id: {monthly_usd: 50}\n").unwrap();
+        std::fs::write(snapshot.root.join(".factory/policies/cra.yaml"), "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: budget\n    title: Budget\n    evidence:\n      - check: budget_within\n").unwrap();
+        let now = Utc::now();
+        for (scope, usd) in [("work", 2.0), ("side", 10.0)] {
+            timed_run(&engine, &database, scope, scope, RunStatus::Done, now - chrono::Duration::hours(1), Some(now - chrono::Duration::minutes(30)), Some(measured(usd, 100))).await;
+        }
+        let detail = engine.policy_control("cra/budget".parse().unwrap(), "work").await.unwrap();
+        assert!(serde_json::to_string(&detail).unwrap().contains("budget_within: over"));
+        std::fs::write(&catalogue, "version: 1\nscopes:\n  root-id: {monthly_usd: 50}\n  work-id: {monthly_usd: 50}\n").unwrap();
+        let report = engine.policy_report(Some("work")).await.unwrap();
+        assert!(serde_json::to_string(&report).unwrap().contains("satisfied"));
+        timed_run(&engine, &database, "unknown", "nested", RunStatus::Done, now - chrono::Duration::minutes(20), Some(now - chrono::Duration::minutes(10)), None).await;
+        let report = engine.policy_report(Some("work")).await.unwrap();
+        assert!(serde_json::to_string(&report).unwrap().contains("budget_within: unknown"));
+        let detail = engine.policy_control("cra/budget".parse().unwrap(), "work").await.unwrap();
+        assert!(serde_json::to_string(&detail).unwrap().contains("budget_within: unknown"));
+        std::fs::write(&catalogue, "version: 1\nscopes: {work-id: {monthly_usd: -1}}\n").unwrap();
+        assert!(serde_json::to_string(&engine.policy_report(Some("work")).await.unwrap()).unwrap().contains("budget_within: unknown"));
+    }
+
+    #[tokio::test]
     async fn cost_week_is_none_with_the_known_sum_and_counts_until_every_run_is_measured() {
         let (engine, database) = scoped_engine();
         let now = Utc::now();
@@ -2900,6 +2980,7 @@ mod tests {
                 from: Some(now - chrono::Duration::days(7)),
                 to: Some(now),
                 group_by: factory_core::usage::CostGroupBy::Scope,
+                ..Default::default()
             })
             .await
             .unwrap();

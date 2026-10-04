@@ -475,7 +475,7 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
     FactCatalogueEntry {
         fact: "CostReport",
         producer: "L4",
-        readers: &["L6 Budget and cost metrics", "L4 router"],
+        readers: &["L6 Budget, policy, Scenarios and cost metrics", "L4 router"],
         lives_in_kernel: true,
         note: "single live spend read with explicit unknown/partial counts (#164)",
     },

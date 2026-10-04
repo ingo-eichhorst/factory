@@ -214,14 +214,11 @@ test("DRIVER_DEFS mirrors the seven built-in drivers, cost drivers named but not
   assert.equal(DRIVER_DEFS.find((d) => d.id === "rework_rate").metric, "rework_rate");
   assert.equal(DRIVER_DEFS.find((d) => d.id === "capacity_factor").assumption, true);
   // unit_cost/tokens_per_run *name* a registry metric -- measured since
-  // #117 -- so they are not bare assumptions; the forecast does not use
-  // them yet (#117 v3), so their sliders stay disabled.
+  // #117 -- so they are not bare assumptions. #164 models their outcomes.
   assert.equal(DRIVER_DEFS.find((d) => d.id === "unit_cost").assumption, false);
   assert.equal(DRIVER_DEFS.find((d) => d.id === "unit_cost").metric, "unit_cost");
-  // `unavailable` is fixed, compiled-in fact -- true for exactly the two
-  // cost drivers, never derived from a `GET /api/metrics` fetch that might
-  // fail (see `driverUnavailableReason`'s own doc comment).
-  assert.deepEqual(DRIVER_DEFS.filter((d) => d.unavailable).map((d) => d.id), ["unit_cost", "tokens_per_run"]);
+  assert.deepEqual(DRIVER_DEFS.filter((d) => d.measuredCost).map((d) => d.id), ["unit_cost", "tokens_per_run"]);
+  assert.deepEqual(DRIVER_DEFS.filter((d) => d.unavailable), []);
 });
 
 test("driverRange: ratios 0..1, capacity_factor 0..2, throughput scales with the baseline", () => {
@@ -230,19 +227,25 @@ test("driverRange: ratios 0..1, capacity_factor 0..2, throughput scales with the
   assert.deepEqual(driverRange("throughput_week", 0), { min: 0, max: 10, step: 0.5 });
   assert.deepEqual(driverRange("throughput_week", 40), { min: 0, max: 80, step: 0.5 });
   assert.deepEqual(driverRange("throughput_week", undefined), { min: 0, max: 10, step: 0.5 });
+  assert.deepEqual(driverRange("unit_cost", 4), { min: 0, max: 8, step: 0.01 });
+  assert.deepEqual(driverRange("tokens_per_run", 4000), { min: 0, max: 8000, step: 1 });
 });
 
 test("driverUnavailableReason: a def's own reason first, then baseline.metrics' reason, then the registry, then a fallback", () => {
   const cost = DRIVER_DEFS.find((d) => d.id === "unit_cost");
-  // A cost driver's metric is measured (#117 v1); the forecast just does
-  // not use it yet, and that is what it says, whatever the metric reads.
+  // The cohort's own reason remains visible even if the registry fetch fails.
   const fromBaseline = [{ id: "unit_cost", value: null, reason: "no run finished in the trailing 28 days" }];
-  assert.match(driverUnavailableReason(cost, fromBaseline, {}), /forecast does not model cost yet/);
+  assert.equal(driverUnavailableReason(cost, fromBaseline, {}), "no run finished in the trailing 28 days");
   const def = { id: "future", metric: "future_metric", unavailable: true };
   assert.equal(driverUnavailableReason(def, [{ id: "future_metric", value: null, reason: "not yet" }], {}), "not yet");
   assert.equal(driverUnavailableReason(def, [], { future_metric: { unavailable_reason: "registry says so" } }), "registry says so");
-  assert.equal(driverUnavailableReason(def, [], {}), "this driver has no data source yet");
-  assert.equal(driverUnavailableReason(def, null, null), "this driver has no data source yet");
+  assert.equal(driverUnavailableReason(def, [], {}), "a complete measured baseline is not available for this scope");
+  assert.equal(driverUnavailableReason(def, null, null), "a complete measured baseline is not available for this scope");
+});
+
+test("whatifBody keeps a selected scope while leaving old unscoped requests compatible", () => {
+  assert.deepEqual(whatifBody(null, { unit_cost: 2 }, "demo"), { drivers: { unit_cost: "=2" }, scope: "demo" });
+  assert.deepEqual(whatifBody(null, {}), { drivers: {} });
 });
 
 // ------------------------------------------------------------------ metrics

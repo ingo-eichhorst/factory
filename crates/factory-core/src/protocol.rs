@@ -815,6 +815,8 @@ pub enum Request {
     #[serde(rename = "scenario.whatif")]
     ScenarioWhatIf {
         #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
         scenario: Option<String>,
         #[serde(default)]
         drivers: std::collections::BTreeMap<crate::scenario::DriverId, String>,
@@ -1806,8 +1808,14 @@ pub struct ScenarioDrivers {
     pub overridden: std::collections::BTreeMap<crate::scenario::DriverId, f64>,
     pub outcomes_before: std::collections::BTreeMap<crate::scenario::OutcomeId, f64>,
     pub outcomes_after: std::collections::BTreeMap<crate::scenario::OutcomeId, f64>,
-    /// Against `effective_throughput` -- v1's only outcome; see
-    /// `Engine::scenarios_report`'s own doc comment.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub outcome_reasons_before: std::collections::BTreeMap<crate::scenario::OutcomeId, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub outcome_reasons_after: std::collections::BTreeMap<crate::scenario::OutcomeId, String>,
+    /// Sensitivity for every measured outcome, including USD and tokens.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tornados: std::collections::BTreeMap<crate::scenario::OutcomeId, Vec<crate::scenario::TornadoBar>>,
+    /// Against `effective_throughput`, retained for existing clients.
     pub tornado: Vec<crate::scenario::TornadoBar>,
 }
 

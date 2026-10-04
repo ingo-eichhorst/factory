@@ -734,7 +734,7 @@ mod tests {
         to: Option<DateTime<Utc>>,
         scope: Option<&str>,
     ) -> SpendQuery {
-        SpendQuery { scope: scope.map(str::to_string), from, to, group_by }
+        SpendQuery { scope: scope.map(str::to_string), from, to, group_by, ..Default::default() }
     }
 
     async fn done(engine: &Arc<Engine>, task: &Task, run: &Run) -> Run {

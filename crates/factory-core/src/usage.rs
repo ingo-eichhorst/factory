@@ -1124,8 +1124,8 @@ impl CostRowExt for CostRow {
             self.runs_tokens_incomplete += 1;
         }
         match u.cost_usd {
-            Some(c) => self.cost_usd += c,
-            None => self.runs_cost_unknown += 1,
+            Some(c) if c.is_finite() && c >= 0.0 && (self.cost_usd + c).is_finite() => self.cost_usd += c,
+            _ => self.runs_cost_unknown += 1,
         }
         for p in &u.pricing_sources {
             if !self.pricing_sources.contains(p) {
@@ -1162,6 +1162,8 @@ impl CostRowExt for CostRow {
 /// or is built in-process (`cost_week`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SpendQuery {
+    #[serde(default)]
+    pub basis: factory_kernel::SpendBasis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1274,6 +1276,15 @@ fn measured(run: &crate::run::Run) -> Option<&RunUsage> {
 /// runs with no estimate to compare against.
 pub fn usage_metric(id: &str, runs: &[crate::run::Run], to: DateTime<Utc>, days: i64) -> Option<UsageFigure> {
     let from = to - chrono::Duration::days(days);
+    usage_metric_in_window(id, runs, from, to)
+}
+
+/// The L4 spend port calls this with its exact finished-run query window.
+pub fn usage_metric_in_window(id: &str, runs: &[crate::run::Run], from: DateTime<Utc>, to: DateTime<Utc>) -> Option<UsageFigure> {
+    let span = to - from;
+    let window = if span.num_seconds() % 86400 == 0 {
+        format!("the trailing {} days", span.num_days())
+    } else { format!("the window {from} through {to}") };
     let finished: Vec<&crate::run::Run> = runs
         .iter()
         .filter(|r| r.status.is_terminal() && r.ended_at.is_some_and(|e| e > from && e <= to))
@@ -1281,10 +1292,10 @@ pub fn usage_metric(id: &str, runs: &[crate::run::Run], to: DateTime<Utc>, days:
     let none = |what: &str| UsageFigure {
         value: None,
         reason: Some(if finished.is_empty() {
-            format!("no run finished in the trailing {days} days")
+            format!("no run finished in {window}")
         } else {
             format!(
-                "none of the {} runs that finished in the trailing {days} days has {what}",
+                "none of the {} runs that finished in {window} has {what}",
                 finished.len()
             )
         }),
@@ -1300,7 +1311,7 @@ pub fn usage_metric(id: &str, runs: &[crate::run::Run], to: DateTime<Utc>, days:
             if counted.is_empty() {
                 return Some(none("fully measured token usage"));
             }
-            let sum: u64 = counted.iter().map(|(_, t)| t).sum();
+            let sum: u128 = counted.iter().map(|(_, t)| u128::from(*t)).sum();
             let rs: Vec<&crate::run::Run> = counted.iter().map(|(r, _)| *r).collect();
             Some(UsageFigure {
                 value: Some(sum as f64 / counted.len() as f64),
@@ -1311,7 +1322,7 @@ pub fn usage_metric(id: &str, runs: &[crate::run::Run], to: DateTime<Utc>, days:
         "unit_cost" => {
             let costed: Vec<(&crate::run::Run, f64)> = finished
                 .iter()
-                .filter_map(|r| measured(r).and_then(|u| u.cost_usd).map(|c| (*r, c)))
+                .filter_map(|r| measured(r).and_then(|u| u.cost_usd).filter(|c| c.is_finite() && *c >= 0.0).map(|c| (*r, c)))
                 .collect();
             let done = costed
                 .iter()

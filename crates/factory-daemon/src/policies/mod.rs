@@ -102,6 +102,10 @@ fn needs_attested_facts(applied: &[policy::Applied]) -> bool {
         .any(|check| matches!(check, policy::Check::Attested { .. }))
 }
 
+fn needs_budget_facts(applied: &[policy::Applied]) -> bool {
+    applied.iter().flat_map(|a| &a.evidence).any(|check| matches!(check, policy::Check::BudgetWithin))
+}
+
 /// Every category an `attested` check among `applied`'s controls names, and
 /// the widest of those controls' own effective `max_age`
 /// (`Applied::max_age`, already folded and tightened) -- what
@@ -259,6 +263,7 @@ impl Engine {
         Option<policy::DaemonFact>,
         BTreeMap<String, SecretsPresence>,
         Option<factory_core::backup::BackupFact>,
+        Option<factory_core::budget::PolicyConfig>,
     )> {
         let mut dataset_names: BTreeSet<String> = BTreeSet::new();
         for (_, applied) in per_scope_applied {
@@ -281,7 +286,16 @@ impl Engine {
         } else {
             None
         };
-        Ok((gates, daemon_fact, credential_rows, backup_fact))
+        let budget_config = if per_scope_applied.iter().any(|(_, applied)| needs_budget_facts(applied)) {
+            let root = self.factory_snapshot().root.clone();
+            let loaded = tokio::task::spawn_blocking(move || factory_core::budget::load(&root)).await
+                .map_err(|error| FactoryError::Other(anyhow::anyhow!("budget intent read: {error}")))?;
+            Some(match loaded {
+                Ok(catalogue) => factory_core::budget::PolicyConfig { catalogue: Some(catalogue), error: None },
+                Err(error) => factory_core::budget::PolicyConfig { catalogue: None, error: Some(error) },
+            })
+        } else { None };
+        Ok((gates, daemon_fact, credential_rows, backup_fact, budget_config))
     }
 
     /// `#158`: `scope`'s own `attested` evidence, gathered only when
@@ -338,6 +352,8 @@ impl Engine {
         daemon_fact: Option<policy::DaemonFact>,
         credential_rows: &BTreeMap<String, SecretsPresence>,
         backup_fact: Option<factory_core::backup::BackupFact>,
+        budget_config: Option<&factory_core::budget::PolicyConfig>,
+        now: chrono::DateTime<Utc>,
     ) -> Result<policy::Evidence> {
         let ancestor_names: BTreeSet<&str> = snapshot
             .config
@@ -361,6 +377,12 @@ impl Engine {
             None
         };
         let attested = self.attested_evidence(&t.name, applied).await?;
+        let budget = if needs_budget_facts(applied) {
+            match budget_config {
+                Some(config) => Some(self.budget_policy_input(snapshot, t, config, now).await?),
+                None => None,
+            }
+        } else { None };
         Ok(policy::Evidence {
             tags: tags.clone(),
             attestations: all_attestations
@@ -377,6 +399,7 @@ impl Engine {
             dependencies,
             backup: backup_fact,
             attested,
+            budget,
         })
     }
 
@@ -481,7 +504,7 @@ impl Engine {
         // against its own, larger `applied` sets, so a policy fact is
         // gathered by exactly one function regardless of which report is
         // asking for it.
-        let (gates, daemon_fact, credential_rows, backup_fact) = self.dataset_level_facts(&per_scope_applied).await?;
+        let (gates, daemon_fact, credential_rows, backup_fact, budget_config) = self.dataset_level_facts(&per_scope_applied).await?;
         for (t, applied) in &per_scope_applied {
             let evidence = self
                 .evidence_for_scope(
@@ -494,6 +517,8 @@ impl Engine {
                     daemon_fact,
                     &credential_rows,
                     backup_fact.clone(),
+                    budget_config.as_ref(),
+                    now,
                 )
                 .await?;
             findings.extend(policy::evidence_findings(&evidence, &t.name));
@@ -632,6 +657,14 @@ impl Engine {
             None
         };
         let attested = self.attested_evidence(&scope_obj.name, &applied).await?;
+        let now = Utc::now();
+        let budget = if needs_budget_facts(&applied) {
+            let (_, _, _, _, config) = self.dataset_level_facts(&[(&scope_obj, applied.clone())]).await?;
+            match config {
+                Some(config) => Some(self.budget_policy_input(&snapshot, &scope_obj, &config, now).await?),
+                None => None,
+            }
+        } else { None };
         let evidence = policy::Evidence {
             tags,
             attestations: history.clone(),
@@ -644,8 +677,9 @@ impl Engine {
             dependencies,
             backup,
             attested,
+            budget,
         };
-        let evaluated = policy::evaluate(&applied, &evidence, Utc::now())
+        let evaluated = policy::evaluate(&applied, &evidence, now)
             .into_iter()
             .find(|s| s.control == control)
             .ok_or_else(|| FactoryError::Other(anyhow::anyhow!("{control} evaluated to no status")))?;
@@ -1766,7 +1800,7 @@ mod tests {
 
         let root_scope = snapshot.config.scopes.iter().find(|s| s.name == "root").unwrap();
         let per_scope_applied = vec![(root_scope, applied)];
-        let (_, _, _, backup_fact) = engine.dataset_level_facts(&per_scope_applied).await.unwrap();
+        let (_, _, _, backup_fact, _) = engine.dataset_level_facts(&per_scope_applied).await.unwrap();
         assert!(backup_fact.is_none(), "no check here names a backup_* fact, so it must never be gathered");
     }
 

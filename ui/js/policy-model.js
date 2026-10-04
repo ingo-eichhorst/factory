@@ -227,6 +227,7 @@ const REMEDIATION = {
   secrets: { page: "secrets", label: "Secrets" },
   dependencies: { page: "dependencies", label: "Dependencies" },
   daemon: { page: "infrastructure", label: "Infrastructure" },
+  budget_within: { page: "budget", label: "Budget" },
   attested: { page: "tasks", label: "Tasks" },
 };
 
@@ -310,6 +311,8 @@ export function describeCheck(check) {
       return check.absent && check.absent.length ? `secrets: absent ${check.absent.join(", ")}` : "secrets";
     case "daemon":
       return `daemon: ${check.fact}`;
+    case "budget_within":
+      return "budget_within: applicable authored monthly USD caps";
     case "dependencies":
       return describeDependencies(check);
     case "attested":

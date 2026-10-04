@@ -110,9 +110,31 @@ impl Engine {
         })
     }
 
+    /// Policy uses the same monthly spend read but sends authored limits
+    /// down as configuration, never consumes the L6 Budget report.
+    pub(crate) async fn budget_policy_input(&self, snapshot: &factory_core::config::Factory, scope: &Scope,
+        config: &budget::PolicyConfig, now: DateTime<Utc>) -> Result<budget::PolicyInput> {
+        let month = budget::Month::at(now).map_err(FactoryError::BadRequest)?;
+        let mut input = budget::PolicyInput { month, caps: Vec::new(), error: config.error.clone() };
+        if input.error.is_some() { return Ok(input); }
+        let Some(catalogue) = &config.catalogue else {
+            input.error = Some("authored monthly budget configuration was not resolved".into());
+            return Ok(input);
+        };
+        let mut chain = snapshot.config.ancestors_of(scope);
+        chain.push(scope);
+        for s in chain {
+            if let Some(limit) = catalogue.scopes.get(&s.id) {
+                let spend = self.month_spend(Some(s.name.clone()), CostGroupBy::Scope, &input.month).await?;
+                input.caps.push(budget::PolicyCap { scope: s.name.clone(), monthly_usd: limit.monthly_usd, spend });
+            }
+        }
+        Ok(input)
+    }
+
     /// At the exact first instant of a month the logical window is empty.
     /// This is known empty spend, not a failed/missing observation.
-    async fn month_spend(
+    pub(crate) async fn month_spend(
         &self,
         scope: Option<String>,
         group_by: CostGroupBy,
@@ -120,6 +142,7 @@ impl Engine {
     ) -> Result<CostReport> {
         if month.from == month.as_of {
             return Ok(CostReport {
+                basis: factory_kernel::SpendBasis::Started, finished: None,
                 group_by,
                 from: month.from,
                 to: month.as_of,
@@ -136,6 +159,7 @@ impl Engine {
                 from: Some(month.from),
                 to: Some(month.as_of),
                 group_by,
+                ..Default::default()
             })
             .await
     }
@@ -445,6 +469,7 @@ mod tests {
                     group_by,
                     from: Some(r.month.from),
                     to: Some(now),
+                    ..Default::default()
                 })
                 .await
                 .unwrap();

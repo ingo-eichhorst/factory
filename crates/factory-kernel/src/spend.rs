@@ -120,10 +120,43 @@ pub struct DailySpend {
     pub unattributed_runs: u32,
 }
 
+/// Spend surfaces charge runs by start time. Measured forecasting inputs
+/// preserve the usage metrics' finished-run cohort and `(from, to]` window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpendBasis {
+    #[default]
+    Started,
+    Finished,
+}
+
+fn is_started(basis: &SpendBasis) -> bool {
+    *basis == SpendBasis::Started
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpendFigure {
+    pub value: Option<f64>,
+    pub reason: Option<String>,
+    pub as_of: Option<DateTime<Utc>>,
+}
+
+/// Measured-subset values never conceal incomplete cohort coverage: the
+/// reason names missing/partial/unattributed observations when applicable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FinishedSpend {
+    pub unit_cost: SpendFigure,
+    pub tokens_per_run: SpendFigure,
+}
+
 /// Live L4 spend, with backward-compatible cost API JSON. Totals contain only known
 /// amounts; the adjacent unknown/partial counters are part of the fact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CostReport {
+    #[serde(default, skip_serializing_if = "is_started")]
+    pub basis: SpendBasis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<FinishedSpend>,
     pub group_by: CostGroupBy,
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,

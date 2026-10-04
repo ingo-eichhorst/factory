@@ -1601,16 +1601,15 @@ fan chart can draw the baseline band and a scenario's band on one axis.
 exists: `throughput_week`, `first_pass_yield`, `scrap_rate`, `rework_rate`
 (registry-backed); `capacity_factor` (an assumption — no data source, a
 person's own what-if); `unit_cost`, `tokens_per_run` (registry-backed since
-#117, but not in the forecast formula until #117 v3, so the What-if panel
-keeps their sliders disabled). The one v1 formula:
+#117; enabled when their finished-run cohort is fully measured). The throughput formula:
 `effective_throughput = throughput_week × capacity_factor × first_pass_yield`.
 An override is authored `×2`/`x2` (multiply), `+20%`/`-20%` (percent
 change), `+5`/`-5` **quoted** (delta — YAML reads a bare `+5` as an
 integer, losing whether it means a delta or an absolute assumption, so an
 unquoted one is a finding, not a guess), or `=0.9` (set, the only variant
 that needs no baseline). The tornado varies each driver ±20% one at a time
-and ranks the effect on `effective_throughput` — v1's only computed
-outcome, so "the scenario's key outcome" has nothing else to name yet.
+and ranks the effect on `effective_throughput`, weekly USD or weekly tokens.
+Cost outcomes require complete measured baselines; missing outcomes carry reasons.
 Driver overrides reach the forecast by scaling, not by replacing, the
 throughput history: `effective_throughput` after ÷ before is the factor
 every point in the history is multiplied by, so the forecast's bands keep
@@ -1678,7 +1677,7 @@ is the ordinary case, not a mistake to stop the whole action over. Needs
 checked against. `POST /api/scenarios/promote` answers
 `{"kind":"scenario_promote","result":{scenario,scope,created,skipped}}`.
 
-**What-if.** `POST /api/scenarios/whatif` (`{scenario?, drivers}`)
+**What-if.** `POST /api/scenarios/whatif` (`{scope?, scenario?, drivers}`)
 recomputes driver outcomes, the tornado and the forecast with slider
 overrides applied server-side — pure and read-only, meant for a driver
 panel to call on every slider change, debounced client-side. Layering: the
@@ -1690,8 +1689,8 @@ its other overrides. Each entry parses with the same authored syntax
 outright (typed input from a live request, not an authored file `load`
 can leave partly wrong and still serve the rest of). Backlog: with
 `scenario` named, the same subtree-wide policy-delta and goal-task backlog
-the report itself computes for that scenario, over the whole instance
-(this request carries no `scope`) — which means this endpoint recomputes
+the report itself computes for that scenario, over the asked scope subtree
+(the whole instance when `scope` is absent) — which means this endpoint recomputes
 the policy delta on every call even though backlog genuinely does not
 depend on which driver moved; the UI is expected to debounce rather than
 this pretending backlog is free. With no `scenario` at all, backlog is
@@ -2745,8 +2744,8 @@ Intervals are bounded by when the runtime sampled each reading (the contract's
 to the runs active when it was sampled; a runtime that gives no sample time
 has the request time stand in.
 
-Not yet (v3 and later): Scenario cost drivers, the `budget_within`
-policy check, and runtime-specific observation work tracked outside Factory.
+Runtime-specific structured observation work remains an upstream integration;
+Budget and Scenario measurements do not depend on that future API.
 
 ### Monthly budgets (#164)
 
@@ -2799,6 +2798,33 @@ Like the existing cost read this is read-only, with an explicit authorization
 arm; it does not create a new role grant or imply agent roles are a security
 boundary. Authored budgets are included byte-for-byte in backup snapshots,
 loader verification and restore, not treated as daemon-owned runtime state.
+
+### Budget policy and measured Scenario costs
+
+A policy control can use `evidence: [{check: budget_within}]`. It checks
+every authored cap on the selected scope and its ancestors. Each ancestor's
+spend covers its entire subtree, including siblings outside the selection.
+A definitive overrun is open; fully measured spend within every cap is
+satisfied. Missing limits, malformed configuration, unknown, partial or
+unattributed spend leave the control open with an explicit
+`budget_within: unknown` reason, never an inferred safe verdict.
+
+Scenario's cost drivers use the same L4 `CostReport` fact port as Budget,
+with the finished-run cohort `(from, to]` (default: trailing 28 days).
+`unit_cost` spreads fully measured finished-run USD, including failures,
+over the costed runs that ended done; `tokens_per_run` is the mean fully
+measured token count. Registry metrics keep measured-subset values and
+disclose missing/partial coverage, but Scenarios require a complete baseline.
+An absolute slider override cannot turn absent measurements into a forecast.
+
+Weekly USD = effective throughput × measured unit cost. Weekly tokens =
+effective throughput × measured tokens/run; there is no assumed token price.
+Missing or invalid measurements omit that outcome with a reason, not zero.
+The Scenarios panel enables cost/token sliders when their measured baselines
+exist, and offers sensitivity charts for throughput, weekly USD and weekly
+tokens. Reports and `POST /api/scenarios/whatif` respect the selected scope
+and descendants; the latter accepts an optional `scope` alongside `scenario`
+and `drivers`, defaulting to the whole instance for existing clients.
 
 ## Workflows
 

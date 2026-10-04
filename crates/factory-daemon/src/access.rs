@@ -1610,6 +1610,7 @@ mod tests {
                 Request::Scenarios { scope: None },
                 Request::Quality { scope: None },
                 Request::ScenarioWhatIf {
+                    scope: None,
                     scenario: None,
                     drivers: Default::default(),
                 },
