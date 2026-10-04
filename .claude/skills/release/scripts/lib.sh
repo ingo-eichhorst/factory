@@ -7,7 +7,7 @@
 set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENVS_CONF="$SKILL_DIR/envs.conf"
+ENVS_CONF="${FACTORY_ENVS_CONF:-$SKILL_DIR/envs.conf}"
 
 # Every environment lives outside the repository. A release must survive a
 # branch switch, a `git clean`, and the worktree it was built from being
@@ -250,4 +250,24 @@ wait_for_exit() {
 record() {
   [ -x "$RECORD_CLI" ] || return 1
   FACTORY_ROOT="$COMPANY_ROOT" "$RECORD_CLI" --root "$COMPANY_ROOT" "$@"
+}
+
+# Offline receipts do not reach the socket: even the recording daemon can
+# be the dead environment this script is about to restart.
+recovery_begin() {
+  local env="$1" reason="$2" command="$3" commit
+  local args=(recovery-journal start --scope "$RECORD_SCOPE" --env "$env"
+    --source ensure.sh --actor "$(id -un)" --reason "$reason" --command "$command")
+  commit="$(released_field "$env" commit || true)"
+  if [[ -n "$commit" ]]; then args+=(--commit "$commit"); fi
+  record "${args[@]}"
+}
+
+recovery_end() {
+  local id="$1" exit_code="$2" local_http="$3" network_routes="$4" detail="$5"
+  local args
+  args=(recovery-journal finish "$id" --exit-code "$exit_code" --detail "$detail")
+  if [[ -n "$local_http" ]]; then args+=(--local-http "$local_http"); fi
+  if [[ -n "$network_routes" ]]; then args+=(--network-routes "$network_routes"); fi
+  record "${args[@]}" >/dev/null
 }

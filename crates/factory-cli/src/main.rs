@@ -107,6 +107,9 @@ enum Command {
     },
     /// Restart/repair an installed environment through an owner-approved task.
     Recover { environment: String, #[arg(long)] reason: String },
+    /// Record an explicit script recovery offline; never dispatches a task or connects to the daemon.
+    #[command(subcommand)]
+    RecoveryJournal(RecoveryJournalCmd),
     /// Run declared health checks now and record their answers; failed checks exit nonzero.
     EnvironmentCheck { environment: String },
     /// Record deployments as they start and finish, or list them.
@@ -696,6 +699,44 @@ enum DeployCmd {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+}
+
+#[derive(Subcommand)]
+enum RecoveryJournalCmd {
+    /// Persist a start before acting. Requires an explicit existing instance root.
+    Start {
+        #[arg(long)] scope: String,
+        #[arg(long = "env")] environment: String,
+        #[arg(long)] source: String,
+        #[arg(long)] actor: String,
+        #[arg(long)] reason: String,
+        #[arg(long)] command: String,
+        #[arg(long)] commit: Option<String>,
+    },
+    /// Persist the script's reported exit and observed route checks; immutable and retryable.
+    Finish {
+        id: String,
+        #[arg(long)] exit_code: u8,
+        #[arg(long, action = clap::ArgAction::Set)] local_http: Option<bool>,
+        #[arg(long, action = clap::ArgAction::Set)] network_routes: Option<bool>,
+        #[arg(long)] detail: Option<String>,
+    },
+}
+
+fn offline_recovery(root: &Path, command: &RecoveryJournalCmd, json: bool) -> Result<()> {
+    use factory_core::recovery_journal::{self, ScriptRecoveryAction, ScriptRecoveryFinish};
+    let action = match command {
+        RecoveryJournalCmd::Start { scope, environment, source, actor, reason, command, commit } => recovery_journal::start(root,
+            ScriptRecoveryAction { id: String::new(), scope: scope.clone(), environment: environment.clone(),
+                source: source.clone(), actor: actor.clone(), reason: reason.clone(), command: command.clone(),
+                expected_commit: commit.clone(), started_at: chrono::Utc::now(), finish: None })?,
+        RecoveryJournalCmd::Finish { id, exit_code, local_http, network_routes, detail } => recovery_journal::finish(root, id,
+            ScriptRecoveryFinish { at: chrono::Utc::now(), exit_code: *exit_code, local_http: *local_http,
+                network_routes: *network_routes, detail: detail.clone() })?,
+    };
+    if json { println!("{}", serde_json::to_string(&action)?); }
+    else { println!("{}", action.id); }
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -1484,9 +1525,14 @@ enum HookEvent {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::RecoveryJournal(command) = &cli.command {
+        let root = cli.root.as_deref().ok_or_else(|| anyhow!("offline recovery-journal requires --root (or FACTORY_ROOT)"))?;
+        return offline_recovery(root, command, cli.json);
+    }
     let client = Client::locate(cli.socket.clone(), cli.url.clone(), cli.root.clone(), cli.token.clone())?;
 
     match cli.command {
+        Command::RecoveryJournal(_) => unreachable!("offline command is handled before locating any client"),
         Command::Status => {
             let payload = client.send(Request::Status).await?;
             print(&payload, cli.json, |p| match p {
@@ -6795,6 +6841,16 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn offline_recovery_cli_requires_explicit_reported_fields_and_keeps_unknown_checks_optional() {
+        let cli = Cli::try_parse_from(["factory", "--root", "/tmp/instance", "recovery-journal", "start", "--scope", "demo",
+            "--env", "prod", "--source", "ensure.sh", "--actor", "operator", "--reason", "not running", "--command", "restart installed"]).unwrap();
+        assert!(matches!(cli.command, Command::RecoveryJournal(RecoveryJournalCmd::Start { .. })));
+        let cli = Cli::try_parse_from(["factory", "--root", "/tmp/instance", "recovery-journal", "finish", "uuid", "--exit-code", "1"]).unwrap();
+        assert!(matches!(cli.command, Command::RecoveryJournal(RecoveryJournalCmd::Finish { local_http: None, network_routes: None, .. })));
+        assert!(Cli::try_parse_from(["factory", "recovery-journal", "finish", "uuid", "--exit-code", "999"]).is_err());
+    }
+
     #[test]
     fn release_recording_accepts_an_explicit_producing_run_scope_and_comparison() {
         let parsed = Cli::try_parse_from(["factory", "release", "add", "--scope", "demo", "--commit", "sha",

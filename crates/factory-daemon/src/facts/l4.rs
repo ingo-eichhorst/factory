@@ -22,6 +22,23 @@ use std::collections::{BTreeMap, BTreeSet};
 const RUN_LOOKBACK: u32 = 20;
 
 #[async_trait]
+impl Provide<factory_kernel::RecoveryJournalFact> for Provider<'_> {
+    type Query = RecoveryQuery;
+    type Value = factory_kernel::RecoveryJournalFact;
+    type Error = FactoryError;
+    async fn get(&self, query: &RecoveryQuery) -> Result<Self::Value> {
+        let findings = crate::recovery_journal::import(self.engine).await;
+        let scopes: Vec<Option<&str>> = query.scopes.as_ref().map(|scopes| scopes.iter().map(|scope| Some(scope.as_str())).collect())
+            .unwrap_or_else(|| vec![None]);
+        let mut actions = Vec::new();
+        for scope in scopes { actions.extend(self.engine.workflows.recovery_actions(scope, query.limit).await?); }
+        actions.sort_by(|a, b| b.started_at.cmp(&a.started_at).then_with(|| a.id.cmp(&b.id)));
+        actions.truncate(query.limit.clamp(1, 200) as usize);
+        Ok(factory_kernel::RecoveryJournalFact { actions, findings })
+    }
+}
+
+#[async_trait]
 impl Provide<factory_kernel::ReleaseBuildFact> for Provider<'_> {
     type Query = super::ReleaseBuildQuery;
     type Value = Option<factory_kernel::ReleaseBuildFact>;

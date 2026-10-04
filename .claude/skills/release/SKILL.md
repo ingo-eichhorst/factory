@@ -103,6 +103,20 @@ so it works on a timer (`/loop`, `cron`, a launch agent); wiring that up is a
 decision for whoever runs the machine, and this skill deliberately does not do
 it behind their back.
 
+Every restart or route repair first persists an offline action start in the
+company instance root, using the current `FACTORY_RECORD_CLI` (`factory` by
+default). Install a CLI with `recovery-journal` support before using this
+version of `ensure.sh`. Recording does not need the company daemon running;
+if the CLI or its durable start is unavailable, no restart or route repair is
+attempted. A finish records the action's reported exit and observed LAN and
+required-route probes. A missing finish remains unknown, never a guessed
+Factory task status. The Operations page imports these separate standalone
+receipts after restart; they are not deployments, declared health samples or
+SLA evidence and do not bypass Factory recovery workflow approvals.
+`FACTORY_RELEASE_SCOPE` selects the receipt scope. `FACTORY_ENVS_CONF` may
+select an explicit alternative environment file. Neither option installs a
+timer or changes a live declaration.
+
 ## When something is wrong
 
 `status.sh` reports `wedged` for a process that is alive while its LAN endpoint

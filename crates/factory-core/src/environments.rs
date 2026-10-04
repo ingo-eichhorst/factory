@@ -1093,6 +1093,9 @@ pub struct EnvironmentsReport {
     /// facade only. Never part of L1 metric production or DORA deployments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recoveries: Vec<factory_kernel::EnvironmentRecoveryFact>,
+    /// Explicit offline script receipts, not workflow runs or deployment cohorts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_journal: Option<factory_kernel::RecoveryJournalFact>,
 }
 
 /// How many deployments the report carries.
@@ -1216,7 +1219,7 @@ pub fn report(
     let mut listed: Vec<Deployment> = deployments.iter().filter(|d| d.status == DeployStatus::Running).cloned().collect();
     listed.extend(deployments.iter().filter(|d| d.status != DeployStatus::Running).cloned());
     listed.truncate(REPORT_DEPLOYMENTS);
-    EnvironmentsReport { generated_at: now, environments: cards, releases, deployments: listed, recoveries: Vec::new() }
+    EnvironmentsReport { generated_at: now, environments: cards, releases, deployments: listed, recoveries: Vec::new(), recovery_journal: None }
 }
 
 /// The catalogue: one row per `(scope, commit)`, from deployments (newest

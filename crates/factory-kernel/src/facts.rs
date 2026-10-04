@@ -391,6 +391,46 @@ impl Fact for EnvironmentRecoveryFact {
     type Producer = L4;
 }
 
+/// An operator/script's reported action, never a fabricated Factory run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptRecoveryAction {
+    pub id: String,
+    pub scope: String,
+    pub environment: String,
+    pub source: String,
+    pub actor: String,
+    pub reason: String,
+    pub command: String,
+    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish: Option<ScriptRecoveryFinish>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptRecoveryFinish {
+    pub at: DateTime<Utc>,
+    pub exit_code: u8,
+    /// Script observations, not the environment's declared Factory checks.
+    pub local_http: Option<bool>,
+    pub network_routes: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// L4 imports immutable offline receipts into its append-only action journal.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryJournalFact {
+    pub actions: Vec<ScriptRecoveryAction>,
+    pub findings: Vec<String>,
+}
+impl Fact for RecoveryJournalFact {
+    type Producer = L4;
+}
+
 /// The actual producing run and its immutable, source-matching artifacts.
 /// A deployment actor alone is never evidence of a build.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -626,6 +666,13 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         readers: &["People Operations page facade"],
         lives_in_kernel: true,
         note: "reported recovery workflow/run evidence; never an L1 deployment or metric input",
+    },
+    FactCatalogueEntry {
+        fact: "RecoveryJournalFact",
+        producer: "L4",
+        readers: &["People Operations page facade"],
+        lives_in_kernel: true,
+        note: "offline script receipts imported into append-only process action history; not Factory runs",
     },
     FactCatalogueEntry {
         fact: "ReleaseBuildFact",

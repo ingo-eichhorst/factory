@@ -2131,6 +2131,14 @@ mod tests {
         let verdicts: Vec<_> = attestations.iter().map(|a| a.verdict).collect();
         assert_eq!(verdicts, vec![AttestationVerdict::Fail, AttestationVerdict::Pass], "append-only: both rounds kept");
         assert!(attestations.iter().all(|a| a.actor == GATE_ACTOR && a.category == "feature"));
+        // finish_run publishes the run before updating its task mirror.
+        // Await the mirror too, with the same bounded polling as settled().
+        for _ in 0..400 {
+            if engine.require(&task.id).await.unwrap().status == factory_core::task::TaskStatus::Done {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert_eq!(engine.require(&task.id).await.unwrap().status, factory_core::task::TaskStatus::Done);
     }
 

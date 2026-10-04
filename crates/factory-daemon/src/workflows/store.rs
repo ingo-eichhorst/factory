@@ -22,6 +22,16 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
 );
 CREATE INDEX IF NOT EXISTS workflow_runs_definition ON workflow_runs(workflow_id, updated_at);
 CREATE INDEX IF NOT EXISTS workflow_runs_active ON workflow_runs(status, updated_at);
+CREATE TABLE IF NOT EXISTS recovery_journal (
+    id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    phase INTEGER NOT NULL,
+    at TEXT NOT NULL,
+    data TEXT NOT NULL,
+    UNIQUE(action_id, phase)
+);
+CREATE INDEX IF NOT EXISTS recovery_journal_scope ON recovery_journal(scope, at);
 "#;
 
 fn error(error: impl std::fmt::Display) -> FactoryError {
@@ -54,6 +64,44 @@ pub struct WorkflowStore {
 }
 
 impl WorkflowStore {
+    /// An append-only script action ledger, not a workflow or task status.
+    pub async fn import_recovery(&self, action: &factory_kernel::ScriptRecoveryAction) -> Result<()> {
+        factory_core::recovery_journal::validate(action)?;
+        let action = action.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(error)?;
+            let mut started = action.clone(); started.finish = None;
+            let mut events = vec![(0, started)];
+            if action.finish.is_some() { events.push((1, action)); }
+            for (phase, event) in events {
+                let id = format!("{}:{phase}", event.id);
+                let data = serde_json::to_string(&event).map_err(error)?;
+                let previous: Option<String> = tx.query_row("SELECT data FROM recovery_journal WHERE id=?1", [&id], |row| row.get(0))
+                    .optional().map_err(error)?;
+                if let Some(previous) = previous {
+                    if previous != data { return Err(error("recovery receipt identity conflicts with its immutable journal")); }
+                    continue;
+                }
+                let at = event.finish.as_ref().map(|finish| finish.at).unwrap_or(event.started_at);
+                tx.execute("INSERT INTO recovery_journal(id, action_id, scope, phase, at, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![id, event.id, event.scope, phase, at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true), data]).map_err(error)?;
+            }
+            tx.commit().map_err(error)
+        }).await
+    }
+
+    pub async fn recovery_actions(&self, scope: Option<&str>, limit: u32) -> Result<Vec<factory_kernel::ScriptRecoveryAction>> {
+        let scope = scope.map(str::to_owned);
+        self.with_conn(move |conn| {
+            let mut query = conn.prepare("SELECT id, data FROM recovery_journal r
+                WHERE phase=(SELECT MAX(phase) FROM recovery_journal WHERE action_id=r.action_id)
+                AND (?1 IS NULL OR scope=?1) ORDER BY at DESC, action_id LIMIT ?2").map_err(error)?;
+            let rows = query.query_map(params![scope, limit.clamp(1, 200)], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(error)?.collect::<std::result::Result<Vec<_>, _>>().map_err(error)?;
+            Ok(decode_all(rows, "recovery_journal"))
+        }).await
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path).map_err(error)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
@@ -308,6 +356,42 @@ mod tests {
         CanvasPoint, SendBack, WorkflowActor, WorkflowDraft, WorkflowEdge, WorkflowExit,
         WorkflowNode, WorkflowNodeKind, WorkflowNodeStatus,
     };
+
+    #[tokio::test]
+    async fn recovery_journal_is_immutable_idempotent_scoped_and_persistent() {
+        use factory_kernel::{ScriptRecoveryAction, ScriptRecoveryFinish};
+        let root = std::env::temp_dir().join(format!("factory-journal-store-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("journal.sqlite");
+        let store = WorkflowStore::open(&path).unwrap();
+        let mut action = ScriptRecoveryAction {
+            id: uuid::Uuid::new_v4().to_string(), scope: "demo".into(), environment: "prod".into(),
+            source: "ensure.sh".into(), actor: "operator".into(), reason: "daemon stopped".into(),
+            command: "restart installed".into(), started_at: chrono::Utc::now(), expected_commit: None, finish: None,
+        };
+        store.import_recovery(&action).await.unwrap();
+        store.import_recovery(&action).await.unwrap();
+        assert!(store.recovery_actions(None, 10).await.unwrap()[0].finish.is_none());
+        action.finish = Some(ScriptRecoveryFinish { at: chrono::Utc::now(), exit_code: 1,
+            local_http: Some(true), network_routes: Some(false), detail: None });
+        store.import_recovery(&action).await.unwrap();
+        store.import_recovery(&action).await.unwrap();
+        let mut forged = action.clone();
+        forged.finish.as_mut().unwrap().exit_code = 0;
+        assert!(store.import_recovery(&forged).await.is_err());
+        forged = action.clone(); forged.scope = "other".into();
+        assert!(store.import_recovery(&forged).await.is_err());
+        assert!(store.recovery_actions(Some("other"), 10).await.unwrap().is_empty());
+        assert_eq!(store.recovery_actions(Some("demo"), 10).await.unwrap(), vec![action.clone()]);
+        let count: i64 = store.with_conn(|conn| conn.query_row("SELECT count(*) FROM recovery_journal", [], |row| row.get(0)).map_err(error)).await.unwrap();
+        assert_eq!(count, 2, "one immutable row per phase, not per import attempt");
+        assert!(store.runs(None, None, 10).await.unwrap().is_empty());
+        drop(store);
+        let reopened = WorkflowStore::open(&path).unwrap();
+        assert_eq!(reopened.recovery_actions(None, 10).await.unwrap(), vec![action]);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn definitions_and_runs_round_trip() {
