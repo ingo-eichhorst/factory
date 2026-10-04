@@ -4,6 +4,30 @@ use factory_kernel::{LaunchKind, LaunchSpec, Schedule, Span};
 use serde_json::json;
 
 #[test]
+fn roster_declarations_and_sandbox_are_canonical_owners_with_unchanged_wire_forms() {
+    let legacy: config::AgentRef = serde_yaml_ng::from_str(
+        "harness: pi\nname: worker\nargs: [--fixture]\nmax_sessions: 2"
+    ).unwrap();
+    let canonical: factory_agents::roster::AgentRef = legacy;
+    assert_eq!(serde_json::to_value(&canonical).unwrap(),
+        json!({"harness":"pi","name":"worker","args":["--fixture"],"max_sessions":2}));
+    let legacy: config::ScopeAgent = serde_yaml_ng::from_str("harness: shell").unwrap();
+    let canonical: factory_agents::roster::ScopeAgent = legacy;
+    assert_eq!(serde_json::to_value(canonical).unwrap(),
+        json!({"harness":"shell","lifetime":"task","role":"worker"}));
+    let legacy: config::ForemanConfig = config::ForemanConfig::default();
+    let canonical: factory_agents::roster::ForemanConfig = legacy;
+    assert_eq!(serde_json::to_value(canonical).unwrap(),
+        json!({"enabled":false,"name":"foreman","exclude":["root"]}));
+    for name in ["none", "docker", "srt", "openshell"] {
+        let legacy: config::Sandbox = serde_json::from_value(json!(name)).unwrap();
+        let canonical: factory_environment::sandbox::Sandbox = legacy;
+        assert_eq!(serde_json::to_value(canonical).unwrap(), json!(name));
+        assert_eq!(canonical.is_enforced(), name == "openshell");
+    }
+}
+
+#[test]
 fn credential_metadata_is_canonical_l2_data_and_preserves_legacy_json() {
     let row: factory_core::protocol::CredentialRow =
         factory_environment::credentials::CredentialRow {

@@ -736,11 +736,13 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "factory-environment",
  "factory-kernel",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -836,6 +838,7 @@ dependencies = [
  "chrono-tz",
  "clap",
  "croner",
+ "factory-agents",
  "factory-assurance",
  "factory-core",
  "factory-direction",
