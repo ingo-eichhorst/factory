@@ -228,7 +228,7 @@ export function releaseRows(report) {
 
 export function releaseEffectiveness(release) {
   const evidence = release.effectiveness;
-  if (!evidence || evidence.change_failure_rate == null) return MISSING;
+  if (evidence?.change_failure_rate == null) return MISSING;
   const observing = evidence.observing ? ` · ${evidence.observing} still observing` : "";
   return `${fmtPct(evidence.change_failure_rate)} · ${evidence.failed_changes}/${evidence.finished} changes · ${evidence.window_days}d${observing}`;
 }
