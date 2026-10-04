@@ -26,17 +26,17 @@ export const MODES = [
   { mode: "energy_saving", label: "Energy saving", pmset: 1 },
 ];
 
-const LABELS = Object.fromEntries(MODES.map(m => [m.mode, m.label]));
+const LABELS = new Map(MODES.map(m => [m.mode, m.label]));
 
 /// A mode's name for a person; `--` for one this page does not know.
 export function modeLabel(mode) {
-  return LABELS[mode] || "--";
+  return LABELS.get(mode) ?? "--";
 }
 
 /// `"unavailable"` for a daemon too old to serve the endpoint (the API
 /// answers a bare 404 with no envelope), `"error"` for anything else.
 export function macFailure(error) {
-  const message = error && error.message ? String(error.message) : String(error ?? "");
+  const message = String(error?.message ?? error ?? "");
   return /^404\b/.test(message) ? "unavailable" : "error";
 }
 
@@ -105,6 +105,7 @@ export function segments(report, { busy = null } = {}) {
     let why = "";
     if (!supported.includes(mode)) why = "this Mac does not offer it";
     else if (!permitted.includes(mode)) why = "the sudoers rule is not installed";
+    else if (state !== "editable") why = "changes are disabled; check the host reading and sudoers rule";
     else if (busy) why = `setting ${modeLabel(busy)}…`;
     return {
       mode,
@@ -119,7 +120,7 @@ export function segments(report, { busy = null } = {}) {
 /// The body `POST /api/host/power-mode` takes. Refuses anything but one of
 /// the three names, so the page never even sends one.
 export function setBody(mode) {
-  if (!LABELS[mode]) throw new Error(`${JSON.stringify(mode)} is not a power mode`);
+  if (!LABELS.has(mode)) throw new Error(`${JSON.stringify(mode)} is not a power mode`);
   return JSON.stringify({ mode });
 }
 
@@ -157,7 +158,7 @@ export function installStep(sudoers) {
 
 /// The journaled changes, newest first, as `{ at, by, text }`.
 export function changeRows(report) {
-  return ((report && report.changes) || [])
+  return (report?.changes ?? [])
     .slice()
     .reverse()
     .map(c => ({ at: c.at, by: c.by, text: c.message || `${modeLabel(c.to)} by ${c.by}` }));

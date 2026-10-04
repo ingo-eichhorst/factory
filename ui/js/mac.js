@@ -65,7 +65,10 @@ async function choose(mode) {
   try {
     state.mac = (await api("/api/host/power-mode", { method: "POST", body: setBody(mode) })).report;
   } catch (error) {
-    state.macError = `Could not set ${modeLabel(mode)}: ${error.message}`;
+    // pmset may have accepted the write before verification failed. Fetch
+    // the actual state rather than retaining a misleading pre-write mode.
+    await loadMac();
+    state.macError = `Could not confirm ${modeLabel(mode)}: ${error.message}`;
   } finally {
     state.macBusy = null;
     renderMac();
@@ -81,14 +84,15 @@ function fact(label, value) {
 function control(report) {
   const segs = segments(report, { busy: state.macBusy });
   if (!segs) return "";
-  return `<fieldset class="seg mac-seg" aria-label="Power mode">${segs.map(s => `
+  return `<div class="seg mac-seg" role="group" aria-label="Power mode">${segs.map(s => `
     <button type="button" data-mode="${esc(s.mode)}" class="${s.on ? "on" : ""}" aria-pressed="${s.on}"
       ${s.disabled ? "disabled" : ""} title="${esc(s.title)}">${esc(s.label)}</button>`).join("")}
-  </fieldset>`;
+  </div>`;
 }
 
 function hero(report) {
   const current = macState(report);
+  const badge = new Map([["read-only", "read-only"], ["editable", "can change"]]).get(current) ?? "not supported";
   const { mixed } = reading(report);
   const rows = current === "unsupported" ? "" : `<dl class="infra-facts">
       ${sourceRows(report).map(r => fact(r.source, r.label)).join("")}
@@ -97,7 +101,7 @@ function hero(report) {
   return `<article class="infra-card mac-hero" data-state="${esc(current)}" aria-labelledby="mac-hero-title">
     <header class="infra-card-head">
       <h3 id="mac-hero-title">Power mode</h3>
-      <span class="tag mac-badge" data-state="${esc(current)}">${esc(current === "read-only" ? "read-only" : current === "editable" ? "can change" : "not supported")}</span>
+      <span class="tag mac-badge" data-state="${esc(current)}">${esc(badge)}</span>
       ${mixed ? `<span class="tag warn">mixed</span>` : ""}
     </header>
     <div class="bk-headline"><div class="bk-age">${esc(headline(report))}</div>

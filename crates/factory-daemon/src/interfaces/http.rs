@@ -2684,7 +2684,7 @@ mod tests {
         assert_eq!(json["data"]["report"]["changes"][0]["to"], "high_performance");
         assert_eq!(
             host.writes(),
-            vec![vec!["/usr/bin/sudo", "-n", "/usr/bin/pmset", "-a", "powermode", "2"]]
+            vec![vec!["/usr/bin/sudo", "-n", "-k", "-u", "root", "--", "/usr/bin/pmset", "-a", "powermode", "2"]]
         );
     }
 
