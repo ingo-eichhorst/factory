@@ -29,10 +29,25 @@ fi
 failed=0
 for env in "${targets[@]}"; do
   if is_running "$env"; then
-    if wait_for_http "$(http_base "$env")" && verify_network_access "$env"; then
+    if ! action="$(recovery_begin "$env" 'verify and repair routes for a running daemon' 'verify LAN and repair configured Tailscale Serve routes')"; then
+      note "$env: could not persist a recovery start; no route repair was attempted"
+      failed=1
+      continue
+    fi
+    local_ok=false; routes_ok=''; code=1
+    if wait_for_http "$(http_base "$env")"; then local_ok=true; fi
+    if [ "$local_ok" = true ]; then
+      routes_ok=false
+      if verify_network_access "$env"; then routes_ok=true; code=0; fi
+    fi
+    if [ "$code" -eq 0 ]; then
       note "$env already running on $(tailscale_url "$env") and $(http_base "$env")"
     else
       note "$env is running but is not reachable through every required network route"
+      failed=1
+    fi
+    if ! recovery_end "$action" "$code" "$local_ok" "$routes_ok" 'ensure.sh observed its LAN and required-route probes'; then
+      note "$env: finish receipt could not be persisted; action $action remains awaiting a receipt"
       failed=1
     fi
     continue
@@ -58,18 +73,38 @@ for env in "${targets[@]}"; do
     continue
   fi
 
-  if [ "$(mode_for "$env")" = company ]; then
-    launchctl kickstart -k "gui/$(id -u)/$COMPANY_LABEL"
-  else
-    nohup "$bin" --root "$(env_root "$env")" run >>"$(env_log "$env")" 2>&1 &
-    echo $! > "$(env_pid "$env")"
+  if ! action="$(recovery_begin "$env" 'installed daemon was not running' 'restart the installed daemon and verify configured network routes')"; then
+    note "$env: could not persist a recovery start; no restart was attempted"
+    failed=1
+    continue
   fi
 
-  if wait_for_http "$(http_base "$env")" && verify_network_access "$env"; then
-    note "$env restarted on $(tailscale_url "$env") and $(http_base "$env") at $(released_field "$env" commit | cut -c1-9)"
+  launch_code=0
+  if [ "$(mode_for "$env")" = company ]; then
+    launchctl kickstart -k "gui/$(id -u)/$COMPANY_LABEL" || launch_code=$?
   else
-    note "$env did not come up; last lines of $(env_log "$env"):"
+    nohup "$bin" --root "$(env_root "$env")" run >>"$(env_log "$env")" 2>&1 &
+    echo $! > "$(env_pid "$env")" || launch_code=$?
+  fi
+
+  local_ok=''; routes_ok=''; code=1
+  if [ "$launch_code" -eq 0 ]; then
+    local_ok=false
+    if wait_for_http "$(http_base "$env")"; then local_ok=true; fi
+  fi
+  if [ "$local_ok" = true ]; then
+    routes_ok=false
+    if verify_network_access "$env"; then routes_ok=true; code=0; fi
+  fi
+  if [ "$code" -eq 0 ]; then
+    note "$env restarted on $(tailscale_url "$env") and $(http_base "$env") at $(released_field "$env" commit | cut -c1-9 || true)"
+  else
+    note "$env restart did not verify every required route; last lines of $(env_log "$env"):"
     tail -10 "$(env_log "$env")" >&2 || true
+    failed=1
+  fi
+  if ! recovery_end "$action" "$code" "$local_ok" "$routes_ok" "ensure.sh launch status $launch_code; observed LAN and required-route probes"; then
+    note "$env: finish receipt could not be persisted; action $action remains awaiting a receipt"
     failed=1
   fi
 done

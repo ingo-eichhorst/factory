@@ -24,6 +24,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<TaskFact, L4>("TaskFact", "L4");
     assert_producer::<WorkflowFact, L4>("WorkflowFact", "L4");
     assert_producer::<EnvironmentRecoveryFact, L4>("EnvironmentRecoveryFact", "L4");
+    assert_producer::<RecoveryJournalFact, L4>("RecoveryJournalFact", "L4");
     assert_producer::<ReleaseBuildFact, L4>("ReleaseBuildFact", "L4");
     assert_producer::<ReleaseSbomFact, L2>("ReleaseSbomFact", "L2");
     assert_producer::<ConfirmedSecurityReport, L4>("ConfirmedSecurityReport", "L4");
@@ -48,6 +49,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "TaskFact",
         "WorkflowFact",
         "EnvironmentRecoveryFact",
+        "RecoveryJournalFact",
         "ReleaseBuildFact",
         "ReleaseSbomFact",
         "ConfirmedSecurityReport",
@@ -154,6 +156,21 @@ fn recovery_fact_preserves_actual_run_outcome_without_a_deployment_schema() {
     let fact: EnvironmentRecoveryFact = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(fact.run.as_ref().unwrap().status, RunStatus::Failed);
     assert_eq!(serde_json::to_value(fact).unwrap(), json);
+}
+
+#[test]
+fn offline_action_schema_keeps_an_absent_finish_unknown_and_rejects_fabricated_run_fields() {
+    let json = serde_json::json!({ "actions": [{
+        "id": "37646f22-22a3-4f20-904a-ad352e37dcbd", "scope": "demo", "environment": "prod",
+        "source": "ensure.sh", "actor": "operator", "reason": "daemon stopped", "command": "restart installed",
+        "started_at": "2026-10-04T00:00:00Z"
+    }], "findings": [] });
+    let fact: RecoveryJournalFact = serde_json::from_value(json.clone()).unwrap();
+    assert!(fact.actions[0].finish.is_none());
+    assert_eq!(serde_json::to_value(fact).unwrap(), json);
+    let mut fabricated = json["actions"][0].clone();
+    fabricated["run_status"] = serde_json::json!("done");
+    assert!(serde_json::from_value::<ScriptRecoveryAction>(fabricated).is_err());
 }
 
 #[test]

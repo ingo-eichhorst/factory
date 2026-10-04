@@ -28,6 +28,7 @@ mod metrics;
 mod occupancy;
 mod openshell;
 mod operations;
+mod recovery_journal;
 mod policies;
 mod power;
 mod production;
@@ -380,6 +381,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // Reconcile persisted workflow decisions only after runtimes and standing
     // agents are available. Recovery reuses task ids recorded before a crash.
     engine.recover_workflows().await;
+    for finding in recovery_journal::import(&engine).await { tracing::warn!("recovery journal: {finding}"); }
     engine.recover_workspaces().await;
     // The one place a bench attempt's gate actually runs -- started before
     // recovery below, so anything it enqueues has a consumer immediately.
@@ -404,6 +406,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // The health checks of every declared environment (`#185`), on their
     // own loop for the same reason: a check can take its whole timeout.
     let health = tokio::spawn(environments::run(engine.clone(), shutdown_rx.clone()));
+    let recovery_receipts = tokio::spawn(recovery_journal::run(engine.clone(), shutdown_rx.clone()));
 
     engine.bus.publish(Event::DaemonStarted {
         at: chrono::Utc::now(),
@@ -443,6 +446,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     github_intake.abort();
     backups.abort();
     health.abort();
+    recovery_receipts.abort();
     engine.registry.shutdown().await;
     Ok(())
 }

@@ -2630,8 +2630,48 @@ its journal preserve the reason, approval and actual outcome across restarts.
 The Operations page reads that history through an L4-owned recovery fact,
 separate from L1's health metrics. Recovery never writes a deployment receipt,
 changes the current release, or increases deployment frequency. Health ticks
-never launch recovery automatically. Direct `ensure.sh` invocations are not
-yet integrated with this workflow and remain a separate migration.
+never launch recovery automatically.
+
+**Standalone script recovery.** `ensure.sh` records a durable start before
+restarting an installed daemon or repairing a running daemon's network routes,
+then a finish with its reported per-environment action exit and actual LAN and
+required-route probe results. Recording uses the current `factory` CLI's
+offline `recovery-journal` command: it needs an explicit existing instance
+root/database, not a live daemon, socket or HTTP endpoint. If the start cannot
+be persisted (including an old or missing CLI), the script refuses to act.
+If it dies before finishing, the start remains **awaiting finish receipt**,
+not an inferred failed or successful task. A finish cannot be rewritten.
+
+For another explicitly invoked owner script, the same reporting primitive is:
+
+```sh
+action=$(factory --root /tmp/dev recovery-journal start --scope demo --env production \
+  --source operator-script --actor operator --reason 'daemon stopped' \
+  --command 'restart the installed daemon')
+# Execute the independently authorised repair; capture its actual result.
+factory --root /tmp/dev recovery-journal finish "$action" --exit-code 1 \
+  --local-http true --network-routes false --detail 'LAN answered; required route failed'
+```
+
+The reporter executes nothing and does not replace the owner approval on
+Factory's recovery workflow. Script invocation remains the operator's own
+action, with filesystem-owner trust, not a new authenticated RPC or a grant
+to dispatch tasks. Unknown probes are omitted, not reported as passed.
+`RELEASED` commit metadata is a reported installed version, not build proof.
+These separate L4-owned receipts appear in the Operations page's standalone
+recovery journal, never as Factory tasks/runs, deployments, declared health
+samples, SLA evidence or changes in DORA cohorts.
+
+Receipts live only under the instance root's `.factory/recovery-outbox/`.
+L4 imports valid, scope-checked starts/finishes transactionally and
+idempotently into append-only SQLite history at startup, every 30 seconds,
+and on Operations page reads. Completed imported receipts are retained in
+`.factory/recovery-receipts/`; unfinished or invalid ones remain queued.
+Bounded imports reject malformed, oversized, symlinked or conflicting
+receipts and report findings without hiding stored history. Keep both receipt
+directories when recovering pending filesystem-only evidence; normal database
+backups include imported history. No timer or live instance is configured by
+this integration.
 
 **Health drill-down.** Select a half-hour check-strip slot (incident overlap
 is marked on the strip) or **View latest samples** to inspect stored answers,
@@ -2698,7 +2738,7 @@ URLs, belongs in the `factory` scope's config once a daemon that reads it is
 installed.
 
 **Not yet:** mirroring deployments to GitHub's
-Deployments API, `ensure.sh`'s restarts as journaled actions,
+Deployments API,
 alerting beyond Factory's own events, external
 monitoring as a check source, and more than one host.
 

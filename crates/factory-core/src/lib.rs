@@ -33,6 +33,7 @@ pub mod provenance;
 pub mod quality;
 pub mod ready;
 pub mod reporting_clock;
+pub mod recovery_journal;
 pub mod role;
 pub mod run;
 pub mod scenario;

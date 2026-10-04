@@ -446,6 +446,32 @@ test("recovery requires a reason, creates a workflow and leaves deployment histo
   state.scope = null;
 });
 
+test("standalone script receipts show reported outcomes without inventing runs, verification or deployments", () => {
+  const el = stubPage(IDS);
+  state.scope = null;
+  const report = structuredClone(REPORT);
+  const action = { id: "receipt", scope: "factory", environment: "production", source: "ensure.sh", actor: "operator",
+    reason: "restart <installed>", command: "repair <routes>", started_at: REPORT.generated_at };
+  report.recovery_journal = { actions: [action], findings: ["rejected <bad> receipt"] };
+  state.environments = report;
+  renderEnvironments();
+  assert.match(el.environments.innerHTML, /Standalone recovery journal/);
+  assert.match(el.environments.innerHTML, /awaiting finish receipt; not a runtime status/);
+  assert.match(el.environments.innerHTML, /LAN: not recorded/);
+  assert.match(el.environments.innerHTML, /restart &lt;installed&gt;/);
+  assert.match(el.environments.innerHTML, /rejected &lt;bad&gt; receipt/);
+  assert.doesNotMatch(el.environments.innerHTML, /proc\/workflows\/undefined/);
+  action.finish = { exit_code: 1, local_http: true, network_routes: false, detail: "route <failed>" };
+  renderEnvironments();
+  assert.match(el.environments.innerHTML, /reported action exit 1/);
+  assert.match(el.environments.innerHTML, /LAN: passed/);
+  assert.match(el.environments.innerHTML, /Required routes: failed/);
+  assert.match(el.environments.innerHTML, /route &lt;failed&gt;/);
+  assert.match(el.environments.innerHTML, /not Factory runs or deployments/);
+  assert.match(el.environments.innerHTML, /not declared health samples or SLA evidence/);
+  assert.equal(report.deployments.length, REPORT.deployments.length);
+});
+
 test("health strips are selectable with incident markers, and missing samples or read failures are explicit", async () => {
   const el = stubPage(IDS);
   const report = structuredClone(REPORT);

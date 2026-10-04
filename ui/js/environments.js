@@ -296,6 +296,30 @@ function recoveriesHTML(report) {
     <div class="bk-scroll"><table><thead><tr><th>Environment</th><th>Outcome</th><th>Reason</th><th>Requested</th><th>Expected installed release</th><th>Evidence</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
 }
 
+function scriptRecoveryHTML(report) {
+  const journal = report.recovery_journal;
+  if (!journal?.actions.length && !journal?.findings.length) return "";
+  const observation = value => value == null ? "not recorded" : (value ? "passed" : "failed");
+  const rows = journal.actions.map(action => {
+    const finish = action.finish;
+    let result = "awaiting finish receipt; not a runtime status";
+    let tone = "warn";
+    if (finish) {
+      result = `reported action exit ${finish.exit_code}`;
+      if (finish.exit_code !== 0) tone = "bad";
+      else if (finish.local_http === true && finish.network_routes === true) tone = "ok";
+    }
+    return `<tr><td>${esc(action.environment)} · ${esc(action.scope)}</td><td class="bk-${tone}">${esc(result)}</td>
+      <td>${esc(action.reason)}<div class="sub">${esc(action.command)}</div></td>
+      <td>${esc(action.actor)} · ${esc(action.source)}<div class="sub">${esc(action.started_at)}</div></td>
+      <td>LAN: ${esc(observation(finish?.local_http))}<br>Required routes: ${esc(observation(finish?.network_routes))}
+        <div class="sub">${esc(finish?.detail || "")}</div></td><td class="mono">${esc(action.expected_commit?.slice(0, 10) || MISSING)}</td></tr>`;
+  }).join("");
+  return `<section class="bk-section"><h3>Standalone recovery journal</h3><p class="sub">Operator/script receipts, not Factory runs or deployments. Script route probes are not declared health samples or SLA evidence. Installed commit is reported release metadata.</p>
+    ${journal.findings.map(finding => `<p class="bk-warn">${esc(finding)}</p>`).join("")}
+    <div class="bk-scroll"><table><thead><tr><th>Environment</th><th>Receipt outcome</th><th>Action</th><th>Actor/source</th><th>Script observations</th><th>Installed metadata</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+}
+
 function samplesHTML() {
   const detail = sampleDetail;
   if (!detail || detail.scope !== state.scope) return "";
@@ -479,7 +503,7 @@ export function renderEnvironments() {
   const cards = report.environments.length
     ? `<div class="sys-cards">${report.environments.map(c => card(c, now)).join("")}</div>`
     : empty();
-  page.innerHTML = [promotionNoticeHTML(), cards, samplesHTML(), recoveriesHTML(report), releaseDetailHTML(), effectivenessHTML(report), deployments(report), releases(report)].join("");
+  page.innerHTML = [promotionNoticeHTML(), cards, samplesHTML(), recoveriesHTML(report), scriptRecoveryHTML(report), releaseDetailHTML(), effectivenessHTML(report), deployments(report), releases(report)].join("");
 }
 
 export function wireEnvironments() {
