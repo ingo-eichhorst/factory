@@ -203,10 +203,13 @@ pub enum Grant {
     /// Record a deployment or a release; its environment's scope is the subject.
     #[serde(rename = "deploy.record")]
     DeployRecord,
+    /// Explicitly approve an outbound deployment mirror; never granted by a wildcard.
+    #[serde(rename = "deploy.publish")]
+    DeployPublish,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 33] = [
+    pub const ALL: [Grant; 34] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -240,6 +243,7 @@ impl Grant {
         Grant::IntakePublish,
         Grant::DashboardEdit,
         Grant::DeployRecord,
+        Grant::DeployPublish,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -277,6 +281,7 @@ impl Grant {
             Self::IntakePublish => "intake.publish",
             Self::DashboardEdit => "dashboard.edit",
             Self::DeployRecord => "deploy.record",
+            Self::DeployPublish => "deploy.publish",
         }
     }
     pub fn describe(self) -> &'static str {
@@ -316,6 +321,7 @@ impl Grant {
             }
             Self::DashboardEdit => "save or reset a scope's dashboard layout",
             Self::DeployRecord => "record a deployment or a release",
+            Self::DeployPublish => "approve publishing a deployment to GitHub",
         }
     }
     pub fn group(self) -> &'static str {
@@ -350,7 +356,7 @@ impl Grant {
             | Self::IntakeDecide
             | Self::IntakePublish => "Intake",
             Self::DashboardEdit => "Dashboard",
-            Self::DeployRecord => "Deployments",
+            Self::DeployRecord | Self::DeployPublish => "Deployments",
         }
     }
 }

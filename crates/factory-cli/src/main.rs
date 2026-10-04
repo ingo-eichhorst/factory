@@ -635,6 +635,10 @@ fn parse_deploy_status(text: &str) -> Result<factory_core::environments::DeployS
 
 #[derive(Subcommand)]
 enum DeployCmd {
+    /// Inspect the exact opt-in GitHub destination/metadata and its approval digest. No outbound write.
+    MirrorPlan { id: String },
+    /// Explicitly approve publishing that frozen plan to GitHub; requires deploy.publish.
+    Publish { id: String, #[arg(long)] approval: String },
     /// A deployment has begun. Prints its id, which `finish` names.
     /// `deploy.record`, in the environment's scope.
     Start {
@@ -1620,6 +1624,25 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Deploy(cmd) => match cmd {
+            DeployCmd::MirrorPlan { id } => {
+                let payload = client.send(Request::DeployMirrorPlan { id }).await?;
+                print(&payload, cli.json, |payload| match payload {
+                    Payload::DeploymentMirrorPlan { plan } => Some(format!("{}: {} {} at {} → {}\nverified: {:?}\napproval: {}\nThis creates GitHub deployment events (task factory:mirror). Inspect downstream automation before approving.",
+                        plan.deployment, plan.repository, plan.environment, plan.commit, plan.state, plan.verified, plan.approval)),
+                    _ => None,
+                })
+            }
+            DeployCmd::Publish { id, approval } => {
+                let payload = client.send(Request::DeployPublish { id, approval }).await?;
+                let published = matches!(&payload, Payload::DeploymentMirror { receipt } if receipt.phase == factory_core::environments::DeploymentMirrorPhase::Published);
+                print(&payload, cli.json, |payload| match payload {
+                    Payload::DeploymentMirror { receipt } => Some(format!("{:?}: {} {}{}", receipt.phase, receipt.plan.repository, receipt.plan.deployment,
+                        receipt.error.as_ref().map(|error| format!(" — {error}")).unwrap_or_default())),
+                    _ => None,
+                })?;
+                if !published { return Err(anyhow!("deployment mirror was not published; its failure receipt is stored")); }
+                Ok(())
+            }
             DeployCmd::Start { environment, strict_verification, scope, release, via, started_at } => {
                 let req = factory_core::environments::DeployStart {
                     environment,
@@ -7576,6 +7599,15 @@ mod tests {
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("factory").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn deployment_mirror_publication_requires_a_specific_approval() {
+        assert!(matches!(parse(&["deploy", "mirror-plan", "d1"]).command,
+            Command::Deploy(DeployCmd::MirrorPlan { id }) if id == "d1"));
+        assert!(matches!(parse(&["deploy", "publish", "d1", "--approval", "digest"]).command,
+            Command::Deploy(DeployCmd::Publish { id, approval }) if id == "d1" && approval == "digest"));
+        assert!(Cli::try_parse_from(["factory", "deploy", "publish", "d1"]).is_err());
     }
 
     #[test]

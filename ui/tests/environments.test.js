@@ -40,7 +40,7 @@ import { readHash, setRouter } from "../js/scopes.js";
 
 const bare = { addEventListener() {}, getElementById: () => null };
 globalThis.document = bare;
-const { loadEnvironments, renderEnvironments, promoteEnvironment, recoverEnvironment, loadEnvironmentSamples, loadReleaseDetail, wireEnvironments } = await import("../js/environments.js");
+const { loadEnvironments, renderEnvironments, promoteEnvironment, recoverEnvironment, publishDeployment, loadEnvironmentSamples, loadReleaseDetail, wireEnvironments } = await import("../js/environments.js");
 
 const page = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
@@ -470,6 +470,78 @@ test("standalone script receipts show reported outcomes without inventing runs, 
   assert.match(el.environments.innerHTML, /not Factory runs or deployments/);
   assert.match(el.environments.innerHTML, /not declared health samples or SLA evidence/);
   assert.equal(report.deployments.length, REPORT.deployments.length);
+});
+
+test("GitHub mirrors are opt-in, explicitly reviewed and become stale when approved metadata changes", async () => {
+  const el = stubPage(IDS);
+  state.scope = null;
+  const report = structuredClone(REPORT);
+  const id = report.deployments[0].id;
+  const plan = { deployment: id, scope: "factory", repository: "owner/repo", commit: "full-sha", environment: "prod", state: "in_progress", approval: "frozen-digest", verified: null };
+  report.deployment_mirrors = { [id]: { plan, receipt: null } };
+  state.environments = report;
+  renderEnvironments();
+  assert.match(el.environments.innerHTML, /Awaiting explicit approval/);
+  assert.match(el.environments.innerHTML, /Review mirror plan/);
+  assert.match(el.environments.innerHTML, /https:\/\/github.com\/owner\/repo\/deployments/);
+  report.deployment_mirrors[id].receipt = { phase: "published", plan: structuredClone(plan) };
+  renderEnvironments();
+  assert.doesNotMatch(el.environments.innerHTML, /Review mirror plan/);
+  report.deployment_mirrors[id].plan.approval = "new-status-digest";
+  renderEnvironments();
+  assert.match(el.environments.innerHTML, /Review mirror plan/);
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push([url, options]);
+    return url.endsWith("/publish")
+      ? { ok: true, json: async () => ({ status: "ok", data: { receipt: { phase: "published" } } }) }
+      : { ok: true, json: async () => ({ status: "ok", data: { report } }) };
+  };
+  await publishDeployment(id, "exact-reviewed-digest");
+  assert.equal(calls[0][0], `/api/deployments/${encodeURIComponent(id)}/publish`);
+  assert.equal(calls[0][1].method, "POST");
+  assert.deepEqual(JSON.parse(calls[0][1].body), { approval: "exact-reviewed-digest" });
+  assert.match(view, /Repository integrations may react to those events/);
+  assert.match(view, /Approve this exact outbound write/);
+  delete globalThis.fetch;
+});
+
+test("reviewing a GitHub mirror writes nothing, and modal approval remains frozen across refreshes", async () => {
+  const el = stubPage([...IDS, "sys-mirror-close", "sys-mirror-form"]);
+  const report = structuredClone(REPORT);
+  const id = report.deployments[0].id;
+  report.deployment_mirrors = { [id]: { plan: { deployment: id, repository: "owner/repo",
+    commit: "a".repeat(40), environment: "prod", state: "success", verified: true,
+    approval: "reviewed-digest" }, receipt: null } };
+  state.environments = report;
+  state.scope = null;
+  let modal;
+  document.querySelectorAll = () => [];
+  document.createElement = () => ({});
+  document.body = { appendChild: element => { modal = element; } };
+  globalThis.location = { hash: "#all/tasks" };
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push([url, options]);
+    return { ok: true, json: async () => ({ status: "ok", data: url.endsWith("/publish")
+      ? { receipt: { phase: "published" } } : { report } }) };
+  };
+  wireEnvironments();
+  el.environments.onclick({ target: { closest: selector => selector === "[data-deployment-publish]"
+    ? { dataset: { deploymentPublish: id } } : null } });
+  assert.equal(calls.length, 0, "opening the review modal cannot publish");
+  assert.match(modal.innerHTML, /owner\/repo/);
+  assert.match(modal.innerHTML, /Approve this exact outbound write/);
+  report.deployment_mirrors[id].plan.approval = "changed-after-review";
+  report.deployment_mirrors[id].plan.repository = "different/repo";
+  let prevented = false;
+  el["sys-mirror-form"].onsubmit({ preventDefault: () => { prevented = true; } });
+  assert.ok(prevented);
+  assert.deepEqual(JSON.parse(calls[0][1].body), { approval: "reviewed-digest" });
+  assert.equal(calls[0][0], `/api/deployments/${encodeURIComponent(id)}/publish`);
+  await new Promise(resolve => setImmediate(resolve));
+  delete globalThis.fetch;
+  delete globalThis.location;
 });
 
 test("health strips are selectable with incident markers, and missing samples or read failures are explicit", async () => {

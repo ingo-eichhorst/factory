@@ -762,6 +762,10 @@ impl AgentContext {
                      applies the labels to the GitHub issue it came from -- only once you approve it; \
                      Factory never posts on its own"
                 ),
+                Grant::DeployPublish => format!(
+                    "deploy.publish -> {bin} deploy mirror-plan <id>, then {bin} deploy publish <id> --approval <digest>; \
+                     explicitly approves that exact GitHub repository, commit, environment and status; never automatic"
+                ),
                 Grant::DashboardEdit => {
                     "dashboard.edit -> save or reset the dashboard layout for a scope; today that is the \
                      web UI's Dashboard > Customise, or PUT/DELETE /api/dashboard?scope=, not this CLI"

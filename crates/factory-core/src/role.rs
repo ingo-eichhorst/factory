@@ -96,10 +96,9 @@ impl GrantExpansion for Grant {
     /// Left out of wildcard expansion (`expand`'s `*` and `prefix.*`
     /// branches): an outward effect a role must be given by its exact name,
     /// never swept in by a wildcard written before the grant existed or
-    /// written broad on purpose. `intake.publish` is the only one today
-    /// (`#171`).
+    /// written broad on purpose. Outbound publishing always needs its exact name.
     fn wildcard_excluded(self) -> bool {
-        matches!(self, Self::IntakePublish)
+        matches!(self, Self::IntakePublish | Self::DeployPublish)
     }
 
     /// One written grant, which may be a wildcard: `task.*`, `agent.*`, `*`.
@@ -256,12 +255,12 @@ impl Roles {
         let foreman = RoleDef {
             name: Role::foreman(),
             describe: "runs a scope: creates the work in it and hands it out".into(),
-            // Every grant but `intake.publish` (`#171`): an outward GitHub
+            // Every grant but the exact-name outbound publishing grants: an outward GitHub
             // effect is not something running a scope implies, so foreman
             // is written out explicitly rather than reusing `Grant::ALL`.
             grants: Grant::ALL
                 .into_iter()
-                .filter(|g| *g != Grant::IntakePublish)
+                .filter(|g| !g.wildcard_excluded())
                 .collect(),
             reach: Reach::Scope,
         };
@@ -402,7 +401,7 @@ mod tests {
         let foreman = roles.get(&Role::foreman()).unwrap();
         assert_eq!(foreman.reach, Reach::Scope);
         for grant in Grant::ALL {
-            if grant == Grant::IntakePublish {
+            if grant.wildcard_excluded() {
                 assert!(!foreman.allows(grant), "foreman must not get an outward GitHub effect for free (#171)");
                 continue;
             }
@@ -454,7 +453,7 @@ mod tests {
         // `*` names every grant but the one or more excluded from wildcard
         // expansion (`intake.publish`, `#171`) -- see
         // `intake_publish_is_excluded_from_wildcard_expansion`.
-        assert_eq!(Grant::expand("*").unwrap().len(), Grant::ALL.len() - 1);
+        assert_eq!(Grant::expand("*").unwrap().len(), Grant::ALL.len() - 2);
         let tasks = Grant::expand("task.*").unwrap();
         assert!(tasks.contains(&Grant::TaskCreate));
         assert!(!tasks.contains(&Grant::AgentStart));
@@ -586,22 +585,23 @@ mod tests {
         // and of `Grant::ALL`, in the order each was added, so a parallel
         // track appending its own grant there too merges without a real
         // conflict.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 13], Grant::DatasetEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 12], Grant::BenchRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::PolicyAttest);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::GoalsCheckIn);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::BackupRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::IntakeAdd);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::IntakeInfo);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakeTriage);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakeAssess);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::IntakeDecide);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::IntakePublish);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 14], Grant::DatasetEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 13], Grant::BenchRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 12], Grant::PolicyAttest);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::GoalsCheckIn);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::BackupRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::IntakeAdd);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::IntakeInfo);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::IntakeTriage);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakeAssess);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakeDecide);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::IntakePublish);
         // `#160`: the same seam, one grant later -- `dashboard.edit` lands at
         // the end too, so a parallel track adding its own grant after this
         // one merges without a real conflict either.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::DashboardEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::DeployRecord);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::DashboardEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::DeployRecord);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::DeployPublish);
         let all = Grant::expand("*").unwrap();
         assert!(all.contains(&Grant::DatasetEdit));
         assert!(all.contains(&Grant::BenchRun));
@@ -615,8 +615,9 @@ mod tests {
         assert!(all.contains(&Grant::IntakeAssess));
         assert!(all.contains(&Grant::IntakeDecide));
         assert!(all.contains(&Grant::DashboardEdit), "an ordinary grant, not excluded from `*`");
-        // The one exception: see `intake_publish_is_excluded_from_wildcard_expansion`.
+        // Outward publishing requires its exact grant, never `*`.
         assert!(!all.contains(&Grant::IntakePublish));
+        assert!(!all.contains(&Grant::DeployPublish));
     }
 
     #[test]

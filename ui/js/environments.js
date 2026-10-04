@@ -437,7 +437,7 @@ function deployments(report) {
       <td class="bk-nowrap">${esc(r.environment)}</td>
       <td><div class="mono">${esc(r.release)}</div>${r.previous ? `<div class="sub mono">was ${esc(r.previous)}</div>` : ""}
         <button type="button" data-release-scope="${esc(r.scope)}" data-release-commit="${esc(r.commit)}" data-release-deployment="${esc(r.id)}">Changes and evidence</button></td>
-      <td><span class="tag sys-badge" data-tone="${r.tone}">${esc(r.status)}</span></td>
+      <td><span class="tag sys-badge" data-tone="${r.tone}">${esc(r.status)}</span>${deploymentMirrorHTML(report.deployment_mirrors?.[r.id])}</td>
       <td class="bk-nowrap">${esc(r.duration)}</td>
       <td>${esc(r.who)}</td>
       <td class="bk-nowrap">${esc(r.when)}</td>
@@ -448,6 +448,56 @@ function deployments(report) {
       <thead><tr><th>Environment</th><th>Release</th><th>Status</th><th>Duration</th><th>Who</th><th>Started</th><th>Verification</th></tr></thead>
       <tbody>${body}</tbody>
     </table></div></section>`;
+}
+
+const publishingMirrors = new Set();
+let mirrorNotice = null;
+
+function deploymentMirrorHTML(offer) {
+  if (!offer) return "";
+  const { plan, receipt } = offer;
+  const current = receipt?.phase === "published" && receipt.plan.approval === plan.approval;
+  const link = `https://github.com/${plan.repository}/deployments`;
+  const status = current ? "Published" : "Awaiting explicit approval";
+  const pending = publishingMirrors.has(plan.deployment);
+  const disabled = pending ? " disabled" : "";
+  let review = "";
+  if (!current) review = `<button type="button" data-deployment-publish="${esc(plan.deployment)}"${disabled}>Review mirror plan</button>`;
+  const error = receipt?.error ? `<p class="bk-bad">${esc(receipt.error)}</p>` : "";
+  return `<div class="sub">GitHub: <a href="${esc(link)}" target="_blank" rel="noopener">${esc(plan.repository)}</a> · ${status}
+    ${error}${review}</div>`;
+}
+
+export async function publishDeployment(id, approval) {
+  if (publishingMirrors.has(id)) return;
+  const scope = state.scope;
+  publishingMirrors.add(id);
+  try {
+    const { receipt } = await api(`/api/deployments/${encodeURIComponent(id)}/publish`, {
+      method: "POST", body: JSON.stringify({ approval }),
+    });
+    mirrorNotice = { scope, message: receipt.error || `GitHub mirror ${receipt.phase}` };
+  } catch (error) { mirrorNotice = { scope, message: error.message }; }
+  finally {
+    publishingMirrors.delete(id);
+    if (state.scope === scope) await refreshEnvironments();
+  }
+}
+
+function mirrorApprovalModal(id) {
+  const offer = state.environments?.deployment_mirrors?.[id];
+  if (!offer) return;
+  const plan = structuredClone(offer.plan);
+  dropModal();
+  scrim(`<header><h2>Approve GitHub deployment mirror</h2><button id="sys-mirror-close">×</button></header>
+    <p>Publish <code>${esc(plan.commit)}</code> to <strong>${esc(plan.repository)}</strong>, environment ${esc(plan.environment)},
+      reported status ${esc(plan.state)}; recorded verification: ${esc(plan.verified == null ? "unknown/not recorded" : String(plan.verified))}.</p>
+    <p>This creates GitHub deployment events with task <code>factory:mirror</code>. Repository integrations may react to those events. Check their automation before approving. Factory does not build, deploy, merge or automatically inactivate other GitHub deployments.</p>
+    <form id="sys-mirror-form"><button type="submit">Approve this exact outbound write</button></form>`);
+  $("sys-mirror-close").onclick = closeModal;
+  $("sys-mirror-form").onsubmit = event => {
+    event.preventDefault(); closeModal(); void publishDeployment(id, plan.approval);
+  };
 }
 
 function releases(report) {
@@ -506,7 +556,8 @@ export function renderEnvironments() {
   const cards = report.environments.length
     ? `<div class="sys-cards">${report.environments.map(c => card(c, now)).join("")}</div>`
     : empty();
-  page.innerHTML = [promotionNoticeHTML(), cards, samplesHTML(), recoveriesHTML(report), scriptRecoveryHTML(report), releaseDetailHTML(), effectivenessHTML(report), deployments(report), releases(report)].join("");
+  const mirrorMessage = mirrorNotice?.scope === state.scope ? `<p role="status">${esc(mirrorNotice.message)}</p>` : "";
+  page.innerHTML = [promotionNoticeHTML(), mirrorMessage, cards, samplesHTML(), recoveriesHTML(report), scriptRecoveryHTML(report), releaseDetailHTML(), effectivenessHTML(report), deployments(report), releases(report)].join("");
 }
 
 export function wireEnvironments() {
@@ -516,6 +567,7 @@ export function wireEnvironments() {
   const actions = [
     ["[data-environment-promote]", button => { void promoteEnvironment(button.dataset.environmentPromote, button.dataset.deployment); }],
     ["[data-environment-recover]", button => recoveryModal(button.dataset.environmentRecover)],
+    ["[data-deployment-publish]", button => mirrorApprovalModal(button.dataset.deploymentPublish)],
     ["[data-samples-environment]", button => { void loadEnvironmentSamples(button.dataset.samplesEnvironment, button.dataset.check, button.dataset.start || null); }],
     ["[data-samples-older]", () => {
       if (sampleDetail?.page?.next_before) void loadEnvironmentSamples(sampleDetail.selection.environment, sampleDetail.selection.check, null, sampleDetail.page.next_before);

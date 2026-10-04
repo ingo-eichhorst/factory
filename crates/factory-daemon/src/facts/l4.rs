@@ -22,6 +22,16 @@ use std::collections::{BTreeMap, BTreeSet};
 const RUN_LOOKBACK: u32 = 20;
 
 #[async_trait]
+impl Provide<factory_kernel::DeploymentMirrorFact> for Provider<'_> {
+    type Query = String;
+    type Value = Vec<factory_kernel::DeploymentMirrorFact>;
+    type Error = FactoryError;
+    async fn get(&self, id: &String) -> Result<Self::Value> {
+        self.engine.workflows.mirror_receipts(id, 200).await
+    }
+}
+
+#[async_trait]
 impl Provide<factory_kernel::RecoveryJournalFact> for Provider<'_> {
     type Query = RecoveryQuery;
     type Value = factory_kernel::RecoveryJournalFact;

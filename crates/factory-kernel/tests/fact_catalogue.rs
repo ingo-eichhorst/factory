@@ -25,6 +25,8 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<WorkflowFact, L4>("WorkflowFact", "L4");
     assert_producer::<EnvironmentRecoveryFact, L4>("EnvironmentRecoveryFact", "L4");
     assert_producer::<RecoveryJournalFact, L4>("RecoveryJournalFact", "L4");
+    assert_producer::<DeploymentMirrorFact, L4>("DeploymentMirrorFact", "L4");
+    assert_producer::<DeploymentPublicationFact, L1>("DeploymentPublicationFact", "L1");
     assert_producer::<ReleaseBuildFact, L4>("ReleaseBuildFact", "L4");
     assert_producer::<ReleaseSbomFact, L2>("ReleaseSbomFact", "L2");
     assert_producer::<ConfirmedSecurityReport, L4>("ConfirmedSecurityReport", "L4");
@@ -50,6 +52,8 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "WorkflowFact",
         "EnvironmentRecoveryFact",
         "RecoveryJournalFact",
+        "DeploymentMirrorFact",
+        "DeploymentPublicationFact",
         "ReleaseBuildFact",
         "ReleaseSbomFact",
         "ConfirmedSecurityReport",
@@ -87,6 +91,26 @@ fn old_cost_json_defaults_new_spend_history_and_scope_uncertainty() {
     assert!(report.daily.is_empty());
     let json = serde_json::to_value(report).unwrap();
     assert!(json.get("daily").is_none() && json.get("unattributed_runs").is_none());
+}
+
+#[test]
+fn deployment_publication_and_append_only_receipts_roundtrip_in_l0() {
+    let fact = DeploymentPublicationFact { deployment: "d".into(), scope: "demo".into(),
+        environment: "prod".into(), commit: "a".repeat(40), dirty: false,
+        state: "success".into(), verified: Some(true), repository: Some("owner/repo".into()),
+        transient: false, production: true };
+    let json = serde_json::to_value(&fact).unwrap();
+    assert_eq!(serde_json::from_value::<DeploymentPublicationFact>(json).unwrap(), fact);
+    let receipt = DeploymentMirrorFact { id: "receipt".into(), plan: DeploymentMirrorPlan {
+        deployment: fact.deployment, scope: fact.scope, repository: fact.repository.unwrap(),
+        environment: fact.environment, commit: fact.commit, state: fact.state, verified: fact.verified,
+        transient: fact.transient, production: fact.production, approval: "b".repeat(64) },
+        phase: DeploymentMirrorPhase::Published, at: "2026-10-04T00:00:00Z".parse().unwrap(),
+        approved_by: "owner".into(), remote_id: Some(71), status_id: Some(81), error: None };
+    let json = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(json["phase"], "published");
+    assert_eq!(serde_json::from_value::<DeploymentMirrorFact>(json).unwrap(), receipt);
+    assert_eq!(serde_json::to_value(Grant::DeployPublish).unwrap(), "deploy.publish");
 }
 
 #[test]

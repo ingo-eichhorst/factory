@@ -16,6 +16,28 @@ impl factory_kernel::FactProvider for Provider<'_> {
 }
 
 #[async_trait]
+impl Provide<factory_kernel::DeploymentPublicationFact> for Provider<'_> {
+    type Query = String;
+    type Value = Option<factory_kernel::DeploymentPublicationFact>;
+    type Error = FactoryError;
+    async fn get(&self, id: &String) -> Result<Self::Value> {
+        use factory_core::environments::{DeployStatus, Tier};
+        let Some(deployment) = self.engine.environments.deployment(id).await? else { return Ok(None); };
+        let snapshot = self.engine.factory_snapshot();
+        let declaration = snapshot.config.environments().into_iter().find(|(scope, env)| *scope == deployment.scope && env.name == deployment.environment);
+        let repository = declaration.as_ref().and_then(|(_, env)| env.github_deployments.as_ref()).map(|mirror| mirror.repository.clone());
+        Ok(Some(factory_kernel::DeploymentPublicationFact {
+            deployment: deployment.id, scope: deployment.scope, environment: deployment.environment,
+            commit: deployment.release.commit, dirty: deployment.release.dirty,
+            state: match deployment.status { DeployStatus::Running => "in_progress", DeployStatus::Succeeded => "success", DeployStatus::Failed => "failure", DeployStatus::RolledBack => "inactive" }.into(),
+            verified: deployment.verification.map(|verification| verification.ok), repository,
+            transient: declaration.as_ref().is_some_and(|(_, env)| env.tier == Tier::Ephemeral),
+            production: declaration.as_ref().is_some_and(|(_, env)| env.tier == Tier::Production),
+        }))
+    }
+}
+
+#[async_trait]
 impl Provide<BackupFact> for Provider<'_> {
     type Query = DateTime<Utc>;
     type Value = BackupFact;

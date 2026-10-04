@@ -20,6 +20,7 @@ mod facts;
 mod goals;
 mod github_intake;
 mod github_outbound;
+mod github_deployments;
 mod harness_health;
 mod host;
 mod intake;

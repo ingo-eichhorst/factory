@@ -26,7 +26,9 @@
 
 use chrono::{DateTime, Duration, Utc};
 pub mod effectiveness;
+pub use factory_kernel::{DeploymentMirrorFact, DeploymentMirrorPhase, DeploymentMirrorPlan};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::error::{FactoryError, Result};
 
@@ -169,6 +171,9 @@ pub enum Tier {
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentDecl {
     pub name: String,
+    /// This scope explicitly opts this environment into approved GitHub mirrors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_deployments: Option<GitHubDeploymentMirror>,
     #[serde(default)]
     pub tier: Tier,
     /// Where a person reaches it, and what an `http` check's `path` is
@@ -196,6 +201,17 @@ pub struct EnvironmentDecl {
     /// sampled -- a paused stretch neither spends nor earns error budget.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubDeploymentMirror { pub repository: String }
+
+pub fn valid_github_repository(repository: &str) -> bool {
+    let Some((owner, repo)) = repository.split_once('/') else { return false; };
+    let valid = |part: &str| !part.is_empty() && part.len() <= 100 && part != "." && part != ".."
+        && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte));
+    valid(owner) && valid(repo)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -437,6 +453,9 @@ pub fn validate<'a>(scopes: impl IntoIterator<Item = (&'a str, &'a [EnvironmentD
     for (scope, envs) in &scopes {
         for env in envs.iter() {
             let here = format!("scope {scope:?}, environment {:?}", env.name);
+            if env.github_deployments.as_ref().is_some_and(|mirror| !valid_github_repository(&mirror.repository)) {
+                return bad(format!("{here}: github_deployments.repository must be an explicit GitHub owner/repo"));
+            }
             if let Some(recover) = &env.recover {
                 if recover.agent.trim().is_empty() || recover.command.trim().is_empty() || recover.timeout_seconds() > 3600 {
                     return bad(format!("{here}: recover needs agent, command and timeout at most 1h"));
@@ -1096,6 +1115,15 @@ pub struct EnvironmentsReport {
     /// Explicit offline script receipts, not workflow runs or deployment cohorts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_journal: Option<factory_kernel::RecoveryJournalFact>,
+    /// People-side outbound plans/receipts; never inputs to L1 metrics.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub deployment_mirrors: BTreeMap<String, DeploymentMirrorOffer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeploymentMirrorOffer {
+    pub plan: factory_kernel::DeploymentMirrorPlan,
+    pub receipt: Option<factory_kernel::DeploymentMirrorFact>,
 }
 
 /// How many deployments the report carries.
@@ -1219,7 +1247,7 @@ pub fn report(
     let mut listed: Vec<Deployment> = deployments.iter().filter(|d| d.status == DeployStatus::Running).cloned().collect();
     listed.extend(deployments.iter().filter(|d| d.status != DeployStatus::Running).cloned());
     listed.truncate(REPORT_DEPLOYMENTS);
-    EnvironmentsReport { generated_at: now, environments: cards, releases, deployments: listed, recoveries: Vec::new(), recovery_journal: None }
+    EnvironmentsReport { generated_at: now, environments: cards, releases, deployments: listed, recoveries: Vec::new(), recovery_journal: None, deployment_mirrors: BTreeMap::new() }
 }
 
 /// The catalogue: one row per `(scope, commit)`, from deployments (newest
@@ -1348,6 +1376,22 @@ mod tests {
 
     fn decls(yaml: &str) -> Vec<EnvironmentDecl> {
         serde_yaml_ng::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn github_mirror_is_strict_opt_in_with_a_bounded_repository_name() {
+        let plain = decls("- name: prod\n");
+        assert!(plain[0].github_deployments.is_none());
+        assert!(serde_json::to_value(&plain[0]).unwrap().get("github_deployments").is_none());
+        let opted = decls("- name: prod\n  github_deployments: { repository: owner/repo }\n");
+        validate([("demo", opted.as_slice())]).unwrap();
+        assert_eq!(opted[0].github_deployments.as_ref().unwrap().repository, "owner/repo");
+        for repository in ["", "https://github.com/owner/repo", "owner/../repo", "owner/repo?key=x", "./repo", "owner/.."] {
+            let mut invalid = opted.clone();
+            invalid[0].github_deployments.as_mut().unwrap().repository = repository.into();
+            assert!(validate([("demo", invalid.as_slice())]).is_err());
+        }
+        assert!(serde_yaml_ng::from_str::<Vec<EnvironmentDecl>>("- name: prod\n  github_deployments: { repository: owner/repo, token: secret }\n").is_err());
     }
 
     pub(super) fn deploy(min: i64, status: DeployStatus, committed: Option<i64>) -> Deployment {

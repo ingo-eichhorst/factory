@@ -2732,6 +2732,58 @@ deployments and sampled incidents, not proof of uninterrupted monitoring.
 No finished deployments is unknown, not a 0% failure rate. Recovery actions
 remain outside all deployment/change cohorts.
 
+**Approved GitHub deployment mirrors.** A scope may opt an environment into
+publishing recorded metadata by adding `github_deployments: { repository:
+owner/repo }` to that environment's declaration. Without this exact opt-in,
+Factory never publishes it. Recording, finishing, checking health or opening
+Operations does not publish anything, even when opted in.
+
+Inspect and explicitly approve the frozen outbound plan:
+
+```sh
+factory deploy mirror-plan <deployment-id>
+factory deploy publish <deployment-id> --approval <the-plan-digest>
+```
+
+The Operations timeline's **Review mirror plan** opens the same repository,
+environment, full commit SHA, recorded status and verification bit for approval.
+Only clean releases with full immutable commit SHAs can be mirrored. A changed
+destination, tier, status or verification requires a fresh plan and approval.
+Agents also need the exact `deploy.publish` grant and scope reach; neither `*`,
+`deploy.*` nor the built-in foreman includes this outward-write permission.
+Roles prevent accidental actions, not access by the machine's owner.
+
+The L4 publisher uses `gh` on the daemon's PATH with its own authentication
+for `github.com` and repository Deployments read/write permission. It creates
+metadata with task `factory:mirror`, `auto_merge: false` and no GitHub commit
+context requirements; these are not a substitute for Factory's release gates.
+It publishes the recorded state (`in_progress`, `success`, `failure`, or
+`inactive`) with `auto_inactive: false`, leaving other GitHub deployments alone.
+It does not run a release or manufacture a deployment, run, health sample or
+SLA observation. No private deployment reason, check output, source path,
+actor text or Factory token is sent. The initial payload records the Factory
+deployment id, scope and initial verification bit; status receipts identify
+each later approved snapshot by its digest.
+
+**GitHub emits deployment webhooks.** Repository integrations may react even
+to metadata-only deployments. Review those integrations before opting in;
+`factory:mirror` is a label, not a security boundary. See GitHub's
+[deployment API](https://docs.github.com/en/rest/deployments/deployments).
+
+Approved, created, published and sanitized failed receipts are immutable in
+the instance database. The timeline links the repository and shows whether
+the current plan was published. Successful retries return their persisted
+receipt without another write; retries after a crash discover the remote
+deployment by Factory id, scope, SHA, tier and environment, and discover the
+status by approval digest. Conflicting identities fail rather than duplicate.
+Requests have a 30-second deadline and a 2 MiB response cap, with a 90-second
+total publication deadline and at most 32 pages of 100 rows per lookup. A
+bounded lookup that cannot prove absence refuses creation. Failures never
+copy provider stderr into receipts; correct authentication or permissions and
+retry the current approved plan. Only one publication runs at a time.
+`GET /api/deployments/<id>/mirror-plan` is read-only; publication is the explicit
+`POST /api/deployments/<id>/publish` with `{ "approval": "<digest>" }`.
+
 **The tab** is L1 › Operations (`#<scope>/infra/environments`), narrowed by
 the rail's scope: environment cards in promotion order (status and since,
 current and deploying release, uptime 24h / 7d / SLO window against target,
@@ -2751,9 +2803,7 @@ and policies; the `environments:` declaration above, with the real Tailscale
 URLs, belongs in the `factory` scope's config once a daemon that reads it is
 installed.
 
-**Not yet:** mirroring deployments to GitHub's
-Deployments API,
-alerting beyond Factory's own events, external
+**Not yet:** live authored-environment migration, alerting beyond Factory's own events, external
 monitoring as a check source, and more than one host.
 
 ## Tasks and runs

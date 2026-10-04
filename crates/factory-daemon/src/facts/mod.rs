@@ -103,6 +103,8 @@ port!(TaskFact, l4, NamedQuery, BTreeMap<String, Vec<TaskFact>>);
 port!(WorkflowFact, l4, NamedQuery, BTreeMap<String, Vec<WorkflowFact>>);
 port!(EnvironmentRecoveryFact, l4, RecoveryQuery, Vec<EnvironmentRecoveryFact>);
 port!(RecoveryJournalFact, l4, RecoveryQuery, RecoveryJournalFact);
+port!(DeploymentPublicationFact, l1, String, Option<DeploymentPublicationFact>);
+port!(DeploymentMirrorFact, l4, String, Vec<DeploymentMirrorFact>);
 port!(ReleaseBuildFact, l4, ReleaseBuildQuery, Option<ReleaseBuildFact>);
 port!(ReleaseSbomFact, l2, ReleaseSbomQuery, Vec<ReleaseSbomFact>);
 port!(AttestedRun, l4, AttestedQuery, Vec<AttestedRun>);
@@ -135,6 +137,8 @@ mod tests {
         registered::<WorkflowFact>();
         registered::<EnvironmentRecoveryFact>();
         registered::<RecoveryJournalFact>();
+        registered::<DeploymentPublicationFact>();
+        registered::<DeploymentMirrorFact>();
         registered::<ReleaseBuildFact>();
         registered::<ReleaseSbomFact>();
         registered::<AttestedRun>();

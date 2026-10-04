@@ -34,6 +34,7 @@ struct Daemon {
     port: u16,
     factory_bin: PathBuf,
     herdr_bin: PathBuf,
+    github_path: Option<PathBuf>,
 }
 
 impl Daemon {
@@ -44,16 +45,18 @@ impl Daemon {
     fn spawn(&mut self) {
         assert!(self.child.is_none(), "a previous daemon was never stopped");
         let log = std::fs::File::create(self.root.join("daemon.log")).expect("daemon.log");
-        let child = Command::new(env!("CARGO_BIN_EXE_factory-daemon"))
-            .arg("--root")
+        let mut command = Command::new(env!("CARGO_BIN_EXE_factory-daemon"));
+        command.arg("--root")
             .arg(&self.root)
             .arg("run")
             .env("FACTORY_BIN", &self.factory_bin)
             .env("FACTORY_HERDR_BIN", &self.herdr_bin)
             .stdout(Stdio::from(log.try_clone().expect("dup log fd")))
-            .stderr(Stdio::from(log))
-            .spawn()
-            .expect("spawn factory-daemon");
+            .stderr(Stdio::from(log));
+        if let Some(directory) = &self.github_path {
+            command.env("PATH", format!("{}:{}", directory.display(), std::env::var("PATH").unwrap_or_default()));
+        }
+        let child = command.spawn().expect("spawn factory-daemon");
         self.child = Some(child);
         self.wait_for_http();
     }
@@ -323,6 +326,7 @@ fn provision() -> Daemon {
         port,
         factory_bin,
         herdr_bin,
+        github_path: None,
     };
     daemon.spawn();
     // The browser loads the roster immediately. Exercise the real axum
@@ -333,6 +337,93 @@ fn provision() -> Daemon {
 }
 
 // -------------------------------------------------------------- the test
+
+#[test]
+fn approved_github_mirror_uses_the_real_cli_api_and_persistent_receipts_without_live_outbound_writes() {
+    if missing_prerequisites() { return; }
+    use std::os::unix::fs::PermissionsExt;
+    let mut daemon = provision(); daemon.sigterm();
+    let config_path = daemon.root.join(".factory/config.yaml");
+    let mut scope: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    scope["scope"]["environments"] = serde_yaml_ng::from_str("- name: mirror-test\n  tier: staging\n  checks: [{ kind: command, command: 'true' }]\n  github_deployments: { repository: fixture-owner/fixture-repo }\n").unwrap();
+    std::fs::write(&config_path, serde_yaml_ng::to_string(&scope).unwrap()).unwrap();
+    let fixture = daemon.root.join("fake-github"); std::fs::create_dir(&fixture).unwrap();
+    let gh = fixture.join("gh");
+    std::fs::write(&gh, format!(r#"#!/bin/sh
+set -eu
+data='{}'
+printf '%s\n' "$*" >> "$data/calls"
+case "$2" in
+  *'/statuses?'*) if test -f "$data/status.json"; then printf '['; cat "$data/status.json"; printf ']'; else printf '[]'; fi ;;
+  *'/statuses') cat > "$data/status-input.json"
+    if test -f "$data/fail-status"; then printf 'credential-error-sentinel-not-for-publication' >&2; exit 1; fi
+    cp "$data/expected-status.json" "$data/status.json"; cat "$data/status.json" ;;
+  *'/deployments?'*) if test -f "$data/deployment.json"; then printf '['; cat "$data/deployment.json"; printf ']'; else printf '[]'; fi ;;
+  *'/deployments') cat > "$data/deployment-input.json"; cp "$data/expected-deployment.json" "$data/deployment.json"; cat "$data/deployment.json" ;;
+  *) exit 3 ;;
+esac
+"#, fixture.display())).unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    daemon.github_path = Some(fixture.clone()); daemon.spawn();
+    let factory_bin = daemon.factory_bin.clone();
+    let instance_root = daemon.root.clone();
+    let instance_url = daemon.base_url();
+    let cli = |args: &[&str]| Command::new(&factory_bin).arg("--root").arg(&instance_root).arg("--url").arg(&instance_url).arg("--json").args(args).env_remove("FACTORY_TOKEN").env_remove("FACTORY_TASK_TOKEN").env_remove("FACTORY_RUN_TOKEN").env_remove("FACTORY_URL").env_remove("FACTORY_SOCKET").output().unwrap();
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let submitted_sha = sha.to_uppercase();
+    let output = cli(&["deploy", "start", "--env", "mirror-test", "--commit", &submitted_sha, "--via", "private-origin-sentinel"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let deployment: Value = serde_json::from_slice(&output.stdout).unwrap(); let id = deployment["deployment"]["id"].as_str().unwrap().to_owned();
+    let plan_url = format!("{}/api/deployments/{id}/mirror-plan", daemon.base_url());
+    let plan = expect_ok(&plan_url, &get(&plan_url))["plan"].clone();
+    assert_eq!(plan["commit"], sha, "GitHub's lowercase object id is canonical in the approved plan");
+    let publish_url = format!("{}/api/deployments/{id}/publish", daemon.base_url());
+    let inspected = cli(&["deploy", "mirror-plan", &id]);
+    assert!(inspected.status.success()); assert_eq!(serde_json::from_slice::<Value>(&inspected.stdout).unwrap()["plan"], plan);
+    assert!(!fixture.join("calls").exists());
+    let (status, _) = raw_request("POST", &publish_url, Some(&json!({"approval": "unapproved"}))).unwrap();
+    assert_ne!(status, 200);
+    assert!(!fixture.join("calls").exists());
+    std::fs::write(fixture.join("expected-deployment.json"), json!({"id": 71, "sha": sha, "task": "factory:mirror", "environment": "mirror-test",
+        "production_environment": false, "transient_environment": false,
+        "payload": {"factory_deployment": id, "scope": "demo"}}).to_string()).unwrap();
+    let set_status = |plan: &Value, number: u64| std::fs::write(fixture.join("expected-status.json"),
+        json!({"id": number, "state": plan["state"], "description": format!("Factory mirror {}", plan["approval"].as_str().unwrap())}).to_string()).unwrap();
+    set_status(&plan, 81);
+    std::fs::write(fixture.join("fail-status"), "1").unwrap();
+    let failed = cli(&["deploy", "publish", &id, "--approval", plan["approval"].as_str().unwrap()]);
+    assert!(!failed.status.success());
+    let failed: Value = serde_json::from_slice(&failed.stdout).unwrap(); assert_eq!(failed["receipt"]["phase"], "failed");
+    assert!(!failed.to_string().contains("credential-error-sentinel"));
+    daemon.sigterm(); daemon.spawn();
+    std::fs::remove_file(fixture.join("fail-status")).unwrap();
+    let resumed = cli(&["deploy", "publish", &id, "--approval", plan["approval"].as_str().unwrap()]);
+    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    let resumed: Value = serde_json::from_slice(&resumed.stdout).unwrap(); assert_eq!(resumed["receipt"]["phase"], "published");
+    let finish_url = format!("{}/api/deployments/{id}/finish", daemon.base_url());
+    expect_ok(&finish_url, &post(&finish_url, &json!({"status": "succeeded"})));
+    let updated = expect_ok(&plan_url, &get(&plan_url))["plan"].clone();
+    assert_eq!(updated["verified"], true); assert_ne!(updated["approval"], plan["approval"]);
+    let (status, _) = raw_request("POST", &publish_url, Some(&json!({"approval": plan["approval"]}))).unwrap();
+    assert_ne!(status, 200);
+    set_status(&updated, 82);
+    let published = expect_ok(&publish_url, &post(&publish_url, &json!({"approval": updated["approval"]})))["receipt"].clone();
+    assert_eq!(published["phase"], "published"); assert_eq!(published["remote_id"], 71); assert_eq!(published["status_id"], 82);
+    daemon.sigterm(); daemon.spawn();
+    let calls = std::fs::read_to_string(fixture.join("calls")).unwrap();
+    assert_eq!(calls.lines().filter(|line| line.contains("/deployments --method POST")).count(), 1);
+    assert_eq!(expect_ok(&publish_url, &post(&publish_url, &json!({"approval": updated["approval"]})))["receipt"], published);
+    assert_eq!(std::fs::read_to_string(fixture.join("calls")).unwrap(), calls, "persisted successful retries do not issue another write");
+    let report_url = format!("{}/api/environments?scope=demo", daemon.base_url());
+    let report = expect_ok(&report_url, &get(&report_url))["report"].clone();
+    assert_eq!(report["deployment_mirrors"][&id]["receipt"], published);
+    assert_eq!(report["deployments"].as_array().unwrap().len(), 1); assert_eq!(report["deployments"][0]["status"], "succeeded");
+    assert!(tasks(&daemon.base_url()).is_empty(), "publishing metadata never manufactures a release task or another deployment");
+    let posted: Value = serde_json::from_slice(&std::fs::read(fixture.join("deployment-input.json")).unwrap()).unwrap();
+    assert_eq!(posted["auto_merge"], false); assert_eq!(posted["required_contexts"], json!([]));
+    assert!(!posted.to_string().contains("private-origin-sentinel"));
+    let status: Value = serde_json::from_slice(&std::fs::read(fixture.join("status-input.json")).unwrap()).unwrap(); assert_eq!(status["auto_inactive"], false);
+}
 
 #[test]
 fn offline_recovery_receipts_import_without_fake_runs_and_survive_outbox_removal_and_restart() {
