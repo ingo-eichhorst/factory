@@ -1274,6 +1274,10 @@ pub struct WorkflowNodeRun {
     pub attempts: Vec<WorkflowAttempt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    /// Persisted creation receipt distinguishes crash repair from deletion.
+    /// Legacy ids are conservatively treated as previously created.
+    #[serde(default = "assume_task_created", skip_serializing_if = "is_true")]
+    pub task_created: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// How many times work was sent back through this node: 0 on its first
@@ -1325,6 +1329,13 @@ pub struct ReworkRequest {
 
 fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+fn assume_task_created() -> bool {
+    true
+}
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// Who started a workflow run, recorded well enough to re-derive their
@@ -1390,6 +1401,7 @@ impl WorkflowRun {
                     status: WorkflowNodeStatus::Unstarted,
                     attempts: Vec::new(),
                     task_id: None,
+                    task_created: false,
                     error: None,
                     round: 0,
                     superseded_task_ids: Vec::new(),

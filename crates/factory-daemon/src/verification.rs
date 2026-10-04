@@ -925,10 +925,12 @@ impl Engine {
                 }
                 self.store.update(&previous_id, &factory_core::task::TaskPatch {
                     instructions: Some(new.instructions),
-                    agent: new.agent, labels: Some(new.labels),
+                    agent: new.agent, runtime: new.runtime,
+                    labels: Some(new.labels),
                     status: Some(factory_core::task::TaskStatus::Pending),
                     clear_result: true, clear_error: true, clear_routed_to: true,
                     clear_failure: true, clear_closure: true,
+                    clear_after: true,
                     ..Default::default()
                 }).await?
             } else {
@@ -938,6 +940,7 @@ impl Engine {
                 let mut workflow = self.workflow_run(&origin.workflow_run_id).await?;
                 if let Some(node) = workflow.nodes.iter_mut().find(|n| n.node_id == *node_id) {
                     node.task_id = Some(review.id.clone());
+                    node.task_created = true;
                     node.status = WorkflowNodeStatus::Pending;
                 }
                 self.workflows.put_run(&workflow).await?;
@@ -2333,10 +2336,10 @@ mod tests {
         assert_eq!(run.required_steps.len(), 1);
         assert_eq!(run.required_steps[0].node_id.as_deref(), Some("a.tests"));
         let wf_now = engine.workflow_run(&wf.id).await.unwrap();
-        assert!(
-            wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap().task_id.is_none(),
-            "b does not start on a's word alone"
-        );
+        let waiting_id = wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap().task_id.as_ref().unwrap();
+        assert!(engine.require(waiting_id).await.unwrap().after.is_some(), "b exists but is not released on a's word alone");
+        assert!(engine.store.active_run(waiting_id).await.unwrap().is_none());
+        assert!(engine.dependency_ready_tasks().await.unwrap().is_empty(), "the scheduler cannot bypass a running gate");
 
         settled(&engine, &run.id).await;
         engine.sync_workflow_for_task(&a_task).await;

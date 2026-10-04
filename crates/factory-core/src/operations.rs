@@ -1148,7 +1148,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
         // task, having no run, already satisfies) so a scheduled task whose
         // own next slot also happens to have passed while it waits is
         // counted once, not twice.
-        if let Some(wait) = &task.slot_wait {
+        if let Some(wait) = task.slot_wait.as_ref().filter(|_| task.after.is_none()) {
             let mut f = flow_for(&mut flow, &task.scope);
             f.wip.queued += 1;
             f.queue_depth += 1;
@@ -1167,7 +1167,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             // Due and not dispatched: the queue.
             let overdue = task
                 .next_run_at
-                .filter(|at| *at <= now && task.schedule.is_some() && !task.schedule_paused && !active);
+                .filter(|at| *at <= now && task.after.is_none() && task.schedule.is_some() && !task.schedule_paused && !active);
             if let Some(at) = overdue {
                 if task.status == TaskStatus::Pending {
                     let mut f = flow_for(&mut flow, &task.scope);
@@ -1716,6 +1716,8 @@ mod tests {
 
     fn task(id: &str, scope: &str) -> Task {
         Task {
+            after: None,
+            after_condition: None,
             id: id.into(),
             title: format!("title of {id}"),
             instructions: String::new(),
@@ -2100,6 +2102,20 @@ mod tests {
     /// `#179`: a task waiting for a `max_sessions` slot counts in the queue
     /// too, aged from when the wait began rather than from a schedule slot
     /// -- the only anchor a manual or retried wait even has.
+    #[test]
+    fn upstream_waits_are_not_in_the_due_or_capacity_queue() {
+        let mut t = scheduled(task("waiting", "demo"), ago(30));
+        t.after = Some(vec!["parent".into()]);
+        t.slot_wait = Some(crate::task::SlotWait {
+            agent: "codex".into(), scope: "demo".into(), trigger: crate::run::Trigger::Dependency,
+            queued_at: ago(40), scheduled_for: None, since: ago(20),
+        });
+        assert!(!t.fires());
+        let r = report(&input(&[t], &[]));
+        assert!(r.flow.iter().all(|flow| flow.queue_depth == 0 && flow.wip.queued == 0));
+        assert!(r.aging.items.iter().all(|item| item.stage != Stage::Queued));
+    }
+
     #[test]
     fn a_task_waiting_for_a_capacity_slot_counts_in_the_queue_aged_from_the_wait() {
         let mut t = task("waiting", "demo");

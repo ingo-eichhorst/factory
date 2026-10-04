@@ -18,6 +18,7 @@
 export function isDue(t, now) {
   return (
     t.status === "pending" &&
+    t.after == null &&
     !t.slot_wait &&
     !!t.schedule &&
     !t.schedule_paused &&
@@ -33,14 +34,16 @@ export function isDue(t, now) {
 ///   "its slot has come" and "already waiting", and the wait is the more
 ///   specific -- and more urgent -- of the two.
 /// - `due`: its slot has come and the scheduler will fire it -- the queue.
-/// - `later`: scheduled, the slot not here yet, or the schedule paused.
+/// - `later`: waiting on upstream, scheduled with its slot not here yet,
+///   or paused. Upstream waits take precedence over stale capacity metadata.
 /// - `manual`: no schedule, so nothing will ever start it but a person (or
 ///   an agent) calling `task run`.
 export function notStarted(tasks, now) {
   const out = { waiting: [], due: [], later: [], manual: [] };
   for (const t of tasks) {
     if (t.status !== "pending") continue;
-    if (t.slot_wait) out.waiting.push(t);
+    if (t.after != null) out.later.push(t);
+    else if (t.slot_wait) out.waiting.push(t);
     else if (!t.schedule) out.manual.push(t);
     else if (isDue(t, now)) out.due.push(t);
     else out.later.push(t);
@@ -51,8 +54,18 @@ export function notStarted(tasks, now) {
 /// What the task modal says about a task nobody has started, or null for any
 /// other task. The point is the first one: a manual task that reads as
 /// "waiting its turn" waits forever.
-export function notStartedNote(t) {
+export function waitingLabel(t, tasks) {
+  if (t?.after == null) return null;
+  const parents = t.after.map(id => tasks?.get?.(id)?.title || id);
+  const label = parents.length ? `waiting on ${parents.join(", ")}` : "waiting for workflow release";
+  return t.after_condition ? `${label}; ${t.after_condition}` : label;
+}
+
+export function notStartedNote(t, tasks) {
   if (!t || t.status !== "pending") return null;
+  if (t.after != null) {
+    return `${waitingLabel(t, tasks)}. Starts automatically when released. Running early requires \`factory task run ${t.id} --override-wait --reason "…"\`, recorded in the journal.`;
+  }
   if (t.slot_wait) {
     return `Waiting for a slot: ${t.slot_wait.agent} already has \`max_sessions\` in use, since ${t.slot_wait.since}. It starts as soon as one opens.`;
   }

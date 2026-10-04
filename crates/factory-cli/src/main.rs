@@ -1154,7 +1154,7 @@ enum TaskCmd {
         limit: Option<u32>,
     },
     /// Create a task. Creating does not start it: nothing dispatches a
-    /// pending task on its own, so pass `--run`, give it a `--schedule`, or
+    /// pending task on its own, so pass `--run`, give it a `--schedule`/`--after`, or
     /// run it later with `factory task run <id>`.
     Create {
         title: String,
@@ -1171,6 +1171,9 @@ enum TaskCmd {
         /// `every 300`, `every 5m`, or a cron expression.
         #[arg(long)]
         schedule: Option<String>,
+        /// Start once all these tasks are done. Repeat for multiple parents.
+        #[arg(long, conflicts_with_all = ["schedule", "run"])]
+        after: Vec<String>,
         /// The IANA timezone a cron schedule's fields are read in, as in
         /// `Europe/Berlin`. Without it they are UTC.
         #[arg(long, requires = "schedule")]
@@ -1327,6 +1330,9 @@ enum TaskCmd {
         /// itself from going through.
         #[arg(long = "continue")]
         continue_run: bool,
+        /// Run before upstream releases it. Requires a journaled --reason.
+        #[arg(long, requires = "reason")]
+        override_wait: bool,
     },
     /// Stop a running task and close its session. Journaled with who
     /// asked, and why if you say.
@@ -5059,6 +5065,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             agent,
             runtime,
             schedule,
+            after,
             timezone,
             estimate,
             estimate_low,
@@ -5102,6 +5109,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             };
             let payload = client
                 .send(Request::TaskCreate(NewTask {
+                    after: (!after.is_empty()).then_some(after),
+                    after_condition: None,
                     title,
                     instructions,
                     scope,
@@ -5130,6 +5139,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             if run {
                 client
                     .send(Request::TaskRun {
+                        override_wait: false,
                         id: created.id.clone(),
                         reason: None,
                         continue_run: false,
@@ -5266,9 +5276,9 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             })
         }
 
-        TaskCmd::Run { id, reason, continue_run } => {
+        TaskCmd::Run { id, reason, continue_run, override_wait } => {
             let id = need_id(id)?;
-            client.send(Request::TaskRun { id: id.clone(), reason, continue_run }).await?;
+            client.send(Request::TaskRun { id: id.clone(), reason, continue_run, override_wait }).await?;
             if continue_run {
                 println!("continuing {id}");
             } else {
@@ -5802,6 +5812,15 @@ fn parse_close_reason(text: &str) -> std::result::Result<CloseReason, String> {
 /// Why a task is where it is, when its status alone does not say: the
 /// failure it is blocked on, or how it was closed (`#122`).
 fn standing(t: &Task) -> Option<String> {
+    if t.status == TaskStatus::Pending {
+        if let Some(after) = &t.after {
+            let waiting = if after.is_empty() { "waiting for workflow release".into() } else { format!("waiting on {}", after.join(", ")) };
+            return Some(match &t.after_condition {
+                Some(condition) => format!("{waiting}; {condition}"),
+                None => waiting,
+            });
+        }
+    }
     if t.has_failed() {
         let kind = t.failure.as_ref().and_then(|f| f.kind).map_or("unclassified", |k| k.as_str());
         return Some(format!("last attempt failed: {kind}"));
@@ -5821,6 +5840,9 @@ fn standing(t: &Task) -> Option<String> {
 fn created_note(t: &Task, dispatched: bool) -> String {
     if dispatched {
         return format!("dispatched; `factory task show {}` follows it", t.id);
+    }
+    if let Some(after) = &t.after {
+        return format!("created, waiting on {}; starts once its upstream tasks finish", after.join(", "));
     }
     match (&t.schedule, t.next_run_at) {
         (Some(_), Some(next)) => format!(
@@ -7588,6 +7610,32 @@ mod tests {
             _ => panic!("metrics flags"),
         }
         assert!(Cli::try_parse_from(["factory", "metrics", "--window", "7d"]).is_err());
+    }
+
+    #[test]
+    fn upstream_triggers_and_explicit_overrides_have_unambiguous_cli_flags() {
+        match parse(&["task", "create", "child", "--after", "a", "--after", "b"]).command {
+            Command::Task(TaskCmd::Create { after, .. }) => assert_eq!(after, vec!["a", "b"]),
+            _ => panic!("after create"),
+        }
+        assert!(Cli::try_parse_from(["factory", "task", "create", "child", "--after", "a", "--run"]).is_err());
+        assert!(Cli::try_parse_from(["factory", "task", "create", "child", "--after", "a", "--schedule", "every 5m"]).is_err());
+        assert!(Cli::try_parse_from(["factory", "task", "run", "child", "--override-wait"]).is_err());
+        match parse(&["task", "run", "child", "--override-wait", "--reason", "investigate"]).command {
+            Command::Task(TaskCmd::Run { override_wait: true, reason: Some(reason), .. }) => assert_eq!(reason, "investigate"),
+            _ => panic!("after override"),
+        }
+    }
+
+    #[test]
+    fn a_created_upstream_wait_is_not_described_as_manual_work() {
+        let mut task = created(None);
+        task.after = Some(vec!["parent-id".into()]);
+        task.after_condition = Some("conditional: review route".into());
+        assert!(one_line(&task).contains("waiting on parent-id; conditional: review route"));
+        let note = created_note(&task, false);
+        assert!(note.contains("starts once its upstream tasks finish"));
+        assert!(!note.contains("nothing starts it"));
     }
 
     #[test]

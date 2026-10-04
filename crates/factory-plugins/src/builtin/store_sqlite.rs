@@ -393,6 +393,16 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.schedule {
                 task.schedule = Some(v);
             }
+            if patch.clear_after {
+                task.after = None;
+                task.after_condition = None;
+            }
+            if let Some(v) = patch.after {
+                task.after = Some(v);
+            }
+            if let Some(v) = patch.after_condition {
+                task.after_condition = Some(v);
+            }
             if patch.clear_estimate {
                 task.estimate_seconds = None;
                 task.estimate = None;
@@ -1118,6 +1128,8 @@ mod tests {
     fn sample_task(id: &str) -> Task {
         let now = Utc::now();
         Task {
+            after: None,
+            after_condition: None,
             id: id.to_string(),
             title: "a title".into(),
             instructions: "do the thing".into(),

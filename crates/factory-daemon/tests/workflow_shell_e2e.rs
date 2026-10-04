@@ -355,6 +355,53 @@ fn missing_prerequisites() -> bool {
 }
 
 #[test]
+fn waiting_tasks_exist_before_release_and_survive_a_real_restart() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision();
+    let base = daemon.base_url();
+    let release = daemon.root.join("release-parent");
+    let instruction = format!("while ! test -f '{}'; do sleep 0.1; done; printf 'bound at dispatch\\n'", release.display());
+    let draft = json!({ "name": "waiting", "scope": "demo",
+        "nodes": [task_node("parent", &instruction), task_node("child", "cat \"$FACTORY_UPSTREAM_FILE\"")],
+        "edges": [edge("parent-child", "parent", "child")] });
+    let created = expect_ok(&format!("{base}/api/workflows"), &post(&format!("{base}/api/workflows"), &draft));
+    let id = created["workflow"]["id"].as_str().unwrap();
+    let started = expect_ok(&format!("{base}/api/workflows/{id}/run"), &post(&format!("{base}/api/workflows/{id}/run"), &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let initial = tasks(&base);
+    assert_eq!(initial.len(), 2, "all task nodes exist at start");
+    let parent = initial.iter().find(|task| task["title"] == "parent").unwrap();
+    let child = initial.iter().find(|task| task["title"] == "child").unwrap();
+    let child_id = child["id"].as_str().unwrap();
+    assert_eq!(child["after"], json!([parent["id"]]));
+    assert_eq!(child["status"], "pending");
+    assert_eq!(child["runs"], 0);
+    let (_, refusal) = raw_request("POST", &format!("{base}/api/tasks/{child_id}/run"), Some(&json!({}))).unwrap();
+    assert!(refusal.contains("override-wait"), "{refusal}");
+    wait_for("parent launch", Duration::from_secs(15), || {
+        tasks(&base).into_iter().find(|task| task["id"] == parent["id"] && task["status"] == "running")
+    });
+    daemon.sigterm();
+    daemon.spawn();
+    let recovered = tasks(&base);
+    assert_eq!(recovered.len(), 2);
+    let recovered_child = recovered.iter().find(|task| task["id"] == child["id"]).unwrap();
+    assert_eq!(recovered_child["after"], child["after"]);
+    assert_eq!(recovered_child["runs"], 0);
+    std::fs::write(&release, b"released").unwrap();
+    let finished = wait_for("upstream-triggered completion", Duration::from_secs(30), || {
+        let run = run_status(&base, run_id);
+        (run["status"] == "done").then_some(run)
+    });
+    assert_eq!(finished["status"], "done");
+    let all = tasks(&base);
+    let completed = all.iter().find(|task| task["id"] == child["id"]).unwrap();
+    assert_eq!(completed["runs"], 1);
+    assert!(completed.get("after").is_none());
+    assert!(completed["result"].as_str().unwrap().contains("bound at dispatch"));
+}
+
+#[test]
 fn diamond_dag_and_restart_recovery_with_the_shell_agent() {
     if missing_prerequisites() {
         return;

@@ -11,7 +11,7 @@ import { describeWorkflowOrigin } from "./workflows.js";
 import { entryKindLabel, entryTone } from "./operations-model.js";
 import { estimateComparisonView, newestRead, runUsageView, taskUsageLine } from "./usage-model.js";
 import { columnFor, standing, taskActions, isSettled, relationLabel, CLOSE_REASONS, closeBody } from "./task-model.js";
-import { notStartedNote } from "./pending-model.js";
+import { notStartedNote, waitingLabel } from "./pending-model.js";
 
 export { scheduleLabel };
 
@@ -93,7 +93,7 @@ function standingDetail(detail, full) {
 /// and how long the newest run has been going.
 function taskCard(t, tasks) {
   const bits = [];
-  bits.push(t.schedule ? scheduleLabel(t.schedule) : (t.runs ? `${t.runs} run${t.runs === 1 ? "" : "s"}` : "no runs yet"));
+  bits.push(waitingLabel(t, state.tasks) || (t.schedule ? scheduleLabel(t.schedule) : (t.runs ? `${t.runs} run${t.runs === 1 ? "" : "s"}` : "no runs yet")));
   if (t.estimate_seconds) bits.push(`est. ${shortSpan(t.estimate_seconds)}`);
   if (!isSettled(t) && t.status !== "pending" && t.last_run_at) bits.push(since(t.last_run_at));
   const wt = t.worktree ? ` <span class="tag" title="runs in a git worktree of its own">worktree</span>` : "";
@@ -142,7 +142,7 @@ export function renderTasks() {
     <tr class="row" data-id="${esc(t.id)}">
       <td><div class="title">${esc(t.title)}</div>
           ${relationLabel(t, state.tasks) ? `<div class="sub">${esc(relationLabel(t, state.tasks))}</div>` : ""}
-          <div class="sub">${esc(scheduleLabel(t.schedule))}${pausedTag(t)}</div></td>
+          <div class="sub">${esc(waitingLabel(t, state.tasks) || scheduleLabel(t.schedule))}${pausedTag(t)}</div></td>
       <td>${statusBadge(t.status)}${standingHtml(t)}</td>
       <td class="sub">${t.runs || 0}</td>
       <td class="sub">${esc(t.scope)}</td>
@@ -301,7 +301,9 @@ function usageHtml(usage, entry) {
 /// terminal.js: which run that is, is the modal's business.
 export function retimeTerminal() {
   const r = selectedRun();
-  setTerminal("run", r ? r.id : null, r ? !TERMINAL.includes(r.status) : false);
+  const waiting = waitingLabel(state.tasks.get(state.open), state.tasks);
+  setTerminal("run", r ? r.id : null, r ? !TERMINAL.includes(r.status) : false,
+    waiting ? `No run yet: ${waiting}. Starts automatically when released.` : undefined);
 }
 
 export function selectedRun() { return state.runs.find(r => r.id === state.run) || null; }
@@ -320,7 +322,7 @@ export function renderModal() {
   $("m-reopen").hidden = !can.reopen;
   if (!can.close) $("m-close-form").hidden = true;
 
-  let meta = `<div class="sub">${esc(t.scope)} · ${esc(t.agent)} on ${esc(t.runtime)} · ${esc(scheduleLabel(t.schedule))}${pausedTag(t)}`;
+  let meta = `<div class="sub">${esc(t.scope)} · ${esc(t.agent)} on ${esc(t.runtime)} · ${esc(waitingLabel(t, state.tasks) || scheduleLabel(t.schedule))}${pausedTag(t)}`;
   if (t.next_run_at && !t.schedule_paused) meta += ` · next ${new Date(t.next_run_at).toLocaleString()}`;
   if (t.estimate?.time) meta += ` · estimate ${shortSpan(t.estimate.time.low)}–${shortSpan(t.estimate.time.high)} (expected ${shortSpan(t.estimate.time.expected)})`;
   else if (t.estimate_seconds) meta += ` · estimate ${shortSpan(t.estimate_seconds)}`;
@@ -342,7 +344,7 @@ export function renderModal() {
   if (labels.length) {
     meta += `<div class="sub">${labels.map(([k, v]) => `<span class="tag">${esc(k)}=${esc(v)}</span>`).join(" ")}</div>`;
   }
-  const idle = notStartedNote(t);
+  const idle = notStartedNote(t, state.tasks);
   if (idle) meta += `<div class="sub">${esc(idle)}</div>`;
   if (t.instructions) meta += `<label>Instructions</label><pre>${esc(t.instructions)}</pre>`;
   const r = selectedRun();

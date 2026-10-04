@@ -499,6 +499,7 @@ impl Engine {
                 &TaskPatch {
                     status: Some(reason.status()),
                     closure: Some(closure),
+                    clear_after: true,
                     clear_pending_retry: task.pending_retry.is_some(),
                     // A closed task waits for nothing (`#179`) -- this is
                     // also how a task only ever waiting for a slot, never
@@ -1292,7 +1293,7 @@ mod tests {
         assert!(e.message.contains("by the owner: stop the line"), "{}", e.message);
 
         let response = engine
-            .handle_request(Request::TaskRun { id: task.id.clone(), reason: Some("try again".into()), continue_run: false })
+            .handle_request(Request::TaskRun { override_wait: false, id: task.id.clone(), reason: Some("try again".into()), continue_run: false })
             .await;
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
         let entries = engine.store.entries(&task.id, 50).await.unwrap();

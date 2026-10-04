@@ -15,6 +15,16 @@ const FAIL_KINDS = [
   "ack_timeout", "run_timeout", "blocked_timeout", "dispatch_failed",
 ];
 
+test("an upstream wait is scheduled even without a cron and cannot be run accidentally", () => {
+  for (const after of [[], ["parent"]]) {
+    const task = { status: "pending", after };
+    assert.equal(columnFor(task), "scheduled");
+    assert.equal(taskActions(task, null).run, false);
+    assert.equal(taskActions(task, null).close, true);
+  }
+  assert.equal(taskActions({ status: "pending", after: null }, null).run, true);
+});
+
 test("a task whose run failed sits in Blocked, never Closed, for every fail kind", () => {
   for (const kind of FAIL_KINDS) {
     const t = { status: "blocked", failure: failure(kind), error: "boom\nand more" };

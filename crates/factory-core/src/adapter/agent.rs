@@ -656,13 +656,13 @@ impl AgentContext {
                 Grant::TaskCreate => format!(
                     "task.create -> {bin} task create \"<title>\" -i \"<instructions>\" --scope {scope} --agent <agent>; \
                      that creates it and nothing more -- it is not dispatched until `task run <id>` \
-                     (or `task create --run`, which does both) or its schedule fires"
+                     (or `task create --run`, which does both), its schedule fires, or upstream work completes when created with --after <task id>"
                 ),
                 Grant::TaskEdit => {
                     format!("task.edit -> {bin} task edit <id> ... (see --help for every field)")
                 }
                 Grant::TaskDelete => format!("task.delete -> {bin} task delete <id>"),
-                Grant::TaskRun => format!("task.run -> {bin} task run <id>"),
+                Grant::TaskRun => format!("task.run -> {bin} task run <id>; an after trigger waits for upstream work. Running early requires --override-wait --reason \"<why>\" and is journaled; workflow gates still apply"),
                 Grant::TaskCancel => format!("task.cancel -> {bin} task cancel <id>"),
                 Grant::TaskClose => format!(
                     "task.close -> {bin} task close <id> --reason completed|not_planned|duplicate [--duplicate-of <id>] [--note <why>], {bin} task reopen <id>"
@@ -997,6 +997,8 @@ mod tests {
     fn task() -> Task {
         let now = chrono::Utc::now();
         Task {
+            after: None,
+            after_condition: None,
             id: "t1".into(),
             title: "fix the flaky test".into(),
             instructions: String::new(),

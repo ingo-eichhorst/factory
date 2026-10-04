@@ -69,13 +69,13 @@ export function stopTerminal() {
   }
 }
 
-export function setTerminal(kind, id, live) {
+export function setTerminal(kind, id, live, emptyMessage = "No run yet. Press Run to start one.") {
   stopTerminal();
   state.term = id ? { kind, id } : null;
   if ($("t-live")) $("t-live").hidden = !live;
   if ($("t-hint")) $("t-hint").hidden = !live;
   if (!state.term) {
-    if ($("t-term")) { $("t-term").textContent = "No run yet. Press Run to start one."; $("t-term").classList.add("idle"); }
+    if ($("t-term")) { $("t-term").textContent = emptyMessage; $("t-term").classList.add("idle"); }
     return;
   }
   if (live) openTermSocket(); else fetchTerminal();
