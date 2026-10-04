@@ -50,7 +50,8 @@ fn plan_from(fact: DeploymentPublicationFact) -> Result<DeploymentMirrorPlan> {
         scope: fact.scope,
         repository,
         environment: fact.environment,
-        commit: fact.commit,
+        // Git object ids are case-insensitive, while GitHub returns lowercase.
+        commit: fact.commit.to_ascii_lowercase(),
         state: fact.state,
         verified: fact.verified,
         transient: fact.transient,
@@ -658,6 +659,15 @@ esac
         let (engine, root) = self::engine(true);
         let id = start(&engine, "moving-branch", false).await;
         assert!(engine.deployment_mirror_plan(&id).await.is_err());
+        let uppercase = start(&engine, &SHA.to_uppercase(), false).await;
+        assert_eq!(
+            engine
+                .deployment_mirror_plan(&uppercase)
+                .await
+                .unwrap()
+                .commit,
+            SHA
+        );
         let mut deployment = engine.environments.deployment(&id).await.unwrap().unwrap();
         deployment.id = uuid::Uuid::new_v4().to_string();
         deployment.release.commit = SHA.into();
