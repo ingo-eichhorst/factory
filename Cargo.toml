@@ -8,6 +8,8 @@ members = [
     "crates/factory-process",
     "crates/factory-assurance",
     "crates/factory-direction",
+    "crates/factory-composition",
+    "crates/factory-interfaces",
     "crates/factory-core",
     "crates/factory-plugins",
     "crates/factory-daemon",

@@ -1,9 +1,11 @@
 [package]
-name = "factory-core"
+name = "factory-interfaces"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Transport/protocol composition is outside the ladder, never a back door for
+# a level to import other levels or the daemon.
 [dependencies]
 factory-kernel = { path = "../factory-kernel" }
 factory-infrastructure = { path = "../factory-infrastructure" }
@@ -13,15 +15,9 @@ factory-process = { path = "../factory-process" }
 factory-assurance = { path = "../factory-assurance" }
 factory-direction = { path = "../factory-direction" }
 factory-composition = { path = "../factory-composition" }
-factory-interfaces = { path = "../factory-interfaces" }
-anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
-csv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml_ng.workspace = true
-sha2.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
-uuid.workspace = true
+

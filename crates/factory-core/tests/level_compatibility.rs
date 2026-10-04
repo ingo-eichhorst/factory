@@ -4,6 +4,44 @@ use factory_kernel::{LaunchKind, LaunchSpec, Schedule, Span};
 use serde_json::json;
 
 #[test]
+fn interface_seam_context_and_observer_stream_are_canonical_outside_stack_types() {
+    let old: Option<&dyn factory_core::adapter::Interface<()>> = None;
+    let canonical: Option<&dyn factory_interfaces::Interface<()>> = old;
+    assert!(canonical.is_none());
+    let context: Option<factory_core::adapter::InterfaceContext> = None;
+    let _: Option<factory_interfaces::InterfaceContext> = context;
+    let bus: factory_core::EventBus = factory_interfaces::EventBus::new(8);
+    let _: factory_interfaces::EventBus = bus;
+    let event: factory_core::Event = factory_interfaces::Event::TaskDeleted { id: "t".into() };
+    assert_eq!(
+        serde_json::to_value(event).unwrap(),
+        json!({"type":"task_deleted", "id":"t"})
+    );
+    let envelope: factory_core::protocol::Envelope =
+        factory_interfaces::protocol::Request::Status.into();
+    let _: factory_interfaces::protocol::Envelope = envelope;
+    let response: factory_core::protocol::Response =
+        factory_interfaces::protocol::Response::error("denied", "No grant");
+    let _: factory_interfaces::protocol::Response = response;
+}
+
+#[test]
+fn config_and_page_projection_paths_are_canonical_outside_stack_types() {
+    let config: Option<factory_core::Config> = None;
+    let _: Option<factory_composition::config::Config> = config;
+    let factory: Option<factory_core::Factory> = None;
+    let _: Option<factory_composition::config::Factory> = factory;
+    let scope: Option<factory_core::Scope> = None;
+    let _: Option<factory_composition::config::Scope> = scope;
+    let dashboard: Option<factory_core::dashboard::DashboardConfig> = None;
+    let _: Option<factory_composition::dashboard::DashboardConfig> = dashboard;
+    let activity: Option<factory_core::building::Activity> = None;
+    let _: Option<factory_composition::building::Activity> = activity;
+    let operations: Option<factory_core::operations::OperationsReport> = None;
+    let _: Option<factory_composition::operations::OperationsReport> = operations;
+}
+
+#[test]
 fn direction_domains_and_goals_store_keep_their_canonical_core_paths() {
     let policy: Option<factory_core::policy::Catalogue> = None;
     let _: Option<factory_direction::policy::Catalogue> = policy;

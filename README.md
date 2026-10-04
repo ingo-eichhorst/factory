@@ -26,8 +26,8 @@ the daemon cannot tell a built-in implementation from a plugin:
 The public compatibility paths are in `crates/factory-core/src/adapter/`.
 The Agent and runtime traits are owned by L3's `factory-agents`, and the
 TaskStore trait by L4's `factory-process`, and KnowledgeProvider by L5's
-`factory-assurance`; core re-exports them. The Interface seam remains in
-core pending the level migration. None knows
+`factory-assurance`; the Interface seam is owned by the outside-stack
+`factory-interfaces`. Core canonically re-exports all five. None knows
 about sqlite, herdr, axum, or any other concrete choice.
 
 ## Quickstart
@@ -5099,8 +5099,24 @@ with the goal owner. The daemon's PolicyStore still mixes process attestations
 and provenance with policy receipts and needs that split, not an L6 label on
 the shared store.
 
-The remaining signpost reader move, protocol/router migration, six live
-services/providers/stores and strict command ladder are still ahead in #193.
+The wire protocol, observer event stream and unchanged generic Interface
+seam now live in `factory-interfaces`, outside the six-level ladder.
+`factory-composition` owns whole-instance configuration/scope loading and
+dashboard/site/Line page projections needed by those responses. These are
+real implementations, not forwarding shells, and import canonical domain
+owners directly; neither imports Core, the daemon or plugins. The metadata
+guard forbids every level from depending on either outside owner, including
+renamed normal/dev/build/target edges. They cannot be a facade escape hatch.
+Existing Core paths still name the same types, with all wire JSON and plugin
+adapter methods intact. The observer stream remains lossy, with no subscribers
+normal and whole-run tokens/digests redacted before publication; it is not a
+fact log. Concrete HTTP/socket mounts, the actual router and its single
+`Engine::handle(Envelope)`/`access.rs` authorization entry remain in the daemon.
+Moving page projections does not isolate their live gatherers or claim to
+finish the Operations signpost reader move.
+
+The remaining signpost reader move, router/six live services/providers/stores
+and strict command ladder are still ahead in #193.
 
 ## Layout
 
@@ -5111,7 +5127,9 @@ services/providers/stores and strict command ladder are still ahead in #193.
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy and TaskStore
     crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam (full live services still pending)
     crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data and GoalsStore
-    crates/factory-core      domain, events, wire protocol, the five adapter traits
+    crates/factory-composition    outside stack: instance config/scope loading and dashboard/site/Line page projections
+    crates/factory-interfaces     outside stack: wire protocol, observer event stream and Interface seam
+    crates/factory-core      compatibility paths and remaining cross-level bridges
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
     crates/factory-cli       the `factory` binary

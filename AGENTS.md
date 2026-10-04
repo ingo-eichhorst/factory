@@ -11,7 +11,9 @@ A daemon that gives tasks to coding agents and watches what happens.
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy and TaskStore
     crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam (full live services still pending)
     crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data and GoalsStore
-    crates/factory-core      domain, events, wire protocol, the five adapter traits
+    crates/factory-composition    outside stack: instance config/scope loading and dashboard/site/Line page projections
+    crates/factory-interfaces     outside stack: wire protocol, observer event stream and Interface seam
+    crates/factory-core      compatibility paths and remaining cross-level bridges
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
     crates/factory-cli       the `factory` binary
@@ -267,6 +269,16 @@ something impossible.
   PolicyStore still mixes process evidence with policy receipts in the daemon;
   split those owners before claiming full service/storage isolation. The
   signpost reader move and live adjacent command ports still remain in #193.
+- Wire envelopes, responses, observer events and the unchanged Interface seam
+  live in `factory-interfaces`, outside the stack. Whole-instance config/scope
+  loading and cross-level page projections live in `factory-composition`.
+  Core re-exports canonical paths. Neither outside owner may depend on Core,
+  the daemon or plugins; no level may import either, even through an alias or
+  dev/target table. They are not extra level services or a fact channel.
+  Keep the lossy observer bus and run-token redaction unchanged. Actual mounts,
+  `Engine::handle(Envelope)` and the single `access.rs` authorization check
+  remain in the daemon; six-service/command-port isolation and the Operations
+  signpost reader move are still unfinished #193 work.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's
   `scope.roles` down to that scope -- from the live snapshot, and `authorize`,
