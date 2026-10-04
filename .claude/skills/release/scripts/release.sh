@@ -110,11 +110,30 @@ else
   REF="$SOURCE"
   DIRTY=no
   SOURCE_DESC="ref $SOURCE"
-  TEMP_WORKTREE="$REPO/../worktrees/.release-$ENV_NAME"
-  git -C "$REPO" worktree remove --force "$TEMP_WORKTREE" >/dev/null 2>&1 || true
-  git -C "$REPO" worktree add --detach --quiet "$TEMP_WORKTREE" "$SHA" \
-    || die "could not check $SHA out into a build worktree"
-  BUILD_DIR="$(cd "$TEMP_WORKTREE" && pwd)"
+  # The commit's tree, kept under the environment's home rather than in a
+  # throwaway worktree: the daemon is built with this path baked in
+  # (`CARGO_MANIFEST_DIR`), and its OpenShell provisioner (#234) builds the
+  # sandbox image's `factory` CLI from that same tree later, long after this
+  # script has exited. A tree that was deleted on the way out leaves every
+  # `sandbox: openshell` agent stuck at "no Factory source tree". One
+  # directory per commit, so a rebuild of the same commit reuses it; the
+  # newest three are kept, enough to roll back to.
+  SRC_HOME="$HOME_DIR/src"
+  BUILD_DIR="$SRC_HOME/$SHA"
+  if [ ! -f "$BUILD_DIR/Cargo.toml" ]; then
+    mkdir -p "$SRC_HOME"
+    rm -rf "$BUILD_DIR.partial"
+    mkdir "$BUILD_DIR.partial"
+    git -C "$REPO" archive "$SHA" | tar -x -C "$BUILD_DIR.partial" \
+      || die "could not export $SHA into $BUILD_DIR"
+    mv "$BUILD_DIR.partial" "$BUILD_DIR"
+  fi
+  touch "$BUILD_DIR"
+  # No .git in an export: the build scripts take the commit from here.
+  export FACTORY_GIT_SHA="$SHA"
+  ls -1t "$SRC_HOME" | grep -v '\.partial$' | tail -n +4 | while read -r old; do
+    rm -rf "${SRC_HOME:?}/$old"
+  done
 fi
 
 if [ "$POLICY" = "main-only" ] && [ "$FORCE" -eq 0 ]; then
