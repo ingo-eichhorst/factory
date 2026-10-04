@@ -58,6 +58,9 @@ mod fact_vocabulary;
 pub mod facts;
 pub use fact_vocabulary::*;
 mod ports;
+mod commands;
+pub use commands::{CommandPort, Commands, DirectlyBelow, TaskReceipt};
+pub use facts::TaskInventoryQuery;
 mod provenance;
 pub use provenance::*;
 mod spend;
@@ -87,6 +90,7 @@ pub use facts::{
     AgentFact, AttestedRun, ConfirmedSecurityReport, DependenciesFact, ExploitedFinding, GateCase,
     GateFact, RunFact, TaskFact, TaskInventoryFact, WorkflowFact, WorkflowRunFact,
 };
+pub use facts::TaskSnapshotFact;
 pub use facts::{
     BackupFact, DaemonConfigFact, Fact, FactCatalogueEntry, Level, SecretsPresence, VerifySummary,
     FACT_CATALOGUE, KNOWN_DAEMON_FACTS, KNOWN_SECRETS_LOCATIONS, L1, L2, L3, L4, L5, L6,

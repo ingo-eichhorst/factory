@@ -21,3 +21,4 @@ pub mod policy_store;
 pub mod reporting_clock;
 pub mod renewal_store;
 pub mod scenario;
+pub mod remediation;

@@ -16,6 +16,7 @@ mod environments;
 mod doctor;
 mod discovery;
 mod engine;
+mod commands;
 #[cfg(test)]
 mod evidence_store_tests;
 mod facts;

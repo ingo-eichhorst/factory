@@ -46,9 +46,7 @@ use std::sync::Arc;
 /// Ten minutes -- a gate's timeout when its requirement names none, the same
 /// fallback the bench gate runner has always used.
 pub(crate) const DEFAULT_GATE_TIMEOUT_SECS: u64 = 600;
-pub(crate) const REVIEW_RUN_LABEL: &str = "factory.review_run";
-pub(crate) const REVIEW_STEP_LABEL: &str = "factory.review_step";
-pub(crate) const REVIEW_DIGEST_LABEL: &str = "factory.review_digest";
+pub(crate) use factory_process::creation::{REVIEW_RUN_LABEL, REVIEW_STEP_LABEL, REVIEW_DIGEST_LABEL};
 
 /// Run `sh -c command` in `dir`, combined stdout+stderr, bounded by
 /// `timeout_secs`. `(None, ...)` on a timeout or a failure to even start the

@@ -22,3 +22,4 @@ pub mod knowledge;
 pub mod knowledge_provider;
 pub mod metrics;
 pub mod quality;
+pub mod remediation;

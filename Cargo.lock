@@ -866,6 +866,7 @@ dependencies = [
 name = "factory-direction"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "factory-assurance",
  "factory-kernel",
@@ -956,6 +957,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "factory-agents",
  "factory-core",
  "rusqlite",
  "serde",

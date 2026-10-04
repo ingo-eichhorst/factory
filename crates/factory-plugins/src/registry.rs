@@ -217,3 +217,15 @@ fn keys<V>(map: &BTreeMap<String, V>) -> String {
         map.keys().cloned().collect::<Vec<_>>().join(", ")
     }
 }
+
+impl factory_agents::selection::Catalog for Registry {
+    fn require_agent(&self, name: &str) -> Result<()> {
+        self.agent(name).map(|_| ())
+    }
+    fn require_runtime(&self, name: &str) -> Result<()> {
+        self.runtime(name).map(|_| ())
+    }
+    fn agent_names(&self) -> Vec<String> {
+        self.agents.keys().cloned().collect()
+    }
+}

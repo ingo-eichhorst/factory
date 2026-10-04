@@ -169,6 +169,7 @@ port!(
 );
 port!(AgentFact, factory_agents::roster::Provider, String, Vec<AgentFact>, l3::provider);
 port!(TaskFact, factory_process::facts::Provider<'a>, NamedQuery, BTreeMap<String, Vec<TaskFact>>, l4::provider);
+port!(TaskSnapshotFact, factory_process::facts::Provider<'a>, String, TaskSnapshotFact, l4::provider);
 port!(
     TaskInventoryFact,
     factory_process::facts::Provider<'a>,
@@ -588,6 +589,7 @@ mod tests {
         registered::<AgentFact>();
         registered::<TaskFact>();
         registered::<TaskInventoryFact>();
+        registered::<TaskSnapshotFact>();
         registered::<WorkflowFact>();
         registered::<EnvironmentRecoveryFact>();
         registered::<RecoveryJournalFact>();
@@ -722,7 +724,7 @@ mod tests {
             include_str!("../environments/recovery.rs"),
         ] {
             assert!(!file
-                .split("#[cfg(test)]")
+                .split("#[cfg(test)]\nmod tests")
                 .next()
                 .unwrap()
                 .contains("crate::policies::subtree_scopes"));
@@ -735,7 +737,7 @@ mod tests {
             include_str!("../policies/mod.rs"),
             include_str!("../scenarios/mod.rs"),
         ] {
-            let production = file.split("#[cfg(test)]").next().unwrap();
+            let production = file.split("#[cfg(test)]\nmod tests").next().unwrap();
             let compact: String = production.chars().filter(|c| !c.is_whitespace()).collect();
             assert!(
                 !compact.contains("self.store"),
@@ -743,9 +745,8 @@ mod tests {
             );
             assert!(production.contains("get::<TaskInventoryFact>"));
         }
-        // The existing quality remediation command returns a full Task and
-        // still awaits the phase-5 command ladder. Its read-only report must
-        // not use that as an excuse to reach into L4's store.
+        // Quality report and remediation both read L4 through facts. A
+        // command acknowledgement cannot supply inventory or a task record.
         let quality = include_str!("../quality/mod.rs")
             .split("pub(crate) async fn quality_remediate")
             .next()
@@ -756,6 +757,16 @@ mod tests {
         assert!(quality.contains("get::<TaskInventoryFact>"));
         let producer = include_str!("../../../factory-process/src/facts.rs");
         assert!(producer.contains("impl Provide<factory_kernel::TaskInventoryFact> for Provider"));
+        for (owner, reader) in [
+            (include_str!("../../../factory-assurance/src/remediation.rs"), "L5"),
+            (include_str!("../../../factory-direction/src/remediation.rs"), "L6"),
+        ] {
+            let production = owner.split("#[cfg(test)]\nmod tests").next().unwrap();
+            let compact: String = production.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(compact.contains(&format!("Facts::<{reader}>::new()")));
+            assert!(compact.contains("get::<TaskInventoryFact,_>"));
+            assert!(!compact.contains("TaskStore") && !compact.contains("Engine"));
+        }
     }
 
     #[test]
