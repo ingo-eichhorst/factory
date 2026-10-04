@@ -55,7 +55,13 @@ export function gatewaySummary(row) {
     label: connected ? "connected" : (row?.status || "unknown"),
     name: row?.gateway || "(active)",
     facts: facts.join(" · "),
-    started: row?.started_at ? `started by Factory at ${row.started_at}${row.started_with ? ` with ${row.started_with}` : ""}` : null,
+    started: startedLine(row),
     detail: row?.detail || null,
   };
+}
+
+function startedLine(row) {
+  if (!row?.started_at) return null;
+  const how = row.started_with ? " with " + row.started_with : "";
+  return "started by Factory at " + row.started_at + how;
 }

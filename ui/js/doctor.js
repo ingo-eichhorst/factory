@@ -45,17 +45,20 @@ function evidenceCard(title, document, now) {
 
 /// The OpenShell gateways sandboxed agents use (#234). Absent when no agent
 /// declares `sandbox: openshell`.
-function gatewaySection(rows) {
-  if (!rows || !rows.length) return "";
-  return `<section class="doctor-evidence-grid">${rows.map((row) => {
-    const g = gatewaySummary(row);
-    return `<article class="infra-card doctor-evidence">
+function gatewayCard(row) {
+  const g = gatewaySummary(row);
+  const lines = [g.facts, g.started].filter(Boolean).map((text) => '<div class="sub">' + esc(text) + "</div>");
+  if (g.detail) lines.push('<p class="infra-hint">' + esc(g.detail) + "</p>");
+  return `<article class="infra-card doctor-evidence">
       <header class="infra-card-head"><h3>OpenShell gateway ${esc(g.name)}</h3><span class="tag bk-badge" data-level="${esc(g.level)}">${esc(g.label)}</span></header>
-      ${g.facts ? `<div class="sub">${esc(g.facts)}</div>` : ""}
-      ${g.started ? `<div class="sub">${esc(g.started)}</div>` : ""}
-      ${g.detail ? `<p class="infra-hint">${esc(g.detail)}</p>` : ""}
+      ${lines.join("")}
     </article>`;
-  }).join("")}</section>`;
+}
+
+function gatewaySection(rows) {
+  if (!rows?.length) return "";
+  const cards = rows.map(gatewayCard).join("");
+  return `<section class="doctor-evidence-grid">${cards}</section>`;
 }
 
 export function renderDoctor() {

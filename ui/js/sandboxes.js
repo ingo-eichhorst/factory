@@ -27,12 +27,14 @@ export function sandboxTag(row) {
 /// of any run (#234): `ready`, `preparing`, or `needs` the one thing named.
 /// An openshell row the daemon has not judged yet says so; any other row
 /// has nothing to say.
+const READINESS_TONE = { ready: "ok", needs: "bad", preparing: "warn" };
+
 export function readinessTag(row) {
   if (row?.sandbox !== "openshell") return "";
   const r = row.readiness;
   if (!r) return ` <span class="tag">checking</span>`;
-  const tone = r.state === "ready" ? "ok" : r.state === "needs" ? "bad" : "warn";
-  const title = r.thing ? ` title="${esc(r.thing)}"` : "";
+  const tone = READINESS_TONE[r.state] || "warn";
+  const title = r.thing ? ' title="' + esc(r.thing) + '"' : "";
   return ` <span class="tag sys-badge" data-tone="${tone}"${title}>${esc(r.state)}</span>`;
 }
 
@@ -47,9 +49,10 @@ export function readinessDetail(readiness) {
   if (readiness.command) lines.push(`<code>${esc(readiness.command)}</code>`);
   for (const note of readiness.notes || []) lines.push(esc(note));
   for (const e of readiness.expiring || []) {
-    lines.push(e.days_left < 0
-      ? `${esc(e.provider)}'s credential expired on ${esc(e.expires)}`
-      : `${esc(e.provider)}'s credential expires on ${esc(e.expires)} (${esc(String(e.days_left))} days)`);
+    const when = e.days_left < 0
+      ? "expired on " + esc(e.expires)
+      : "expires on " + esc(e.expires) + " (" + esc(String(e.days_left)) + " days)";
+    lines.push(esc(e.provider) + "'s credential " + when);
   }
   return lines.map(line => `<div class="sub">${line}</div>`).join("");
 }
