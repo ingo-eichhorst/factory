@@ -5140,8 +5140,22 @@ fact log. Concrete HTTP/socket mounts, the actual router and its single
 Moving page projections does not isolate their live gatherers or claim to
 finish the Operations signpost reader move.
 
-The remaining signpost reader move, router/six live services/providers/stores
-and strict command ladder are still ahead in #193.
+The live benchmark resolution, gate and knowledge-tag providers now live in
+L5's `factory-assurance`, holding only its benchmark store and instance root.
+The infrastructure expiry store itself provides its L1 fact, and L4's
+workflow store provides deployment mirror receipts. L4's provenance provider
+uses only the task-store seam and run-evidence store: only authoritative Done
+runs expose rows matching that run, task, finish time and captured artifact.
+Both upward fact reads and ordinary same-level reads use these actual owners,
+not an Engine-backed forwarding provider. The daemon only constructs them;
+query windows, 200-run/receipt bounds, settlement rules, live file reads,
+unknown values and existing error identities are unchanged.
+
+The company decision is recorded in
+[ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),
+with ADR 0004 amended to name the evidence channel. The remaining signpost
+reader move, six live services and other Engine-backed providers, adjacent
+command ports and remediation/promotion routing are still ahead in #193.
 
 ## Layout
 
