@@ -64,6 +64,25 @@ function promotionButton(choice) {
   return `<button type="button" data-environment-promote="${esc(choice.source)}" data-deployment="${esc(choice.deployment)}"${promoting.has(choice.source) ? " disabled" : ""}>Promote to ${esc(choice.target)}</button>`;
 }
 
+function cardPromotion(card) {
+  if (!card.promotes_to) return "";
+  let action;
+  if (card.promotion_ready && card.current) {
+    action = promotionButton({ source: card.name, target: card.promotes_to, deployment: card.current.id });
+  } else {
+    action = `<span class="sub">${esc(card.promotion_reason || "Promotion is not available on this daemon.")}</span>`;
+  }
+  return `<div class="sys-promotion">${action}<p class="sub">Creates a release workflow; deployment waits for owner approval.</p></div>`;
+}
+
+function promotionNoticeHTML() {
+  if (!promotionNotice || promotionNotice.scope !== state.scope) return "";
+  if (promotionNotice.error) return `<p class="sys-promotion-notice bk-bad" role="status">${esc(promotionNotice.error)}</p>`;
+  const { run } = promotionNotice;
+  const href = `#${encodeURIComponent(run.scope)}/proc/workflows/${encodeURIComponent(run.workflow_id)}/run/${encodeURIComponent(run.id)}`;
+  return `<p class="sys-promotion-notice" role="status">Promotion created. <a href="${href}">Open release workflow</a>. Deployment waits for owner approval.</p>`;
+}
+
 // ------------------------------------------------------------------ fetching
 
 /// Sets `state.environments`, or `state.environmentsError` with
@@ -158,7 +177,7 @@ function card(c, now) {
       ${link}
     </header>
     <p class="sys-status">${esc(statusText(c, now))}</p>
-    ${c.promotes_to ? `<div class="sys-promotion">${c.promotion_ready && c.current ? promotionButton({ source: c.name, target: c.promotes_to, deployment: c.current.id }) : `<span class="sub">${esc(c.promotion_reason || "Promotion is not available on this daemon.")}</span>`}<p class="sub">Creates a release workflow; deployment waits for owner approval.</p></div>` : ""}
+    ${cardPromotion(c)}
     ${running}
     <dl class="infra-facts">
       ${fact("Running", current)}
@@ -253,19 +272,15 @@ export function renderEnvironments() {
   const cards = report.environments.length
     ? `<div class="sys-cards">${report.environments.map(c => card(c, now)).join("")}</div>`
     : empty();
-  const notice = promotionNotice && promotionNotice.scope === state.scope
-    ? (promotionNotice.error ? `<p class="sys-promotion-notice bk-bad" role="status">${esc(promotionNotice.error)}</p>`
-      : `<p class="sys-promotion-notice" role="status">Promotion created. <a href="#${encodeURIComponent(promotionNotice.run.scope)}/proc/workflows/${encodeURIComponent(promotionNotice.run.workflow_id)}/run/${encodeURIComponent(promotionNotice.run.id)}">Open release workflow</a>. Deployment waits for owner approval.</p>`)
-    : "";
-  page.innerHTML = [notice, cards, deployments(report), releases(report)].join("");
+  page.innerHTML = [promotionNoticeHTML(), cards, deployments(report), releases(report)].join("");
 }
 
 export function wireEnvironments() {
   const refresh = $("environments-refresh");
-  if (refresh) refresh.onclick = () => refreshEnvironments();
+  if (refresh) refresh.onclick = () => { void refreshEnvironments(); };
   const page = $("environments");
   if (page) page.onclick = event => {
     const button = event.target.closest?.("[data-environment-promote]");
-    if (button && !button.disabled) promoteEnvironment(button.dataset.environmentPromote, button.dataset.deployment);
+    if (button && !button.disabled) void promoteEnvironment(button.dataset.environmentPromote, button.dataset.deployment);
   };
 }
