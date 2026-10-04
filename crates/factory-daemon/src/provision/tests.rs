@@ -81,10 +81,11 @@ case "$1 $2" in
 'profile list')
   printf '['; sep=''
   for f in "$d"/profiles/*; do [ -e "$f" ] || continue
-    printf '%s{{"id":"%s","credentials":[{{"env_vars":["%s"]}}]}}' "$sep" "$(basename "$f")" "$(cat "$f")"; sep=','; done
+    printf '%s{{"id":"%s","resource_version":7,"credentials":[{{"env_vars":["%s"]}}]}}' "$sep" "$(basename "$f")" "$(cat "$f")"; sep=','; done
   printf ']\n' ;;
 'profile import'|'profile update')
   if [ "$2" = update ] && [ "$5" != "$(sed -n 's/^id: //p' "$4")" ]; then echo 'error: the following required arguments were not provided: <ID>' >&2; exit 2; fi
+  if [ "$2" = update ] && ! grep -q '^resource_version: 7$' "$4"; then echo 'custom provider profile update requires a non-zero resource_version' >&2; exit 1; fi
   id=$(sed -n 's/^id: //p' "$4"); env=$(grep -o 'env_vars: \[[A-Z_]*' "$4" | sed 's/.*\[//')
   printf '%s' "$env" > "$d/profiles/$id" ;;
 'sandbox create') echo '{{}}' ;;

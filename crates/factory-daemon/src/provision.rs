@@ -669,7 +669,13 @@ impl Engine {
             return Err(needs(format!("a profile id this instance owns (not {id})"), None));
         }
         let listed = list_profiles(base).await.map_err(|e| needs(format!("the gateway's profile list ({e})"), None))?;
-        let present = listed.iter().any(|p| p.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
+        let present = listed.iter().find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id.as_str()));
+        // An update names the version it replaces, as OpenShell requires.
+        let yaml = match present.and_then(|p| p.get("resource_version")).and_then(|v| v.as_u64()) {
+            Some(version) => yaml.replacen(&format!("id: {id}\n"), &format!("id: {id}\nresource_version: {version}\n"), 1),
+            None => yaml,
+        };
+        let present = present.is_some();
         let file = tempfile_with(&yaml).map_err(|e| needs(format!("a place to write the profile ({e})"), None))?;
         let path = file.0.display().to_string();
         let mut argv = base.to_vec();
