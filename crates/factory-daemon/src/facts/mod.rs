@@ -27,6 +27,15 @@ pub(crate) struct NamedQuery {
     pub names: BTreeSet<String>,
 }
 
+/// Exact selection is not subtree expansion: callers pass the scope-model
+/// members they need. All preserves instance-wide remediation label reads;
+/// Exact retains the single-store lookup used by remediation commands.
+pub(crate) enum TaskInventoryQuery {
+    All,
+    Exact(String),
+    Members(BTreeSet<String>),
+}
+
 pub(crate) struct AttestedQuery {
     pub scopes: Option<BTreeSet<String>>,
     pub categories: Option<BTreeSet<String>>,
@@ -122,6 +131,7 @@ port!(DependenciesFact, l2, String, DependenciesFact);
 port!(ExploitedFinding, l2, String, Vec<ExploitedFinding>);
 port!(AgentFact, l3, String, Vec<AgentFact>);
 port!(TaskFact, l4, NamedQuery, BTreeMap<String, Vec<TaskFact>>);
+port!(TaskInventoryFact, l4, TaskInventoryQuery, Vec<TaskInventoryFact>);
 port!(WorkflowFact, l4, NamedQuery, BTreeMap<String, Vec<WorkflowFact>>);
 port!(EnvironmentRecoveryFact, l4, RecoveryQuery, Vec<EnvironmentRecoveryFact>);
 port!(RecoveryJournalFact, l4, RecoveryQuery, RecoveryJournalFact);
@@ -159,6 +169,7 @@ mod tests {
         registered::<ExploitedFinding>();
         registered::<AgentFact>();
         registered::<TaskFact>();
+        registered::<TaskInventoryFact>();
         registered::<WorkflowFact>();
         registered::<EnvironmentRecoveryFact>();
         registered::<RecoveryJournalFact>();
@@ -238,5 +249,25 @@ mod tests {
         ] {
             assert!(!file.split("#[cfg(test)]").next().unwrap().contains("crate::policies::subtree_scopes"));
         }
+    }
+
+    #[test]
+    fn upper_level_task_inventory_reads_cannot_bypass_the_l4_port() {
+        for file in [include_str!("../policies/mod.rs"), include_str!("../scenarios/mod.rs")] {
+            let production = file.split("#[cfg(test)]").next().unwrap();
+            let compact: String = production.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(!compact.contains("self.store"), "upper-level task read bypasses L4");
+            assert!(production.contains("get::<TaskInventoryFact>"));
+        }
+        // The existing quality remediation command returns a full Task and
+        // still awaits the phase-5 command ladder. Its read-only report must
+        // not use that as an excuse to reach into L4's store.
+        let quality = include_str!("../quality/mod.rs").split("pub(crate) async fn quality_remediate").next().unwrap();
+        let compact: String = quality.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(!compact.contains("self.store"));
+        assert!(quality.contains("Facts::<L5>::new(self)"));
+        assert!(quality.contains("get::<TaskInventoryFact>"));
+        let producer = include_str!("l4.rs");
+        assert!(producer.contains("impl Provide<factory_kernel::TaskInventoryFact> for Provider"));
     }
 }

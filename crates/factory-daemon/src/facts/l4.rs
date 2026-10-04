@@ -1,5 +1,5 @@
 //! Process-owned providers. Ambiguous names never acquire run history.
-use super::{AttestedQuery, NamedQuery, RecoveryQuery};
+use super::{AttestedQuery, NamedQuery, RecoveryQuery, TaskInventoryQuery};
 use crate::engine::Engine;
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -20,6 +20,38 @@ use factory_kernel::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 const RUN_LOOKBACK: u32 = 20;
+
+#[async_trait]
+impl Provide<factory_kernel::TaskInventoryFact> for Provider<'_> {
+    type Query = TaskInventoryQuery;
+    type Value = Vec<factory_kernel::TaskInventoryFact>;
+    type Error = FactoryError;
+    async fn get(&self, query: &Self::Query) -> Result<Self::Value> {
+        let snapshot = self.engine.factory_snapshot();
+        let (filter, members) = match query {
+            TaskInventoryQuery::All => (TaskFilter::default(), None),
+            TaskInventoryQuery::Exact(scope) => (TaskFilter {
+                scope: Some(snapshot.scope(scope)?.name.clone()),
+                ..Default::default()
+            }, None),
+            TaskInventoryQuery::Members(scopes) => {
+                let members: BTreeSet<String> = scopes.iter()
+                    .map(|scope| snapshot.scope(scope).map(|s| s.name.clone()))
+                    .collect::<Result<_>>()?;
+                // No scopes means no evidence, not an accidental unscoped read.
+                if members.is_empty() { return Ok(Vec::new()); }
+                (TaskFilter::default(), Some(members))
+            }
+        };
+        Ok(self.engine.store.list(&filter).await?.into_iter()
+            .filter(|task| members.as_ref().is_none_or(|scopes|
+                scopes.contains(&snapshot.canonical_scope_name(&task.scope))))
+            .map(|task| factory_kernel::TaskInventoryFact {
+                open: !task.status.is_terminal(), id: task.id, title: task.title,
+                scope: task.scope, labels: task.labels,
+            }).collect())
+    }
+}
 
 #[async_trait]
 impl Provide<factory_kernel::ScheduledRunDatesFact> for Provider<'_> {

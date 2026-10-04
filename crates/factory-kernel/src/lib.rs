@@ -52,7 +52,7 @@ pub use ports::{Below, FactProvider, FactValue, Facts, People, Provide, Reader};
 pub use duration::Duration;
 pub use facts::{
     AgentFact, AttestedRun, ConfirmedSecurityReport, DependenciesFact, ExploitedFinding, GateCase,
-    GateFact, RunFact, TaskFact, WorkflowFact, WorkflowRunFact,
+    GateFact, RunFact, TaskFact, TaskInventoryFact, WorkflowFact, WorkflowRunFact,
 };
 pub use facts::{
     BackupFact, DaemonConfigFact, Fact, FactCatalogueEntry, Level, SecretsPresence, VerifySummary,

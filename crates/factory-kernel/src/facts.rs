@@ -315,6 +315,25 @@ pub struct TaskFact {
     pub runs: Vec<RunFact>,
 }
 
+/// A standing task's inventory metadata, not its run history or an L4
+/// command response. L4 derives `open` from the task's authoritative status;
+/// a blocked/failed task is still open, a done/cancelled task is not.
+/// Scope is the persisted scope name. Providers retain store ordering so
+/// remediation lookups keep selecting the same task when labels collide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskInventoryFact {
+    pub id: String,
+    pub title: String,
+    pub scope: String,
+    pub open: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+}
+
+impl Fact for TaskInventoryFact {
+    type Producer = L4;
+}
+
 /// Shared WorkflowRunFact evidence schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowRunFact {
@@ -745,6 +764,13 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         readers: &["L5 quality", "L6 policy (the `task` check)"],
         lives_in_kernel: true,
         note: "moved with its nested shared vocabulary in phase 2",
+    },
+    FactCatalogueEntry {
+        fact: "TaskInventoryFact",
+        producer: "L4",
+        readers: &["L5 quality remediation inventory", "L6 policy and scenario task inventory"],
+        lives_in_kernel: true,
+        note: "live standing intent metadata; no run history or task command payload",
     },
     FactCatalogueEntry {
         fact: "WorkflowFact",
