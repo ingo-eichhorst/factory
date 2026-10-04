@@ -283,7 +283,12 @@ something impossible.
   Engine callback. L6 projects only applicable authored budget caps/errors
   down; L5 reads their live spend. Preserve exact scope, path ancestry,
   shared subtree reads, twice-window stale coverage and unknown evidence.
-  Metric gathering and the complete six-service split still remain.
+  L5's live metric service owns selective lower reads, same-level benchmark
+  calls, arithmetic, compliance and Quality figures. Its authored Quality
+  load/fingerprint/dependency expansion is canonical too. L6 supplies raw
+  applicable subjects, counting instructions, receipts and caps, never a
+  Policy report/rollup. Request-only page failure preflights stay outside.
+  Signposts and the complete six-service split still remain.
   L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.
   L6 still owns authored policy and budget intent. Policy remediation and

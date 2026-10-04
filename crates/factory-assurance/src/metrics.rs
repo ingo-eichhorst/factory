@@ -14,10 +14,9 @@
 //! pure types a computed value or a time series come back as
 //! ([`MetricValue`], [`MetricSeries`]) and a couple of pure helpers over
 //! them ([`trend`]). It never reads a `Run`, a `Task`, a `PolicyReport` or
-//! anything else Factory stores: actually computing a metric's value is
-//! `factory-daemon`'s job (a later ticket), the same one-directional split
-//! `policy.rs` draws between "what a check means" (here) and "resolving a
-//! task/workflow/gate fact" (the engine).
+//! anything else Factory stores. L5's [`crate::metrics_service`] owns the
+//! live gathering and computation, through typed lower facts and same-level
+//! knowledge/benchmark calls. This module remains the pure vocabulary.
 //!
 //! ## Families and bound ids
 //!
@@ -946,6 +945,40 @@ pub fn trend(series: &MetricSeries) -> Option<Trend> {
         Some(Trend::Up)
     } else {
         Some(Trend::Down)
+    }
+}
+
+/// `MetricDef`, with its two `&'static str` fields turned
+/// into owned `String`s so it can cross the wire and come back --
+/// `MetricDef` itself stays `Serialize`-only (see its own doc comment: it
+/// is a fixed, compiled-in vocabulary, never something a caller builds),
+/// so this is the view `Payload::Metrics::registry` actually carries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricDefView {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub unit: Unit,
+    pub better: Better,
+    pub coverage: MetricCoverage,
+    pub source: String,
+    pub available: bool,
+    pub unavailable_reason: Option<String>,
+}
+
+impl From<MetricDef> for MetricDefView {
+    fn from(d: MetricDef) -> Self {
+        Self {
+            id: d.id,
+            title: d.title,
+            description: d.description,
+            unit: d.unit,
+            better: d.better,
+            coverage: d.coverage,
+            source: d.source.to_string(),
+            available: d.available,
+            unavailable_reason: d.unavailable_reason.map(str::to_string),
+        }
     }
 }
 

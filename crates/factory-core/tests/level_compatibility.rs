@@ -4,6 +4,36 @@ use factory_kernel::{LaunchKind, LaunchSpec, Schedule, Span};
 use serde_json::json;
 
 #[test]
+fn metric_registry_wire_view_and_counts_are_identical_l5_owner_types() {
+    let definition = factory_assurance::metrics::resolve(
+        &factory_assurance::metrics::MetricId::new("fail_rate").unwrap(),
+    )
+    .unwrap();
+    let old: factory_core::protocol::MetricDefView = definition.into();
+    let canonical: factory_assurance::metrics::MetricDefView = old;
+    let wire = serde_json::to_value(&canonical).unwrap();
+    assert_eq!(wire["id"], "fail_rate");
+    assert_eq!(wire["unit"], "ratio");
+    assert_eq!(wire["better"], "lower");
+    assert!(wire["description"].as_str().unwrap().contains("failed"));
+    let old: factory_core::policy::StatusCounts =
+        factory_assurance::evaluation_rollup::StatusCounts {
+            satisfied: 2,
+            attested: 1,
+            stale: 3,
+            open: 4,
+            not_applicable: 5,
+        };
+    let canonical: factory_assurance::evaluation_rollup::StatusCounts = old;
+    assert_eq!(
+        serde_json::to_value(canonical).unwrap(),
+        json!({
+            "satisfied":2,"attested":1,"stale":3,"open":4,"not_applicable":5,
+        })
+    );
+}
+
+#[test]
 fn roster_declarations_and_sandbox_are_canonical_owners_with_unchanged_wire_forms() {
     let legacy: config::AgentRef = serde_yaml_ng::from_str(
         "harness: pi\nname: worker\nargs: [--fixture]\nmax_sessions: 2"

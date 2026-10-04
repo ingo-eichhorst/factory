@@ -5295,7 +5295,15 @@ budget caps and errors, never spend or a precomputed verdict. Exact-scope
 history, path-based receipt ancestry, twice-window stale lookbacks, shared
 subtree reads and unknown/missing evidence are preserved. The outside wiring
 constructs real physical providers, with no Engine callback entering L5.
-Metric gathering, signposts and the complete six-service split still remain.
+L5 also owns the actual live metric service: registry resolution, lazy
+production/process/spend/conformance/backup/environment fact reads, same-level
+benchmark reads, series arithmetic and Quality/compliance figures. Quality
+profile loading, fingerprints and recursion-safe metric dependencies live
+there too. L6 projects raw applicable controls, receipts and budget limits;
+L5 evaluates them, never asking for a Policy page or accepting an upper-level
+rollup. The outside request retains historical Policy page failure preflights
+without passing their decorations into L5. Signposts and the complete
+six-service split still remain.
 
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),

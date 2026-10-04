@@ -66,13 +66,90 @@ impl Engine {
         if !per_scope.iter().any(|(_, a)| factory_assurance::evidence::needs_budget_facts(a)) {
             return Ok(None);
         }
+        self.load_check_budget_config().await.map(Some)
+    }
+
+    pub(crate) async fn load_check_budget_config(
+        &self,
+    ) -> Result<factory_core::budget::PolicyConfig> {
         let root = self.factory_snapshot().root.clone();
-        let loaded = tokio::task::spawn_blocking(move || factory_core::budget::load(&root)).await
+        let loaded = tokio::task::spawn_blocking(move || factory_core::budget::load(&root))
+            .await
             .map_err(|error| FactoryError::Other(anyhow::anyhow!("budget intent read: {error}")))?;
-        Ok(Some(match loaded {
-            Ok(catalogue) => factory_core::budget::PolicyConfig { catalogue: Some(catalogue), error: None },
-            Err(error) => factory_core::budget::PolicyConfig { catalogue: None, error: Some(error) },
-        }))
+        Ok(match loaded {
+            Ok(catalogue) => factory_core::budget::PolicyConfig {
+                catalogue: Some(catalogue),
+                error: None,
+            },
+            Err(error) => factory_core::budget::PolicyConfig {
+                catalogue: None,
+                error: Some(error),
+            },
+        })
+    }
+
+    /// Downward authored inputs only. Compliance is evaluated by L5, not
+    /// obtained by asking for an upper-level Policy page.
+    pub(crate) async fn metric_policy_inputs(
+        &self,
+        snapshot: &Factory,
+        scope: Option<&str>,
+    ) -> Result<factory_assurance::metrics_service::PolicyInputs> {
+        let dir = snapshot.policies_dir();
+        let (catalogues, _) = tokio::task::spawn_blocking(move || policy::load_all(&dir))
+            .await
+            .map_err(|error| {
+                FactoryError::Other(anyhow::anyhow!("policy catalogue walk: {error}"))
+            })?;
+        let (_, targets) = snapshot.subtree_scopes(scope)?;
+        let attestations = self.policies.all().await?;
+        let mut applied = Vec::new();
+        for target in &targets {
+            let (subjects, _) =
+                policy::applicable(&catalogues, &snapshot.policy_chain(&target.name));
+            if !subjects.is_empty() {
+                applied.push((target, subjects));
+            }
+        }
+        let config = self.check_budget_config(&applied).await?;
+        let scopes = applied
+            .into_iter()
+            .map(
+                |(target, subjects)| factory_assurance::metrics_service::PolicyScope {
+                    scope: factory_kernel::ScopeNode {
+                        name: target.name.clone(),
+                        path: target.path.clone(),
+                    },
+                    subjects: subjects.iter().map(policy::metric_subject).collect(),
+                    budget: config.as_ref().map(|config| {
+                        crate::budgets::check_budget_intent(snapshot, target, config)
+                    }),
+                },
+            )
+            .collect();
+        Ok(factory_assurance::metrics_service::PolicyInputs {
+            scopes,
+            attestations,
+        })
+    }
+
+    /// Historical request failure dependencies from the full Policy page.
+    /// These decorations have no part in L5's computation. Keep their IO
+    /// outside the service; no task page or workflow lint crosses into L5.
+    pub(crate) async fn metric_policy_preflight(
+        &self,
+        snapshot: &Factory,
+        scope: Option<&str>,
+        has_rows: bool,
+    ) -> Result<()> {
+        if has_rows {
+            Facts::<factory_kernel::People>::new(self)
+                .get::<TaskInventoryFact>(&TaskInventoryQuery::All)
+                .await?;
+        }
+        let (_, targets) = snapshot.subtree_scopes(scope)?;
+        Box::pin(self.policy_workflow_enforcement(&targets)).await?;
+        Ok(())
     }
 
     /// Compatibility composition: L5 owns all live check-evidence gathering;

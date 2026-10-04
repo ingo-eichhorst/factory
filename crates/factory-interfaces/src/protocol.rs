@@ -1709,39 +1709,7 @@ pub use factory_direction::policy_report::{
     WorkflowEnforcement, WorkflowEnforcementFinding,
 };
 
-/// `factory_assurance::metrics::MetricDef`, with its two `&'static str` fields turned
-/// into owned `String`s so it can cross the wire and come back --
-/// `MetricDef` itself stays `Serialize`-only (see its own doc comment: it
-/// is a fixed, compiled-in vocabulary, never something a caller builds),
-/// so this is the view `Payload::Metrics::registry` actually carries.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MetricDefView {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub unit: factory_assurance::metrics::Unit,
-    pub better: factory_assurance::metrics::Better,
-    pub coverage: factory_assurance::metrics::MetricCoverage,
-    pub source: String,
-    pub available: bool,
-    pub unavailable_reason: Option<String>,
-}
-
-impl From<factory_assurance::metrics::MetricDef> for MetricDefView {
-    fn from(d: factory_assurance::metrics::MetricDef) -> Self {
-        Self {
-            id: d.id,
-            title: d.title,
-            description: d.description,
-            unit: d.unit,
-            better: d.better,
-            coverage: d.coverage,
-            source: d.source.to_string(),
-            available: d.available,
-            unavailable_reason: d.unavailable_reason.map(str::to_string),
-        }
-    }
-}
+pub use factory_assurance::metrics::MetricDefView;
 
 /// One cycle's place in `GoalsReport::cycles`: enough to draw a picker or a
 /// timeline without evaluating every cycle's full report, which

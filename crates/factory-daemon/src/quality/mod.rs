@@ -48,7 +48,6 @@
 //! commands that same L5 service. Only the outside router reads task responses.
 
 use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -61,14 +60,15 @@ use factory_core::metrics::{MetricId, MetricSeries, MetricValue};
 #[cfg(test)]
 use factory_core::checks::Check;
 use factory_core::protocol::{CharacteristicView, QualityRemediation, QualityReport, ScopeQuality};
-use factory_core::quality::{self, Level, Measure, QualityCatalogue, QualityTree, ScenarioStatus, ScopeReport};
+use factory_core::quality::{self, Level, QualityCatalogue, QualityTree, ScenarioStatus, ScopeReport};
+#[cfg(test)]
+use factory_core::quality::Measure;
 #[cfg(test)]
 use factory_core::task::{NewTask, TaskFilter};
 
 use crate::engine::Engine;
 use crate::facts::{Facts, TaskInventoryQuery};
 use factory_kernel::{L5, TaskInventoryFact};
-use factory_core::config::subtree_scopes;
 
 /// The label a remediation task carries, and the key `ScopeQuality::open_tasks`
 /// and [`Engine::quality_remediate`] look it up by. The scope is part of it
@@ -76,46 +76,28 @@ use factory_core::config::subtree_scopes;
 /// in every scope that inherits it, and each scope's gap is its own.
 pub(crate) use factory_assurance::remediation::remediation_label;
 
-/// A fingerprint of everything a report's *shape* depends on that a person
-/// authors: every loaded profile, every load finding, and every scope's
-/// quality chain. Deliberately not the evidence or metric values -- those
-/// move on their own events -- and not the asked scope, so a narrowed and a
-/// whole-instance read of the same files agree. `DefaultHasher` is fine
-/// here: the value never leaves this process or outlives a restart.
-fn fingerprint(snapshot: &Factory, catalogue: &QualityCatalogue) -> u64 {
-    let chains: Vec<(String, Vec<quality::QualityLayer>)> = snapshot
-        .config
-        .scopes
-        .iter()
-        .map(|s| (s.name.clone(), snapshot.config.quality_chain_for_scope(s)))
-        .collect();
-    let text = serde_json::to_string(&(&catalogue.profiles, &catalogue.findings, &chains)).unwrap_or_default();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Every metric id `trees` measures by, once each, in first-seen order --
-/// minus any `quality.*` metric (the recursion guard: `quality.<c>` is
-/// itself computed from this module's report, and `quality::evaluate`
-/// already reads such a measure as `no_data`) and any id the registry has
-/// never heard of (`push_if_known`, so one typo in one profile cannot make
-/// `Engine::metrics` refuse the whole call; the profile's own
-/// `unknown_metric` finding already names it).
-fn metric_ids<'a>(trees: impl IntoIterator<Item = &'a QualityTree>) -> Vec<MetricId> {
-    let mut ids = Vec::new();
-    for tree in trees {
-        for attr in &tree.attributes {
-            for s in &attr.scenarios {
-                if let Some(Measure::Metric(m)) = &s.scenario.measure {
-                    if !quality::is_quality_metric(&m.metric) && !ids.contains(&m.metric) {
-                        crate::metrics::push_if_known(&mut ids, &m.metric);
-                    }
-                }
-            }
-        }
+/// Outside-stack projection of current plain Quality declarations. L5
+/// owns loading, applicability, fingerprinting and recursion-safe metric ids.
+pub(crate) fn quality_configuration(
+    snapshot: &Factory,
+) -> factory_assurance::quality_inputs::Configuration {
+    factory_assurance::quality_inputs::Configuration {
+        scopes: snapshot
+            .config
+            .scopes
+            .iter()
+            .map(
+                |scope| factory_assurance::quality_inputs::ScopeConfiguration {
+                    id: scope.id.clone(),
+                    scope: factory_kernel::ScopeNode {
+                        name: scope.name.clone(),
+                        path: scope.path.clone(),
+                    },
+                    layers: snapshot.config.quality_chain_for_scope(scope),
+                },
+            )
+            .collect(),
     }
-    ids
 }
 
 /// The status word the guide shows beside a scenario, or `None` when there
@@ -173,9 +155,9 @@ pub(crate) struct QualityInputs {
 }
 
 impl QualityInputs {
-    /// Every metric id the trees measure by -- see [`metric_ids`].
+    /// Every metric id the trees measure by, using L5's canonical recursion guard.
     pub(crate) fn metric_ids(&self) -> Vec<MetricId> {
-        metric_ids(self.trees.iter().map(|(_, t)| t))
+        factory_assurance::quality_inputs::metric_ids(self.trees.iter().map(|(_, t)| t))
     }
 }
 
@@ -190,44 +172,38 @@ const GUIDE_TTL: Duration = Duration::from_secs(60);
 pub(crate) type GuideCache = std::collections::HashMap<String, (Instant, u64, Vec<QualityAttributeContext>)>;
 
 impl Engine {
-    /// `.factory/quality/`, loaded off the async runtime.
-    async fn load_quality(&self, snapshot: &Factory) -> Result<QualityCatalogue> {
-        let dir = snapshot.quality_dir();
-        tokio::task::spawn_blocking(move || quality::load(&dir))
-            .await
-            .map_err(|e| FactoryError::Other(anyhow::anyhow!("quality profile walk: {e}")))
-    }
-
-    /// Load the profiles and fold every scope in `scope`'s subtree (the
-    /// whole instance for `None`) that binds at least one -- or, with
-    /// `only`, just that one scope, the guide's and remediation's case.
-    pub(crate) async fn quality_inputs(&self, scope: Option<&str>, only: bool) -> Result<QualityInputs> {
-        let loaded_at = Instant::now();
+    /// Compose legacy response/config identities around L5's canonical
+    /// live authored-input read. No profile walk or applicability lives here.
+    pub(crate) async fn quality_inputs(
+        &self,
+        scope: Option<&str>,
+        only: bool,
+    ) -> Result<QualityInputs> {
         let snapshot = self.factory_snapshot();
-        let catalogue = self.load_quality(&snapshot).await?;
-        let (asked, mut target_scopes) = subtree_scopes(&snapshot, scope)?;
-        if only {
-            target_scopes.retain(|s| Some(&s.name) == asked.as_ref().map(|a| &a.name));
-        }
-        let mut findings = catalogue.findings.clone();
-        let mut trees = Vec::new();
-        for t in target_scopes {
-            let chain = snapshot.config.quality_chain_for_scope(&t);
-            if chain.is_empty() {
-                continue;
-            }
-            let (tree, chain_findings) = quality::applicable(&catalogue, &t.name, &chain);
-            findings.extend(chain_findings);
-            trees.push((t, tree));
-        }
+        let inputs = quality_configuration(&snapshot)
+            .read(snapshot.root.clone(), scope, only)
+            .await?;
+        let configured_scope = |id: &str| {
+            snapshot
+                .config
+                .scopes
+                .iter()
+                .find(|s| s.id == id)
+                .expect("captured configured quality scope")
+                .clone()
+        };
         Ok(QualityInputs {
-            fingerprint: fingerprint(&snapshot, &catalogue),
+            asked: inputs.asked.as_ref().map(|s| configured_scope(&s.id)),
+            trees: inputs
+                .trees
+                .into_iter()
+                .map(|(s, tree)| (configured_scope(&s.id), tree))
+                .collect(),
             snapshot,
-            catalogue,
-            loaded_at,
-            asked,
-            trees,
-            findings,
+            catalogue: inputs.catalogue,
+            fingerprint: inputs.fingerprint,
+            loaded_at: inputs.loaded_at,
+            findings: inputs.findings,
         })
     }
 

@@ -661,8 +661,13 @@ mod tests {
         assert!(budget.contains("check_budget_intent") && budget.contains("month_spend"));
         assert!(!budget.contains("async fn budget_policy_input"));
         let evidence = include_str!("../../../factory-assurance/src/evidence.rs")
-            .split("\nmod tests").next().unwrap();
-        assert!(evidence.contains("pub async fn budget(") && evidence.contains("pub async fn month_spend("));
+            .split("\nmod tests")
+            .next()
+            .unwrap();
+        assert!(
+            evidence.contains("pub async fn budget(")
+                && evidence.contains("pub async fn month_spend(")
+        );
         assert!(evidence.contains("get::<CostReport, _>") && !evidence.contains("runs_between"));
         assert!(!budget.contains("runs_between") && !budget.contains("crate::costs"));
         let costs = include_str!("../costs.rs")
@@ -676,12 +681,12 @@ mod tests {
         let owner = include_str!("../../../factory-process/src/measurements.rs");
         assert!(owner.contains("impl Provide<CostReport> for MeasurementProvider"));
         assert!(!owner.contains("factory_core") && !owner.contains("Engine"));
-        let metrics = include_str!("../metrics.rs")
+        let metrics = include_str!("../../../factory-assurance/src/metrics_service.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
         assert!(
-            metrics.contains("get::<factory_kernel::CostReport>")
+            metrics.contains("get::<factory_kernel::CostReport, _>")
                 && metrics.contains("SpendBasis::Finished")
         );
         let branch = metrics
@@ -691,12 +696,13 @@ mod tests {
             .split("} else if is_usage_metric")
             .next()
             .unwrap();
+        let branch: String = branch.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(branch.contains("sources.spend") && !branch.contains("usage_value"));
     }
 
     #[test]
     fn registry_process_and_benchmark_reads_are_producer_owned() {
-        let metrics = include_str!("../metrics.rs")
+        let metrics = include_str!("../../../factory-assurance/src/metrics_service.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
@@ -711,8 +717,53 @@ mod tests {
                 "metrics bypasses a fact port: {forbidden}"
             );
         }
-        for fact in ["ProductionFact", "ProcessMetricFact", "BenchResolutionFact"] {
-            assert!(metrics.contains(&format!("get::<factory_kernel::{fact}>")));
+        for fact in ["ProductionFact", "ProcessMetricFact"] {
+            assert!(metrics.contains(&format!("get::<{fact}, _>")));
+        }
+        let compact: String = metrics.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact
+            .contains("Provide::<factory_kernel::BenchResolutionFact>::get(&self.evidence.own"));
+        assert!(metrics.contains("Facts::<L5>::new()"));
+        for forbidden in [
+            "factory_core",
+            "factory_direction",
+            "factory_interfaces",
+            "Engine",
+            "Facts::<L6>",
+            "self.policy_report(",
+        ] {
+            assert!(
+                !metrics.contains(forbidden),
+                "L5 metric owner back-edge: {forbidden}"
+            );
+        }
+        let service = metrics.split("/// Sum `finished`").next().unwrap();
+        for forbidden in ["Fn(", "FnMut(", "FnOnce("] {
+            assert!(
+                !service.contains(forbidden),
+                "L5 metric owner callback: {forbidden}"
+            );
+        }
+        let request = include_str!("../metrics.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert!(
+            request.contains("service.gather_measurements(")
+                && request.contains("service.gather_policy(")
+                && request.contains("service.finish(")
+        );
+        for forbidden in [
+            "fn compute_one",
+            "fn compliance_value",
+            "fn rolling_series",
+            ".policy_report(",
+            "Facts::<L6>::",
+        ] {
+            assert!(
+                !request.contains(forbidden),
+                "metric computation left in router: {forbidden}"
+            );
         }
         let process = include_str!("../../../factory-process/src/process_metrics.rs")
             .split("#[cfg(test)]")

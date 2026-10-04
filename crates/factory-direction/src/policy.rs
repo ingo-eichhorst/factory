@@ -751,6 +751,29 @@ pub fn evaluation_subject(applied: &Applied) -> factory_assurance::checks::Evalu
     }
 }
 
+/// L6 decides which authored classifications count toward compliance. L5
+/// receives that plain counting instruction, never an upper-level rollup.
+pub fn metric_subject(applied: &Applied) -> factory_assurance::checks::EvaluationSubject<bool> {
+    let factory_assurance::checks::EvaluationSubject {
+        control,
+        title,
+        kind,
+        maps_to,
+        evidence,
+        max_age,
+        not_applicable,
+    } = evaluation_subject(applied);
+    factory_assurance::checks::EvaluationSubject {
+        control,
+        title,
+        kind: kind != Kind::BestPractice,
+        maps_to,
+        evidence,
+        max_age,
+        not_applicable,
+    }
+}
+
 impl factory_assurance::checks::CheckSource for Applied {
     fn checks(&self) -> &[Check] {
         &self.evidence
@@ -835,31 +858,7 @@ pub fn remediation_instructions(
 
 // ================================================================= rollup
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatusCounts {
-    #[serde(default)]
-    pub satisfied: usize,
-    #[serde(default)]
-    pub attested: usize,
-    #[serde(default)]
-    pub stale: usize,
-    #[serde(default)]
-    pub open: usize,
-    #[serde(default)]
-    pub not_applicable: usize,
-}
-
-impl StatusCounts {
-    fn add(&mut self, kind: StatusKind) {
-        match kind {
-            StatusKind::Satisfied => self.satisfied += 1,
-            StatusKind::Attested => self.attested += 1,
-            StatusKind::Stale => self.stale += 1,
-            StatusKind::Open => self.open += 1,
-            StatusKind::NotApplicable => self.not_applicable += 1,
-        }
-    }
-}
+pub use factory_assurance::evaluation_rollup::StatusCounts;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameworkRollup {
@@ -898,70 +897,7 @@ pub fn rollup(statuses: &[ControlStatus]) -> Vec<FrameworkRollup> {
     by_framework.into_values().collect()
 }
 
-/// How bad a control's status is for cross-scope aggregation, lowest is
-/// worst -- deliberately not `StatusKind::rank`, which orders `NotApplicable`
-/// *below* `Open` for a different purpose (whether a `maps_to` neighbour's
-/// status should win out over this control's own). Here `NotApplicable`
-/// means "this scope has nothing to say", which is not a status to compare
-/// against the real ones at all -- see [`worst_across_scopes`], which never
-/// calls this on one.
-fn compliance_severity(kind: StatusKind) -> u8 {
-    match kind {
-        StatusKind::Open => 0,
-        StatusKind::Stale => 1,
-        StatusKind::Attested => 2,
-        StatusKind::Satisfied => 3,
-        StatusKind::NotApplicable => 4,
-    }
-}
-
-/// One status per control, folding many scopes' own [`evaluate`] output
-/// into the single view a subtree-wide [`rollup`] needs: "a control counts
-/// compliant only if it is compliant in every scope it applies to" (ADR
-/// 0004). For each control, every scope where it is `not_applicable` is
-/// ignored -- that scope has nothing to say about whether it is met -- and
-/// the worst of whatever real statuses remain wins (`Open` beats `Stale`
-/// beats `Attested` beats `Satisfied`). A control that is `not_applicable`
-/// in every scope it appears in keeps that status; a control absent from
-/// every scope in `per_scope` never appears in the result at all.
-///
-/// Pure: no scope tree, no store, no clock -- just what each scope's own
-/// `evaluate` already produced. The caller (`Engine::policy_report`) is the
-/// one that knows which scopes are in the subtree being asked about.
-pub fn worst_across_scopes(per_scope: &[Vec<ControlStatus>]) -> Vec<ControlStatus> {
-    let mut worst: BTreeMap<ControlRef, ControlStatus> = BTreeMap::new();
-    let mut fallback_na: BTreeMap<ControlRef, ControlStatus> = BTreeMap::new();
-
-    for statuses in per_scope {
-        for status in statuses {
-            if status.status.kind() == StatusKind::NotApplicable {
-                fallback_na
-                    .entry(status.control.clone())
-                    .or_insert_with(|| status.clone());
-                continue;
-            }
-            match worst.get(&status.control) {
-                Some(current)
-                    if compliance_severity(current.status.kind())
-                        <= compliance_severity(status.status.kind()) =>
-                {
-                    // The status already kept is at least as bad; nothing to do.
-                }
-                _ => {
-                    worst.insert(status.control.clone(), status.clone());
-                }
-            }
-        }
-    }
-
-    // A control that never had a real status anywhere it appeared is
-    // `not_applicable` everywhere -- keep exactly one of those entries.
-    for (control, status) in fallback_na {
-        worst.entry(control).or_insert(status);
-    }
-
-    worst.into_values().collect()
-}
+pub use factory_assurance::evaluation_rollup::worst_across_scopes;
 
 #[cfg(test)]
 mod tests {

@@ -186,9 +186,9 @@ pub struct QualityScope<'a> {
 }
 
 pub struct Service<'a, P> {
-    ports: P,
-    own: facts::Provider<'a>,
-    scopes: ScopeTree,
+    pub(crate) ports: P,
+    pub(crate) own: facts::Provider<'a>,
+    pub(crate) scopes: ScopeTree,
 }
 
 impl<'a, P: Ports> Service<'a, P> {
@@ -778,6 +778,375 @@ mod tests {
                 .collect(),
             },
         )
+    }
+
+    #[async_trait]
+    impl Provide<factory_kernel::ProductionFact> for Process {
+        type Query = factory_process::measurements::ProductionQuery;
+        type Value = factory_kernel::ProductionFact;
+        type Error = FactoryError;
+        async fn get(&self, q: &Self::Query) -> Result<Self::Value> {
+            self.0.record(
+                "production",
+                vec![
+                    q.scope.clone().unwrap_or_default(),
+                    q.minutes.unwrap().to_string(),
+                    q.subtree.to_string(),
+                ],
+            )?;
+            Ok(factory_kernel::ProductionFact {
+                bin: q.bin,
+                from: q.now,
+                to: q.now,
+                buckets: Vec::new(),
+                daily: Vec::new(),
+                earliest_run: None,
+            })
+        }
+    }
+    #[async_trait]
+    impl Provide<factory_kernel::ProcessMetricFact> for Process {
+        type Query = factory_process::measurements::ProcessMetricsQuery;
+        type Value = BTreeMap<String, factory_kernel::ProcessMetricFact>;
+        type Error = FactoryError;
+        async fn get(&self, q: &Self::Query) -> Result<Self::Value> {
+            self.0.record(
+                "process",
+                std::iter::once(q.scope.clone().unwrap_or_default())
+                    .chain(q.names.iter().cloned())
+                    .collect(),
+            )?;
+            Ok(q.names
+                .iter()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        factory_kernel::ProcessMetricFact {
+                            name: name.clone(),
+                            value: Some(self.0.generation.load(Ordering::SeqCst) as f64),
+                            as_of: q.now - chrono::Duration::hours(1),
+                            reason: None,
+                        },
+                    )
+                })
+                .collect())
+        }
+    }
+    #[async_trait]
+    impl Provide<factory_kernel::EnvironmentMetricFact> for Infrastructure {
+        type Query = Option<String>;
+        type Value = BTreeMap<String, factory_kernel::EnvironmentMetricFact>;
+        type Error = FactoryError;
+        async fn get(&self, q: &Self::Query) -> Result<Self::Value> {
+            self.0
+                .record("environments", vec![q.clone().unwrap_or_default()])?;
+            Ok(BTreeMap::new())
+        }
+    }
+    impl crate::metrics_service::Ports for Inputs {
+        capability!(Production, production, process, Process);
+        capability!(Process, process, process, Process);
+        capability!(Environments, environments, infrastructure, Infrastructure);
+    }
+    async fn metric_plan(
+        evidence: &Service<'_, Inputs>,
+        names: &[&str],
+        scope: Option<&str>,
+    ) -> crate::metrics_service::Plan {
+        let ids: Vec<_> = names
+            .iter()
+            .map(|name| metrics::MetricId::new(*name).unwrap())
+            .collect();
+        crate::metrics_service::Plan::prepare(
+            &ids,
+            std::env::temp_dir(),
+            &evidence.scopes,
+            &crate::quality_inputs::Configuration::default(),
+            scope,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn metrics_owner_shares_selective_reads_and_preserves_order_scope_unknown_and_freshness()
+    {
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let names = [
+            "bench.resolve_rate.missing",
+            "cost_week",
+            "fail_rate",
+            "agent_hours",
+            "backup_age_hours",
+            "backup_verified_age_days",
+            "gate_fail_rate",
+            "conformance_rate.build",
+            "availability.production",
+            "throughput_week",
+            "first_pass_yield",
+            "scrap_rate",
+            "fail_rate",
+        ];
+        let plan = metric_plan(&evidence, &names, Some("projects/work")).await;
+        assert_eq!(plan.scope(), Some("parent"));
+        let metrics = crate::metrics_service::Service::new(evidence);
+        let gathered = metrics
+            .gather(&plan, None, time(), Some(metrics::MetricsWindow::Day))
+            .await
+            .unwrap();
+        let output = metrics
+            .finish(
+                &plan,
+                gathered,
+                &Ok(BTreeMap::new()),
+                time(),
+                Some(metrics::MetricsWindow::Day),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            output
+                .values
+                .iter()
+                .map(|v| v.id.as_str())
+                .collect::<Vec<_>>(),
+            names[..names.len() - 1]
+        );
+        assert_eq!(output.registry.len(), output.values.len());
+        assert_eq!(output.series.len(), 3);
+        for kind in [
+            "production",
+            "process",
+            "backup",
+            "attested",
+            "environments",
+            "spend",
+        ] {
+            assert_eq!(recorder.calls(kind).len(), 1, "{kind} read is shared");
+        }
+        assert_eq!(recorder.calls("production")[0], ["parent", "1440", "true"]);
+        assert_eq!(
+            recorder.calls("process")[0],
+            ["parent", "agent_hours", "fail_rate"]
+        );
+        assert_eq!(
+            recorder.calls("attested")[0],
+            [
+                "child",
+                "parent",
+                "2026-10-15T12:00:00+00:00",
+                "2026-10-16T12:00:00+00:00"
+            ]
+        );
+        for name in [
+            "bench.resolve_rate.missing",
+            "availability.production",
+            "gate_fail_rate",
+            "conformance_rate.build",
+            "backup_age_hours",
+        ] {
+            let value = output
+                .values
+                .iter()
+                .find(|v| v.id.as_str() == name)
+                .unwrap();
+            assert!(
+                value.value.is_none() && value.reason.is_some(),
+                "{name} remains unknown"
+            );
+        }
+        let fail = output
+            .values
+            .iter()
+            .find(|v| v.id.as_str() == "fail_rate")
+            .unwrap();
+        assert_eq!(fail.as_of, time() - chrono::Duration::hours(1));
+        recorder.generation.store(4, Ordering::SeqCst);
+        let gathered = metrics.gather(&plan, None, time(), None).await.unwrap();
+        let output = metrics
+            .finish(&plan, gathered, &Ok(BTreeMap::new()), time(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            output
+                .values
+                .iter()
+                .find(|v| v.id.as_str() == "fail_rate")
+                .unwrap()
+                .value,
+            Some(4.0)
+        );
+        assert!(
+            recorder.calls("agents").is_empty()
+                && recorder.calls("daemon").is_empty()
+                && recorder.calls("secrets").is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_owner_no_unneeded_reads_and_needed_provider_failure_is_not_a_zero() {
+        let recorder = Arc::new(Recorder::default());
+        *recorder.failing.lock().unwrap() = Some("production");
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let plan = metric_plan(&evidence, &["bench.resolve_rate.absent"], None).await;
+        let production = metric_plan(&evidence, &["throughput_week"], None).await;
+        let metrics = crate::metrics_service::Service::new(evidence);
+        let gathered = metrics.gather(&plan, None, time(), None).await.unwrap();
+        let output = metrics
+            .finish(&plan, gathered, &Ok(BTreeMap::new()), time(), None)
+            .await
+            .unwrap();
+        assert!(output.values[0].value.is_none());
+        assert!(recorder.calls.lock().unwrap().is_empty());
+        assert!(
+            matches!(metrics.gather(&production, None, time(), None).await, Err(FactoryError::BadRequest(message)) if message == "production unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_owner_evaluates_raw_policy_inputs_and_keeps_best_practice_only_framework_unknown(
+    ) {
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let plan = metric_plan(&evidence, &["compliance.test", "open_controls.test"], None).await;
+        let scope = evidence.scopes.scopes[0].clone();
+        let metrics = crate::metrics_service::Service::new(evidence);
+        let raw = subject(vec![Check::Daemon {
+            fact: "foreman_enabled".into(),
+        }]);
+        let policy = crate::metrics_service::PolicyInputs {
+            scopes: vec![crate::metrics_service::PolicyScope {
+                scope,
+                subjects: vec![EvaluationSubject {
+                    control: raw.control,
+                    title: raw.title,
+                    kind: false,
+                    maps_to: raw.maps_to,
+                    evidence: raw.evidence,
+                    max_age: raw.max_age,
+                    not_applicable: raw.not_applicable,
+                }],
+                budget: None,
+            }],
+            attestations: Vec::new(),
+        };
+        let gathered = metrics
+            .gather(&plan, Some(&policy), time(), None)
+            .await
+            .unwrap();
+        let output = metrics
+            .finish(&plan, gathered, &Ok(BTreeMap::new()), time(), None)
+            .await
+            .unwrap();
+        assert!(output.values[0].value.is_none());
+        assert_eq!(output.values[1].value, Some(0.0));
+        let mut policy = policy;
+        policy.scopes[0].subjects[0].kind = true;
+        recorder.generation.store(1, Ordering::SeqCst);
+        let gathered = metrics
+            .gather(&plan, Some(&policy), time(), None)
+            .await
+            .unwrap();
+        let output = metrics
+            .finish(&plan, gathered, &Ok(BTreeMap::new()), time(), None)
+            .await
+            .unwrap();
+        assert_eq!(output.values[0].value, Some(1.0));
+        assert_eq!(recorder.calls("daemon").len(), 2);
+        assert!(recorder.calls("attested").is_empty() && recorder.calls("spend").is_empty());
+    }
+
+    #[tokio::test]
+    async fn metrics_owner_expands_quality_dependencies_and_judges_live_budget_evidence() {
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let scratch = Scratch(
+            std::env::temp_dir().join(format!("factory-metric-quality-{}", uuid::Uuid::new_v4())),
+        );
+        let dir = quality::quality_dir(&scratch.0);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("base.yaml"),
+            "attributes:\n  - id: reliability.availability\n    importance: H\n    difficulty: M\n    scenarios:\n      - id: failure\n        measure: { metric: fail_rate, below: 0.1 }\n      - id: budget\n        measure: { check: budget_within }\n"
+        ).unwrap();
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let config = crate::quality_inputs::Configuration {
+            scopes: vec![crate::quality_inputs::ScopeConfiguration {
+                id: "parent-id".into(),
+                scope: evidence.scopes.scopes[0].clone(),
+                layers: vec![quality::QualityLayer {
+                    scope: "parent".into(),
+                    profiles: vec!["base".into()],
+                }],
+            }],
+        };
+        let ids = [
+            metrics::MetricId::new("quality.reliability").unwrap(),
+            metrics::MetricId::new("fail_rate").unwrap(),
+        ];
+        let plan = crate::metrics_service::Plan::prepare(
+            &ids,
+            scratch.0.clone(),
+            &evidence.scopes,
+            &config,
+            Some("parent"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(plan.quality_budget_ids(), ["parent-id"]);
+        let metrics = crate::metrics_service::Service::new(evidence);
+        let budgets = Ok(BTreeMap::from([(
+            "parent-id".into(),
+            BudgetIntent {
+                caps: vec![("parent".into(), 0.0)],
+                error: None,
+            },
+        )]));
+        let gathered = metrics.gather(&plan, None, time(), None).await.unwrap();
+        let output = metrics
+            .finish(&plan, gathered, &budgets, time(), None)
+            .await
+            .unwrap();
+        assert_eq!(output.values[0].value, Some(1.0));
+        assert_eq!(output.values[1].value, Some(0.0));
+        assert_eq!(recorder.calls("process").len(), 1);
+        assert_eq!(recorder.calls("spend").len(), 1);
+        recorder.generation.store(2, Ordering::SeqCst);
+        let gathered = metrics.gather(&plan, None, time(), None).await.unwrap();
+        let output = metrics
+            .finish(&plan, gathered, &budgets, time(), None)
+            .await
+            .unwrap();
+        assert_eq!(output.values[0].value, Some(0.0));
+        assert_eq!(output.values[1].value, Some(2.0));
+        let gathered = metrics.gather(&plan, None, time(), None).await.unwrap();
+        let output = metrics
+            .finish(
+                &plan,
+                gathered,
+                &Err("budget intent read: synthetic join failure".into()),
+                time(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(output.values[0].value.is_none());
+        assert!(output.values[0]
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("the quality evaluation failed: budget intent read: synthetic join failure"));
+        assert_eq!(output.values[1].value, Some(2.0));
+        assert!(recorder.calls("production").is_empty() && recorder.calls("attested").is_empty());
     }
     fn subject(evidence: Vec<Check>) -> EvaluationSubject {
         EvaluationSubject {
