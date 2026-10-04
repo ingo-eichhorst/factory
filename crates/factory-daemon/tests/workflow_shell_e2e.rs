@@ -340,6 +340,55 @@ fn provision() -> Daemon {
 // -------------------------------------------------------------- the test
 
 #[test]
+fn task_inventory_links_follow_real_shell_completion_and_restart() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["policies"] = serde_yaml_ng::to_value(json!({"frameworks": ["house"]})).unwrap();
+    config["quality"] = serde_yaml_ng::to_value(json!(["inventory"])).unwrap();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    std::fs::create_dir_all(daemon.root.join(".factory/policies")).unwrap();
+    std::fs::write(daemon.root.join(".factory/policies/house.yaml"), serde_yaml_ng::to_string(&json!({
+        "framework": "house", "title": "Inventory acceptance", "kind": "best-practice",
+        "controls": [{"id": "missing", "title": "Missing authored evidence", "evidence": [{"check": "knowledge"}]}]
+    })).unwrap()).unwrap();
+    std::fs::create_dir_all(daemon.root.join(".factory/quality")).unwrap();
+    std::fs::write(daemon.root.join(".factory/quality/inventory.yaml"),
+        "attributes:\n  - id: reliability\n    importance: M\n    difficulty: L\n    scenarios:\n      - {id: someday}\n").unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let policy_url = format!("{base}/api/policy?scope=demo");
+    let quality_url = format!("{base}/api/quality?scope=demo");
+    let links = || {
+        let policy = expect_ok(&policy_url, &get(&policy_url));
+        let quality = expect_ok(&quality_url, &get(&quality_url));
+        (policy["report"]["rows"][0]["open_tasks"]["house/missing"].clone(),
+         quality["report"]["scopes"][0]["open_tasks"]["reliability/someday"].clone())
+    };
+    assert_eq!(links(), (Value::Null, Value::Null));
+    let task_url = format!("{base}/api/tasks");
+    let created = expect_ok(&task_url, &post(&task_url, &json!({
+        "title": "Inventory shell acceptance", "instructions": "printf inventory-acceptance",
+        "scope": "demo", "agent": "shell", "worktree": false,
+        "labels": {"policy": "house/missing", "quality": "demo/reliability/someday"}
+    })));
+    let id = created["task"]["id"].as_str().unwrap().to_string();
+    assert_eq!(links(), (json!(id), json!(id)));
+    daemon.sigterm(); daemon.spawn();
+    assert_eq!(links(), (json!(id), json!(id)), "pending standing intent survives restart");
+    let start = format!("{base}/api/tasks/{id}/run");
+    expect_ok(&start, &post(&start, &json!({})));
+    wait_for("the inventory task's actual shell report", Duration::from_secs(30), || {
+        tasks(&base).into_iter().find(|task| task["id"] == id && task["status"] == "done")
+    });
+    assert_eq!(links(), (Value::Null, Value::Null), "closed work stops being a remediation link on the next read");
+    daemon.sigterm(); daemon.spawn();
+    assert_eq!(links(), (Value::Null, Value::Null), "closed state is not a transient cache");
+}
+
+#[test]
 fn important_dates_are_live_metadata_warnings_not_a_scheduler_gate() {
     if missing_prerequisites() { return; }
     let mut daemon = provision();

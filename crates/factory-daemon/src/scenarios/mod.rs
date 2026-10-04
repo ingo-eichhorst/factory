@@ -71,7 +71,9 @@ use factory_core::protocol::{
     SkippedControl, TriggeredSignpost,
 };
 use factory_core::scenario::{self, DriverId, Scenario};
-use factory_core::task::{NewTask, Task, TaskFilter};
+use factory_core::task::NewTask;
+use factory_kernel::{L6, TaskInventoryFact};
+use crate::facts::{Facts, TaskInventoryQuery};
 
 use crate::engine::Engine;
 use factory_core::config::subtree_scopes;
@@ -443,20 +445,20 @@ fn deltas_from_statuses(
 /// `goals`'s own entries, summed -- unscoped, the same convention
 /// `crate::metrics`'s own `goal_tasks_done` reads tasks under: a key
 /// result's own scope (if any) is not the scope its serving tasks run in.
-fn open_goal_task_count(tasks: &[Task], goal_changes: &[scenario::GoalChange]) -> usize {
+fn open_goal_task_count(tasks: &[TaskInventoryFact], goal_changes: &[scenario::GoalChange]) -> usize {
     let labels: BTreeSet<String> = goal_changes.iter().map(|c| c.kr.to_string()).collect();
     tasks
         .iter()
-        .filter(|t| !t.status.is_terminal() && t.labels.get("goal").is_some_and(|l| labels.contains(l)))
+        .filter(|t| t.open && t.labels.get("goal").is_some_and(|l| labels.contains(l)))
         .count()
 }
 
 /// Open tasks in the target scopes: the backlog a forecast burns down. A
 /// task blocked by a failure is open work (`#122`); a closed one is not.
-fn open_backlog(tasks: &[Task], target_names: &BTreeSet<&str>) -> f64 {
+fn open_backlog(tasks: &[TaskInventoryFact], target_names: &BTreeSet<&str>) -> f64 {
     tasks
         .iter()
-        .filter(|t| !t.status.is_terminal() && target_names.contains(t.scope.as_str()))
+        .filter(|t| t.open && target_names.contains(t.scope.as_str()))
         .count() as f64
 }
 
@@ -539,9 +541,9 @@ impl Engine {
 
         let (asked, target_scopes) = subtree_scopes(&snapshot, scope)?;
         let all_attestations = self.policies.all().await?;
-        let target_names: BTreeSet<&str> = target_scopes.iter().map(|s| s.name.as_str()).collect();
-        let tasks: Vec<Task> = self.store.list(&TaskFilter::default()).await?.into_iter()
-            .filter(|task| target_names.contains(snapshot.canonical_scope_name(&task.scope).as_str())).collect();
+        let tasks = Facts::<L6>::new(self).get::<TaskInventoryFact>(
+            &TaskInventoryQuery::Members(target_scopes.iter().map(|s| s.name.clone()).collect())
+        ).await?;
 
         // Every metric any loaded scenario's drivers, signposts or goal
         // changes reference, computed once and shared by every scenario --
@@ -771,9 +773,8 @@ impl Engine {
         let scenario_statuses = policy::evaluate(&scenario_applied, &evidence, now);
         let delta = scenario::policy_delta(&baseline_statuses, &scenario_statuses);
 
-        let existing_tasks = self
-            .store
-            .list(&TaskFilter { scope: Some(scope_obj.name.clone()), ..Default::default() })
+        let existing_tasks = Facts::<L6>::new(self)
+            .get::<TaskInventoryFact>(&TaskInventoryQuery::Exact(scope_obj.name.clone()))
             .await?;
 
         let mut created = Vec::new();
@@ -782,7 +783,7 @@ impl Engine {
             let label = control.to_string();
             if let Some(existing) = existing_tasks
                 .iter()
-                .find(|t| !t.status.is_terminal() && t.labels.get("policy").map(String::as_str) == Some(label.as_str()))
+                .find(|t| t.open && t.labels.get("policy").map(String::as_str) == Some(label.as_str()))
             {
                 skipped.push(SkippedControl { control: control.clone(), existing_task: existing.id.clone() });
                 continue;
@@ -886,9 +887,9 @@ impl Engine {
                 evaluate_scenario_over_scopes(self, &snapshot, &all_scopes, &s, &catalogues_with_drafts, &tags, &all_attestations, now).await?;
             let (_per_scope, subtree_delta) = deltas_from_statuses(&all_scopes, &baseline_statuses, &scenario_statuses);
 
-            let target_names: BTreeSet<&str> = target_scopes.iter().map(|s| s.name.as_str()).collect();
-            let tasks: Vec<Task> = self.store.list(&TaskFilter::default()).await?.into_iter()
-                .filter(|task| target_names.contains(snapshot.canonical_scope_name(&task.scope).as_str())).collect();
+            let tasks = Facts::<L6>::new(self).get::<TaskInventoryFact>(
+                &TaskInventoryQuery::Members(target_scopes.iter().map(|s| s.name.clone()).collect())
+            ).await?;
             let open_goal_tasks = open_goal_task_count(&tasks, &s.goals);
             backlog_total = (subtree_delta.newly_open.len() + open_goal_tasks) as f64;
         }
@@ -1276,7 +1277,10 @@ mod tests {
                     at: chrono::Utc::now(),
                 });
             }
-            t
+            TaskInventoryFact {
+                open: !t.status.is_terminal(), id: t.id, title: t.title,
+                scope: t.scope, labels: t.labels,
+            }
         };
         let tasks = vec![
             task("failed", TaskStatus::Blocked, true),

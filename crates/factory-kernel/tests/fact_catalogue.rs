@@ -29,6 +29,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<ExploitedFinding, L2>("ExploitedFinding", "L2");
     assert_producer::<AgentFact, L3>("AgentFact", "L3");
     assert_producer::<TaskFact, L4>("TaskFact", "L4");
+    assert_producer::<TaskInventoryFact, L4>("TaskInventoryFact", "L4");
     assert_producer::<WorkflowFact, L4>("WorkflowFact", "L4");
     assert_producer::<EnvironmentRecoveryFact, L4>("EnvironmentRecoveryFact", "L4");
     assert_producer::<RecoveryJournalFact, L4>("RecoveryJournalFact", "L4");
@@ -42,6 +43,22 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<CostReport, L4>("CostReport", "L4");
     assert_producer::<GateFact, L5>("GateFact", "L5");
     assert_producer::<KnowledgeTags, L5>("KnowledgeTags", "L5");
+}
+
+#[test]
+fn task_inventory_is_plain_metadata_and_preserves_label_defaults() {
+    let row: TaskInventoryFact = serde_json::from_value(serde_json::json!({
+        "id": "task", "title": "standing intent", "scope": "demo", "open": true
+    })).unwrap();
+    assert!(row.labels.is_empty());
+    let json = serde_json::to_value(&row).unwrap();
+    assert!(json.get("labels").is_none());
+    assert_eq!(serde_json::from_value::<TaskInventoryFact>(json).unwrap(), row);
+    let labelled: TaskInventoryFact = serde_json::from_value(serde_json::json!({
+        "id": "task", "title": "standing intent", "scope": "demo", "open": false,
+        "labels": {"goal": "ship/kr1", "custom": "preserved"}
+    })).unwrap();
+    assert_eq!(serde_json::from_value::<TaskInventoryFact>(serde_json::to_value(&labelled).unwrap()).unwrap(), labelled);
 }
 
 #[test]
@@ -82,6 +99,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "ExploitedFinding",
         "AgentFact",
         "TaskFact",
+        "TaskInventoryFact",
         "WorkflowFact",
         "EnvironmentRecoveryFact",
         "RecoveryJournalFact",

@@ -4886,6 +4886,15 @@ the L0 schema unchanged. Shared subtree resolution now belongs to the common
 scope model, not L6 Policy, so lower levels do not import a policy helper.
 This does not finish the evaluator, signpost, crate or service migrations.
 
+Standing-task inventory reads also use an L4-owned port. Its L0 metadata
+contains the task id, title, persisted scope, labels and authoritative
+open/closed flag, not the full task or its run history. Policy remediation
+lookups, quality report links and scenario backlog/goal counts retain store
+ordering, exact-scope versus selected-subtree semantics and live updates.
+Quality names L5 on its adjacent upward inventory read. Remediation writes
+and Quality's full-task command response still await the command-ladder
+migration; this inventory port does not claim to complete that work.
+
 The live read API now enforces `Producer: Below<Reader>` in L0 and in the
 daemon's typed wiring. The sealed relation allows exactly the fifteen
 strictly upward pairs among L1–L6, including adjacent reads. Downward and

@@ -66,6 +66,8 @@ use factory_core::quality::{self, Level, Measure, QualityCatalogue, QualityTree,
 use factory_core::task::{NewTask, TaskFilter};
 
 use crate::engine::Engine;
+use crate::facts::{Facts, TaskInventoryQuery};
+use factory_kernel::{L5, TaskInventoryFact};
 use factory_core::config::subtree_scopes;
 
 /// The label a remediation task carries, and the key `ScopeQuality::open_tasks`
@@ -412,11 +414,11 @@ impl Engine {
         let open: BTreeMap<String, String> = if reports.is_empty() {
             BTreeMap::new()
         } else {
-            self.store
-                .list(&TaskFilter::default())
+            Facts::<L5>::new(self)
+                .get::<TaskInventoryFact>(&TaskInventoryQuery::All)
                 .await?
                 .into_iter()
-                .filter(|t| !t.status.is_terminal())
+                .filter(|t| t.open)
                 .filter_map(|t| t.labels.get("quality").cloned().map(|label| (label, t.id)))
                 .collect()
         };

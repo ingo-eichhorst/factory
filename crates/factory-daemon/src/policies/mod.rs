@@ -23,9 +23,10 @@ use factory_core::policy::{self, Attestation, ControlRef, Withdrawal};
 use factory_core::policy_export;
 use factory_core::protocol::{CatalogueSummary, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy, WorkflowEnforcement, WorkflowEnforcementFinding};
 use factory_core::reporting_clock::{self, ClockDeadlineState, ClockMark};
-use factory_core::task::{NewTask, Task, TaskFilter};
+use factory_core::task::{NewTask, Task};
 use factory_kernel::{DaemonConfigFact, BackupFact, SecretsPresence, AgentFact, TaskFact, WorkflowFact, GateFact, DependenciesFact, AttestedRun, L6};
-use crate::facts::{Facts, NamedQuery, AttestedQuery};
+use crate::facts::{Facts, NamedQuery, AttestedQuery, TaskInventoryQuery};
+use factory_kernel::TaskInventoryFact;
 
 use crate::access::Caller;
 use crate::engine::Engine;
@@ -512,7 +513,7 @@ impl Engine {
         // `policy_remediate` asks it for one scope, so the two agree.
         if !rows.is_empty() {
             let mut open: BTreeMap<(String, String), String> = BTreeMap::new();
-            for task in self.store.list(&TaskFilter::default()).await? {
+            for task in Facts::<L6>::new(self).get::<TaskInventoryFact>(&TaskInventoryQuery::All).await? {
                 if let Some(label) = open_policy_label(&task) {
                     // Newest first: keep the one `policy_remediate`'s own
                     // `find` would name, should two ever carry one label.
@@ -896,14 +897,10 @@ impl Engine {
     /// is open: what `policy_remediate` refuses a second task over, and what
     /// `policy_control` reports as `open_task` (`#98`). An exact match on
     /// the label, never a title guess.
-    async fn open_policy_task(&self, control: &ControlRef, scope: &str) -> Result<Option<Task>> {
+    async fn open_policy_task(&self, control: &ControlRef, scope: &str) -> Result<Option<TaskInventoryFact>> {
         let label = control.to_string();
-        Ok(self
-            .store
-            .list(&TaskFilter {
-                scope: Some(scope.to_string()),
-                ..Default::default()
-            })
+        Ok(Facts::<L6>::new(self)
+            .get::<TaskInventoryFact>(&TaskInventoryQuery::Exact(scope.to_string()))
             .await?
             .into_iter()
             .find(|t| open_policy_label(t) == Some(label.as_str())))
@@ -989,8 +986,8 @@ pub(crate) fn caller_name(caller: &Caller) -> String {
 /// terminal, or when it carries no such label. The one predicate
 /// `policy_report`'s `open_tasks` and `open_policy_task` both read, so the
 /// tab's "Task open" and the remediation refusal can never disagree.
-fn open_policy_label(task: &Task) -> Option<&str> {
-    if task.status.is_terminal() {
+fn open_policy_label(task: &TaskInventoryFact) -> Option<&str> {
+    if !task.open {
         return None;
     }
     task.labels.get("policy").map(String::as_str)
@@ -1603,6 +1600,81 @@ mod tests {
         assert!(Facts::<L6>::new(&engine).get::<TaskFact>(&NamedQuery {
             scope: "missing".into(), names: ["shared".into()].into_iter().collect(),
         }).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn task_inventory_port_preserves_order_scopes_and_live_metadata() {
+        use factory_core::task::{TaskFilter, TaskPatch, TaskStatus};
+        let engine = test_engine();
+        let mut ids = Vec::new();
+        for (i, scope) in ["engineering", "demo-app", "sibling", "engineering"].iter().enumerate() {
+            let mut task = task_from_new(NewTask {
+                title: "same title".into(),
+                instructions: "must not leak into the inventory fact".into(),
+                labels: BTreeMap::from([("policy".into(), "cra/b".into())]),
+                ..Default::default()
+            }, scope.to_string(), "shell".into(), "quiet".into());
+            task.created_at = Utc::now() + chrono::Duration::seconds(i as i64);
+            ids.push(engine.store.create(&task).await.unwrap().id);
+        }
+        let facts = Facts::<L6>::new(&engine);
+        let all = facts.get::<TaskInventoryFact>(&TaskInventoryQuery::All).await.unwrap();
+        let stored = engine.store.list(&TaskFilter::default()).await.unwrap();
+        assert_eq!(all.iter().map(|t| &t.id).collect::<Vec<_>>(), stored.iter().map(|t| &t.id).collect::<Vec<_>>());
+        assert!(all.iter().all(|t| t.open && t.labels["policy"] == "cra/b"));
+        let json = serde_json::to_value(&all).unwrap();
+        for row in json.as_array().unwrap() {
+            assert!(row.get("instructions").is_none() && row.get("runs").is_none());
+        }
+
+        let exact = facts.get::<TaskInventoryFact>(&TaskInventoryQuery::Exact("engineering".into())).await.unwrap();
+        assert_eq!(exact.iter().map(|t| &t.id).collect::<Vec<_>>(), vec![&ids[3], &ids[0]]);
+        assert_eq!(engine.open_policy_task(&"cra/b".parse().unwrap(), "engineering").await.unwrap().unwrap().id, ids[3]);
+        // Exact never adds children; Members never guesses ancestry from names.
+        let members = facts.get::<TaskInventoryFact>(&TaskInventoryQuery::Members(
+            ["engineering".into(), "demo-app".into()].into_iter().collect()
+        )).await.unwrap();
+        assert_eq!(members.iter().map(|t| &t.id).collect::<Vec<_>>(), vec![&ids[3], &ids[1], &ids[0]]);
+        assert!(facts.get::<TaskInventoryFact>(&TaskInventoryQuery::Members(BTreeSet::new())).await.unwrap().is_empty());
+        assert!(facts.get::<TaskInventoryFact>(&TaskInventoryQuery::Exact("missing".into())).await.is_err());
+        assert!(facts.get::<TaskInventoryFact>(&TaskInventoryQuery::Members(["missing".into()].into_iter().collect())).await.is_err());
+
+        engine.store.update(&ids[3], &TaskPatch { status: Some(TaskStatus::Done), ..Default::default() }).await.unwrap();
+        assert_eq!(engine.open_policy_task(&"cra/b".parse().unwrap(), "engineering").await.unwrap().unwrap().id, ids[0]);
+        engine.store.update(&ids[0], &TaskPatch {
+            status: Some(TaskStatus::Blocked),
+            labels: Some(BTreeMap::from([("goal".into(), "ship/kr1".into())])),
+            ..Default::default()
+        }).await.unwrap();
+        let after = facts.get::<TaskInventoryFact>(&TaskInventoryQuery::Exact("engineering".into())).await.unwrap();
+        assert!(!after[0].open);
+        assert!(after[1].open && after[1].labels["goal"] == "ship/kr1");
+        assert!(engine.open_policy_task(&"cra/b".parse().unwrap(), "engineering").await.unwrap().is_none());
+        // L5 names its real identity on the adjacent upward read, not L6.
+        assert_eq!(Facts::<factory_kernel::L5>::new(&engine).get::<TaskInventoryFact>(
+            &TaskInventoryQuery::Exact("engineering".into())
+        ).await.unwrap(), after);
+    }
+
+    #[tokio::test]
+    async fn task_inventory_open_flag_follows_all_authoritative_task_statuses() {
+        use factory_core::task::TaskStatus;
+        let engine = test_engine();
+        for status in [TaskStatus::Intake, TaskStatus::Pending, TaskStatus::Dispatching,
+            TaskStatus::Running, TaskStatus::Blocked, TaskStatus::Verifying,
+            TaskStatus::Failed, TaskStatus::Done, TaskStatus::Cancelled] {
+            let mut task = task_from_new(NewTask { title: status.as_str().into(), ..Default::default() },
+                "engineering".into(), "shell".into(), "quiet".into());
+            task.status = status;
+            engine.store.create(&task).await.unwrap();
+        }
+        let rows = Facts::<L6>::new(&engine).get::<TaskInventoryFact>(
+            &TaskInventoryQuery::Exact("engineering".into())
+        ).await.unwrap();
+        assert_eq!(rows.len(), 9);
+        for row in rows {
+            assert_eq!(row.open, !matches!(row.title.as_str(), "done" | "cancelled"), "{}", row.title);
+        }
     }
 
     /// A bare-bones engine for the F8 mutation test below (`#193`, phase 1):
