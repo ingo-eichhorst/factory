@@ -99,6 +99,12 @@ enum Command {
         #[arg(long)]
         scope: Option<String>,
     },
+    /// Start a frozen promotion workflow; deployment waits for owner approval.
+    Promote {
+        environment: String,
+        #[arg(long)]
+        deployment: String,
+    },
     /// Record deployments as they start and finish, or list them.
     #[command(subcommand)]
     Deploy(DeployCmd),
@@ -615,6 +621,9 @@ enum DeployCmd {
         /// The environment, e.g. staging.
         #[arg(long = "env")]
         environment: String,
+        /// Skipped, paused or missing checks can never count as success.
+        #[arg(long)]
+        strict_verification: bool,
         /// The scope, for an environment nobody declared. A declared one's
         /// own scope is used.
         #[arg(long)]
@@ -1523,10 +1532,18 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::Promote { environment, deployment } => {
+            let payload = client.send(Request::EnvironmentPromote(factory_core::environments::Promote { environment, deployment })).await?;
+            print(&payload, cli.json, |payload| match payload {
+                Payload::WorkflowRun { run } => Some(format!("promotion workflow {}; deployment waits for owner approval", run.id)),
+                _ => None,
+            })
+        }
         Command::Deploy(cmd) => match cmd {
-            DeployCmd::Start { environment, scope, release, via, started_at } => {
+            DeployCmd::Start { environment, strict_verification, scope, release, via, started_at } => {
                 let req = factory_core::environments::DeployStart {
                     environment,
+                    strict_verification,
                     scope,
                     release: release.facts()?,
                     via,
@@ -1550,6 +1567,7 @@ async fn main() -> Result<()> {
                 let wanted = parse_deploy_status(&status)?;
                 let start = factory_core::environments::DeployStart {
                     environment,
+                    strict_verification: false,
                     scope,
                     release: release.facts()?,
                     via,
@@ -6743,6 +6761,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn environment_promotion_requires_a_deployment_selection_and_strict_start_is_explicit() {
+        let parsed = Cli::try_parse_from(["factory", "promote", "staging", "--deployment", "verified-id"]).unwrap();
+        assert!(matches!(parsed.command, Command::Promote { environment, deployment } if environment == "staging" && deployment == "verified-id"));
+        assert!(Cli::try_parse_from(["factory", "promote", "staging"]).is_err());
+        assert!(Cli::try_parse_from(["factory", "deploy", "start", "--env", "production", "--commit", "abc", "--strict-verification"]).is_ok());
+        assert!(Cli::try_parse_from(["factory", "env", "production"]).is_ok(), "existing environment read syntax is unchanged");
+    }
+
     #[test]
     fn provenance_cli_supports_repeated_artifacts_and_run_lookup() {
         let cli = Cli::try_parse_from([

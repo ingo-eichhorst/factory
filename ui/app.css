@@ -1537,6 +1537,9 @@ button.linklike:hover { color: var(--signal); }
 .tag.sys-badge[data-tone="warn"] { color: var(--wait); border-color: var(--wait); }
 .tag.sys-badge[data-tone="bad"] { color: var(--fault); border-color: var(--fault); }
 .sys-status { margin: 0 0 10px; font: 600 15px/1.3 var(--cond); color: var(--ink); }
+.sys-promotion { margin: 0 0 10px; }
+.sys-promotion .sub { margin: 4px 0 0; }
+.sys-promotion-notice { padding: 10px; border: 1px solid var(--line-soft); }
 .sys-none { margin: 10px 0 0; font-size: 12px; color: var(--muted); }
 .sys-checks { margin-top: 10px; display: grid; gap: 9px; border-top: 1px solid var(--line-soft); padding-top: 9px; }
 .sys-check { min-width: 0; }

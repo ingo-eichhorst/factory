@@ -119,6 +119,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/doctor", get(doctor))
         .route("/api/infrastructure", get(infrastructure))
         .route("/api/environments", get(environments))
+        .route("/api/environments/promote", post(environment_promote))
         .route("/api/deployments", post(deploy_start))
         .route("/api/deployments/{id}/finish", post(deploy_finish))
         .route("/api/releases", post(release_add))
@@ -391,6 +392,13 @@ struct EnvironmentsQuery {
 /// `GET /api/environments?scope=` -- the Operations tab (`#185`).
 async fn environments(State(engine): State<Arc<Engine>>, Query(q): Query<EnvironmentsQuery>) -> AxumResponse {
     run(&engine, Request::Environments { scope: q.scope }).await
+}
+
+async fn environment_promote(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<factory_core::environments::Promote>,
+) -> AxumResponse {
+    run(&engine, Request::EnvironmentPromote(body)).await
 }
 
 /// `POST /api/deployments` with a `deploy.start` body.

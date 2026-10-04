@@ -260,6 +260,10 @@ pub struct WorkflowDraft {
     #[serde(default)]
     pub description: String,
     pub scope: String,
+    /// Optional git revision for task workspaces. Resolved to one immutable
+    /// commit before a run starts; every git-backed task scope must contain it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_ref: Option<String>,
     /// The category every task node is planned as unless it names its own
     /// (`#118`). Absent is the default category.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -279,6 +283,9 @@ pub struct WorkflowDefinition {
     pub name: String,
     pub description: String,
     pub scope: String,
+    /// Authored revision on the definition; frozen commit on a run snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_ref: Option<String>,
     /// See `WorkflowDraft::category`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
@@ -300,6 +307,7 @@ impl WorkflowDefinition {
             name: draft.name,
             description: draft.description,
             scope: draft.scope,
+            workspace_ref: draft.workspace_ref,
             category: draft.category,
             inputs: draft.inputs,
             nodes: draft.nodes,
@@ -315,6 +323,7 @@ impl WorkflowDefinition {
         self.description = draft.description;
         self.scope = draft.scope;
         self.category = draft.category;
+        self.workspace_ref = draft.workspace_ref;
         self.inputs = draft.inputs;
         self.nodes = draft.nodes;
         self.edges = draft.edges;
@@ -325,6 +334,10 @@ impl WorkflowDefinition {
     /// Validate the definition and return a topological order. The order is
     /// also the accessible textual representation used by the UI.
     pub fn validate(&self) -> Result<Vec<String>, String> {
+        if self.workspace_ref.as_ref().is_some_and(|reference| reference.trim().is_empty()
+            || reference.len() > 256 || reference.chars().any(char::is_control)) {
+            return Err("workspace_ref must be a nonempty git revision of at most 256 characters".into());
+        }
         if self.name.trim().is_empty() {
             return Err("a workflow needs a name".into());
         }
@@ -758,6 +771,27 @@ impl WorkflowDefinition {
         control_plan::effective_category(node.task.category.as_deref().or(self.category.as_deref())).to_string()
     }
 
+    /// Approval is held by the subject run, not a harness task. Ignore the
+    /// approval decision when admitting that run, but never its upstream
+    /// work: otherwise an approval injected before a downstream task could
+    /// bypass every policy gate on the task's former parents.
+    pub fn prerequisite_edges(&self, target: &str) -> Vec<&WorkflowEdge> {
+        let mut pending = vec![target.to_string()];
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        while let Some(target) = pending.pop() {
+            if !seen.insert(target.clone()) { continue; }
+            for edge in self.edges.iter().filter(|edge| edge.to == target) {
+                if self.node(&edge.from).is_some_and(|node| node.kind == WorkflowNodeKind::Approval) {
+                    pending.push(edge.from.clone());
+                } else {
+                    out.push(edge);
+                }
+            }
+        }
+        out
+    }
+
     /// Every category a task node here is planned as -- what a caller
     /// resolves a plan for before calling [`inject`](Self::inject).
     pub fn categories(&self) -> BTreeSet<String> {
@@ -851,6 +885,7 @@ impl WorkflowDefinition {
             name: task.title.clone(),
             description: String::new(),
             scope: task.scope.clone(),
+            workspace_ref: None,
             category: task.category.clone(),
             inputs: Vec::new(),
             nodes: vec![WorkflowNode {
@@ -1386,6 +1421,13 @@ pub struct WorkflowRun {
 }
 
 impl WorkflowRun {
+    /// Integration tasks start on the single writer's branch. Other
+    /// revision-pinned workflows start on their frozen snapshot commit.
+    pub fn task_workspace(&self) -> Option<crate::task::WorkflowWorkspace> {
+        self.integration.as_ref().map(|integration| integration.branch.clone())
+            .or_else(|| self.definition.workspace_ref.clone())
+            .map(|base_ref| crate::task::WorkflowWorkspace { base_ref })
+    }
     pub fn new(definition: WorkflowDefinition, started_by: WorkflowActor) -> Self {
         let now = Utc::now();
         Self {
@@ -1586,6 +1628,40 @@ mod tests {
             edges,
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn approval_admission_still_requires_every_upstream_gate() {
+        let mut approval = node("approval");
+        approval.kind = WorkflowNodeKind::Approval;
+        let mut second = approval.clone();
+        second.id = "second".into();
+        let def = definition(vec![node("tested"), approval, second, node("deploy")], vec![
+            WorkflowEdge { id: "tested-approval".into(), from: "tested".into(), to: "approval".into() },
+            WorkflowEdge { id: "approval-second".into(), from: "approval".into(), to: "second".into() },
+            WorkflowEdge { id: "second-deploy".into(), from: "second".into(), to: "deploy".into() },
+        ]);
+        assert_eq!(def.prerequisite_edges("deploy").iter().map(|e| e.from.as_str()).collect::<Vec<_>>(), ["tested"]);
+        let root = definition(vec![def.nodes[1].clone(), node("deploy")], vec![
+            WorkflowEdge { id: "approval-deploy".into(), from: "approval".into(), to: "deploy".into() },
+        ]);
+        assert!(root.prerequisite_edges("deploy").is_empty(), "a root approval may hold a subject run before dispatch");
+    }
+
+    #[test]
+    fn workspace_revision_is_optional_validated_and_frozen_in_a_run() {
+        let mut def = definition(vec![node("release")], vec![]);
+        assert!(def.workspace_ref.is_none());
+        assert!(serde_json::to_value(&def).unwrap().get("workspace_ref").is_none());
+        for invalid in ["", " \t ", "main\nHEAD"] {
+            def.workspace_ref = Some(invalid.into());
+            assert!(def.validate().is_err(), "{invalid:?}");
+        }
+        def.workspace_ref = Some("a".repeat(40));
+        def.validate().unwrap();
+        let encoded = serde_json::to_value(&def).unwrap();
+        let decoded: WorkflowDefinition = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.workspace_ref, def.workspace_ref);
     }
 
     #[test]

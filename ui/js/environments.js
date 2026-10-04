@@ -5,9 +5,8 @@
 //! then the deployment timeline and the release catalogue.
 //!
 //! Not Factory's own production line: that is the L4 Line tab
-//! (`operations.js`, `/api/operations`). This page starts nothing; a
-//! deployment is recorded by whoever made it (`factory deploy start` /
-//! `finish`), and the page only reads.
+//! (`operations.js`, `/api/operations`). Promote creates a policy-gated
+//! release workflow; the deployment still waits for an owner approval.
 //!
 //! Every formatter lives in `environments-model.js`, which the Node tests
 //! import; this file only puts their answers on screen.
@@ -27,6 +26,7 @@ import {
   fmtPct,
   incidentText,
   lastCheckText,
+  promotionChoices,
   releaseRows,
   releaseText,
   sloText,
@@ -40,6 +40,29 @@ import {
 // The rail can move while a request is in flight; only the newest answer
 // is drawn.
 let asked = 0;
+const promoting = new Set();
+let promotionNotice = null;
+
+export async function promoteEnvironment(environment, deployment) {
+  const card = state.environments?.environments?.find(card => card.name === environment);
+  if (!card?.promotion_ready || card.current?.id !== deployment || promoting.has(environment)) return;
+  const scope = state.scope;
+  promoting.add(environment);
+  renderEnvironments();
+  try {
+    const { run } = await api("/api/environments/promote", { method: "POST", body: JSON.stringify({ environment, deployment }) });
+    promotionNotice = { scope, run };
+  } catch (error) {
+    promotionNotice = { scope, error: error.message };
+  } finally {
+    promoting.delete(environment);
+    if (state.scope === scope) await refreshEnvironments();
+  }
+}
+
+function promotionButton(choice) {
+  return `<button type="button" data-environment-promote="${esc(choice.source)}" data-deployment="${esc(choice.deployment)}"${promoting.has(choice.source) ? " disabled" : ""}>Promote to ${esc(choice.target)}</button>`;
+}
 
 // ------------------------------------------------------------------ fetching
 
@@ -135,6 +158,7 @@ function card(c, now) {
       ${link}
     </header>
     <p class="sys-status">${esc(statusText(c, now))}</p>
+    ${c.promotes_to ? `<div class="sys-promotion">${c.promotion_ready && c.current ? promotionButton({ source: c.name, target: c.promotes_to, deployment: c.current.id }) : `<span class="sub">${esc(c.promotion_reason || "Promotion is not available on this daemon.")}</span>`}<p class="sub">Creates a release workflow; deployment waits for owner approval.</p></div>` : ""}
     ${running}
     <dl class="infra-facts">
       ${fact("Running", current)}
@@ -178,17 +202,18 @@ function deployments(report) {
 function releases(report) {
   const rows = releaseRows(report);
   if (!rows.length) return "";
-  const body = rows.map(r => `<tr>
+  const body = rows.map((r, index) => `<tr>
       <td class="mono">${esc(r.commit)}${r.dirty ? ` <span class="tag warn">dirty</span>` : ""}</td>
       <td>${r.name ? esc(r.name) : `<span class="infra-missing">${MISSING}</span>`}</td>
       <td>${esc(r.scope)}</td>
       <td class="bk-nowrap">${esc(r.firstSeen)}</td>
       <td>${r.runningOn.length ? r.runningOn.map(e => `<span class="tag sys-badge" data-tone="ok">${esc(e)}</span>`).join(" ") : `<span class="sub">not running anywhere</span>`}</td>
       <td class="bk-nowrap">${r.deployments}${r.failed ? ` <span class="bk-bad">(${r.failed} failed)</span>` : ""}</td>
+      <td>${promotionChoices(report, report.releases[index]).map(promotionButton).join(" ")}</td>
     </tr>`).join("");
   return `<section class="bk-section"><h3>Releases <span class="sub">newest first</span></h3>
     <div class="bk-scroll"><table>
-      <thead><tr><th>Commit</th><th>Version</th><th>Scope</th><th>First seen</th><th>Running on</th><th>Deployments</th></tr></thead>
+      <thead><tr><th>Commit</th><th>Version</th><th>Scope</th><th>First seen</th><th>Running on</th><th>Deployments</th><th>Promote</th></tr></thead>
       <tbody>${body}</tbody>
     </table></div></section>`;
 }
@@ -228,10 +253,19 @@ export function renderEnvironments() {
   const cards = report.environments.length
     ? `<div class="sys-cards">${report.environments.map(c => card(c, now)).join("")}</div>`
     : empty();
-  page.innerHTML = [cards, deployments(report), releases(report)].join("");
+  const notice = promotionNotice && promotionNotice.scope === state.scope
+    ? (promotionNotice.error ? `<p class="sys-promotion-notice bk-bad" role="status">${esc(promotionNotice.error)}</p>`
+      : `<p class="sys-promotion-notice" role="status">Promotion created. <a href="#${encodeURIComponent(promotionNotice.run.scope)}/proc/workflows/${encodeURIComponent(promotionNotice.run.workflow_id)}/run/${encodeURIComponent(promotionNotice.run.id)}">Open release workflow</a>. Deployment waits for owner approval.</p>`)
+    : "";
+  page.innerHTML = [notice, cards, deployments(report), releases(report)].join("");
 }
 
 export function wireEnvironments() {
   const refresh = $("environments-refresh");
   if (refresh) refresh.onclick = () => refreshEnvironments();
+  const page = $("environments");
+  if (page) page.onclick = event => {
+    const button = event.target.closest?.("[data-environment-promote]");
+    if (button && !button.disabled) promoteEnvironment(button.dataset.environmentPromote, button.dataset.deployment);
+  };
 }

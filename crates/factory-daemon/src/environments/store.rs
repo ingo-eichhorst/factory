@@ -347,6 +347,7 @@ mod tests {
             actor: Actor { kind: ActorKind::Person, name: "owner".into(), run_id: None, task_id: None },
             via: None,
             manual: true,
+            strict_verification: false,
             started_at: at,
             finished_at: None,
             status: DeployStatus::Running,

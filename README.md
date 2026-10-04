@@ -2495,6 +2495,67 @@ The **release catalogue** is every `(scope, commit)` a deployment or
 `release add` recorded -- builds that actually happened, not git tags --
 with where each is running now and how many of its deployments failed.
 
+**Promotion** is an owner action from an environment card or the release
+catalogue, or `factory promote staging --deployment <verified-deployment-id>`.
+`POST /api/environments/promote` takes `{ "environment": "staging",
+"deployment": "<id>" }` and returns the ordinary `workflow_run` payload.
+It selects the source's latest successful, verified, clean release by its
+full commit id; stale selections, unverified releases, paused checks,
+an already-current target and a pending promotion to that target are refused.
+The target may belong to another scope, but its repository must contain the
+selected commit. The target declares its deployment recipe and a named shell
+agent, for example:
+
+```yaml
+scope:
+  name: demo
+  roles:
+    releaser:
+      extends: worker
+      grants: [deploy.record]
+      reach: own
+  agents:
+    - { name: release-shell, harness: shell, lifetime: task, role: releaser, max_sessions: 1 }
+  environments:
+    - name: staging
+      promotes_to: production
+      checks: [{ kind: command, command: './health staging' }]
+    - name: production
+      checks: [{ kind: command, command: './health production' }]
+      deploy:
+        agent: release-shell
+        prepare: './build-and-test'       # optional preflight; defaults to true
+        command: './deploy "$FACTORY_ENVIRONMENT" "$FACTORY_RELEASE_COMMIT"'
+        timeout: 30m                    # per task; default 30m, maximum 1h
+```
+
+The resulting workflow freezes the commit, recipe and applicable `release`
+policy plan. Preflight and deployment are separate ordinary `release` tasks,
+each with its own commit-pinned workspace. Preflight's required policy gates
+must pass before the deploy run is admitted; passing them never approves it.
+A locked, owner-bound approval holds deployment **before** the shell starts.
+Review the workflow and use its approval action (or
+`factory run approve <run-id> --reason 'reviewed release evidence'`). Restarts
+preserve this hold and the original commit. `prepare` can validate or publish
+an immutable build artifact, but local files it builds are not shared with
+the separate deployment workspace. The deployment command must build what
+it needs or retrieve that artifact. Both commands receive
+`FACTORY_RELEASE_COMMIT`, `FACTORY_ENVIRONMENT` and
+`FACTORY_SOURCE_ENVIRONMENT`; the existing task/run context supplies the
+recording token. A command may not change the checked-out commit or tracked
+source and still claim a successful promotion.
+
+The deploy wrapper records the attempt **before** executing the command and
+finishes it with mandatory post-deploy health checks. Its frozen
+`strict_verification` receipt prevents `--no-verify`, pausing checks or removing
+their declaration from turning an unverified promotion into success. A failed
+command or failed check leaves a failed deployment with its run/task actor;
+a terminal release run without a finish receipt is failed during run
+settlement or startup reconciliation, never inferred successful. Starting a
+promotion is owner-only; `deploy.record` alone does not grant that action.
+Roles remain accidental-access bounds, not a security boundary against an
+agent running as the machine's owner.
+
 **SLA and release effectiveness** are computed from samples and deployments,
 never typed in, and are metrics in the registry like any other -- the Goals
 tab, the Scenarios drivers and dashboard tiles can read them:
@@ -2533,8 +2594,7 @@ and policies; the `environments:` declaration above, with the real Tailscale
 URLs, belongs in the `factory` scope's config once a daemon that reads it is
 installed.
 
-**Not yet:** promoting a release from the page (a `release` task gated by
-policy and approval, `#118` v2), mirroring deployments to GitHub's
+**Not yet:** mirroring deployments to GitHub's
 Deployments API, `ensure.sh`'s restarts as journaled actions,
 alerting beyond Factory's own events, external
 monitoring as a check source, and more than one host.

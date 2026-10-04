@@ -267,6 +267,7 @@ impl Engine {
             // checked before the shared arm below: a role grant must never
             // become "read this key file".
             Request::BackupVerify { identity: Some(_), .. } => return Needs::Owner,
+            Request::EnvironmentPromote(_) => return Needs::Owner,
             // Checked against the root scope too: a backup is of the whole
             // instance's state (`#116`).
             Request::BackupRun | Request::BackupVerify { .. } => Grant::BackupRun,
@@ -1197,6 +1198,17 @@ mod tests {
     /// reach covers only what a run of its own deploys, and reading the
     /// environments is open to every agent (`#185`).
     #[tokio::test]
+    async fn starting_a_promotion_is_owner_only_even_for_a_foreman() {
+        let e = engine_with_roles_and_root_scope("company", "roles: {}\n");
+        let request = || Request::EnvironmentPromote(factory_core::environments::Promote {
+            environment: "staging".into(), deployment: "selected".into(),
+        });
+        let agent = Caller::Agent { scope: "demo".into(), name: "release".into(), role: Role::foreman(), run_id: None };
+        assert!(!allowed(&e, &agent, request()).await);
+        assert!(allowed(&e, &Caller::Owner, request()).await);
+    }
+
+    #[tokio::test]
     async fn deploy_record_follows_the_environments_scope_and_own_reach_needs_a_run() {
         use factory_core::environments::{DeployFinish, DeployStart, DeployStatus, ReleaseFacts};
         let e = engine_with_roles_and_root_scope(
@@ -1213,6 +1225,7 @@ mod tests {
         let start = |scope: Option<&str>| {
             Request::DeployStart(DeployStart {
                 environment: "review13".into(),
+                strict_verification: false,
                 scope: scope.map(str::to_string),
                 release: ReleaseFacts { commit: "abc".into(), ..Default::default() },
                 via: None,
@@ -1228,6 +1241,7 @@ mod tests {
 
         let d = e.deploy_start(&caller("releaser", Some("run-1")), DeployStart {
             environment: "review13".into(),
+            strict_verification: false,
             scope: None,
             release: ReleaseFacts { commit: "abc".into(), ..Default::default() },
             via: None,
