@@ -2,6 +2,7 @@
 //! this is only typed wiring. The Engine reference is temporary wiring
 //! until phase 6 splits services, not an implementation of Provide on Engine.
 mod l1;
+pub(crate) mod checks;
 mod l2;
 mod l3;
 mod l4;
@@ -18,7 +19,6 @@ pub(crate) use l2::{
     provider_declarations as environment_provider_declarations,
 };
 pub(crate) use l4::{import_recovery_journal, process_security_reports};
-pub(crate) use l5::{assurance_gate_facts, assurance_knowledge_tags};
 
 use crate::engine::Engine;
 use chrono::{DateTime, Utc};
@@ -658,7 +658,12 @@ mod tests {
             .next()
             .unwrap();
         assert!(budget.contains("get::<CostReport>"));
-        assert!(budget.contains("budget_policy_input") && budget.contains("month_spend"));
+        assert!(budget.contains("check_budget_intent") && budget.contains("month_spend"));
+        assert!(!budget.contains("async fn budget_policy_input"));
+        let evidence = include_str!("../../../factory-assurance/src/evidence.rs")
+            .split("\nmod tests").next().unwrap();
+        assert!(evidence.contains("pub async fn budget(") && evidence.contains("pub async fn month_spend("));
+        assert!(evidence.contains("get::<CostReport, _>") && !evidence.contains("runs_between"));
         assert!(!budget.contains("runs_between") && !budget.contains("crate::costs"));
         let costs = include_str!("../costs.rs")
             .split("#[cfg(test)]")
@@ -767,6 +772,37 @@ mod tests {
             assert!(compact.contains("get::<TaskInventoryFact,_>"));
             assert!(!compact.contains("TaskStore") && !compact.contains("Engine"));
         }
+    }
+
+    #[test]
+    fn check_evidence_and_quality_judgement_have_real_l5_ownership() {
+        let evidence = include_str!("../../../factory-assurance/src/evidence.rs")
+            .split("\nmod tests").next().unwrap();
+        let compact: String = evidence.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("Facts::<L5>::new()"));
+        for fact in ["TaskFact", "WorkflowFact", "AgentFact", "DaemonConfigFact", "SecretsPresence", "DependenciesFact", "BackupFact", "AttestedRun", "CostReport"] {
+            assert!(compact.contains(&format!("get::<{fact},_>")), "missing checked L5 read: {fact}");
+            assert!(!compact.contains(&format!("Provide::<{fact}>::get")), "unchecked lower read: {fact}");
+        }
+        assert!(compact.contains("Provide::<GateFact>::get(&self.own") && compact.contains("Provide::<KnowledgeTags>::get(&self.own"));
+        for forbidden in ["Engine", "factory_core", "factory_direction", "factory_infrastructure", "factory_environment", "factory_agents", "TaskStore", "dyn Fn", "BoxFuture"] {
+            assert!(!evidence.contains(forbidden), "owner acquired an outside callback/backedge: {forbidden}");
+        }
+        assert!(compact.contains("quality::evaluate(scope.tree,values,&evidence,now)"));
+        assert!(compact.contains("self.scopes.ancestors_of(scope)"));
+        let policy = include_str!("../policies/mod.rs").split("\nmod tests").next().unwrap();
+        for fact in ["TaskFact", "WorkflowFact", "AgentFact", "DaemonConfigFact", "SecretsPresence", "DependenciesFact", "BackupFact", "AttestedRun"] {
+            assert!(!policy.contains(&format!("get::<{fact}>")), "second gathering path in policy: {fact}");
+        }
+        assert!(!policy.contains("async fn attested_evidence") && !policy.contains("fn needs_agent_facts"));
+        let quality = include_str!("../quality/mod.rs").split("\nmod tests").next().unwrap();
+        assert!(quality.contains("crate::facts::checks::service(self, inputs.snapshot.scope_tree()).judge_quality"));
+        assert!(!quality.contains("reports.push(quality::evaluate") && !quality.contains(".evidence_for_scope("));
+        let wiring = include_str!("checks.rs");
+        assert!(wiring.contains("Service::new") && !wiring.contains("async fn") && !wiring.contains(".get::<"));
+        let direction = include_str!("../../../factory-direction/src/budget.rs").split("\nmod tests").next().unwrap();
+        assert!(direction.contains("pub fn check_intent") && direction.contains("factory_assurance::evidence::BudgetIntent"));
+        assert!(!direction.contains("get::<CostReport") && !direction.contains("async fn"));
     }
 
     #[test]

@@ -5286,6 +5286,17 @@ outside router alone reconstructs legacy task responses through L4's opaque
 live `TaskSnapshotFact`. Authorization remains at the one existing entry.
 This does not complete isolation of every live service, timer or command.
 
+L5's live check-evidence service now owns lazy lower-fact reads and Quality
+judgement. Policy reports, control details and Scenarios share that one
+gatherer; Quality calls it directly rather than re-entering Policy. Every
+lower read uses the kernel's `Facts<L5>` boundary; knowledge and benchmark
+gates remain ordinary calls to L5's own provider. L6 sends only authored
+budget caps and errors, never spend or a precomputed verdict. Exact-scope
+history, path-based receipt ancestry, twice-window stale lookbacks, shared
+subtree reads and unknown/missing evidence are preserved. The outside wiring
+constructs real physical providers, with no Engine callback entering L5.
+Metric gathering, signposts and the complete six-service split still remain.
+
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),
 with ADR 0004 amended to name the evidence channel. Every registered fact
