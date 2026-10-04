@@ -4,7 +4,7 @@
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, Utc};
 use factory_core::{
     config::Factory,
-    openshell::{CredentialSource, ProviderDecl},
+    openshell::{CredentialSource, ProviderCredential, ProviderDecl},
     renewals::*,
 };
 use futures_util::{stream, StreamExt};
@@ -782,6 +782,7 @@ pub(crate) async fn observe(factory: &Factory, tools: &Tools, now: DateTime<Utc>
                 credentials.insert(item.id.clone(), item);
             }
         }
+        let mut dated_by_secret = BTreeSet::new();
         for (scope, agent, config) in agents {
             for decl in &config.providers {
                 let name = decl.gateway_name(&suffix);
@@ -804,6 +805,17 @@ pub(crate) async fn observe(factory: &Factory, tools: &Tools, now: DateTime<Utc>
                     continue;
                 }
                 if let ProviderDecl::Managed(managed) = decl {
+                    // A credential named from the declared catalogue (#244)
+                    // is dated by the secret's own entry (`secret:<name>`),
+                    // one per secret however many providers name it. Unless
+                    // OpenShell itself reports a date, this row would only
+                    // repeat that date -- or guess one -- so it goes.
+                    if managed.credential.secret().is_some() {
+                        if item.basis != DateBasis::Observed {
+                            dated_by_secret.insert(item.id.clone());
+                        }
+                        continue;
+                    }
                     if item.basis != DateBasis::Observed {
                         if let Some(expires) = managed
                             .expires
@@ -818,13 +830,16 @@ pub(crate) async fn observe(factory: &Factory, tools: &Tools, now: DateTime<Utc>
                                 now,
                             );
                         } else if managed.kind.contains("claude") {
-                            if let CredentialSource::File { path } = &managed.credential {
+                            if let ProviderCredential::Source(CredentialSource::File { path }) = &managed.credential {
                                 derive_claude(item, &claude_file(tools, path), now);
                             }
                         }
                     }
                 }
             }
+        }
+        for id in dated_by_secret {
+            credentials.remove(&id);
         }
     }
     let mut github = observation(
@@ -870,7 +885,7 @@ pub(crate) async fn observe(factory: &Factory, tools: &Tools, now: DateTime<Utc>
                 for decl in config.providers {
                     if let ProviderDecl::Managed(managed) = decl {
                         if managed.kind.contains("github")
-                            && matches!(managed.credential, CredentialSource::Command { ref run } if run.trim() == "gh auth token")
+                            && matches!(managed.credential.source(&factory.config.secrets), Some(CredentialSource::Command { run }) if run.trim() == "gh auth token")
                         {
                             github.affects.push(agent_dependency(
                                 &scope.name,

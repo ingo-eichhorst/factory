@@ -54,6 +54,12 @@ impl Engine {
             &runs,
             now,
         );
+        // A declared secret (#244) is edited on L2 Secrets: link there.
+        for entry in &mut entries {
+            if entry.observation.source == DateSource::Secret {
+                entry.href = "#all/secrets".into();
+            }
+        }
         // Same-level native state, projected on read, not copied to a ledger.
         let attestations = self.policies.all().await?;
         for attestation in &attestations {

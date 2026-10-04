@@ -648,7 +648,9 @@ pub enum ExceptionKind {
     /// missing thing and the command that supplies it.
     SandboxNotReady,
     /// A managed provider's declared credential expires within
-    /// `openshell::EXPIRY_WARNING_DAYS`, or already has.
+    /// `openshell::EXPIRY_WARNING_DAYS`, or already has. Only a credential
+    /// written inline with its own `expires:` (`#234`): a declared secret's
+    /// date is an Important dates entry instead (`#244`, `#236`).
     CredentialExpiring,
 }
 

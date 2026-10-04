@@ -121,13 +121,7 @@ fn fixture(block: &str, tools: impl FnOnce(&Path) -> Tools) -> Fixture {
     std::fs::create_dir_all(root.join(".factory")).unwrap();
     std::fs::create_dir_all(root.join("projects/demo")).unwrap();
     let cli = fake_openshell(&dir);
-    let block = block.replace("CLI", &cli.display().to_string()).replace("ROOT", &root.display().to_string());
-    let indented: String = block.lines().map(|l| format!("      {l}\n")).collect();
-    let mut scope: factory_core::config::Scope = serde_yaml_ng::from_str(&format!(
-        "id: demo-id\nname: demo\ngit: https://github.com/example/demo.git\nagents:\n  - name: boxed\n    harness: shell\n    sandbox: openshell\n    openshell:\n{indented}"
-    ))
-    .unwrap();
-    scope.path = root.join("projects/demo");
+    let scope = demo_scope(&root, &cli, block);
     let config = Config {
         version: 1,
         instance: Instance { id: format!("{SUFFIX}-0000-4000-8000-000000000000"), name: "test".into() },
@@ -139,6 +133,7 @@ fn fixture(block: &str, tools: impl FnOnce(&Path) -> Tools) -> Fixture {
         policies: PolicyDeclaration::default(),
         quality: Default::default(),
         infrastructure: Default::default(),
+        secrets: Vec::new(),
         plugins_dir: None,
         renewals: Vec::new(),
         renewals_notify: None,
@@ -151,6 +146,19 @@ fn fixture(block: &str, tools: impl FnOnce(&Path) -> Tools) -> Fixture {
     t.launchctl = fake_launchctl(&dir);
     engine.provision = Provisioner::new(t);
     Fixture { root, dir, engine: Arc::new(engine) }
+}
+
+/// The scope `demo`, whose agent `boxed` has `block` as its `openshell:`
+/// block -- `CLI` and `ROOT` in it are the stand-in CLI and the instance root.
+fn demo_scope(root: &Path, cli: &Path, block: &str) -> factory_core::config::Scope {
+    let block = block.replace("CLI", &cli.display().to_string()).replace("ROOT", &root.display().to_string());
+    let indented: String = block.lines().map(|l| format!("      {l}\n")).collect();
+    let mut scope: factory_core::config::Scope = serde_yaml_ng::from_str(&format!(
+        "id: demo-id\nname: demo\ngit: https://github.com/example/demo.git\nagents:\n  - name: boxed\n    harness: shell\n    sandbox: openshell\n    openshell:\n{indented}"
+    ))
+    .unwrap();
+    scope.path = root.join("projects/demo");
+    scope
 }
 
 fn no_build(_: &Path) -> Tools {
@@ -476,6 +484,8 @@ async fn two_agents_declaring_one_provider_differently_are_both_told() {
         key: ("a".into(), "x".into()),
         config: serde_yaml_ng::from_str("providers:\n  - { name: p, type: t, credential: { from: env, name: A } }\npolicy: {}\n").unwrap(),
         git: None,
+        secrets: BTreeMap::new(),
+        unresolved: None,
     };
     let mut b = a.clone();
     b.key = ("b".into(), "y".into());
@@ -536,4 +546,117 @@ async fn the_gate_waits_briefly_for_a_first_judgement_and_never_lets_a_needs_thr
     let resolved = f.engine.sandbox_gate(&f.key(), &config).await;
     looping.abort();
     assert_eq!(resolved.unwrap().image, f.root.join("image.tar.gz").display().to_string());
+}
+
+// -- #244: the declared secrets catalogue ----------------------------------
+
+/// `MANAGED`, with both providers naming catalogue entries instead.
+const BY_REFERENCE: &str = "\
+image: ROOT/image.tar.gz
+cli: CLI
+callback: http://127.0.0.1:9
+providers:
+  - name: factory-claude
+    type: claude-code-oauth
+    credential: { secret: claude-oauth-token }
+  - name: factory-github
+    type: github-publish
+    credential: { secret: github-gh-login }
+policy:
+  network_policies: {}
+";
+
+/// The catalogue the issue declares, over this fixture's two sources.
+fn catalogue(root: &Path) -> Vec<SecretDecl> {
+    serde_yaml_ng::from_str(&format!(
+        "- name: claude-oauth-token\n  kind: token\n  source: {{ from: file, path: {r}/secrets/claude }}\n  expires: 2027-10-04\n  renew: \"claude setup-token, then (umask 077; cat > {r}/secrets/claude)\"\n\
+         - name: github-gh-login\n  kind: token\n  source: {{ from: command, run: cat {r}/secrets/gh }}\n  expires: never\n  renew: gh auth login\n",
+        r = root.display()
+    ))
+    .unwrap()
+}
+
+fn by_reference(f: &Fixture) {
+    f.engine.replace_instance_secrets(catalogue(&f.root));
+    f.engine.replace_scope("demo-id", demo_scope(&f.root, &f.dir.join("openshell"), BY_REFERENCE));
+    f.engine.factory_snapshot().config.validate().expect("the catalogue and the references load");
+}
+
+#[tokio::test]
+async fn moving_inline_credentials_into_the_catalogue_gives_the_same_digest_and_recreates_nothing() {
+    // Acceptance 1: the curator stays ready and its providers are not
+    // recreated when its inline sources become `{ secret: }` references.
+    let f = managed();
+    assert_eq!(f.pass().await.state, ReadinessState::Ready);
+    let given = lock(&f.engine.provision.given).clone();
+    assert_eq!(given.len(), 2, "{given:?}");
+
+    by_reference(&f);
+    let d = &declared(&f.engine)[0];
+    assert_eq!(d.secrets.keys().collect::<Vec<_>>(), ["factory-claude", "factory-github"]);
+    std::fs::write(f.dir.join("calls"), "").unwrap();
+    let r = f.pass().await;
+    assert_eq!(r.state, ReadinessState::Ready, "{r:?}");
+    let calls = f.calls();
+    for verb in ["provider create", "provider update", "provider delete", "sandbox create"] {
+        assert!(!calls.contains(verb), "{verb} after moving to the catalogue: {calls}");
+    }
+    assert_eq!(*lock(&f.engine.provision.given), given, "the same value digest, per provider");
+
+    // A dispatch, handed the block as written -- references and all.
+    let raw = f.engine.factory_snapshot().scope("demo").unwrap().declared_agents()[0].openshell.clone().unwrap();
+    assert!(serde_json::to_string(&raw).unwrap().contains(r#""secret":"claude-oauth-token""#));
+    let resolved = f.engine.sandbox_gate(&f.key(), &raw).await.unwrap();
+    assert_eq!(resolved.providers, [format!("factory-claude-{SUFFIX}"), format!("factory-github-{SUFFIX}")]);
+    assert!(!f.calls().contains("provider update"), "{}", f.calls());
+
+    // The secret's expiry is the secret's: no per-provider expiring line.
+    assert!(r.expiring.is_empty(), "{:?}", r.expiring);
+    // And the catalogue's sources were checked -- whether they resolve, never what they gave.
+    let checks = f.engine.provision.source_checks();
+    assert!(checks["claude-oauth-token"].resolves && checks["github-gh-login"].resolves, "{checks:?}");
+    let shown = serde_json::to_string(&checks).unwrap();
+    assert!(!shown.contains("file-secret-123") && !shown.contains("cmd-secret-456"), "{shown}");
+}
+
+#[tokio::test]
+async fn a_referenced_secret_that_will_not_resolve_names_its_renew_line() {
+    let f = managed();
+    by_reference(&f);
+    std::fs::remove_file(f.root.join("secrets/claude")).unwrap();
+    let r = f.pass().await;
+    assert_eq!(r.state, ReadinessState::Needs);
+    assert!(r.thing.as_deref().unwrap().contains("cannot be read"), "{r:?}");
+    assert_eq!(r.command, Some(format!("claude setup-token, then (umask 077; cat > {}/secrets/claude)", f.root.display())));
+    let check = &f.engine.provision.source_checks()["claude-oauth-token"];
+    assert!(!check.resolves && check.reason.as_deref().unwrap().contains("cannot be read"), "{check:?}");
+}
+
+#[tokio::test]
+async fn a_reference_the_catalogue_does_not_declare_is_a_need_never_a_panic() {
+    let f = managed();
+    f.engine.replace_scope("demo-id", demo_scope(&f.root, &f.dir.join("openshell"), BY_REFERENCE));
+    let r = f.pass().await;
+    assert_eq!(r.state, ReadinessState::Needs);
+    assert!(r.thing.as_deref().unwrap().contains("the secret claude-oauth-token"), "{r:?}");
+    assert!(!f.calls().contains("provider create"));
+    let raw = f.engine.factory_snapshot().scope("demo").unwrap().declared_agents()[0].openshell.clone().unwrap();
+    let e = f.engine.sandbox_gate(&f.key(), &raw).await.unwrap_err();
+    assert!(e.contains("the secret claude-oauth-token"), "{e}");
+}
+
+#[tokio::test]
+async fn one_provider_named_inline_by_one_agent_and_by_reference_by_another_is_not_a_conflict() {
+    let catalogue: Vec<SecretDecl> =
+        serde_yaml_ng::from_str("- { name: a, kind: token, source: { from: env, name: A } }").unwrap();
+    let inline: OpenshellConfig =
+        serde_yaml_ng::from_str("providers:\n  - { name: p, type: t, credential: { from: env, name: A } }\npolicy: {}\n").unwrap();
+    let reference: OpenshellConfig =
+        serde_yaml_ng::from_str("providers:\n  - { name: p, type: t, credential: { secret: a } }\npolicy: {}\n").unwrap();
+    let (resolved, secrets) = resolve_secrets(&reference, &catalogue).unwrap();
+    assert_eq!(resolved, inline, "a reference resolves to the very source written inline");
+    assert!(secrets.contains_key("p"));
+    let a = Declared { key: ("a".into(), "x".into()), config: inline, git: None, secrets: BTreeMap::new(), unresolved: None };
+    let b = Declared { key: ("b".into(), "y".into()), config: resolved, git: None, secrets, unresolved: None };
+    assert!(conflicting_providers(&[a, b]).is_empty());
 }

@@ -339,11 +339,15 @@ pub struct ManagedProvider {
     /// on the gateway.
     #[serde(rename = "type")]
     pub kind: String,
-    /// Where the value comes from. By reference, never by value.
-    pub credential: CredentialSource,
+    /// Where the value comes from: a source written here (`#234`), or an
+    /// entry of the instance root's `secrets:` catalogue (`#244`). By
+    /// reference, never by value.
+    pub credential: ProviderCredential,
     /// When the credential stops working, if it says. The Inbox says so
     /// [`EXPIRY_WARNING_DAYS`] ahead -- a `claude setup-token` token lasts
     /// a year, and nothing on the host can tell when that year ends.
+    /// Superseded by the catalogue's `expires` for a `{ secret: }`
+    /// credential (`#244`): config load refuses the two when they disagree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires: Option<chrono::NaiveDate>,
 }
@@ -394,20 +398,96 @@ impl CredentialSource {
         }
     }
 
-    fn problems(&self, provider: &str) -> Vec<String> {
-        let blank = |what: &str| format!("gives the provider {provider:?} a credential with no {what}");
+    /// Everything wrong with this source, as phrases about `subject` (`the
+    /// provider "x"`, `the secret "y"`). Empty means it can be read.
+    pub fn problems(&self, subject: &str) -> Vec<String> {
+        let blank = |what: &str| format!("gives {subject} a credential with no {what}");
         match self {
             Self::Env { name } if !is_env_name(name) => {
-                vec![format!("gives the provider {provider:?} a credential from {name:?}, which is not an environment variable name")]
+                vec![format!("gives {subject} a credential from {name:?}, which is not an environment variable name")]
             }
             Self::File { path } if path.trim().is_empty() => vec![blank("path")],
             Self::File { path } if !(path.starts_with('/') || path.starts_with("~/")) => vec![format!(
-                "gives the provider {provider:?} a credential file {path:?}, which is not an absolute path or one under ~/"
+                "gives {subject} a credential file {path:?}, which is not an absolute path or one under ~/"
             )],
             Self::Command { run } if run.trim().is_empty() => vec![blank("command")],
             Self::Keychain { service, .. } if service.trim().is_empty() => vec![blank("Keychain service")],
             _ => Vec::new(),
         }
+    }
+}
+
+/// A managed provider's `credential:`: a source written inline (`#234`), or
+/// `{ secret: <name> }`, an entry of the instance root's `secrets:`
+/// catalogue (`#244`). Either way the provisioner reads the same source, so
+/// moving an inline credential into the catalogue gives its provider the
+/// same value and changes nothing on the gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderCredential {
+    Source(CredentialSource),
+    Secret(String),
+}
+
+impl ProviderCredential {
+    /// The catalogue entry this names, if it names one.
+    pub fn secret(&self) -> Option<&str> {
+        match self {
+            Self::Secret(name) => Some(name),
+            Self::Source(_) => None,
+        }
+    }
+
+    /// The source to read: written inline, or the named catalogue entry's.
+    /// `None` for a name the catalogue does not declare -- which config load
+    /// refuses, so only a hand-built config gets here.
+    pub fn source<'a>(&'a self, catalogue: &'a [crate::secrets::SecretDecl]) -> Option<&'a CredentialSource> {
+        match self {
+            Self::Source(source) => Some(source),
+            Self::Secret(name) => crate::secrets::find(catalogue, name).map(|s| &s.source),
+        }
+    }
+}
+
+impl From<CredentialSource> for ProviderCredential {
+    fn from(source: CredentialSource) -> Self {
+        Self::Source(source)
+    }
+}
+
+impl Serialize for ProviderCredential {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Self::Source(source) => source.serialize(serializer),
+            Self::Secret(name) => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("secret", name)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderCredential {
+    /// `{ secret: <name> }` alone, or a source read strictly -- a map that
+    /// mixes the two is refused, naming the key that does not belong.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = serde_yaml_ng::Value::deserialize(deserializer)?;
+        let secret_key = serde_yaml_ng::Value::String("secret".into());
+        if let Some(map) = value.as_mapping().filter(|m| m.contains_key(&secret_key)) {
+            if let Some((other, _)) = map.iter().find(|(k, _)| **k != secret_key) {
+                return Err(D::Error::custom(format!(
+                    "a credential is {{ secret: <name> }} or {{ from: ... }}, not both: unknown key {}",
+                    serde_yaml_ng::to_string(other).unwrap_or_default().trim()
+                )));
+            }
+            return match map.get(&secret_key) {
+                Some(serde_yaml_ng::Value::String(name)) => Ok(Self::Secret(name.clone())),
+                _ => Err(D::Error::custom("a credential's secret: is the name of a secrets: entry")),
+            };
+        }
+        serde_yaml_ng::from_value(value).map(Self::Source).map_err(D::Error::custom)
     }
 }
 
@@ -417,7 +497,13 @@ impl ManagedProvider {
         if !is_object_name(&self.kind) {
             out.push(format!("gives the provider {:?} a type {:?}, which is not a profile id", self.name, self.kind));
         }
-        out.extend(self.credential.problems(&self.name));
+        match &self.credential {
+            ProviderCredential::Source(source) => out.extend(source.problems(&format!("the provider {:?}", self.name))),
+            ProviderCredential::Secret(secret) if secret.trim().is_empty() => {
+                out.push(format!("gives the provider {:?} a credential {{ secret: }} that names no secret", self.name))
+            }
+            ProviderCredential::Secret(_) => {}
+        }
         out
     }
 
@@ -1596,9 +1682,9 @@ policy:
             panic!("both providers are the daemon's: {:?}", block.providers)
         };
         assert_eq!(claude.kind, "claude-code-oauth");
-        assert_eq!(claude.credential, CredentialSource::File { path: "~/.config/factory/secrets/claude-oauth-token".into() });
+        assert_eq!(claude.credential, ProviderCredential::Secret("claude-oauth-token".into()), "declared once, in the catalogue (#244)");
         assert_eq!(github.kind, "github-publish");
-        assert_eq!(github.credential, CredentialSource::Command { run: "gh auth token".into() });
+        assert_eq!(github.credential, ProviderCredential::Secret("github-gh-login".into()));
         let target = block.callback_target(Some("192.168.188.92:8791")).unwrap();
         let policy: serde_yaml_ng::Value = serde_yaml_ng::from_str(&block.policy_yaml(&target).unwrap()).unwrap();
         for rule in ["github_read", "awesome_herdr_publish", "sources", CALLBACK_RULE] {
@@ -1671,7 +1757,7 @@ policy: {}
         assert_eq!(c.providers[4], ProviderDecl::Managed(ManagedProvider {
             name: "kc".into(),
             kind: "generic".into(),
-            credential: CredentialSource::Keychain { service: "factory-ci".into(), account: Some("me".into()) },
+            credential: CredentialSource::Keychain { service: "factory-ci".into(), account: Some("me".into()) }.into(),
             expires: None,
         }));
         let again: OpenshellConfig = serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&c).unwrap()).unwrap();
@@ -1692,6 +1778,41 @@ policy: {}
             let e = serde_yaml_ng::from_str::<OpenshellConfig>(&yaml).unwrap_err().to_string();
             assert!(e.contains(expected), "{bad}: {e}");
         }
+    }
+
+    #[test]
+    fn a_credential_names_a_catalogue_entry_or_is_a_source_never_both() {
+        let c: OpenshellConfig = serde_yaml_ng::from_str(
+            "providers:\n  - { name: p, type: t, credential: { secret: claude-oauth-token } }\npolicy: {}\n",
+        )
+        .unwrap();
+        let ProviderDecl::Managed(p) = &c.providers[0] else { panic!() };
+        assert_eq!(p.credential, ProviderCredential::Secret("claude-oauth-token".into()));
+        assert_eq!(p.credential.secret(), Some("claude-oauth-token"));
+        assert!(c.problems().is_empty(), "{:?}", c.problems());
+        let again: OpenshellConfig = serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&c).unwrap()).unwrap();
+        assert_eq!(again, c);
+        let json: OpenshellConfig = serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
+        assert_eq!(json, c);
+        assert_eq!(serde_json::to_value(&p.credential).unwrap(), serde_json::json!({ "secret": "claude-oauth-token" }));
+
+        let catalogue: Vec<crate::secrets::SecretDecl> =
+            serde_yaml_ng::from_str("- { name: claude-oauth-token, kind: token, source: { from: env, name: T } }").unwrap();
+        assert_eq!(p.credential.source(&catalogue), Some(&CredentialSource::Env { name: "T".into() }));
+        assert_eq!(p.credential.source(&[]), None);
+
+        for (bad, expected) in [
+            ("{ secret: a, from: env, name: X }", "not both"),
+            ("{ secret: [a] }", "name of a secrets: entry"),
+            ("{ secrt: a }", "from"),
+        ] {
+            let yaml = format!("providers:\n  - {{ name: p, type: t, credential: {bad} }}\npolicy: {{}}\n");
+            let e = serde_yaml_ng::from_str::<OpenshellConfig>(&yaml).unwrap_err().to_string();
+            assert!(e.contains(expected), "{bad}: {e}");
+        }
+        let blank: OpenshellConfig =
+            serde_yaml_ng::from_str("providers:\n  - { name: p, type: t, credential: { secret: '' } }\npolicy: {}\n").unwrap();
+        assert!(blank.problems().join(";").contains("names no secret"));
     }
 
     #[test]
@@ -1812,7 +1933,7 @@ policy: {}
         let m = ManagedProvider {
             name: "p".into(),
             kind: "t".into(),
-            credential: CredentialSource::Env { name: "X".into() },
+            credential: CredentialSource::Env { name: "X".into() }.into(),
             expires: chrono::NaiveDate::from_ymd_opt(2027, 1, 31),
         };
         assert_eq!(m.expiring(chrono::NaiveDate::from_ymd_opt(2026, 12, 1).unwrap()), None);

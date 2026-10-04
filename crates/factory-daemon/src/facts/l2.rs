@@ -21,7 +21,11 @@ impl Provide<factory_kernel::CredentialExpiryFact> for Provider<'_> {
     type Value = factory_kernel::CredentialExpiryFact;
     type Error = FactoryError;
     async fn get(&self, _: &()) -> Result<Self::Value> {
-        Ok(factory_kernel::CredentialExpiryFact { observations: self.engine.credential_expiries.all().await? })
+        let mut observations = self.engine.credential_expiries.all().await?;
+        // The declared catalogue (#244), read from the live config rather
+        // than the probe cache: a date edited on the Secrets tab counts at once.
+        observations.extend(crate::secrets::ledger_observations(&self.engine.factory_snapshot(), chrono::Utc::now()));
+        Ok(factory_kernel::CredentialExpiryFact { observations })
     }
 }
 #[async_trait]

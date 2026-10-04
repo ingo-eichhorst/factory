@@ -838,6 +838,7 @@ mod tests {
                 renewals: Vec::new(),
             }],
             infrastructure: Default::default(),
+            secrets: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,

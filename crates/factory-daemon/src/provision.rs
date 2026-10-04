@@ -42,9 +42,10 @@ use crate::engine::Engine;
 use chrono::{DateTime, Utc};
 use factory_core::config::Sandbox;
 use factory_core::openshell::{
-    self as os, CredentialSource, GatewayRow, ManagedProvider, OpenshellConfig, ProviderDecl, Readiness,
-    ReadinessState, SmokeProvider,
+    self as os, CredentialSource, GatewayRow, ManagedProvider, OpenshellConfig, ProviderCredential, ProviderDecl,
+    Readiness, ReadinessState, SmokeProvider,
 };
+use factory_core::secrets::SecretDecl;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -99,8 +100,63 @@ pub(crate) type AgentKey = (String, String);
 #[derive(Clone)]
 pub(crate) struct Declared {
     pub key: AgentKey,
+    /// The block with every `{ secret: }` credential replaced by the
+    /// catalogue entry's source (`resolve_secrets`), so everything below
+    /// reads one inline source whichever way it was written.
     pub config: OpenshellConfig,
     pub git: Option<String>,
+    /// Provider name -> the catalogue entry its credential names.
+    pub secrets: BTreeMap<String, SecretDecl>,
+    /// A `{ secret: }` the catalogue does not declare. Config load refuses
+    /// one, so only a hand-built config gets here; it is a `needs`.
+    pub unresolved: Option<String>,
+}
+
+/// `config` with every `{ secret: <name> }` credential replaced by that
+/// catalogue entry's source, and which provider named which entry. The
+/// provisioner hashes the value the source gives, never the way it was
+/// written, so a provider moved from an inline source to the catalogue
+/// entry with the same source keeps its digest and is not given its
+/// credential again (`#244`).
+pub(crate) fn resolve_secrets(
+    config: &OpenshellConfig,
+    catalogue: &[SecretDecl],
+) -> std::result::Result<(OpenshellConfig, BTreeMap<String, SecretDecl>), String> {
+    let mut resolved = config.clone();
+    let mut named = BTreeMap::new();
+    for provider in &mut resolved.providers {
+        let ProviderDecl::Managed(managed) = provider else { continue };
+        let Some(name) = managed.credential.secret().map(str::to_string) else { continue };
+        let secret = factory_core::secrets::find(catalogue, &name).ok_or_else(|| {
+            format!("the secret {name} that the provider {} names, declared in the instance root's secrets:", managed.name)
+        })?;
+        managed.credential = ProviderCredential::Source(secret.source.clone());
+        named.insert(managed.name.clone(), secret.clone());
+    }
+    Ok((resolved, named))
+}
+
+/// A resolved provider's source. Every credential is inline once
+/// `resolve_secrets` has run; anything else is a `needs`, never a panic.
+fn source_of(managed: &ManagedProvider) -> Result<&CredentialSource, Unready> {
+    match &managed.credential {
+        ProviderCredential::Source(source) => Ok(source),
+        ProviderCredential::Secret(name) => Err(needs(
+            format!("the secret {name} that the provider {} names, declared in the instance root's secrets:", managed.name),
+            None,
+        )),
+    }
+}
+
+/// Whether a catalogue entry's source resolved at the last pass -- never
+/// what it gave. What the L2 Secrets tab shows; a page load never runs a
+/// credential command itself.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct SourceCheck {
+    pub resolves: bool,
+    /// Why not, when it did not. Never a value.
+    pub reason: Option<String>,
+    pub checked_at: DateTime<Utc>,
 }
 
 /// What a dispatch resolves from a `ready` agent.
@@ -181,6 +237,8 @@ pub(crate) struct Provisioner {
     /// `SMOKE_RETRY`, not one per pass.
     smoke_failed: Mutex<BTreeMap<AgentKey, (String, Instant, String)>>,
     build: Mutex<BuildState>,
+    /// Per catalogue entry: whether its source resolved at the last pass.
+    catalogue: Mutex<BTreeMap<String, SourceCheck>>,
     salt: [u8; 16],
     pass: tokio::sync::Mutex<()>,
     /// Asks the loop for a pass now.
@@ -206,6 +264,7 @@ impl Provisioner {
             smoked: Mutex::default(),
             smoke_failed: Mutex::default(),
             build: Mutex::default(),
+            catalogue: Mutex::default(),
             salt: *uuid::Uuid::new_v4().as_bytes(),
             pass: tokio::sync::Mutex::new(()),
             wake: tokio::sync::Notify::new(),
@@ -219,6 +278,11 @@ impl Provisioner {
 
     pub(crate) fn all(&self) -> BTreeMap<AgentKey, Readiness> {
         lock(&self.readiness).clone()
+    }
+
+    /// Every catalogue entry's last resolution check, by name.
+    pub(crate) fn source_checks(&self) -> BTreeMap<String, SourceCheck> {
+        lock(&self.catalogue).clone()
     }
 
     pub(crate) fn gateway_rows(&self) -> Vec<GatewayRow> {
@@ -314,7 +378,12 @@ pub(crate) fn declared(engine: &Engine) -> Vec<Declared> {
                 continue;
             }
             if let Some(config) = agent.openshell.clone() {
-                out.push(Declared { key: (scope.name.clone(), agent.name()), config, git: scope.git.clone() });
+                let key = (scope.name.clone(), agent.name());
+                let (config, secrets, unresolved) = match resolve_secrets(&config, &factory.config.secrets) {
+                    Ok((resolved, secrets)) => (resolved, secrets, None),
+                    Err(missing) => (config, BTreeMap::new(), Some(missing)),
+                };
+                out.push(Declared { key, config, git: scope.git.clone(), secrets, unresolved });
             }
         }
     }
@@ -354,6 +423,7 @@ impl Engine {
     /// One reconcile of every declared sandboxed agent. One at a time.
     pub(crate) async fn provision_pass(self: &Arc<Self>) {
         let _pass = self.provision.pass.lock().await;
+        self.check_catalogue().await;
         let agents = declared(self);
         let live: BTreeSet<AgentKey> = agents.iter().map(|d| d.key.clone()).collect();
         lock(&self.provision.readiness).retain(|key, _| live.contains(key));
@@ -376,11 +446,14 @@ impl Engine {
                 .providers
                 .iter()
                 .filter_map(|p| match p {
+                    // A catalogue entry's expiry is raised once, for the
+                    // secret and every agent using it -- not per provider.
+                    ProviderDecl::Managed(m) if agent.secrets.contains_key(&m.name) => None,
                     ProviderDecl::Managed(m) => m.expiring(today).map(|days_left| os::Expiring {
                         provider: m.name.clone(),
                         expires: m.expires.unwrap_or(today),
                         days_left,
-                        source: m.credential.describe(),
+                        source: source_of(m).map(CredentialSource::describe).unwrap_or_default(),
                     }),
                     ProviderDecl::Named(_) => None,
                 })
@@ -415,6 +488,9 @@ impl Engine {
         image: &mut Option<String>,
     ) -> Result<(), Unready> {
         let config = &agent.config;
+        if let Some(missing) = &agent.unresolved {
+            return Err(needs(missing.clone(), None));
+        }
         if let Some(problem) = config.problems().into_iter().next() {
             return Err(needs(format!("an openshell: block that works (this one {problem})"), None));
         }
@@ -465,7 +541,8 @@ impl Engine {
                 ProviderDecl::Managed(managed) => {
                     managed_any = true;
                     let env = self.ensure_profile(&base, managed, &suffix).await?;
-                    self.ensure_provider(&base, managed, &suffix, &env, &listed).await?;
+                    let renew = agent.secrets.get(&managed.name).and_then(|s| s.renew.as_deref());
+                    self.ensure_provider(&base, managed, renew, &suffix, &env, &listed).await?;
                     smoke.push(SmokeProvider { name: managed.name.clone(), kind: managed.kind.clone(), env });
                 }
             }
@@ -502,7 +579,7 @@ impl Engine {
             .filter(|(before, at, _)| *before == print && at.elapsed() < SMOKE_RETRY)
             .map(|(_, _, reason)| reason.clone());
         if let Some(reason) = failed_before {
-            return Err(needs(format!("a passing smoke run ({reason})"), smoke_hint(config, &reason)));
+            return Err(needs(format!("a passing smoke run ({reason})"), smoke_hint(agent, &reason)));
         }
         let instance = factory.config.instance.id.clone();
         let state_root = factory.factory_dir().join("openshell-provision");
@@ -515,7 +592,7 @@ impl Engine {
             }
             Err(reason) => {
                 lock(&self.provision.smoke_failed).insert(agent.key.clone(), (print, Instant::now(), reason.clone()));
-                Err(needs(format!("a passing smoke run ({reason})"), smoke_hint(config, &reason)))
+                Err(needs(format!("a passing smoke run ({reason})"), smoke_hint(agent, &reason)))
             }
         }
     }
@@ -716,6 +793,7 @@ impl Engine {
         &self,
         base: &[String],
         managed: &ManagedProvider,
+        renew: Option<&str>,
         suffix: &str,
         env: &str,
         listed: &BTreeMap<String, String>,
@@ -724,10 +802,11 @@ impl Engine {
         if !os::owned_by_instance(&name, suffix) {
             return Err(needs(format!("a provider name this instance owns (not {name})"), None));
         }
-        let value = resolve(&managed.credential).await.map_err(|reason| {
+        let source = source_of(managed)?;
+        let value = resolve(source).await.map_err(|reason| {
             needs(
-                format!("the credential for {} from {} ({reason})", managed.name, managed.credential.describe()),
-                Some(supply_hint(managed)),
+                format!("the credential for {} from {} ({reason})", managed.name, source.describe()),
+                Some(supply_hint(managed, source, renew)),
             )
         })?;
         let digest = self.provision.digest(base, &name, &value);
@@ -758,7 +837,7 @@ impl Engine {
         exec(&argv, Some((env, &value)), QUICK, "giving the provider its credential", &[value.expose()])
             .await
             .map_err(|e| needs(format!("the provider {name} on the gateway ({e})"), None))?;
-        tracing::info!(provider = %name, "openshell provider {} from {}", if existing.is_some() { "updated" } else { "created" }, managed.credential.describe());
+        tracing::info!(provider = %name, "openshell provider {} from {}", if existing.is_some() { "updated" } else { "created" }, source.describe());
         lock(&self.provision.given).insert(key, digest);
         Ok(())
     }
@@ -770,6 +849,8 @@ impl Engine {
     /// -- the run's own preflight checks it as it always has.
     pub(crate) async fn sandbox_gate(self: &Arc<Self>, key: &AgentKey, config: &OpenshellConfig) -> std::result::Result<Resolved, String> {
         let factory = self.factory_snapshot();
+        let (resolved, secrets) = resolve_secrets(config, &factory.config.secrets).map_err(|missing| needs_reason(missing, None))?;
+        let config = &resolved;
         let suffix = os::instance_suffix(&factory.config.instance.id);
         let providers: Vec<String> = config.providers.iter().map(|p| p.gateway_name(&suffix)).collect();
         // A gateway that went down since the last pass -- a reboot, a
@@ -792,7 +873,7 @@ impl Engine {
                 Some(r) if r.state == ReadinessState::Ready => {
                     // `ready` was true at the last pass. A source removed or
                     // rotated since then is found now, not five minutes on.
-                    match self.sources_current(base.as_deref().unwrap_or_default(), config, &suffix).await {
+                    match self.sources_current(base.as_deref().unwrap_or_default(), config, &secrets, &suffix).await {
                         Err((thing, command)) => {
                             self.provision.wake.notify_one();
                             return Err(needs_reason(thing, Some(command)));
@@ -827,14 +908,24 @@ impl Engine {
     /// Whether every managed provider's source still gives the value last
     /// handed to its provider: `Ok(false)` when one changed, `Err` with the
     /// thing and command when one no longer resolves.
-    async fn sources_current(&self, base: &[String], config: &OpenshellConfig, suffix: &str) -> std::result::Result<bool, (String, String)> {
+    async fn sources_current(
+        &self,
+        base: &[String],
+        config: &OpenshellConfig,
+        secrets: &BTreeMap<String, SecretDecl>,
+        suffix: &str,
+    ) -> std::result::Result<bool, (String, String)> {
         let mut current = true;
         for provider in &config.providers {
             let ProviderDecl::Managed(managed) = provider else { continue };
-            let value = resolve(&managed.credential).await.map_err(|reason| {
+            let source = source_of(managed).map_err(|e| match e {
+                Unready::Needs { thing, .. } | Unready::Preparing(thing) => (thing, "declare it in the instance root's secrets:".to_string()),
+            })?;
+            let renew = secrets.get(&managed.name).and_then(|s| s.renew.as_deref());
+            let value = resolve(source).await.map_err(|reason| {
                 (
-                    format!("the credential for {} from {} ({reason})", managed.name, managed.credential.describe()),
-                    supply_hint(managed),
+                    format!("the credential for {} from {} ({reason})", managed.name, source.describe()),
+                    supply_hint(managed, source, renew),
                 )
             })?;
             let name = os::managed_name(&managed.name, suffix);
@@ -844,6 +935,23 @@ impl Engine {
             }
         }
         Ok(current)
+    }
+}
+
+impl Engine {
+    /// Resolve every catalogue entry once, keeping only whether it worked
+    /// (`#244`). The value is dropped the moment it is read.
+    pub(crate) async fn check_catalogue(&self) {
+        let catalogue = self.factory_snapshot().config.secrets.clone();
+        let mut checks = BTreeMap::new();
+        for secret in &catalogue {
+            let outcome = resolve(&secret.source).await;
+            checks.insert(
+                secret.name.clone(),
+                SourceCheck { resolves: outcome.is_ok(), reason: outcome.err(), checked_at: Utc::now() },
+            );
+        }
+        *lock(&self.provision.catalogue) = checks;
     }
 }
 
@@ -865,7 +973,7 @@ fn needs_reason(thing: String, command: Option<String>) -> String {
 /// Two agents declaring one managed provider name with different types or
 /// sources, on the same gateway.
 fn conflicting_providers(agents: &[Declared]) -> BTreeMap<AgentKey, String> {
-    let mut seen: BTreeMap<(Option<String>, String), (AgentKey, String, CredentialSource)> = BTreeMap::new();
+    let mut seen: BTreeMap<(Option<String>, String), (AgentKey, String, ProviderCredential)> = BTreeMap::new();
     let mut out = BTreeMap::new();
     for agent in agents {
         for provider in &agent.config.providers {
@@ -1079,7 +1187,7 @@ pub(crate) fn augmented_path() -> std::ffi::OsString {
     std::env::join_paths(dirs).unwrap_or_default()
 }
 
-fn expand_home(path: &str) -> PathBuf {
+pub(crate) fn expand_home(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
         Some(rest) => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(rest),
         None => PathBuf::from(path),
@@ -1158,10 +1266,14 @@ async fn command_value(argv: &[String], what: &str) -> std::result::Result<Strin
     Err(format!("{what} failed ({})", output.status))
 }
 
-/// The exact command that puts a value at a managed provider's source.
-fn supply_hint(managed: &ManagedProvider) -> String {
+/// The exact command that puts a value at a managed provider's source: the
+/// catalogue entry's own `renew` line when it names one with one.
+fn supply_hint(managed: &ManagedProvider, source: &CredentialSource, renew: Option<&str>) -> String {
+    if let Some(renew) = renew {
+        return renew.to_string();
+    }
     let claude = managed.kind.contains("claude");
-    match &managed.credential {
+    match source {
         CredentialSource::File { path } if claude => {
             format!("claude setup-token, then (umask 077; cat > {path}) and paste the token")
         }
@@ -1177,10 +1289,13 @@ fn supply_hint(managed: &ManagedProvider) -> String {
     }
 }
 
-fn smoke_hint(config: &OpenshellConfig, reason: &str) -> Option<String> {
+fn smoke_hint(agent: &Declared, reason: &str) -> Option<String> {
     if reason.contains("rejected") {
-        let source = config.providers.iter().find_map(|p| match p {
-            ProviderDecl::Managed(m) if reason.contains(&format!("provider {}", m.name)) => Some(supply_hint(m)),
+        let source = agent.config.providers.iter().find_map(|p| match p {
+            ProviderDecl::Managed(m) if reason.contains(&format!("provider {}", m.name)) => {
+                let renew = agent.secrets.get(&m.name).and_then(|s| s.renew.as_deref());
+                source_of(m).ok().map(|source| supply_hint(m, source, renew))
+            }
             _ => None,
         });
         if source.is_some() {

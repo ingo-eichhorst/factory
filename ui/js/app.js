@@ -20,7 +20,7 @@ import { taskUsageMoved } from "./usage-model.js";
 import { initActivity, recordEvent, markWatching, renderActivity, activityFilter, setActivityFilter } from "./activity.js";
 import { showSite, hideSite, refreshSite, siteMode, setSiteMode, loadFootprint } from "./site.js";
 import { loadEnvironment, renderSandboxes } from "./sandboxes.js";
-import { renderSecrets } from "./secrets.js";
+import { onSecretSaved, renderSecrets } from "./secrets.js";
 import { loadDependencies, wireDependencies } from "./dependencies.js";
 import { benchTail, loadBenchmarks, readBenchTail, renderBenchmarks, wireBenchmarkSegments } from "./benchmarks.js";
 import { loadDatasets, renderDatasetsSegment, wireDatasets } from "./datasets.js";
@@ -630,6 +630,7 @@ async function boot() {
   wireScenarios();
   $("environment-refresh").onclick = () => refreshEnvironment();
   $("secrets-refresh").onclick = () => refreshEnvironment();
+  onSecretSaved(() => refreshEnvironment().catch(error => console.warn("Environment refresh failed", error)));
   wireDependencies();
   $("benchmarks-refresh").onclick = () => {
     loadBenchmarks();
@@ -821,7 +822,7 @@ function onEvent(ev) {
     if (state.tab === "dashboard") loadDashboard();
     if (state.tab === "inbox") loadInbox();
     if (state.tab === "roster") loadDateBadges().then(renderAgents);
-    if (state.tab === "sandboxes") refreshEnvironment();
+    if (state.tab === "sandboxes" || state.tab === "secrets") refreshEnvironment().catch(error => console.warn("Environment refresh failed", error));
     if (state.tab === "environments") refreshEnvironments();
   }
   // A deployment began or ended, or an environment's status changed.

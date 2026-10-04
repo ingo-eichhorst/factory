@@ -115,6 +115,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/production", get(production))
         .route("/api/site", get(site_footprint))
         .route("/api/environment", get(environment))
+        .route("/api/secrets/{name}", put(secret_set))
         .route("/api/dependencies", get(dependencies))
         .route("/api/dependencies/documents/{id}", get(dependency_document))
         .route("/api/doctor", get(doctor))
@@ -386,6 +387,17 @@ async fn site_footprint(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn environment(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Environment).await
+}
+
+/// `PUT /api/secrets/{name}` -- a declared secret's `expires`, `renew` and
+/// `note`, replaced whole (`#244`). The body is metadata; there is no field
+/// a value could be sent in.
+async fn secret_set(
+    State(engine): State<Arc<Engine>>,
+    Path(name): Path<String>,
+    Json(metadata): Json<factory_core::secrets::SecretMetadata>,
+) -> AxumResponse {
+    run(&engine, Request::SecretSet { name, metadata }).await
 }
 
 #[derive(serde::Deserialize)]
@@ -2388,6 +2400,7 @@ mod tests {
             policies: PolicyDeclaration::default(),
             quality: vec!["baseline".into()],
             infrastructure: Default::default(),
+            secrets: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -2686,6 +2699,7 @@ mod tests {
             policies: PolicyDeclaration::default(),
             quality: Default::default(),
             infrastructure: Default::default(),
+            secrets: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -2827,6 +2841,7 @@ mod tests {
             policies: Default::default(),
             quality: Default::default(),
             infrastructure: Default::default(),
+            secrets: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -2898,6 +2913,7 @@ mod tests {
             policies: Default::default(),
             quality: Default::default(),
             infrastructure: Default::default(),
+            secrets: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,

@@ -96,9 +96,11 @@ impl GrantExpansion for Grant {
     /// Left out of wildcard expansion (`expand`'s `*` and `prefix.*`
     /// branches): an outward effect a role must be given by its exact name,
     /// never swept in by a wildcard written before the grant existed or
-    /// written broad on purpose. Outbound publishing always needs its exact name.
+    /// written broad on purpose. Outbound publishing always needs its exact name,
+    /// and so does `secrets.edit` (`#244`): a declared expiry is what raises
+    /// the Inbox's warning, and a `*` role must not be able to move it.
     fn wildcard_excluded(self) -> bool {
-        matches!(self, Self::IntakePublish | Self::DeployPublish)
+        matches!(self, Self::IntakePublish | Self::DeployPublish | Self::SecretsEdit)
     }
 
     /// One written grant, which may be a wildcard: `task.*`, `agent.*`, `*`.
@@ -453,7 +455,7 @@ mod tests {
         // `*` names every grant but the one or more excluded from wildcard
         // expansion (`intake.publish`, `#171`) -- see
         // `intake_publish_is_excluded_from_wildcard_expansion`.
-        assert_eq!(Grant::expand("*").unwrap().len(), Grant::ALL.len() - 2);
+        assert_eq!(Grant::expand("*").unwrap().len(), Grant::ALL.len() - 3, "intake.publish, deploy.publish and secrets.edit");
         let tasks = Grant::expand("task.*").unwrap();
         assert!(tasks.contains(&Grant::TaskCreate));
         assert!(!tasks.contains(&Grant::AgentStart));
@@ -551,7 +553,7 @@ mod tests {
     fn every_grant_belongs_to_a_group_a_person_reads() {
         for grant in Grant::ALL {
             assert!(
-                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals", "Backup", "Intake", "Dashboard", "Deployments"]
+                ["Tasks", "Agents", "Runs", "Workflows", "Knowledge", "Datasets", "Bench", "Policy", "Goals", "Backup", "Intake", "Dashboard", "Deployments", "Secrets"]
                     .contains(&grant.group()),
                 "{} has no group",
                 grant.as_str()
@@ -585,23 +587,25 @@ mod tests {
         // and of `Grant::ALL`, in the order each was added, so a parallel
         // track appending its own grant there too merges without a real
         // conflict.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 14], Grant::DatasetEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 13], Grant::BenchRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 12], Grant::PolicyAttest);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::GoalsCheckIn);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::BackupRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::IntakeAdd);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::IntakeInfo);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::IntakeTriage);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakeAssess);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakeDecide);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::IntakePublish);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 15], Grant::DatasetEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 14], Grant::BenchRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 13], Grant::PolicyAttest);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 12], Grant::GoalsCheckIn);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::BackupRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::IntakeAdd);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::IntakeInfo);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::IntakeTriage);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::IntakeAssess);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakeDecide);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::IntakePublish);
         // `#160`: the same seam, one grant later -- `dashboard.edit` lands at
         // the end too, so a parallel track adding its own grant after this
         // one merges without a real conflict either.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::DashboardEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::DeployRecord);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::DeployPublish);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::DashboardEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::DeployRecord);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::DeployPublish);
+        // `#244`: `secrets.edit`, appended the same way.
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::SecretsEdit);
         let all = Grant::expand("*").unwrap();
         assert!(all.contains(&Grant::DatasetEdit));
         assert!(all.contains(&Grant::BenchRun));
@@ -618,6 +622,10 @@ mod tests {
         // Outward publishing requires its exact grant, never `*`.
         assert!(!all.contains(&Grant::IntakePublish));
         assert!(!all.contains(&Grant::DeployPublish));
+        // A declared secret's expiry is what raises its Inbox warning; a
+        // role moves it only when given `secrets.edit` by name.
+        assert!(!all.contains(&Grant::SecretsEdit));
+        assert_eq!(Grant::expand("secrets.edit").unwrap(), vec![Grant::SecretsEdit]);
     }
 
     #[test]

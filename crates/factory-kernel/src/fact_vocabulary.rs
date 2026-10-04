@@ -206,10 +206,14 @@ pub enum Grant {
     /// Explicitly approve an outbound deployment mirror; never granted by a wildcard.
     #[serde(rename = "deploy.publish")]
     DeployPublish,
+    /// Change a declared secret's expiry, renew line or note -- metadata in
+    /// the instance root's config, never a value (`#244`).
+    #[serde(rename = "secrets.edit")]
+    SecretsEdit,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 34] = [
+    pub const ALL: [Grant; 35] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -244,6 +248,7 @@ impl Grant {
         Grant::DashboardEdit,
         Grant::DeployRecord,
         Grant::DeployPublish,
+        Grant::SecretsEdit,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -280,6 +285,7 @@ impl Grant {
             Self::IntakeDecide => "intake.decide",
             Self::IntakePublish => "intake.publish",
             Self::DashboardEdit => "dashboard.edit",
+            Self::SecretsEdit => "secrets.edit",
             Self::DeployRecord => "deploy.record",
             Self::DeployPublish => "deploy.publish",
         }
@@ -320,6 +326,7 @@ impl Grant {
                 "publish a decided GitHub item's triage comment and labels to its issue"
             }
             Self::DashboardEdit => "save or reset a scope's dashboard layout",
+            Self::SecretsEdit => "change a declared secret's expiry, renew line or note (never its value)",
             Self::DeployRecord => "record a deployment or a release",
             Self::DeployPublish => "approve publishing a deployment to GitHub",
         }
@@ -356,6 +363,7 @@ impl Grant {
             | Self::IntakeDecide
             | Self::IntakePublish => "Intake",
             Self::DashboardEdit => "Dashboard",
+            Self::SecretsEdit => "Secrets",
             Self::DeployRecord | Self::DeployPublish => "Deployments",
         }
     }

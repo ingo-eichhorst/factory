@@ -590,6 +590,16 @@ impl Engine {
         factory.config.dashboard = dashboard;
     }
 
+    /// The instance root's own `secrets:` catalogue, after a write to its
+    /// config (`#244`) -- `replace_instance_dashboard`, for the catalogue.
+    pub(crate) fn replace_instance_secrets(&self, secrets: Vec<factory_core::secrets::SecretDecl>) {
+        let mut factory = self
+            .factory
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        factory.config.secrets = secrets;
+    }
+
     pub(crate) fn replace_scope(&self, id: &str, replacement: factory_core::config::Scope) {
         let mut factory = self
             .factory
@@ -705,13 +715,22 @@ impl Engine {
             Request::SiteFootprint => Ok(Payload::SiteFootprint {
                 footprint: self.site_footprint().await?,
             }),
+            // Boxed, like intake's: inline, these size every request's
+            // future past a worker thread's stack in a debug build.
             Request::Environment => {
-                let (sandboxes, credentials) = self.environment().await?;
+                let (sandboxes, credentials) = Box::pin(self.environment()).await?;
+                let (secrets, undeclared, secret_changes) = Box::pin(self.secrets_view()).await;
                 Ok(Payload::Environment {
                     sandboxes,
                     credentials,
+                    secrets,
+                    undeclared,
+                    secret_changes,
                 })
             }
+            Request::SecretSet { name, metadata } => Ok(Payload::Secret {
+                secret: Box::pin(self.set_secret(caller, &name, metadata)).await?,
+            }),
             Request::Dependencies { scope } => Ok(Payload::Dependencies {
                 report: self.dependencies_report(&scope).await?,
             }),
@@ -5432,6 +5451,7 @@ mod tests {
                 renewals: Vec::new(),
             }],
             infrastructure: Default::default(),
+            secrets: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -5542,6 +5562,7 @@ mod tests {
                     renewals: Vec::new(),
                 }],
                 infrastructure: Default::default(),
+                secrets: Vec::new(),
                 plugins_dir: None,
                 renewals: Vec::new(),
                 renewals_notify: None,
@@ -8752,6 +8773,7 @@ mod tests {
                     renewals: Vec::new(),
                 }],
                 infrastructure: Default::default(),
+                secrets: Vec::new(),
                 plugins_dir: None,
                 renewals: Vec::new(),
                 renewals_notify: None,

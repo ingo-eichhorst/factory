@@ -766,6 +766,12 @@ impl AgentContext {
                     "deploy.publish -> {bin} deploy mirror-plan <id>, then {bin} deploy publish <id> --approval <digest>; \
                      explicitly approves that exact GitHub repository, commit, environment and status; never automatic"
                 ),
+                Grant::SecretsEdit => {
+                    "secrets.edit -> change a declared secret's expires, renew or note (never its value) in the \
+                     instance root's secrets:; today that is the web UI's L2 Environment > Secrets tab, or \
+                     PUT /api/secrets/<name>, not this CLI; the catalogue is company-wide, not scoped"
+                        .to_string()
+                }
                 Grant::DashboardEdit => {
                     "dashboard.edit -> save or reset the dashboard layout for a scope; today that is the \
                      web UI's Dashboard > Customise, or PUT/DELETE /api/dashboard?scope=, not this CLI"

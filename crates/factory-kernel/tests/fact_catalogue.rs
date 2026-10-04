@@ -171,6 +171,7 @@ fn deployment_publication_and_append_only_receipts_roundtrip_in_l0() {
     assert_eq!(json["phase"], "published");
     assert_eq!(serde_json::from_value::<DeploymentMirrorFact>(json).unwrap(), receipt);
     assert_eq!(serde_json::to_value(Grant::DeployPublish).unwrap(), "deploy.publish");
+    assert_eq!(serde_json::to_value(Grant::SecretsEdit).unwrap(), "secrets.edit");
 }
 
 #[test]

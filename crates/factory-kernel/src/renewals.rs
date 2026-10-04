@@ -32,6 +32,8 @@ pub enum DateSource {
     GithubAuth,
     PolicyAttestation,
     CraDeadline,
+    /// An entry of the instance root's declared secrets catalogue (`#244`).
+    Secret,
 }
 
 /// Authored metadata vocabulary. Parsing and validation belong to L1/core,

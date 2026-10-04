@@ -1047,6 +1047,7 @@ mod tests {
             policies: PolicyDeclaration { frameworks: vec!["cra".to_string()], ..Default::default() },
             quality: Default::default(),
             infrastructure: Default::default(),
+            secrets: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -1442,6 +1443,7 @@ mod tests {
                 destination.display()
             ))
             .unwrap(),
+            secrets: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -1529,6 +1531,7 @@ mod tests {
             policies: PolicyDeclaration::default(),
             quality: Default::default(),
             infrastructure: Default::default(),
+            secrets: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
