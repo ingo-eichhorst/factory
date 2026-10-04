@@ -21,6 +21,34 @@ export function isDrag(start, end, threshold = 3) {
   return Math.hypot(end.x - start.x, end.y - start.y) > threshold;
 }
 
+/// #235: a decomposition that ran every part through a part workflow holds
+/// one copy of that workflow per part. One box per such part around its
+/// copied nodes and the control nodes that judge them, labelled with the
+/// part, in canvas coordinates. A part that is a single task node (a plan
+/// without a part workflow) gets none, so every other graph draws nothing.
+export function partGroups(nodes, pad = 18, label = 22) {
+  const partOf = new Map(nodes.filter(node => node.task?.decomposition_part).map(node => [node.id, node.task.decomposition_part]));
+  const groups = new Map();
+  for (const node of nodes) {
+    const part = partOf.get(node.id) ?? partOf.get(node.gate?.subject);
+    if (!part || !node.position) continue;
+    const box = groups.get(part) || { part, tasks: 0, x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity };
+    if (partOf.has(node.id)) box.tasks += 1;
+    box.x1 = Math.min(box.x1, node.position.x);
+    box.y1 = Math.min(box.y1, node.position.y);
+    box.x2 = Math.max(box.x2, node.position.x + NODE_W);
+    box.y2 = Math.max(box.y2, node.position.y + NODE_H);
+    groups.set(part, box);
+  }
+  return [...groups.values()].filter(box => box.tasks > 1).map(box => ({
+    part: box.part,
+    x: box.x1 - pad,
+    y: box.y1 - pad - label,
+    width: box.x2 - box.x1 + 2 * pad,
+    height: box.y2 - box.y1 + 2 * pad + label,
+  }));
+}
+
 /// A node's title, or its id when it somehow has none -- used everywhere a
 /// message needs to name a node the way the canvas does rather than by its
 /// opaque id alone.

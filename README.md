@@ -504,7 +504,9 @@ command that supplies it, on L2 Sandboxes and the roster:
    account }`. The value goes to `openshell provider create/update
    --credential <VAR>` through that one child's environment and nowhere else:
    not the config, journal, logs, task records or any command line. A bare
-   name is created by hand and only checked for.
+   name is created by hand and only checked for. Failed credential-source
+   and credential-bearing provider commands report their exit status,
+   never their stdout or stderr; those streams may themselves contain secrets.
 5. **Smoke.** After any of that changed, a no-model run in a throwaway
    `factory-s…` sandbox from the image, the agent's own policy (plus one
    read-only `curl` rule for the probes) and its providers: each provider's
@@ -1993,14 +1995,28 @@ immediately. Successors appear scheduled and are dispatched only after their
 prerequisites have completed and been merged; their prompts receive each
 prerequisite's result as upstream output. The normal L3 session limit still
 bounds dispatch. A failed or missing prerequisite never silently releases a
-child. Automatic plans are one level deep, leave `routing.workflow` empty,
-and do not create GitHub child issues.
+child. Automatic plans are one level deep and do not create GitHub child
+issues.
+
+Without `routing.workflow`, each part is one task. With it, an executable
+plan names a **part workflow** (`#235`) that every part runs through -- for
+example `workflows/epic-part.yaml`: implement, then an independent review that
+can send the work back up to five times, inside that part only. Factory copies
+the part workflow once per part into the same generated run, so a part is
+reviewed before the integrator merges it. The assessment is refused when the
+named workflow breaks the part-workflow contract, or when it gives
+`routing.inputs`: Factory fills each copy with the part's own values.
+`routing.agents` picks an agent per step of the template, for every part. The
+decision records which template was used (`decision.part_workflow`), and the
+release result names it. The contract, the reserved inputs and the per-part
+integration rule are described under [Workflows](#dynamic-expansion-and-integration-180).
 
 For a GitHub item, Factory fetches `origin/main` once and creates
 `factory/issue-<number>`. Each runnable child branches from that integration
 ref as it then stands. The workflow's single-writer integrator merges clean,
-committed child branches in dependency order; a conflict returns only that
-child with concrete rework feedback. After all merges, every part's acceptance
+committed child branches in dependency order -- a part once its last step is
+done, from the branch of the step that did the work; a conflict returns only
+that part, with concrete rework feedback. After all merges, every part's acceptance
 command runs again in the combined worktree. A failed combined check likewise
 returns its owning part, up to the expand node's rework limit. On success the
 integrator pushes without force and opens one PR to `main`, whose body lists
@@ -2712,8 +2728,48 @@ its journal preserve the reason, approval and actual outcome across restarts.
 The Operations page reads that history through an L4-owned recovery fact,
 separate from L1's health metrics. Recovery never writes a deployment receipt,
 changes the current release, or increases deployment frequency. Health ticks
-never launch recovery automatically. Direct `ensure.sh` invocations are not
-yet integrated with this workflow and remain a separate migration.
+never launch recovery automatically.
+
+**Standalone script recovery.** `ensure.sh` records a durable start before
+restarting an installed daemon or repairing a running daemon's network routes,
+then a finish with its reported per-environment action exit and actual LAN and
+required-route probe results. Recording uses the current `factory` CLI's
+offline `recovery-journal` command: it needs an explicit existing instance
+root/database, not a live daemon, socket or HTTP endpoint. If the start cannot
+be persisted (including an old or missing CLI), the script refuses to act.
+If it dies before finishing, the start remains **awaiting finish receipt**,
+not an inferred failed or successful task. A finish cannot be rewritten.
+
+For another explicitly invoked owner script, the same reporting primitive is:
+
+```sh
+action=$(factory --root /tmp/dev recovery-journal start --scope demo --env production \
+  --source operator-script --actor operator --reason 'daemon stopped' \
+  --command 'restart the installed daemon')
+# Execute the independently authorised repair; capture its actual result.
+factory --root /tmp/dev recovery-journal finish "$action" --exit-code 1 \
+  --local-http true --network-routes false --detail 'LAN answered; required route failed'
+```
+
+The reporter executes nothing and does not replace the owner approval on
+Factory's recovery workflow. Script invocation remains the operator's own
+action, with filesystem-owner trust, not a new authenticated RPC or a grant
+to dispatch tasks. Unknown probes are omitted, not reported as passed.
+`RELEASED` commit metadata is a reported installed version, not build proof.
+These separate L4-owned receipts appear in the Operations page's standalone
+recovery journal, never as Factory tasks/runs, deployments, declared health
+samples, SLA evidence or changes in DORA cohorts.
+
+Receipts live only under the instance root's `.factory/recovery-outbox/`.
+L4 imports valid, scope-checked starts/finishes transactionally and
+idempotently into append-only SQLite history at startup, every 30 seconds,
+and on Operations page reads. Completed imported receipts are retained in
+`.factory/recovery-receipts/`; unfinished or invalid ones remain queued.
+Bounded imports reject malformed, oversized, symlinked or conflicting
+receipts and report findings without hiding stored history. Keep both receipt
+directories when recovering pending filesystem-only evidence; normal database
+backups include imported history. No timer or live instance is configured by
+this integration.
 
 **Health drill-down.** Select a half-hour check-strip slot (incident overlap
 is marked on the strip) or **View latest samples** to inspect stored answers,
@@ -2760,6 +2816,58 @@ deployments and sampled incidents, not proof of uninterrupted monitoring.
 No finished deployments is unknown, not a 0% failure rate. Recovery actions
 remain outside all deployment/change cohorts.
 
+**Approved GitHub deployment mirrors.** A scope may opt an environment into
+publishing recorded metadata by adding `github_deployments: { repository:
+owner/repo }` to that environment's declaration. Without this exact opt-in,
+Factory never publishes it. Recording, finishing, checking health or opening
+Operations does not publish anything, even when opted in.
+
+Inspect and explicitly approve the frozen outbound plan:
+
+```sh
+factory deploy mirror-plan <deployment-id>
+factory deploy publish <deployment-id> --approval <the-plan-digest>
+```
+
+The Operations timeline's **Review mirror plan** opens the same repository,
+environment, full commit SHA, recorded status and verification bit for approval.
+Only clean releases with full immutable commit SHAs can be mirrored. A changed
+destination, tier, status or verification requires a fresh plan and approval.
+Agents also need the exact `deploy.publish` grant and scope reach; neither `*`,
+`deploy.*` nor the built-in foreman includes this outward-write permission.
+Roles prevent accidental actions, not access by the machine's owner.
+
+The L4 publisher uses `gh` on the daemon's PATH with its own authentication
+for `github.com` and repository Deployments read/write permission. It creates
+metadata with task `factory:mirror`, `auto_merge: false` and no GitHub commit
+context requirements; these are not a substitute for Factory's release gates.
+It publishes the recorded state (`in_progress`, `success`, `failure`, or
+`inactive`) with `auto_inactive: false`, leaving other GitHub deployments alone.
+It does not run a release or manufacture a deployment, run, health sample or
+SLA observation. No private deployment reason, check output, source path,
+actor text or Factory token is sent. The initial payload records the Factory
+deployment id, scope and initial verification bit; status receipts identify
+each later approved snapshot by its digest.
+
+**GitHub emits deployment webhooks.** Repository integrations may react even
+to metadata-only deployments. Review those integrations before opting in;
+`factory:mirror` is a label, not a security boundary. See GitHub's
+[deployment API](https://docs.github.com/en/rest/deployments/deployments).
+
+Approved, created, published and sanitized failed receipts are immutable in
+the instance database. The timeline links the repository and shows whether
+the current plan was published. Successful retries return their persisted
+receipt without another write; retries after a crash discover the remote
+deployment by Factory id, scope, SHA, tier and environment, and discover the
+status by approval digest. Conflicting identities fail rather than duplicate.
+Requests have a 30-second deadline and a 2 MiB response cap, with a 90-second
+total publication deadline and at most 32 pages of 100 rows per lookup. A
+bounded lookup that cannot prove absence refuses creation. Failures never
+copy provider stderr into receipts; correct authentication or permissions and
+retry the current approved plan. Only one publication runs at a time.
+`GET /api/deployments/<id>/mirror-plan` is read-only; publication is the explicit
+`POST /api/deployments/<id>/publish` with `{ "approval": "<digest>" }`.
+
 **The tab** is L1 › Operations (`#<scope>/infra/environments`), narrowed by
 the rail's scope: environment cards in promotion order (status and since,
 current and deploying release, uptime 24h / 7d / SLO window against target,
@@ -2779,9 +2887,7 @@ and policies; the `environments:` declaration above, with the real Tailscale
 URLs, belongs in the `factory` scope's config once a daemon that reads it is
 installed.
 
-**Not yet:** mirroring deployments to GitHub's
-Deployments API, `ensure.sh`'s restarts as journaled actions,
-alerting beyond Factory's own events, external
+**Not yet:** live authored-environment migration, alerting beyond Factory's own events, external
 monitoring as a check source, and more than one host.
 
 ## Tasks and runs
@@ -3192,6 +3298,108 @@ current integration ref. All of this state—the base ref, merge ledger, checks,
 PR URL and cleanup—is stored on the workflow run, so restart reconciliation
 continues rather than opening a second PR or losing which branches were
 accepted.
+
+**Part workflows (`#235`).** An executable plan's `routing.workflow` names a
+template that `start_decomposition_workflow` copies once per part, instead of
+emitting one task node per part. A definition declares itself one with a
+`part:` block, which says which node plays which role:
+
+```yaml
+# workflows/epic-part.yaml, abridged
+name: epic-part
+scope: factory
+part:
+  deliverable: implement   # its worktree branch is merged; rework goes to it
+  terminal: review         # its `done` releases the merge
+nodes:
+  - id: implement
+    task: { title: "Implement {{part_id}}: {{part_title}}", worktree: true, instructions: "..." }
+  - id: review
+    task: { title: "Review {{part_id}}: {{part_title}}", worktree: true, instructions: "..." }
+    exits: [{ to: implement, agent: "concrete findings the implementer can fix alone", max_rounds: 5 }]
+edges:
+  - { id: implement-review, from: implement, to: review }
+```
+
+- **The contract.** It is checked when a definition with `part:` is stored,
+  when an assessment names it, and again when the plan expands, so a
+  template edited in between fails with the same words.
+  - Exactly one **entry** node (no incoming edge) and exactly one
+    **terminal** node (no outgoing edge), both task nodes. `part.terminal`,
+    if given, has to be that node.
+  - Exactly one **deliverable**: a task node that works in a worktree.
+    `part.deliverable` names it. It may be left out only when one task node
+    is the only one with a worktree.
+  - No expand node: decomposition stays one level deep.
+  - Every exit stays inside the template, and a backward exit is bounded as
+    usual.
+  - No input but the reserved part inputs, whether declared or written as
+    `{{...}}`, and none of them spliced into a command the daemon runs (an
+    exit's `check:`, a gate's command).
+  - It must not open a pull request or mark one ready. The integrator owns
+    the one PR. Factory cannot see this, so the template's instructions
+    have to say it, as `epic-part.yaml`'s do.
+
+  Refusals name what is wrong, for example `a part workflow needs exactly
+  one terminal node (one with no outgoing edge); it has 2: review, docs`,
+  `node "review" exit 1 leads to "ship", which is outside this part
+  workflow`, or `node "implement" uses {{issue}}, which is not a part input`.
+- **Reserved inputs.** Each copy's titles, instructions and label values get
+  `{{part_id}}`, `{{part_title}}`, `{{part_instructions}}`,
+  `{{part_acceptance}}`, `{{part_owns}}`, `{{part_interface}}`,
+  `{{parent_title}}` and `{{parent_instructions}}`. Underscores, not dots:
+  an input name is `[A-Za-z_][A-Za-z0-9_-]*`, so `{{part.x}}` would not be a
+  placeholder. A task node that uses none of them still learns its part. Its
+  title gets `: <part title>` appended. The brief a part without a template is
+  given (its instructions, "Done when", owned surface, interface and the
+  parent request) follows the node's own instructions, or replaces them when
+  it has none.
+- **Expansion.** Every template node becomes `<part>-<node>`. Edges, exit
+  targets and gate `subject`s are rewritten to match. Two parts whose ids
+  would collide (`a` + `b-c` and `a-b` + `c`) are refused by name. `expand`
+  leads into every root part's entry. For each `depends_on`, the
+  prerequisite's terminal leads into the dependant's entry.
+  `expand.children` lists every copied task node. Each copied task node
+  carries `parent_task_id`, `decomposition_part` and the parent/part labels,
+  as a single-node part does. Its agent is `routing.agents[<step>]`, else
+  the template node's, else `routing.agent`. Its category is the node's,
+  else the template's, else the item's. The part's `estimate_seconds` goes
+  on the deliverable; other steps keep the template's estimates. In a scope
+  that cannot make worktrees, every copy runs without one, as single-node
+  parts do. Control-plan injection runs after expansion, so every copied
+  task node gets its locked gates. `factory workflow lint` on a part
+  workflow shows exactly that, over two sample parts (`b` after `a`), and so
+  does the Policy tab's workflow enforcement. Each part is laid out as one
+  row, and the canvas draws a labelled box around each part's nodes.
+- **Integration, per part.** `IntegrationPart.node_id` stays the
+  **deliverable**: the newest run of that node supplies the worktree and
+  branch to merge, `merged_nodes` is keyed by it, and a merge conflict or
+  failed combined check is sent back to it. The new `terminal_node` names
+  the node whose `done` releases the merge. A part is merged once its
+  terminal is done in the current round, with its exits decided, and every
+  part it depends on (read through the graph, gates included) is already
+  merged. A part's own later steps never wait for its earlier ones to be
+  merged. A dependant's entry waits until each prerequisite's terminal is
+  done **and** that part is merged.
+- **Rework after integration.** The deliverable is continued at once with
+  the integrator's feedback, as before. Every node of the part on the path
+  from the deliverable to the terminal goes back to `unstarted` for a new
+  round on its same task, and so do the part's gates below the terminal.
+  This reuses the #149 round machinery (`round`, the waiting `after`,
+  stale-run checks), so the review runs again on the fix before the part is
+  merged, and an old `done` never releases it. Integration rework counts
+  against `expand.max_rework_rounds` per part (`integration_rounds`), apart
+  from the review's own `max_rounds`. A review loop never spends integration
+  rework, and integration rework never spends the review's rounds. When the
+  budget is used up, the deliverable fails and the run fails, as before.
+- **Stored runs.** A run written before this change has no `terminal_node`.
+  Each of its parts is the one node `node_id`, which plays all three roles,
+  and it loads and integrates as it always did. A plan without a template
+  generates exactly the definition it always did.
+
+`workflows/github-issue.yaml` is not a part workflow and is refused as one: its
+`implement` opens its own PR, `ready` marks it ready (both collide with the
+integrator), and `triage` repeats what intake already did.
 
 ### Inputs and ordered exits (#140, #149)
 

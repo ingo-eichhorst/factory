@@ -231,6 +231,8 @@ pub struct Engine {
     /// Deployment transitions are read-modify-write operations. Keep starts,
     /// supersession and finishes ordered, including post-deploy verification.
     pub(crate) deployment_edit: tokio::sync::Mutex<()>,
+    /// Serializes approved remote effects without holding a deployment/health lock.
+    pub(crate) deployment_mirror_busy: tokio::sync::Mutex<()>,
     /// `#156`: the due slot and reason a verification drill last skipped for
     /// (an encrypted newest snapshot with no identity), so the job logs it
     /// once per slot rather than on every tick -- the same skip can recur
@@ -429,6 +431,7 @@ impl Engine {
             environments: crate::environments::EnvironmentStore::in_memory()
                 .expect("an in-memory environment store should open"),
             deployment_edit: tokio::sync::Mutex::new(()),
+            deployment_mirror_busy: tokio::sync::Mutex::new(()),
             verify_drill_skip: std::sync::Mutex::new(None),
             bench_edit: tokio::sync::Mutex::new(()),
             usage_edit: tokio::sync::Mutex::new(()),
@@ -748,6 +751,8 @@ impl Engine {
             Request::DeployFinish(req) => Ok(Payload::Deployment {
                 deployment: Box::new(self.deploy_finish(req).await?),
             }),
+            Request::DeployMirrorPlan { id } => Ok(Payload::DeploymentMirrorPlan { plan: self.deployment_mirror_plan(&id).await? }),
+            Request::DeployPublish { id, approval } => Ok(Payload::DeploymentMirror { receipt: self.publish_deployment(caller, &id, &approval).await? }),
             Request::ReleaseAdd(req) => {
                 let (scope, release) = self.release_add(req).await?;
                 Ok(Payload::ReleaseAdded { scope, release })
@@ -3730,6 +3735,11 @@ impl Engine {
                 // failed before it was its turn) -- nothing to report.
                 continue;
             };
+            // A decomposition's dependency is usually its workflow parent
+            // too; say what it reported once.
+            if outputs.iter().any(|output| output.task_id == parent_task_id) {
+                continue;
+            }
             match self.store.get(&parent_task_id).await {
                 Ok(Some(parent)) => outputs.push(UpstreamOutput {
                     node_id: edge.from.clone(),
@@ -3819,7 +3829,7 @@ impl Engine {
             .nodes
             .iter()
             .find(|node| node.node_id == origin.node_id)
-            .map_or(0, |node| node.round);
+            .map_or(0, |node| node.exit_rounds());
         run.definition
             .nodes
             .iter()

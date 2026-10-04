@@ -1006,7 +1006,8 @@ async fn list_profiles(base: &[String]) -> std::result::Result<Vec<serde_json::V
 
 /// One child: a deadline, nothing on stdin, `secret` (if any) in its
 /// environment only, and a failure reason that never contains stdout's
-/// secrets -- every string in `redact` is cut out of it.
+/// secrets. Credential-bearing commands get only a fixed failure reason;
+/// redaction cannot safely cover stderr-only values or truncated fragments.
 async fn exec(
     argv: &[String],
     secret: Option<(&str, &Secret)>,
@@ -1034,13 +1035,13 @@ async fn exec(
     if output.status.success() {
         return Ok(stdout);
     }
+    if secret.is_some() || !redact.is_empty() {
+        return Err(format!("{what}: the command failed ({})", output.status));
+    }
     let stderr = String::from_utf8_lossy(&output.stderr);
     let mut reason = one_line(&stderr);
     if reason.is_empty() && secret.is_none() && redact.is_empty() {
         reason = one_line(&stdout);
-    }
-    for word in redact.iter().filter(|w| !w.is_empty()) {
-        reason = reason.replace(word, "[redacted]");
     }
     Err(format!("{what}: {} ({})", if reason.is_empty() { "no output".into() } else { reason }, output.status))
 }
@@ -1134,8 +1135,9 @@ fn read_private_file(path: &Path) -> std::result::Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("{} cannot be read: {e}", path.display()))
 }
 
-/// A command's stdout. Its failure names the exit status and stderr --
-/// with anything it printed on stdout cut out -- but never stdout.
+/// A command's stdout. Its failure names only the exit status. Either
+/// stream can contain a credential, even when stdout is empty, so neither
+/// is copied into readiness, the journal or logs on failure.
 async fn command_value(argv: &[String], what: &str) -> std::result::Result<String, String> {
     let (program, args) = argv.split_first().ok_or("nothing to run")?;
     let child = Command::new(program)
@@ -1153,11 +1155,7 @@ async fn command_value(argv: &[String], what: &str) -> std::result::Result<Strin
     if output.status.success() {
         return Ok(stdout);
     }
-    let mut stderr = one_line(&String::from_utf8_lossy(&output.stderr));
-    for line in stdout.lines().map(str::trim).filter(|l| l.len() >= 4) {
-        stderr = stderr.replace(line, "[redacted]");
-    }
-    Err(format!("{what} failed ({}){}", output.status, if stderr.is_empty() { String::new() } else { format!(": {stderr}") }))
+    Err(format!("{what} failed ({})", output.status))
 }
 
 /// The exact command that puts a value at a managed provider's source.

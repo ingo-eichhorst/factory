@@ -1851,6 +1851,10 @@ pub struct DecisionRecord {
     /// The tasks a split or executable plan made, in the parts' order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<String>,
+    /// The part workflow every part of an executable plan ran through
+    /// (`#235`), by id. Absent when each part was one task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_workflow: Option<String>,
 }
 
 /// Check a decision against the item before anything is written. Returns
@@ -2435,6 +2439,10 @@ pub struct WorkflowOption {
     /// be chosen for.
     #[serde(default)]
     pub steps: Vec<WorkflowStep>,
+    /// It declares itself a part workflow (`#235`): one an executable
+    /// plan's `routing.workflow` can name for every part to run through.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub part: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2473,6 +2481,7 @@ impl WorkflowOption {
                 .filter(|n| n.kind == crate::workflow::WorkflowNodeKind::Task)
                 .map(|n| WorkflowStep { id: n.id.clone(), title: n.task.title.clone(), agent: n.task.agent.clone() })
                 .collect(),
+            part: d.part.is_some(),
         }
     }
 }
@@ -2719,10 +2728,14 @@ pub fn triage_instructions(item: &Task, record: &Intake, definition: &ReadyDefin
          eight parts, each bounded enough to pass the seven axes on its own, with a short id, \
          a title, standalone instructions, `depends_on` naming parts that come first, an \
          acceptance check, `estimate_seconds`, `interface` naming its hand-off, and `owns` naming its paths or components. \
-         Parallel parts must not own the same surface. Leave `routing.workflow` out: Factory \
-         creates ordinary internal tasks, starts roots, and releases dependent tasks as their \
-         predecessors finish. A failed readiness axis is still needs-info; decomposition only \
-         resolves complexity.\n\n\
+         Parallel parts must not own the same surface. Factory creates ordinary internal \
+         tasks, starts roots, and releases dependent tasks as their predecessors finish and \
+         are merged. To run every part through the same steps -- implement, then an \
+         independent review that can send it back -- set `routing.workflow` to a workflow \
+         listed below as a part workflow, with no `routing.inputs` (Factory fills in each \
+         part's own values) and, if you like, `routing.agents` for its steps; otherwise \
+         leave `routing.workflow` out and each part is one task. A failed readiness axis is \
+         still needs-info; decomposition only resolves complexity.\n\n\
          ## Where it can go\n\n",
     );
     out.push_str(&routes_text(routes));
@@ -2823,6 +2836,9 @@ pub fn routes_text(routes: &[RouteOptions]) -> String {
         }
         for w in &r.workflows {
             out.push_str(&format!("  workflow `{}`", w.name));
+            if w.part {
+                out.push_str(" (part workflow)");
+            }
             if !w.description.trim().is_empty() {
                 out.push_str(&format!(" -- {}", w.description.trim()));
             }
@@ -3719,6 +3735,7 @@ mod tests {
             at: now - chrono::Duration::hours(1),
             workflow_run: None,
             parts: vec![],
+            part_workflow: None,
         });
         let mut stale_ready = ready.clone();
         stale_ready.decision.as_mut().unwrap().at = now - chrono::Duration::days(30);
@@ -3730,6 +3747,7 @@ mod tests {
             at: now,
             workflow_run: None,
             parts: vec![],
+            part_workflow: None,
         });
         let tasks = vec![
             task("r1", TaskStatus::Intake, Some(received)),
@@ -3834,6 +3852,14 @@ mod tests {
                     description: "issue to PR".into(),
                     inputs: vec![crate::workflow::WorkflowInput { name: "issue".into(), description: "the number".into() }],
                     steps: vec![WorkflowStep { id: "review".into(), title: "Review #{{issue}}".into(), agent: Some("builder".into()) }],
+                    part: false,
+                }, WorkflowOption {
+                    id: "w2".into(),
+                    name: "epic-part".into(),
+                    description: "implement, then review".into(),
+                    steps: vec![WorkflowStep { id: "implement".into(), title: "Implement {{part_title}}".into(), agent: None }],
+                    part: true,
+                    ..Default::default()
                 }],
                 ..Default::default()
             },
@@ -3846,6 +3872,8 @@ mod tests {
         assert!(text.contains("- scope `demo`") && text.contains("- scope `web` (default agent claude-code)"));
         assert!(text.contains("agents: reviewer (codex, gpt-5)"), "{text}");
         assert!(text.contains("workflow `github-issue` -- issue to PR"));
+        assert!(text.contains("workflow `epic-part` (part workflow) -- implement, then review"), "{text}");
+        assert!(text.contains("set `routing.workflow` to a workflow"), "a plan may name a part workflow (#235)");
         assert!(text.contains("input `issue`: the number"));
         assert!(text.contains("step `review` Review #{{issue}} [builder]"));
         assert!(text.contains("\"split\""), "the shape shows a split");
@@ -4162,6 +4190,7 @@ mod tests {
             at: now,
             workflow_run: None,
             parts: vec!["c1".into()],
+            part_workflow: None,
         });
         let mut child = open(None);
         child.stage = IntakeStage::Received;

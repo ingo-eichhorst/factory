@@ -107,6 +107,9 @@ enum Command {
     },
     /// Restart/repair an installed environment through an owner-approved task.
     Recover { environment: String, #[arg(long)] reason: String },
+    /// Record an explicit script recovery offline; never dispatches a task or connects to the daemon.
+    #[command(subcommand)]
+    RecoveryJournal(RecoveryJournalCmd),
     /// Run declared health checks now and record their answers; failed checks exit nonzero.
     EnvironmentCheck { environment: String },
     /// Record deployments as they start and finish, or list them.
@@ -632,6 +635,10 @@ fn parse_deploy_status(text: &str) -> Result<factory_core::environments::DeployS
 
 #[derive(Subcommand)]
 enum DeployCmd {
+    /// Inspect the exact opt-in GitHub destination/metadata and its approval digest. No outbound write.
+    MirrorPlan { id: String },
+    /// Explicitly approve publishing that frozen plan to GitHub; requires deploy.publish.
+    Publish { id: String, #[arg(long)] approval: String },
     /// A deployment has begun. Prints its id, which `finish` names.
     /// `deploy.record`, in the environment's scope.
     Start {
@@ -696,6 +703,44 @@ enum DeployCmd {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+}
+
+#[derive(Subcommand)]
+enum RecoveryJournalCmd {
+    /// Persist a start before acting. Requires an explicit existing instance root.
+    Start {
+        #[arg(long)] scope: String,
+        #[arg(long = "env")] environment: String,
+        #[arg(long)] source: String,
+        #[arg(long)] actor: String,
+        #[arg(long)] reason: String,
+        #[arg(long)] command: String,
+        #[arg(long)] commit: Option<String>,
+    },
+    /// Persist the script's reported exit and observed route checks; immutable and retryable.
+    Finish {
+        id: String,
+        #[arg(long)] exit_code: u8,
+        #[arg(long, action = clap::ArgAction::Set)] local_http: Option<bool>,
+        #[arg(long, action = clap::ArgAction::Set)] network_routes: Option<bool>,
+        #[arg(long)] detail: Option<String>,
+    },
+}
+
+fn offline_recovery(root: &Path, command: &RecoveryJournalCmd, json: bool) -> Result<()> {
+    use factory_core::recovery_journal::{self, ScriptRecoveryAction, ScriptRecoveryFinish};
+    let action = match command {
+        RecoveryJournalCmd::Start { scope, environment, source, actor, reason, command, commit } => recovery_journal::start(root,
+            ScriptRecoveryAction { id: String::new(), scope: scope.clone(), environment: environment.clone(),
+                source: source.clone(), actor: actor.clone(), reason: reason.clone(), command: command.clone(),
+                expected_commit: commit.clone(), started_at: chrono::Utc::now(), finish: None })?,
+        RecoveryJournalCmd::Finish { id, exit_code, local_http, network_routes, detail } => recovery_journal::finish(root, id,
+            ScriptRecoveryFinish { at: chrono::Utc::now(), exit_code: *exit_code, local_http: *local_http,
+                network_routes: *network_routes, detail: detail.clone() })?,
+    };
+    if json { println!("{}", serde_json::to_string(&action)?); }
+    else { println!("{}", action.id); }
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -1484,9 +1529,14 @@ enum HookEvent {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::RecoveryJournal(command) = &cli.command {
+        let root = cli.root.as_deref().ok_or_else(|| anyhow!("offline recovery-journal requires --root (or FACTORY_ROOT)"))?;
+        return offline_recovery(root, command, cli.json);
+    }
     let client = Client::locate(cli.socket.clone(), cli.url.clone(), cli.root.clone(), cli.token.clone())?;
 
     match cli.command {
+        Command::RecoveryJournal(_) => unreachable!("offline command is handled before locating any client"),
         Command::Status => {
             let payload = client.send(Request::Status).await?;
             print(&payload, cli.json, |p| match p {
@@ -1574,6 +1624,25 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Deploy(cmd) => match cmd {
+            DeployCmd::MirrorPlan { id } => {
+                let payload = client.send(Request::DeployMirrorPlan { id }).await?;
+                print(&payload, cli.json, |payload| match payload {
+                    Payload::DeploymentMirrorPlan { plan } => Some(format!("{}: {} {} at {} → {}\nverified: {:?}\napproval: {}\nThis creates GitHub deployment events (task factory:mirror). Inspect downstream automation before approving.",
+                        plan.deployment, plan.repository, plan.environment, plan.commit, plan.state, plan.verified, plan.approval)),
+                    _ => None,
+                })
+            }
+            DeployCmd::Publish { id, approval } => {
+                let payload = client.send(Request::DeployPublish { id, approval }).await?;
+                let published = matches!(&payload, Payload::DeploymentMirror { receipt } if receipt.phase == factory_core::environments::DeploymentMirrorPhase::Published);
+                print(&payload, cli.json, |payload| match payload {
+                    Payload::DeploymentMirror { receipt } => Some(format!("{:?}: {} {}{}", receipt.phase, receipt.plan.repository, receipt.plan.deployment,
+                        receipt.error.as_ref().map(|error| format!(" — {error}")).unwrap_or_default())),
+                    _ => None,
+                })?;
+                if !published { return Err(anyhow!("deployment mirror was not published; its failure receipt is stored")); }
+                Ok(())
+            }
             DeployCmd::Start { environment, strict_verification, scope, release, via, started_at } => {
                 let req = factory_core::environments::DeployStart {
                     environment,
@@ -6044,6 +6113,15 @@ fn workflow_text(w: &factory_core::workflow::WorkflowDefinition) -> String {
     for input in &w.inputs {
         s.push_str(&format!("input {}  {}\n", input.name, input.description));
     }
+    if w.part.is_some() {
+        match w.part_shape() {
+            Ok(part) => s.push_str(&format!(
+                "part workflow: entry {}, deliverable {}, terminal {}\n",
+                part.entry, part.deliverable, part.terminal
+            )),
+            Err(error) => s.push_str(&format!("part workflow: {error}\n")),
+        }
+    }
     let order = w.validate().unwrap_or_else(|_| w.nodes.iter().map(|n| n.id.clone()).collect());
     for id in order {
         let Some(node) = w.nodes.iter().find(|n| n.id == id) else { continue };
@@ -6112,6 +6190,12 @@ fn lint_text(lint: &factory_core::workflow::WorkflowLint) -> String {
     let mut s = String::new();
     if !lint.subject.is_empty() {
         s.push_str(&format!("{}  (scope {})\n", lint.subject, lint.scope));
+    }
+    if let Some(part) = &lint.part {
+        s.push_str(&format!(
+            "part workflow: entry {}, deliverable {}, terminal {} -- shown as every part gets it, over two sample parts (b after a)\n",
+            part.entry, part.deliverable, part.terminal
+        ));
     }
     for plan in &lint.plans {
         s.push_str(&format!("\nplan for {} at {}:\n", plan.category, plan.scope));
@@ -6795,6 +6879,16 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn offline_recovery_cli_requires_explicit_reported_fields_and_keeps_unknown_checks_optional() {
+        let cli = Cli::try_parse_from(["factory", "--root", "/tmp/instance", "recovery-journal", "start", "--scope", "demo",
+            "--env", "prod", "--source", "ensure.sh", "--actor", "operator", "--reason", "not running", "--command", "restart installed"]).unwrap();
+        assert!(matches!(cli.command, Command::RecoveryJournal(RecoveryJournalCmd::Start { .. })));
+        let cli = Cli::try_parse_from(["factory", "--root", "/tmp/instance", "recovery-journal", "finish", "uuid", "--exit-code", "1"]).unwrap();
+        assert!(matches!(cli.command, Command::RecoveryJournal(RecoveryJournalCmd::Finish { local_http: None, network_routes: None, .. })));
+        assert!(Cli::try_parse_from(["factory", "recovery-journal", "finish", "uuid", "--exit-code", "999"]).is_err());
+    }
+
     #[test]
     fn release_recording_accepts_an_explicit_producing_run_scope_and_comparison() {
         let parsed = Cli::try_parse_from(["factory", "release", "add", "--scope", "demo", "--commit", "sha",
@@ -7508,6 +7602,15 @@ mod tests {
     }
 
     #[test]
+    fn deployment_mirror_publication_requires_a_specific_approval() {
+        assert!(matches!(parse(&["deploy", "mirror-plan", "d1"]).command,
+            Command::Deploy(DeployCmd::MirrorPlan { id }) if id == "d1"));
+        assert!(matches!(parse(&["deploy", "publish", "d1", "--approval", "digest"]).command,
+            Command::Deploy(DeployCmd::Publish { id, approval }) if id == "d1" && approval == "digest"));
+        assert!(Cli::try_parse_from(["factory", "deploy", "publish", "d1"]).is_err());
+    }
+
+    #[test]
     fn intake_parses_its_subcommands_and_refuses_an_unknown_decision() {
         assert!(matches!(parse(&["intake"]).command, Command::Intake { scope: None, command: None }));
         match parse(&["intake", "add", "Broken link", "-i", "the footer", "--scope", "web", "--reference", "mail-7"]).command {
@@ -7970,5 +8073,24 @@ mod tests {
         let text = intake_definitions_text(&[route]);
         assert_eq!(text.matches("could not be read").count(), 1, "{text}");
         assert!(!text.contains("finding ["), "an Unreadable finding restates the blocker sentence -- left out: {text}");
+    }
+
+    #[test]
+    fn a_part_workflow_says_which_node_plays_which_role() {
+        let draft: factory_core::workflow::WorkflowDraft =
+            serde_yaml_ng::from_str(include_str!("../../../workflows/epic-part.yaml")).unwrap();
+        let definition = factory_core::workflow::WorkflowDefinition::from_draft(draft);
+        let text = super::workflow_text(&definition);
+        assert!(text.contains("part workflow: entry implement, deliverable implement, terminal review"), "{text}");
+        let lint = factory_core::workflow::WorkflowLint {
+            subject: definition.id.clone(),
+            scope: "factory".into(),
+            plans: Vec::new(),
+            injections: Vec::new(),
+            violations: Vec::new(),
+            injected: None,
+            part: Some(definition.part_shape().unwrap()),
+        };
+        assert!(super::lint_text(&lint).contains("over two sample parts (b after a)"));
     }
 }

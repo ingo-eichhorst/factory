@@ -321,6 +321,31 @@ async fn a_failing_command_source_never_puts_what_it_printed_in_the_reason() {
 }
 
 #[tokio::test]
+async fn credential_failures_never_copy_stderr_or_a_truncated_secret() {
+    let f = managed();
+    let source = f.root.join("source-failure.sh");
+    executable(&source, "#!/bin/sh\necho stderr-only-secret >&2\nexit 3\n");
+    let error = command_value(&[source.display().to_string()], "credential source").await.unwrap_err();
+    assert!(error.contains("exit status: 3"), "{error}");
+    assert!(!error.contains("stderr-only-secret"), "{error}");
+
+    let provider = f.root.join("provider-failure.sh");
+    executable(&provider, "#!/bin/sh\nprintf '%s' \"$QA_TOKEN\" >&2\nexit 4\n");
+    let value = Secret("long-sensitive-value-".repeat(40));
+    let error = exec(
+        &[provider.display().to_string()],
+        Some(("QA_TOKEN", &value)),
+        QUICK,
+        "giving the provider its credential",
+        &[value.expose()],
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("exit status: 4"), "{error}");
+    assert!(!error.contains("long-sensitive-value"), "{error}");
+}
+
+#[tokio::test]
 async fn a_credential_the_endpoint_rejects_fails_the_smoke_and_the_agent_needs_it() {
     let f = managed();
     std::fs::write(

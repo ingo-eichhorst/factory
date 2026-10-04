@@ -438,6 +438,11 @@ pub enum Request {
     /// them. The same grant as `DeployStart`.
     #[serde(rename = "deploy.finish")]
     DeployFinish(crate::environments::DeployFinish),
+    #[serde(rename = "deploy.mirror_plan")]
+    DeployMirrorPlan { id: String },
+    /// Explicit approval of the exact metadata/destination, not a background effect.
+    #[serde(rename = "deploy.publish")]
+    DeployPublish { id: String, approval: String },
     /// Put a release in the catalogue without deploying it. The same grant.
     #[serde(rename = "release.add")]
     ReleaseAdd(crate::environments::ReleaseAdd),
@@ -1116,6 +1121,8 @@ pub enum Payload {
     /// A deployment as recorded: the answer to `deploy.start` and
     /// `deploy.finish`.
     Deployment { deployment: Box<crate::environments::Deployment> },
+    DeploymentMirrorPlan { plan: factory_kernel::DeploymentMirrorPlan },
+    DeploymentMirror { receipt: factory_kernel::DeploymentMirrorFact },
     /// The answer to `release.add`.
     ReleaseAdded { scope: String, release: crate::environments::ReleaseFacts },
     /// The answer to `Request::BackupRestore`: the newly materialized root.

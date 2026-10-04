@@ -264,6 +264,15 @@ impl Engine {
         let mut report = env::report(&declared, &samples, &deployments, &added, now);
         if actions {
             let pending = self.workflows.active_runs().await?;
+            for deployment in &report.deployments {
+                if let Ok(plan) = self.deployment_mirror_plan(&deployment.id).await {
+                    let receipt = crate::facts::Facts::<factory_kernel::People>::new(self).get::<factory_kernel::DeploymentMirrorFact>(&deployment.id).await?.into_iter().next();
+                    report.deployment_mirrors.insert(deployment.id.clone(), env::DeploymentMirrorOffer { plan, receipt });
+                }
+            }
+            report.recovery_journal = Some(crate::facts::Facts::<factory_kernel::People>::new(self).get::<factory_kernel::RecoveryJournalFact>(
+                &crate::facts::RecoveryQuery { scopes: members.clone(), limit: 200 }
+            ).await?);
             report.recoveries = crate::facts::Facts::<factory_kernel::People>::new(self).get::<factory_kernel::EnvironmentRecoveryFact>(
                 &crate::facts::RecoveryQuery { scopes: members.clone(), limit: 200 }
             ).await?;
@@ -532,7 +541,7 @@ async fn committed_at(dir: PathBuf, commit: String) -> Option<DateTime<Utc>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use factory_core::environments::{EnvStatus, INCIDENT_THRESHOLD};
     use factory_core::role::Role;
