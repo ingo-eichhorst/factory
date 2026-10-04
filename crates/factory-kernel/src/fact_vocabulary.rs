@@ -211,7 +211,7 @@ pub enum Grant {
     #[serde(rename = "secrets.edit")]
     SecretsEdit,
     /// Change the host's macOS power mode -- Automatic, High performance or
-    /// Energy saving (`#260`). A change to the machine every run shares.
+    /// Energy saving (`#260`). Owner-only, even when a role names the grant.
     #[serde(rename = "host.power")]
     HostPower,
 }

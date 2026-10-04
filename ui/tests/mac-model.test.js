@@ -76,6 +76,26 @@ test("with the rule the control is live and nothing is shown to install", () => 
   assert.ok(segments(WITH_RULE, { busy: "high_performance" }).every(s => s.disabled));
 });
 
+test("read-only disables every segment even with partial or stale permissions", () => {
+  for (const permitted of [["automatic"], TODAY.supported]) {
+    assert.ok(segments({ ...TODAY, permitted }).every(s => s.disabled));
+  }
+});
+
+test("unreadable modes do not ask to reinstall an already permitted rule", () => {
+  const unread = { ...TODAY, ac: null, battery: null, permitted: TODAY.supported };
+  assert.equal(needsRule(unread), false);
+  assert.match(stateText(unread), /current mode must be readable/);
+  assert.ok(segments(unread).every(s => s.disabled));
+});
+
+test("prototype names are not modes and cannot reach the POST body", () => {
+  for (const mode of ["constructor", "toString", "__proto__", "hasOwnProperty", null, {}, 2]) {
+    assert.equal(modeLabel(mode), "--");
+    assert.throws(() => setBody(mode), /not a power mode/);
+  }
+});
+
 test("AC and battery that disagree are mixed: both shown, no segment lit", () => {
   const mixed = { ...WITH_RULE, ac: "high_performance", battery: "energy_saving" };
   assert.deepEqual(reading(mixed), { ac: "high_performance", battery: "energy_saving", mixed: true, current: null });

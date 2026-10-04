@@ -15,9 +15,10 @@
 //! administrator privileges` either. It runs `sudo -n`, which fails at once
 //! instead of prompting, and works only once the owner has installed a
 //! sudoers drop-in scoped to exactly the three commands (`SudoersRule`).
-//! Whether that rule is there is found out with `sudo -n -l <command>`,
-//! which *lists* whether the command would be permitted and never runs it --
-//! not by trying a write.
+//! The probe uses `sudo -n -k -l -l -u root -- <command>` and requires the
+//! matching verbose rule's explicit `!authenticate` option. A successful
+//! listing alone is NOT proof of NOPASSWD (listpw and cached credentials can
+//! allow listing password-required commands). No probe executes pmset.
 //!
 //! ## No free string reaches a command
 //!
@@ -84,6 +85,7 @@ impl Runner for SystemRunner {
     async fn run(&self, program: &'static str, args: &[&'static str]) -> std::io::Result<Output> {
         let child = tokio::process::Command::new(program)
             .args(args)
+            .env("LC_ALL", "C")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -128,13 +130,64 @@ pub(crate) fn pmset_value(mode: PowerMode) -> &'static str {
 }
 
 /// `-n` then the full command: run it as root without ever prompting.
-pub(crate) fn sudo_set_args(mode: PowerMode) -> [&'static str; 5] {
-    ["-n", PMSET, "-a", "powermode", pmset_value(mode)]
+pub(crate) fn sudo_set_args(mode: PowerMode) -> [&'static str; 9] {
+    [
+        "-n",
+        "-k",
+        "-u",
+        "root",
+        "--",
+        PMSET,
+        "-a",
+        "powermode",
+        pmset_value(mode),
+    ]
 }
 
-/// `-n -l` then the full command: would it be permitted? Lists, never runs.
-pub(crate) fn sudo_probe_args(mode: PowerMode) -> [&'static str; 6] {
-    ["-n", "-l", PMSET, "-a", "powermode", pmset_value(mode)]
+/// Lists the matching rule, never runs; ignores cached credentials without
+/// invalidating them. Root is explicit, not the policy's runas_default.
+pub(crate) fn sudo_probe_args(mode: PowerMode) -> [&'static str; 11] {
+    [
+        "-n",
+        "-k",
+        "-l",
+        "-l",
+        "-u",
+        "root",
+        "--",
+        PMSET,
+        "-a",
+        "powermode",
+        pmset_value(mode),
+    ]
+}
+
+/// sudoers' verbose command-specific listing has one effective matching
+/// entry, an Options line and an exact Matched command. Fail closed if a
+/// policy plugin cannot show these. Do not borrow NOPASSWD from other rules
+/// or global listing defaults. Within Options the last auth setting wins.
+fn passwordless_match(text: &str, mode: PowerMode) -> bool {
+    let mut entries = 0;
+    let mut authentication = None;
+    let mut matched = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("Sudoers entry:") || line.starts_with("LDAP Role:") {
+            entries += 1;
+            authentication = None;
+        } else if let Some(options) = line.strip_prefix("Options:").filter(|_| entries == 1) {
+            for option in options.split(',').map(str::trim) {
+                match option {
+                    "!authenticate" => authentication = Some(false),
+                    "authenticate" => authentication = Some(true),
+                    _ => {}
+                }
+            }
+        } else if let Some(command) = line.strip_prefix("Matched:").filter(|_| entries == 1) {
+            matched.push(command.trim());
+        }
+    }
+    let expected = format!("{PMSET} -a powermode {}", pmset_value(mode));
+    entries == 1 && authentication == Some(false) && matched == [expected.as_str()]
 }
 
 fn from_pmset(value: &str) -> Option<PowerMode> {
@@ -151,6 +204,8 @@ fn from_pmset(value: &str) -> Option<PowerMode> {
 pub(crate) struct Custom {
     pub ac: Option<PowerMode>,
     pub battery: Option<PowerMode>,
+    /// Presence differs from a source whose mode is unreadable.
+    pub sources: [bool; 2],
     /// A value this daemon does not know, in words.
     pub notes: Vec<String>,
 }
@@ -183,6 +238,11 @@ pub(crate) fn parse_custom(text: &str) -> Custom {
                 "Battery Power:" => Source::Battery,
                 _ => Source::Other,
             };
+            match source {
+                Source::Ac => out.sources[0] = true,
+                Source::Battery => out.sources[1] = true,
+                _ => {}
+            }
             continue;
         }
         let slot = match source {
@@ -223,6 +283,26 @@ pub(crate) fn parse_custom(text: &str) -> Custom {
         }
     }
     out
+}
+
+impl Custom {
+    fn complete(&self) -> bool {
+        self.sources.contains(&true)
+            && self
+                .sources
+                .into_iter()
+                .zip([self.ac, self.battery])
+                .all(|(present, mode)| !present || mode.is_some())
+    }
+
+    fn confirms(&self, before: &Self, mode: PowerMode) -> bool {
+        self.complete()
+            && self.sources == before.sources
+            && [self.ac, self.battery]
+                .into_iter()
+                .flatten()
+                .all(|m| m == mode)
+    }
 }
 
 /// `pmset -g cap`: one capability per indented line. Automatic is offered
@@ -289,7 +369,11 @@ pub(crate) fn parse_admins(text: &str) -> Vec<String> {
             continue;
         };
         for name in rest.split_whitespace() {
-            if name != "root" && !name.starts_with('_') && !names.iter().any(|n| n == name) {
+            if safe_account_name(name)
+                && name != "root"
+                && !name.starts_with('_')
+                && !names.iter().any(|n| n == name)
+            {
                 names.push(name.to_string());
             }
         }
@@ -304,7 +388,7 @@ fn current_user() -> String {
         // SAFETY: getpwuid_r writes into `pwd` and `buf`, both valid for the
         // sizes given, and `result` is only read when the call says it found
         // an entry, in which case `pw_name` points into `buf`.
-        let uid = unsafe { libc::geteuid() };
+        let uid = unsafe { libc::getuid() };
         let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
         let mut buf = [0 as libc::c_char; 1024];
         let mut result: *mut libc::passwd = std::ptr::null_mut();
@@ -314,15 +398,24 @@ fn current_user() -> String {
             let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }
                 .to_string_lossy()
                 .into_owned();
-            if !name.is_empty() {
+            if safe_account_name(&name) {
                 return name;
             }
         }
+        // sudoers accepts #uid. Never trust USER or put an unescaped account
+        // name into the copy/paste shell command or sudoers syntax.
+        return format!("#{uid}");
     }
-    std::env::var("USER")
-        .ok()
-        .filter(|u| !u.is_empty())
-        .unwrap_or_else(|| "factory".to_string())
+    #[cfg(not(unix))]
+    "factory".to_string()
+}
+
+fn safe_account_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+        && !name.starts_with('-')
 }
 
 /// What `Engine` holds. One runner, and one lock so two clicks cannot
@@ -343,6 +436,7 @@ impl Default for HostPower {
 pub(crate) struct Changed {
     pub before: Custom,
     pub after: Custom,
+    pub verification_error: Option<String>,
 }
 
 impl HostPower {
@@ -414,7 +508,7 @@ impl HostPower {
     /// the ordinary state before the rule is installed.
     async fn permitted(runner: &dyn Runner, mode: PowerMode, notes: &mut Vec<String>) -> bool {
         match runner.run(SUDO, &sudo_probe_args(mode)).await {
-            Ok(out) => out.success,
+            Ok(out) => out.success && passwordless_match(&out.stdout, mode),
             Err(e) => {
                 let note = format!("sudo could not be asked: {e}");
                 if !notes.contains(&note) {
@@ -439,7 +533,7 @@ impl HostPower {
                 can_change: false,
                 sudoers,
                 notes: vec![
-                    "The power mode is a macOS setting; this host is not macOS.".to_string()
+                    "The power mode is a macOS setting; this host is not macOS.".to_string(),
                 ],
                 changes: Vec::new(),
             };
@@ -463,7 +557,14 @@ impl HostPower {
                 permitted.push(*mode);
             }
         }
-        let can_change = !supported.is_empty() && supported.iter().all(|m| permitted.contains(m));
+        let can_change = custom.complete()
+            && !supported.is_empty()
+            && supported.iter().all(|m| permitted.contains(m));
+        if !supported.is_empty() && !custom.complete() {
+            notes.push(
+                "Cannot read every power source's current mode; changes are disabled.".into(),
+            );
+        }
         PowerModeReport {
             applicable: true,
             supported,
@@ -502,7 +603,16 @@ impl HostPower {
                 pmset_value(mode)
             )));
         }
-        let before = Self::custom(runner.as_ref()).await.unwrap_or_default();
+        let before = Self::custom(runner.as_ref()).await.map_err(|e| {
+            FactoryError::Other(anyhow::anyhow!(
+                "cannot read the current power mode; nothing changed: {e}"
+            ))
+        })?;
+        if !before.complete() {
+            return Err(FactoryError::Other(anyhow::anyhow!(
+                "cannot read every power source's current mode; nothing changed"
+            )));
+        }
         let out = runner
             .run(SUDO, &sudo_set_args(mode))
             .await
@@ -519,8 +629,27 @@ impl HostPower {
                 }
             )));
         }
-        let after = Self::custom(runner.as_ref()).await.unwrap_or_default();
-        Ok(Changed { before, after })
+        let (after, verification_error) = match Self::custom(runner.as_ref()).await {
+            Ok(after) if after.confirms(&before, mode) => (after, None),
+            Ok(after) => {
+                let why = format!(
+                    "pmset accepted {mode}, but read-back did not confirm every power source (now {}); Refresh to inspect the host",
+                    modes_words(&after)
+                );
+                (after, Some(why))
+            }
+            Err(e) => (
+                Custom::default(),
+                Some(format!(
+                    "pmset accepted {mode}, but read-back failed: {e}; Refresh to inspect the host"
+                )),
+            ),
+        };
+        Ok(Changed {
+            before,
+            after,
+            verification_error,
+        })
     }
 }
 
@@ -594,13 +723,20 @@ impl crate::engine::Engine {
         caller: &crate::access::Caller,
         mode: PowerMode,
     ) -> Result<PowerModeReport> {
-        let Changed { before, after } = self.host_power.set(mode).await?;
+        let Changed {
+            before,
+            after,
+            verification_error,
+        } = self.host_power.set(mode).await?;
         let asked = crate::operations::Asked::new(caller, None);
-        let message = format!(
+        let mut message = format!(
             "power mode: {} -> {mode} {}",
             modes_words(&before),
             asked.words()
         );
+        if let Some(why) = &verification_error {
+            message.push_str(&format!("; {why}"));
+        }
         let entry = asked.entry(
             POWER_MODE_CHANGED,
             message,
@@ -610,23 +746,19 @@ impl crate::engine::Engine {
                 "to": mode,
                 "after_ac": after.ac,
                 "after_battery": after.battery,
+                "confirmed": verification_error.is_none(),
+                "verification_error": verification_error,
             }),
         );
         if let Err(e) = self.store.append_entry(HOST_JOURNAL, &entry).await {
-            tracing::warn!("the power mode was changed but not journaled: {e}");
+            return Err(FactoryError::Other(anyhow::anyhow!(
+                "pmset accepted the change, but it could not be journaled: {e}; Refresh to inspect the host"
+            )));
         }
-        let read_back = [after.ac, after.battery]
-            .into_iter()
-            .flatten()
-            .all(|m| m == mode);
-        if read_back {
-            tracing::info!("power mode set to {mode} {}", asked.words());
-        } else {
-            tracing::warn!(
-                "power mode set to {mode}, but pmset now reads {}",
-                modes_words(&after)
-            );
+        if let Some(why) = verification_error {
+            return Err(FactoryError::Other(anyhow::anyhow!(why)));
         }
+        tracing::info!("power mode set to {mode} {}", asked.words());
         Ok(self.host_power_report().await)
     }
 }
@@ -685,7 +817,7 @@ pub(crate) mod testing {
         pub(crate) fn writes(&self) -> Vec<Vec<&'static str>> {
             self.calls()
                 .into_iter()
-                .filter(|c| c[0] == SUDO && c.get(2) != Some(&"-l"))
+                .filter(|c| c[0] == SUDO && !c.contains(&"-l"))
                 .collect()
         }
 
@@ -733,14 +865,31 @@ pub(crate) mod testing {
                 (DSCL, [".", "-read", "/Groups/admin", "GroupMembership"]) => {
                     ok(self.admin_group.clone())
                 }
-                (SUDO, ["-n", "-l", PMSET, "-a", "powermode", n]) => {
+                (
+                    SUDO,
+                    [
+                        "-n",
+                        "-k",
+                        "-l",
+                        "-l",
+                        "-u",
+                        "root",
+                        "--",
+                        PMSET,
+                        "-a",
+                        "powermode",
+                        n,
+                    ],
+                ) => {
                     if self.permitted.lock().unwrap().contains(n) {
-                        ok(format!("{PMSET} -a powermode {n}\n"))
+                        ok(format!(
+                            "Sudoers entry: /etc/sudoers.d/factory-pmset\n    RunAsUsers: root\n    Options: !authenticate\n    Commands:\n        {PMSET} -a powermode {n}\n    Matched: {PMSET} -a powermode {n}\n"
+                        ))
                     } else {
                         refused()
                     }
                 }
-                (SUDO, ["-n", PMSET, "-a", "powermode", n]) => {
+                (SUDO, ["-n", "-k", "-u", "root", "--", PMSET, "-a", "powermode", n]) => {
                     if !self.permitted.lock().unwrap().contains(n) {
                         return refused();
                     }

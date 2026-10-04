@@ -118,11 +118,33 @@ fn every_mode_maps_to_its_pmset_number_and_the_commands_are_exact() {
     assert_eq!(pmset_value(PowerMode::HighPerformance), "2");
     assert_eq!(
         sudo_set_args(PowerMode::HighPerformance),
-        ["-n", "/usr/bin/pmset", "-a", "powermode", "2"]
+        [
+            "-n",
+            "-k",
+            "-u",
+            "root",
+            "--",
+            "/usr/bin/pmset",
+            "-a",
+            "powermode",
+            "2"
+        ]
     );
     assert_eq!(
         sudo_probe_args(PowerMode::EnergySaving),
-        ["-n", "-l", "/usr/bin/pmset", "-a", "powermode", "1"]
+        [
+            "-n",
+            "-k",
+            "-l",
+            "-l",
+            "-u",
+            "root",
+            "--",
+            "/usr/bin/pmset",
+            "-a",
+            "powermode",
+            "1"
+        ]
     );
 }
 
@@ -143,9 +165,10 @@ fn the_sudoers_rule_names_exactly_the_three_commands_for_the_daemons_user() {
         .unwrap();
     assert!(check < install, "{}", rule.install);
     assert!(rule.install.contains(&format!("'{}'", rule.rule)));
-    assert!(rule
-        .install
-        .ends_with("/etc/sudoers.d/factory-pmset; rm -f \"$f\""));
+    assert!(
+        rule.install
+            .ends_with("/etc/sudoers.d/factory-pmset; rm -f \"$f\"")
+    );
     assert_eq!(rule.check, "sudo visudo -c");
 }
 
@@ -187,15 +210,17 @@ async fn without_the_rule_the_mode_is_read_and_nothing_is_written() {
         "no rule is the ordinary state, not a note: {:?}",
         report.notes
     );
-    assert!(report
-        .sudoers
-        .rule
-        .starts_with("factory ALL=(root) NOPASSWD: "));
+    assert!(
+        report
+            .sudoers
+            .rule
+            .starts_with("factory ALL=(root) NOPASSWD: ")
+    );
     assert!(host.writes().is_empty(), "{:?}", host.calls());
     // Probed with `-l` for each mode, never run.
     let probes: Vec<_> = host.calls().into_iter().filter(|c| c[0] == SUDO).collect();
     assert_eq!(probes.len(), 3);
-    assert!(probes.iter().all(|c| c[1..3] == ["-n", "-l"]));
+    assert!(probes.iter().all(|c| c[1..5] == ["-n", "-k", "-l", "-l"]));
 }
 
 #[tokio::test]
@@ -228,7 +253,18 @@ async fn with_the_rule_each_mode_runs_its_own_command_and_reads_back() {
         assert_eq!(writes.len(), before + 1);
         assert_eq!(
             writes.last().unwrap(),
-            &vec![SUDO, "-n", PMSET, "-a", "powermode", n]
+            &vec![
+                SUDO,
+                "-n",
+                "-k",
+                "-u",
+                "root",
+                "--",
+                PMSET,
+                "-a",
+                "powermode",
+                n
+            ]
         );
         assert_eq!(changed.after.ac, Some(mode));
         assert_eq!(changed.after.battery, Some(mode));
@@ -319,7 +355,8 @@ fn engine() -> Arc<Engine> {
     .unwrap();
     config.validate().unwrap();
     let factory = Factory {
-        root: PathBuf::from("/tmp/factory-host-power-test"),
+        root: std::env::temp_dir()
+            .join(format!("factory-host-power-test-{}", uuid::Uuid::new_v4())),
         config,
     };
     Arc::new(Engine::new(
@@ -391,6 +428,170 @@ async fn through_the_engine_a_change_is_journaled_with_who_from_and_to() {
 #[test]
 fn the_mac_cap_fixture_is_the_hosts_shape() {
     assert_eq!(parse_cap(MAC_CAP), parse_cap(HOST_CAP));
+}
+
+#[test]
+fn listing_success_is_not_passwordless_permission() {
+    let listing = |options: &str, matched: &str| {
+        format!(
+            "Sudoers entry: /etc/sudoers\n    RunAsUsers: root\n    Options: {options}\n    Commands:\n        ALL\n    Matched: {matched}\n"
+        )
+    };
+    let mode = PowerMode::HighPerformance;
+    let command = "/usr/bin/pmset -a powermode 2";
+    assert!(passwordless_match(&listing("!authenticate", command), mode));
+    assert!(passwordless_match(
+        &listing("noexec, !authenticate, log_output", command),
+        mode
+    ));
+    for text in [
+        String::new(),
+        command.to_string(),              // short listing / cached credentials
+        listing("authenticate", command), // listpw=any, unrelated NOPASSWD
+        listing("!authenticate, authenticate", command),
+        listing("!authenticate", "/usr/bin/pmset -a powermode 3"),
+        listing("!authenticate", "/usr/bin/pmset -a powermode 2 extra"),
+        format!(
+            "{}{}",
+            listing("!authenticate", command),
+            listing("authenticate", command)
+        ),
+        "Matching Defaults entries: !authenticate\n    Matched: /usr/bin/pmset -a powermode 2\n"
+            .into(),
+        "Options: !authenticate\nSudoers entry: /etc/sudoers\n    Matched: /usr/bin/pmset -a powermode 2\n".into(),
+    ] {
+        assert!(!passwordless_match(&text, mode), "must fail closed: {text}");
+    }
+}
+
+/// Overrides only the read-only command. All writes still go through the
+/// recording fake, so the tests can prove how many were attempted.
+struct ReadbackHost {
+    host: Arc<FakeHost>,
+    reads: std::sync::Mutex<std::collections::VecDeque<Option<Output>>>,
+}
+
+#[async_trait::async_trait]
+impl Runner for ReadbackHost {
+    async fn run(&self, program: &'static str, args: &[&'static str]) -> std::io::Result<Output> {
+        let actual = self.host.run(program, args).await?;
+        if program == PMSET && args == ["-g", "custom"] {
+            if let Some(Some(out)) = self.reads.lock().unwrap().pop_front() {
+                return Ok(out);
+            }
+        }
+        Ok(actual)
+    }
+}
+
+fn read_output(stdout: &str) -> Output {
+    Output {
+        success: true,
+        stdout: stdout.into(),
+        stderr: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn unreadable_before_state_refuses_every_write_and_disables_the_report() {
+    for out in [
+        read_output(""),
+        read_output("AC Power:\n powermode 0\nBattery Power:\n standby 1\n"),
+        read_output("AC Power:\n powermode 3\n"),
+        Output {
+            success: false,
+            stderr: "read failed".into(),
+            ..Default::default()
+        },
+    ] {
+        let host = FakeHost::mac();
+        host.install_rule();
+        let runner = Arc::new(ReadbackHost {
+            host: host.clone(),
+            reads: std::sync::Mutex::new([Some(out.clone()), Some(out)].into()),
+        });
+        let power = HostPower::with_runner(runner, "factory");
+        let report = power.read().await;
+        assert!(!report.can_change);
+        assert!(!report.notes.is_empty());
+        assert!(power.set(PowerMode::HighPerformance).await.is_err());
+        assert!(host.writes().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_write_is_journaled_but_not_reported_successful_if_readback_fails_or_disagrees() {
+    for out in [
+        read_output(""),
+        read_output("AC Power:\n powermode 2\n"), // battery disappeared
+        read_output("AC Power:\n powermode 2\nBattery Power:\n powermode 1\n"),
+        read_output("AC Power:\n powermode 2\nBattery Power:\n powermode 3\n"),
+        Output {
+            success: false,
+            stderr: "read failed".into(),
+            ..Default::default()
+        },
+    ] {
+        let engine = engine();
+        let host = FakeHost::mac();
+        host.install_rule();
+        engine.host_power.replace_runner(Arc::new(ReadbackHost {
+            host: host.clone(),
+            reads: std::sync::Mutex::new([None, Some(out)].into()),
+        }));
+        let response = engine
+            .handle_request(Request::HostPowerModeSet {
+                mode: PowerMode::HighPerformance,
+            })
+            .await;
+        assert!(matches!(response, Response::Error { .. }), "{response:?}");
+        assert_eq!(host.writes().len(), 1);
+        let entries = engine.store.entries(HOST_JOURNAL, 20).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        let data = entries[0].data.as_ref().unwrap();
+        assert_eq!(data["confirmed"], false);
+        assert_eq!(data["from_ac"], "automatic");
+        assert_eq!(data["to"], "high_performance");
+        assert!(
+            data["verification_error"]
+                .as_str()
+                .unwrap()
+                .contains("read-back")
+        );
+        assert!(entries[0].message.contains("read-back"));
+    }
+}
+
+#[tokio::test]
+async fn desktop_readback_confirms_its_only_source() {
+    let host = FakeHost::mac();
+    *host.battery.lock().unwrap() = None;
+    host.install_rule();
+    let power = HostPower::with_runner(host, "factory");
+    let changed = power.set(PowerMode::EnergySaving).await.unwrap();
+    assert!(changed.verification_error.is_none());
+    assert_eq!(changed.after.ac, Some(PowerMode::EnergySaving));
+    assert_eq!(changed.after.battery, None);
+}
+
+#[test]
+fn account_names_in_copy_paste_commands_must_be_shell_and_sudoers_safe() {
+    for safe in ["factory", "ingo", "user.name", "_system", "a-b"] {
+        assert!(safe_account_name(safe));
+    }
+    for unsafe_name in [
+        "",
+        "-option",
+        "a'b",
+        "a b",
+        "$(command)",
+        "a\nALL",
+        "a,b",
+        "a\\b",
+    ] {
+        assert!(!safe_account_name(unsafe_name));
+    }
+    assert!(parse_admins("GroupMembership: $(command) -option\n").is_empty());
 }
 
 #[test]

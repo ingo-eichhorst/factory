@@ -111,7 +111,7 @@ header h1 {
    full-width row of its own under the level row rather than squeezed in
    beside the title. */
 .tabs {
-  display: flex; gap: 2px; padding: 6px 18px; background: var(--panel);
+  display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 18px; background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
 .tabs button {

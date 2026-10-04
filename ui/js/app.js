@@ -565,7 +565,14 @@ function startBackup() {
 
 function startMac() {
   stopAgentPoll();
-  refreshMac();
+  refreshMac().catch(error => {
+    state.macError = `Could not refresh Mac: ${error.message}`;
+    const failed = $("mac-error");
+    if (failed) {
+      failed.textContent = state.macError;
+      failed.hidden = false;
+    }
+  });
 }
 
 function startDates() {
