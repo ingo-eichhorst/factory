@@ -128,6 +128,7 @@ port!(ScopeCapacityFact, l1, (), ScopeCapacityFact);
 port!(EnvironmentMetricFact, l1, Option<String>, BTreeMap<String, EnvironmentMetricFact>);
 port!(SecretsPresence, l2, BTreeSet<String>, BTreeMap<String, SecretsPresence>);
 port!(DependenciesFact, l2, String, DependenciesFact);
+port!(SandboxServiceEvidenceFact, l2, String, SandboxServiceEvidenceFact);
 port!(ExploitedFinding, l2, String, Vec<ExploitedFinding>);
 port!(AgentFact, l3, String, Vec<AgentFact>);
 port!(TaskFact, l4, NamedQuery, BTreeMap<String, Vec<TaskFact>>);
@@ -166,6 +167,7 @@ mod tests {
         registered::<EnvironmentMetricFact>();
         registered::<SecretsPresence>();
         registered::<DependenciesFact>();
+        registered::<SandboxServiceEvidenceFact>();
         registered::<ExploitedFinding>();
         registered::<AgentFact>();
         registered::<TaskFact>();
@@ -269,5 +271,17 @@ mod tests {
         assert!(quality.contains("get::<TaskInventoryFact>"));
         let producer = include_str!("l4.rs");
         assert!(producer.contains("impl Provide<factory_kernel::TaskInventoryFact> for Provider"));
+    }
+
+    #[test]
+    fn sandbox_service_evidence_uses_l2_ownership_and_people_composition() {
+        let engine = include_str!("../engine.rs");
+        let branch = engine.split("Request::Dependencies { scope } =>").nth(1).unwrap()
+            .split("Request::DependenciesVex").next().unwrap();
+        assert!(branch.contains("Facts::<factory_kernel::People>"));
+        assert!(branch.contains("get::<factory_kernel::SandboxServiceEvidenceFact>"));
+        let producer = include_str!("../service_observations.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!producer.contains(".store") && !producer.contains("factory_core::policy"));
+        assert!(include_str!("l2.rs").contains("impl Provide<factory_kernel::SandboxServiceEvidenceFact> for Provider"));
     }
 }

@@ -4,6 +4,7 @@
 import { $, api, esc, state } from "./core.js";
 import { writeHash } from "./scopes.js";
 import { findingCard } from "./dependency-finding.js";
+import { observedCell, evidenceCards } from "./service-observations-model.js";
 import {
   credentialState,
   findingCounts,
@@ -43,7 +44,7 @@ function credentialCell(name, credential) {
   return `<code>${esc(name)}</code> <span class="tag ${tone}">${esc(credential)}</span>`;
 }
 
-function serviceRow(row) {
+function serviceRow(row, evidence) {
   const credential = credentialState(row);
   const scope = (row.agents || []).length ? row.agents.join(", ") : "every declared agent";
   const access = [row.effects, row.direction].filter(Boolean).join(" / ") || "—";
@@ -54,6 +55,7 @@ function serviceRow(row) {
     <td>${esc(access)}</td>
     <td>${(row.data || []).map((d) => `<span class="tag">${esc(d)}</span>`).join(" ") || "—"}</td>
     <td>${credentialCell(row.credential, credential)}</td>
+    <td>${observedCell(row, evidence)}</td>
   </tr>`;
 }
 
@@ -68,6 +70,7 @@ export function renderDependencies() {
     $("dependencies-documents").innerHTML = "";
     $("dependencies-findings").innerHTML = "";
     $("dependencies-services").innerHTML = "";
+    $("dependencies-observations").innerHTML = "";
     $("no-dependency-documents").hidden = false;
     $("no-dependency-findings").hidden = true;
     $("no-dependency-services").hidden = true;
@@ -89,7 +92,8 @@ export function renderDependencies() {
   $("no-dependency-findings").hidden = findings.length !== 0 || !!state.dependenciesError;
 
   const services = report?.services || [];
-  $("dependencies-services").innerHTML = services.map(serviceRow).join("");
+  $("dependencies-services").innerHTML = services.map((service) => serviceRow(service, report?.service_evidence)).join("");
+  $("dependencies-observations").innerHTML = evidenceCards(report?.service_evidence);
   $("no-dependency-services").hidden = services.length !== 0 || !!state.dependenciesError;
 }
 

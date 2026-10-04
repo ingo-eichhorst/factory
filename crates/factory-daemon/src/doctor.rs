@@ -62,6 +62,7 @@ impl Engine {
                 documents: Vec::new(),
                 findings: Vec::new(),
                 services: Vec::new(),
+                service_evidence: None,
             },
             Err(error) => return Err(error),
         };
@@ -119,6 +120,7 @@ mod tests {
             documents,
             findings: Vec::new(),
             services: Vec::new(),
+            service_evidence: None,
         }
     }
 

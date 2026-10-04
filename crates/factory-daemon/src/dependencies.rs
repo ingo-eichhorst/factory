@@ -650,6 +650,7 @@ fn build_report(
         documents,
         findings,
         services,
+        service_evidence: None,
     }
 }
 

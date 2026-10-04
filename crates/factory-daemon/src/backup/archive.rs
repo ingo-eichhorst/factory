@@ -1266,8 +1266,13 @@ mod tests {
     #[test]
     fn include_logs_adds_the_logs() {
         let instance = Instance::new("logs");
+        fs::create_dir(instance.root.join(".factory/logs/service-evidence")).unwrap();
+        fs::write(instance.root.join(".factory/logs/service-evidence/receipt.json"), "{\"partial\":true}").unwrap();
         let manifest = Instance::manifest(&instance.take(true).path);
         assert!(manifest.files.iter().any(|f| f.path == ".factory/logs/daemon.log" && f.group == Group::Logs));
+        assert!(manifest.files.iter().any(|f| f.path == ".factory/logs/service-evidence/receipt.json" && f.group == Group::Logs));
+        let excluded = take(&instance.plan_with(false, None), &instance.destination, "without-logs.tar.zst", Utc::now()).unwrap();
+        assert!(!Instance::manifest(&excluded.path).files.iter().any(|f| f.path.contains("service-evidence")));
     }
 
     #[test]

@@ -731,9 +731,12 @@ impl Engine {
             Request::SecretSet { name, metadata } => Ok(Payload::Secret {
                 secret: Box::pin(self.set_secret(caller, &name, metadata)).await?,
             }),
-            Request::Dependencies { scope } => Ok(Payload::Dependencies {
-                report: self.dependencies_report(&scope).await?,
-            }),
+            Request::Dependencies { scope } => {
+                let mut report = self.dependencies_report(&scope).await?;
+                report.service_evidence = Some(crate::facts::Facts::<factory_kernel::People>::new(self)
+                    .get::<factory_kernel::SandboxServiceEvidenceFact>(&report.scope).await?);
+                Ok(Payload::Dependencies { report })
+            }
             Request::DependenciesVex { scope } => Ok(Payload::Text {
                 text: self.dependencies_vex(&scope).await?,
             }),
@@ -4799,7 +4802,12 @@ impl Engine {
             .in_run(run_id),
         )
         .await;
-        let teardown = crate::openshell::Teardown::of(&plan, cwd, config.fast_forward);
+        let mut teardown = crate::openshell::Teardown::of(&plan, cwd, config.fast_forward);
+        teardown.service_evidence = Some(crate::service_observations::CaptureContext {
+            root: factory.root.clone(), instance: factory.config.instance.id.clone(),
+            scope: task.scope.clone(), agent: task.agent.clone(), task: task.id.clone(),
+            run: run_id.to_string(), base: plan.base.clone(),
+        });
         crate::openshell::Pending {
             instance: factory.config.instance.id.clone(),
             run: run_id.to_string(),
@@ -9610,6 +9618,7 @@ edges: [{id: next, from: implement, to: review}]
                 download: Some(vec![base[0].clone(), "sandbox".into(), "download".into(), sandbox.clone(), "/sandbox/work/demo".into(), download_dir.display().to_string()]),
                 download_dir, fast_forward: false,
                 delete: vec![base[0].clone(), "sandbox".into(), "delete".into(), sandbox.clone()],
+                service_evidence: None,
             };
             crate::openshell::Pending { instance: factory.config.instance.id.clone(), run: run.clone(), task: task.id.clone(), base, teardown }.save().unwrap();
             let listed = serde_json::json!({"sandboxes":[{"name":sandbox,"labels":{"factory.instance":factory.config.instance.id,"factory.run":run}}]});

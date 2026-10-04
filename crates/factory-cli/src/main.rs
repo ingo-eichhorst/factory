@@ -5636,6 +5636,27 @@ fn dependencies_text(report: &DependenciesReport) -> String {
             out.push('\n');
         }
     }
+    out.push_str("sandbox service observations (partial enforcement evidence, not a verdict)\n");
+    match &report.service_evidence {
+        None => out.push_str("  unknown: no sandbox evidence in this response\n"),
+        Some(evidence) => {
+            if evidence.captures.iter().all(|capture| capture.accesses.is_empty()) {
+                out.push_str("  unknown: no supported access records in the available evidence\n");
+            }
+            for capture in &evidence.captures {
+                out.push_str(&format!("  run {} task {} agent {} sandbox {}\n    {} captured {} (partial)\n",
+                    capture.run_id, capture.task_id, capture.agent, capture.sandbox, capture.source, capture.captured_at));
+                if let Some(issue) = &capture.issue { out.push_str(&format!("    {issue}\n")); }
+                for access in &capture.accesses {
+                    out.push_str(&format!("    {} {:?} {} {:?} process {} policy {}\n", access.at,
+                        access.transport, access.target, access.disposition,
+                        access.process.as_deref().unwrap_or("unknown"), access.policy.as_deref().unwrap_or("unknown")));
+                }
+            }
+            for finding in &evidence.findings { out.push_str(&format!("  {finding}\n")); }
+        }
+    }
+    out.push_str("  Socket and file use are unknown without actual access records; configured paths and listeners are not observations.\n");
     out.trim_end().to_string()
 }
 
@@ -7473,6 +7494,21 @@ mod tests {
         assert!(text.contains("reported reachability: unknown"));
         assert!(text.contains("analysis evidence: document s run r at"));
         assert!(!text.contains("document newer-absence"));
+    }
+
+    #[test]
+    fn dependency_observation_text_preserves_dispositions_provenance_and_unknowns() {
+        let report: DependenciesReport = serde_json::from_value(serde_json::json!({
+            "scope": "demo", "documents": [], "findings": [], "services": [],
+            "service_evidence": {"scope": "demo", "captures": [{"id": "capture", "run_id": "run", "task_id": "task",
+                "agent": "curator", "sandbox": "factory-run", "source": "OpenShell supervisor/proxy OCSF", "partial": true,
+                "captured_at": "2026-10-04T12:00:00Z", "accesses": [{"at": "2026-10-04T11:59:00Z", "transport": "network",
+                    "target": "api.github.com:443", "disposition": "denied"}]}]}
+        })).unwrap();
+        let text = dependencies_text(&report);
+        assert!(text.contains("api.github.com:443") && text.contains("Denied"));
+        assert!(text.contains("run run task task agent curator") && text.contains("partial"));
+        assert!(text.contains("not a verdict") && text.contains("Socket and file use are unknown"));
     }
 
     // -- --timezone ----------------------------------------------------------

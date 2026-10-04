@@ -41,6 +41,8 @@ pub(crate) struct Teardown {
     #[serde(default)]
     pub fast_forward: bool,
     pub delete: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_evidence: Option<crate::service_observations::CaptureContext>,
 }
 
 impl Teardown {
@@ -57,6 +59,7 @@ impl Teardown {
             download_dir: plan.download_dir.clone(),
             fast_forward,
             delete: plan.delete.clone(),
+            service_evidence: None,
         }
     }
 
@@ -138,6 +141,9 @@ impl Pending {
             && !self.base[0].is_empty()
             && self.teardown.delete == delete
             && download_valid
+            && self.teardown.service_evidence.as_ref().is_none_or(|context|
+                context.valid(&self.teardown) && context.instance == self.instance
+                    && context.run == self.run && context.task == self.task && context.base == self.base)
     }
 }
 
@@ -490,6 +496,18 @@ impl Drop for Claim {
 /// for the run's journal.
 pub(crate) async fn finish(teardown: &Teardown) -> Vec<String> {
     let mut notes = Vec::new();
+    if let Some(context) = &teardown.service_evidence {
+        let capture = crate::service_observations::collect_final(context, teardown).await;
+        let count = capture.accesses.len();
+        let context = context.clone();
+        let evidence_teardown = teardown.clone();
+        let saved = tokio::task::spawn_blocking(move ||
+            crate::service_observations::save(&context, &evidence_teardown, &capture)).await;
+        match saved {
+            Ok(Ok(())) => notes.push(format!("preserved {count} sandbox service observations (partial enforcement log)")),
+            _ => notes.push("sandbox service evidence could not be preserved".into()),
+        }
+    }
     let mut retain = false;
     let mut restore_failed = false;
     if let Some(download) = &teardown.download {
@@ -1172,6 +1190,7 @@ mod tests {
             download: None,
             download_dir: dir.0.join("dl"),
             fast_forward: false,
+            service_evidence: None,
             delete: vec![
                 "/bin/sh".into(),
                 "-c".into(),

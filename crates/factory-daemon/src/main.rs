@@ -41,6 +41,7 @@ mod roles;
 mod scenarios;
 mod scheduler;
 mod secrets;
+mod service_observations;
 mod schedule;
 mod site;
 mod stores;

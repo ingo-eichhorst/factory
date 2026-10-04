@@ -26,6 +26,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<BackupFact, L1>("BackupFact", "L1");
     assert_producer::<SecretsPresence, L2>("SecretsPresence", "L2");
     assert_producer::<DependenciesFact, L2>("DependenciesFact", "L2");
+    assert_producer::<SandboxServiceEvidenceFact, L2>("SandboxServiceEvidenceFact", "L2");
     assert_producer::<ExploitedFinding, L2>("ExploitedFinding", "L2");
     assert_producer::<AgentFact, L3>("AgentFact", "L3");
     assert_producer::<TaskFact, L4>("TaskFact", "L4");
@@ -59,6 +60,19 @@ fn task_inventory_is_plain_metadata_and_preserves_label_defaults() {
         "labels": {"goal": "ship/kr1", "custom": "preserved"}
     })).unwrap();
     assert_eq!(serde_json::from_value::<TaskInventoryFact>(serde_json::to_value(&labelled).unwrap()).unwrap(), labelled);
+}
+
+#[test]
+fn sandbox_service_evidence_roundtrips_in_l0_with_unknown_empty_defaults() {
+    let empty: SandboxServiceEvidenceFact = serde_json::from_value(serde_json::json!({"scope": "demo"})).unwrap();
+    assert!(empty.captures.is_empty() && empty.findings.is_empty());
+    let fact: SandboxServiceEvidenceFact = serde_json::from_value(serde_json::json!({
+        "scope": "demo", "captures": [{"id": "receipt", "run_id": "run", "task_id": "task", "agent": "curator",
+            "sandbox": "factory-run", "captured_at": "2026-10-04T12:00:00Z", "source": "OpenShell supervisor/proxy OCSF", "partial": true,
+            "accesses": [{"at": "2026-10-04T11:59:00Z", "transport": "network", "target": "api.github.com:443", "disposition": "denied"}]}]
+    })).unwrap();
+    assert_eq!(fact.captures[0].accesses[0].disposition, AccessDisposition::Denied);
+    assert_eq!(serde_json::from_value::<SandboxServiceEvidenceFact>(serde_json::to_value(&fact).unwrap()).unwrap(), fact);
 }
 
 #[test]
@@ -96,6 +110,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "BackupFact",
         "SecretsPresence",
         "DependenciesFact",
+        "SandboxServiceEvidenceFact",
         "ExploitedFinding",
         "AgentFact",
         "TaskFact",

@@ -945,8 +945,28 @@ Policy catalogues may read the same evidence:
 
 The scan workflow supplies the build and installed-binary evidence used by
 `built_sbom` and Doctor, plus optional declared-source reachability evidence.
-Observed services still require sandbox enforcement evidence; the CRA Article
-14 reporting clock's 24-hour and 72-hour deadlines
+For `sandbox: openshell` runs, Dependencies shows observed network endpoints
+beside declared services, with allow/deny/block decisions, event time, process,
+policy and run/task/agent provenance. L2 reads the supervisor/proxy's native
+OCSF security log only after verifying the sandbox's instance and run labels.
+It also preserves a private, immutable receipt before deleting the sandbox,
+under the instance root's `.factory/logs/service-evidence/`. Receipts survive
+daemon restart and are included in backups when `include_logs` is enabled.
+The same evidence is returned by `factory dependencies <scope>` and
+`GET /api/dependencies?scope=<scope>`; reads do not change sandbox settings.
+
+Coverage is explicitly partial: at most the latest 1,000 log records per
+sandbox, eight live sandboxes, 50 captures and 2,000 access records per report.
+Bounds and failed collections are visible. URL paths, queries, fragments,
+userinfo, request bodies, credentials and raw error output are not retained.
+Missing evidence is **unknown**, not unused or compliant. An endpoint match
+does not prove access to a declared URL path or successful application traffic.
+OpenShell's Landlock configuration records and endpointless socket-relay
+records are not actual file/socket access evidence; those transports remain
+unknown pending a suitable enforcement source (#157). Observations do not
+change VEX, finding status, reportability, policy verdicts or the CRA clock.
+
+The CRA Article 14 reporting clock's 24-hour and 72-hour deadlines
 (`#157`, phase 1) read this same evidence -- see "Policies" below.
 
 `Engine::exploited_findings` (daemon `dependencies.rs`) is that clock's L2

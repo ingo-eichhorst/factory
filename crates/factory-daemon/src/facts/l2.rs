@@ -16,6 +16,16 @@ impl factory_kernel::FactProvider for Provider<'_> {
 }
 
 #[async_trait]
+impl Provide<factory_kernel::SandboxServiceEvidenceFact> for Provider<'_> {
+    type Query = String;
+    type Value = factory_kernel::SandboxServiceEvidenceFact;
+    type Error = FactoryError;
+    async fn get(&self, scope: &String) -> Result<Self::Value> {
+        crate::service_observations::read(self.engine, scope).await
+    }
+}
+
+#[async_trait]
 impl Provide<factory_kernel::CredentialExpiryFact> for Provider<'_> {
     type Query = ();
     type Value = factory_kernel::CredentialExpiryFact;

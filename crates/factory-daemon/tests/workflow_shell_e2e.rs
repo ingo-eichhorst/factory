@@ -339,6 +339,96 @@ fn provision() -> Daemon {
 
 // -------------------------------------------------------------- the test
 
+/// Opt in with an existing Factory rootfs/image and a connected OpenShell
+/// gateway. No profiles, providers, credentials or global settings are changed.
+#[test]
+fn openshell_observations_are_real_enforcement_evidence_and_survive_vm_cleanup() {
+    let Some(image) = std::env::var_os("FACTORY_QA_OPENSHELL_IMAGE") else {
+        eprintln!("skipping OpenShell acceptance: set FACTORY_QA_OPENSHELL_IMAGE to an existing Factory image");
+        return;
+    };
+    if missing_prerequisites() { return; }
+    let openshell = find_on_path("openshell").expect("OpenShell CLI required by the opted-in test");
+    let mut daemon = provision(); daemon.sigterm();
+    let path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["scope"]["agent"] = serde_yaml_ng::to_value(json!({
+        "name": "shell", "harness": "shell", "lifetime": "task", "sandbox": "openshell",
+        "openshell": {"cli": openshell, "image": image.to_string_lossy(), "providers": [], "upload": "none", "policy": {
+            "filesystem_policy": {"include_workdir": true,
+                "read_only": ["/usr", "/lib", "/bin", "/sbin", "/etc", "/opt", "/proc", "/sys", "/var", "/dev/urandom", "/dev/random"],
+                "read_write": ["/sandbox", "/tmp", "/dev/null", "/dev/zero", "/dev/tty", "/dev/pts", "/dev/shm"]},
+            "network_policies": {"qa_callback": {"endpoints": [{"host": "host.openshell.internal", "port": daemon.port}], "binaries": [{"path": "/usr/bin/curl"}]}}
+        }}
+    })).unwrap();
+    config["scope"]["dependencies"] = serde_yaml_ng::to_value(json!({"services": [
+        {"name": "callback", "transport": "network", "endpoints": [format!("host.openshell.internal:{}", daemon.port)]},
+        {"name": "files", "transport": "file", "path": "/tmp"}
+    ]})).unwrap();
+    let instance = config["instance"]["id"].as_str().unwrap().to_string();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap(); daemon.spawn();
+    let base = daemon.base_url(); let url = format!("{base}/api/tasks");
+    let task = expect_ok(&url, &post(&url, &json!({"title": "Observed services acceptance", "scope": "demo", "agent": "shell", "worktree": false,
+        "instructions": format!("curl --noproxy '*' --max-time 10 -sS http://host.openshell.internal:{}/api/status >/dev/null || true; curl --noproxy '*' --max-time 10 -sS http://host.openshell.internal:1 >/dev/null || true; printf observations-done", daemon.port)})))["task"].clone();
+    let id = task["id"].as_str().unwrap(); let start = format!("{base}/api/tasks/{id}/run");
+    expect_ok(&start, &post(&start, &json!({})));
+    let runs_url = format!("{base}/api/tasks/{id}/runs");
+    let history = wait_for("OpenShell provisioning to release the queued run", Duration::from_secs(180), || {
+        let history = expect_ok(&runs_url, &get(&runs_url));
+        history["runs"].as_array().filter(|runs| !runs.is_empty()).map(|_| history.clone())
+    });
+    let run = history["runs"][0]["id"].as_str().unwrap().to_string();
+    struct SandboxGuard { cli: PathBuf, sandbox: String, instance: String, run: String }
+    impl Drop for SandboxGuard {
+        fn drop(&mut self) {
+            let get = Command::new(&self.cli).args(["sandbox", "get", &self.sandbox, "-o", "json"]).output();
+            if let Ok(output) = get {
+                if let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) {
+                    if value["labels"]["factory.instance"] == self.instance && value["labels"]["factory.run"] == self.run {
+                        let _ = Command::new(&self.cli).args(["sandbox", "delete", &self.sandbox]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+                    }
+                }
+            }
+        }
+    }
+    let guard = SandboxGuard { cli: openshell, sandbox: format!("factory-{}", &run[..8]), instance, run: run.clone() };
+    wait_for("the real OpenShell shell report", Duration::from_secs(180), || tasks(&base).into_iter()
+        .find(|task| task["id"] == id && matches!(task["status"].as_str(), Some("done") | Some("blocked") | Some("failed"))));
+    let current = tasks(&base).into_iter().find(|task| task["id"] == id).unwrap();
+    assert_eq!(current["status"], "done", "{current}");
+    let deps_url = format!("{base}/api/dependencies?scope=demo");
+    let evidence_started = Instant::now();
+    let report = wait_for("preserved native allow and deny observations", Duration::from_secs(30), || {
+        let report = expect_ok(&deps_url, &get(&deps_url))["report"].clone();
+        let captures = report["service_evidence"]["captures"].as_array()?;
+        let accesses: Vec<_> = captures.iter().flat_map(|capture| capture["accesses"].as_array().into_iter().flatten()).collect();
+        if evidence_started.elapsed() > Duration::from_secs(28) {
+            let entries_url = format!("{base}/api/tasks/{id}/entries");
+            let entries = expect_ok(&entries_url, &get(&entries_url));
+            let messages: Vec<_> = entries["entries"].as_array().unwrap().iter().filter(|entry| entry["kind"] == "done").map(|entry| &entry["message"]).collect();
+            panic!("Missing native observations: {report}; shell outcome: {messages:?}");
+        }
+        (accesses.iter().any(|row| row["target"] == format!("host.openshell.internal:{}", daemon.port) && row["disposition"] == "allowed" && row["process"].as_str().is_some_and(|process| process.contains("curl")))
+            && accesses.iter().any(|row| row["target"].as_str().is_some_and(|target| target.ends_with(":1")) && row["disposition"] == "denied" && row["process"].as_str().is_some_and(|process| process.contains("curl")))).then_some(report)
+    });
+    assert_eq!(report["services"][1]["transport"], "file");
+    assert!(report["service_evidence"]["captures"].as_array().unwrap().iter().all(|capture| capture["partial"] == true));
+    wait_for("only this run sandbox to be deleted", Duration::from_secs(30), || {
+        let output = Command::new(&guard.cli).args(["sandbox", "get", &guard.sandbox, "-o", "json"]).output().unwrap();
+        (!output.status.success()).then_some(json!(true))
+    });
+    let preserved = expect_ok(&deps_url, &get(&deps_url))["report"].clone();
+    assert!(!preserved["service_evidence"]["captures"].as_array().unwrap().is_empty());
+    daemon.sigterm(); daemon.spawn();
+    let restarted = expect_ok(&deps_url, &get(&deps_url))["report"].clone();
+    assert_eq!(restarted["service_evidence"], preserved["service_evidence"]);
+    let cli = Command::new(&daemon.factory_bin).arg("--root").arg(&daemon.root).arg("--url").arg(&base)
+        .args(["--json", "dependencies", "demo"]).env_remove("FACTORY_TOKEN").env_remove("FACTORY_TASK_TOKEN").env_remove("FACTORY_RUN_TOKEN").output().unwrap();
+    assert!(cli.status.success(), "{}", String::from_utf8_lossy(&cli.stderr));
+    let cli_json: Value = serde_json::from_slice(&cli.stdout).unwrap();
+    assert_eq!(cli_json["report"]["service_evidence"], restarted["service_evidence"]);
+}
+
 #[test]
 fn task_inventory_links_follow_real_shell_completion_and_restart() {
     if missing_prerequisites() { return; }
@@ -583,7 +673,9 @@ fn ensure_restarts_a_real_dead_daemon_offline_and_records_a_failed_required_rout
     let fake_bin = assets.join("fixtures"); std::fs::create_dir_all(&fake_bin).unwrap();
     let route_log = assets.join("route-attempts");
     let tailscale = fake_bin.join("tailscale");
-    std::fs::write(&tailscale, "#!/bin/sh\nprintf 'route attempt\\n' >> \"$RECOVERY_TEST_ROUTE_LOG\"\nexit 42\n").unwrap();
+    // Metadata discovery may read `tailscale status`; only a mutating Serve
+    // invocation is a route repair, not every call to the same binary.
+    std::fs::write(&tailscale, "#!/bin/sh\nif [ \"${1:-}\" = serve ] && [ \"${2:-}\" != status ]; then printf 'route attempt\\n' >> \"$RECOVERY_TEST_ROUTE_LOG\"; fi\nexit 42\n").unwrap();
     std::fs::set_permissions(&tailscale, std::fs::Permissions::from_mode(0o755)).unwrap();
     let original = daemon.child.as_ref().unwrap().id();
     std::fs::write(env_home.join("daemon.pid"), original.to_string()).unwrap();
@@ -607,6 +699,7 @@ fn ensure_restarts_a_real_dead_daemon_offline_and_records_a_failed_required_rout
         .env("FACTORY_RELEASE_ROOT", &daemon.root).env("FACTORY_RELEASE_SCOPE", "demo")
         .env("FACTORY_RECORD_CLI", record_cli).env("FACTORY_BIN", &daemon.factory_bin).env("FACTORY_HERDR_BIN", &daemon.herdr_bin)
         .env("RECOVERY_TEST_ROUTE_LOG", &route_log)
+        .env("FACTORY_RENEWALS_DISCOVERY", "0")
         .env("PATH", format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap_or_default()))
         .output().unwrap();
     let refused = run(&assets.join("missing-record-cli"));
