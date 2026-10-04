@@ -1,0 +1,16 @@
+[package]
+name = "factory-assurance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.factory]
+level = 5
+
+[dependencies]
+factory-kernel = { path = "../factory-kernel" }
+factory-process = { path = "../factory-process" }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

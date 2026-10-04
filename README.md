@@ -24,8 +24,9 @@ the daemon cannot tell a built-in implementation from a plugin:
 | **Knowledge provider** | how the knowledge vault is searched — read side only | `keyword` |
 
 The public compatibility paths are in `crates/factory-core/src/adapter/`.
-The Agent and runtime traits are owned by L3's `factory-agents` and re-exported there;
-the other seams remain in core pending the level migration. Neither knows
+The Agent and runtime traits are owned by L3's `factory-agents`, and the
+TaskStore trait by L4's `factory-process`; core re-exports them. The other
+seams remain in core pending the level migration. None knows
 about sqlite, herdr, axum, or any other concrete choice.
 
 ## Quickstart
@@ -5039,8 +5040,34 @@ or search/evaluation logic. Core is only the compatibility/conversion bridge;
 L3 never depends on it. The trait methods, guide and reporting text are unchanged.
 
 This is a partial physical migration: live providers, storage and runtime
-services remain in the daemon. The
-remaining signpost reader move, L4–L6 and protocol/router migration, and
+services remain in the daemon. `factory-process` (L4) now owns the actual
+task/run lifecycle model, workflow planning and state, intake/ready rules,
+run usage deltas and provider-window allocation, occupancy schemas and the
+complete TaskStore seam. Dispatch projection into L3 is owned by L4 too.
+Core keeps identical canonical paths; existing workflow/compiler integration
+tests stay outside the ladder, without an upper-level dev dependency.
+
+L4 keeps generic execution plans and gate verification. L5's
+`factory-assurance` owns requirement validation and the sole compiler of
+policy and quality sources into that plan; L4 imports no declaration or
+compiler from above. The old core `resolve` path is only the adaptation
+bridge from policy declarations to L5's plain command inputs, not a second
+compiler. Waivers, tightened timeouts, deterministic order and enforced
+findings keep their existing behavior. The policy/check evaluator is still
+to be migrated, separately from this execution-plan compiler.
+
+`Task.bench_origin` is an L4 `OriginRef`, opaque to process. It has no
+benchmark-field API; the benchmark owner alone decodes its legacy object
+reference. Serde preserves existing stored/plugin JSON (and can carry future
+string ids). Rust callers assigning a `BenchOrigin` convert with `.into()`;
+this field-type change does not change the plugin protocol. Opacity is an
+ownership API, not a security boundary. Benchmark scheduling, resets/base
+selection and its own timer still await the service/command-ladder migration.
+Only the small shared slug/identifier validator moves from dataset to L0;
+no task, run, intake, workflow, plan compilation or usage accounting enters
+the kernel.
+
+The remaining signpost reader move, L6 and protocol/router migration, and
 strict command ladder are still ahead in #193.
 
 ## Layout
@@ -5049,6 +5076,8 @@ strict command ladder are still ahead in #193.
     crates/factory-infrastructure L1: backup, running environments and renewal domain behaviour
     crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
+    crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy and TaskStore
+    crates/factory-assurance      L5: requirement validation and the single execution-plan compiler (other assurance services still pending)
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary

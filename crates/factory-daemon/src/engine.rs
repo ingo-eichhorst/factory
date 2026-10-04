@@ -2689,7 +2689,7 @@ impl Engine {
         let mut task = factory_core::adapter::store::task_from_new(new, declared.name.clone(), agent, runtime);
         if let Some(id) = id { task.id = id; }
         task.workflow_origin = workflow_origin;
-        task.bench_origin = bench_origin;
+        task.bench_origin = bench_origin.map(Into::into);
         if let Some(intake) = intake {
             task.status = TaskStatus::Intake;
             task.intake = Some(intake);
@@ -3643,7 +3643,7 @@ impl Engine {
         let branch = worktree::branch_name(&task.id, &task.title, run.attempt);
         let dir = self.factory_snapshot().worktrees_dir().join(&run.id);
         let base = match &task.bench_origin {
-            Some(origin) => self.bench_case_base(origin).await,
+            Some(origin) => self.bench_case_base(origin).await?,
             None => task
                 .workflow_origin
                 .as_ref()
@@ -3695,7 +3695,7 @@ impl Engine {
         // dispatching the agent.
         if let Some(origin) = &task.bench_origin {
             if reused { return Ok((dir, run)); }
-            if let Some(reset) = self.bench_case_reset(origin).await {
+            if let Some(reset) = self.bench_case_reset(origin).await? {
                 if let Err(detail) = self.run_bench_reset(&dir, &reset).await {
                     return Err(FactoryError::BadRequest(format!("reset failed: {detail}")));
                 }
@@ -9802,16 +9802,22 @@ edges: [{id: next, from: implement, to: review}]
             // The teardown runs in the background, after the run is settled.
             assert_eq!(engine.store.get_run(&run.id).await.unwrap().unwrap().status, RunStatus::Done);
             let mut calls = String::new();
+            let mut entries = Vec::new();
             for _ in 0..100 {
                 calls = std::fs::read_to_string(tools.join("calls")).unwrap();
-                if calls.trim_end().ends_with(&format!("sandbox delete {}", teardown.sandbox)) && !teardown.state_dir.exists() {
+                entries = engine.store.run_entries(&run.id, 100).await.unwrap();
+                // Removal precedes the background worker's journal writes.
+                // Await the whole observable contract, not only its first
+                // side effects, before asserting the completion evidence.
+                if calls.trim_end().ends_with(&format!("sandbox delete {}", teardown.sandbox))
+                    && !teardown.state_dir.exists()
+                    && entries.iter().any(|e| e.kind == "sandbox" && e.message.contains("deleted sandbox")) {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             assert!(calls.trim_end().ends_with(&format!("sandbox delete {}", teardown.sandbox)), "{calls}");
             assert!(!teardown.state_dir.exists(), "the run's openshell files are gone");
-            let entries = engine.store.run_entries(&run.id, 100).await.unwrap();
             assert!(
                 entries.iter().any(|e| e.kind == "sandbox" && e.message.contains("deleted sandbox")),
                 "{:?}",

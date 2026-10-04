@@ -745,6 +745,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "factory-assurance"
+version = "0.1.0"
+dependencies = [
+ "factory-kernel",
+ "factory-process",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "factory-cli"
 version = "0.1.0"
 dependencies = [
@@ -768,9 +778,11 @@ dependencies = [
  "chrono",
  "csv",
  "factory-agents",
+ "factory-assurance",
  "factory-environment",
  "factory-infrastructure",
  "factory-kernel",
+ "factory-process",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -861,6 +873,23 @@ dependencies = [
  "serde_yaml_ng",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "factory-process"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "factory-agents",
+ "factory-kernel",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2 0.10.9",
+ "tokio",
  "uuid",
 ]
 
