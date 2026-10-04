@@ -63,11 +63,10 @@ export function agentTags(a) {
   }
   // Whether that sandbox could be made now (#234); the Sandboxes tab
   // names what is missing and the command that supplies it.
-  const readiness = readinessTag(a).trim();
-  if (readiness) tags.push(readiness);
+  tags.push(readinessTag(a).trim());
   if (a.source && a.source !== "builtin" && a.source !== "missing") tags.push(`<span class="tag plug">plugin</span>`);
   if (!a.declared) tags.push(`<span class="tag">undeclared</span>`);
-  return tags.join(" ");
+  return tags.filter(Boolean).join(" ");
 }
 
 export function renderAgents() {
