@@ -662,6 +662,16 @@ fn workspace_files_survive_fresh_shell_retry_restart_and_are_released_only_after
     assert_eq!(second["worktree_branch"], first["worktree_branch"]);
     assert!(second["resumed_session"].is_null(), "shell starts a fresh conversation, not a fake resume");
     assert!(path.exists(), "closed task with untracked work must be retained");
+    // The done mirror is published before the asynchronous finish path's
+    // workspace sweep. Wait for its retention decision before moving the
+    // file, or the sweep may correctly find it already clean and never leave
+    // the retention receipt this test asserts below.
+    wait_for("unsafe closed workspace is retained and journalled", Duration::from_secs(10), || {
+        let url = format!("{base}/api/tasks/{id}/entries");
+        let entries = expect_ok(&url, &get(&url));
+        entries["entries"].as_array().unwrap().iter()
+            .any(|entry| entry["kind"] == "workspace_retained").then_some(entries)
+    });
     let saved = daemon.root.join("saved-work");
     std::fs::rename(path.join("unfinished"), &saved).unwrap();
     daemon.sigterm();
