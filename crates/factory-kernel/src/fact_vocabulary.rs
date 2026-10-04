@@ -210,10 +210,14 @@ pub enum Grant {
     /// the instance root's config, never a value (`#244`).
     #[serde(rename = "secrets.edit")]
     SecretsEdit,
+    /// Change the host's macOS power mode -- Automatic, High performance or
+    /// Energy saving (`#260`). Owner-only, even when a role names the grant.
+    #[serde(rename = "host.power")]
+    HostPower,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 35] = [
+    pub const ALL: [Grant; 36] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -249,6 +253,7 @@ impl Grant {
         Grant::DeployRecord,
         Grant::DeployPublish,
         Grant::SecretsEdit,
+        Grant::HostPower,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -288,6 +293,7 @@ impl Grant {
             Self::SecretsEdit => "secrets.edit",
             Self::DeployRecord => "deploy.record",
             Self::DeployPublish => "deploy.publish",
+            Self::HostPower => "host.power",
         }
     }
     pub fn describe(self) -> &'static str {
@@ -329,6 +335,7 @@ impl Grant {
             Self::SecretsEdit => "change a declared secret's expiry, renew line or note (never its value)",
             Self::DeployRecord => "record a deployment or a release",
             Self::DeployPublish => "approve publishing a deployment to GitHub",
+            Self::HostPower => "change the host's power mode (Automatic, High performance, Energy saving)",
         }
     }
     pub fn group(self) -> &'static str {
@@ -365,6 +372,7 @@ impl Grant {
             Self::DashboardEdit => "Dashboard",
             Self::SecretsEdit => "Secrets",
             Self::DeployRecord | Self::DeployPublish => "Deployments",
+            Self::HostPower => "Host",
         }
     }
 }

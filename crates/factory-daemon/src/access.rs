@@ -233,6 +233,10 @@ impl Engine {
             // A declared secret's metadata in the instance root's config
             // (`#244`); never a value.
             Request::SecretSet { .. } => Grant::SecretsEdit,
+            // The host's power mode (`#260`): a change to the machine every
+            // run shares. Its own grant, never swept in by a wildcard, and
+            // checked against the root scope -- see `authorize` below.
+            Request::HostPowerModeSet { .. } => Grant::HostPower,
             Request::AgentStop { .. } => Grant::AgentStop,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
@@ -296,6 +300,9 @@ impl Engine {
             | Request::DependenciesVex { .. }
             | Request::Doctor
             | Request::Infrastructure
+            // `pmset -g` and `sudo -n -l`, which lists and never runs: the
+            // mode is read, nothing is changed (`#260`).
+            | Request::HostPowerMode
             | Request::ImportantDates { .. }
             // Lists the destination and reads the history; writes nothing.
             | Request::Backup
@@ -456,7 +463,7 @@ impl Engine {
                 Some(root) if root.name == *scope => Ok(()),
                 Some(root) => Err(FactoryError::Denied(format!(
                     "{} works in {scope}; the knowledge base, datasets, bench runs, policy \
-                     attestations, goals check-ins, backups and the secrets catalogue are company-wide and belong to the \
+                     attestations, goals check-ins, backups, the secrets catalogue and the host's power mode are company-wide and belong to the \
                      root scope ({:?}) alone",
                     caller.describe(),
                     root.name
@@ -732,6 +739,10 @@ impl Engine {
                 Reach::Scope => in_root_scope(),
                 Reach::Own => Err(deny("change a declared secret's metadata; that requires scope reach")),
             },
+            // The grant is explicit vocabulary, but even a named grant may
+            // not let a task change the shared host. Only the owner bypass
+            // above (UI/CLI) writes, like security confirmation.
+            Request::HostPowerModeSet { .. } => Err(deny("change the host's power mode; only the owner may do that")),
             // A deployment belongs to its environment's scope. Own reach
             // covers what the caller's own run deploys and nothing else: it
             // may start one from a run, and finish only one its run started.
@@ -1222,6 +1233,48 @@ mod tests {
         assert!(!allowed(&e, &worker("w"), set()).await);
         assert!(allowed(&e, &worker("w"), Request::Environment).await, "reading the tab is open");
         assert!(allowed(&e, &Caller::Owner, set()).await);
+    }
+
+    /// `#260`: only the owner changes the host, even when an agent's role
+    /// names host.power explicitly. Reading stays open to every agent.
+    #[tokio::test]
+    async fn host_power_is_owner_only_even_with_an_explicit_grant() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  keeper:\n    grants: [host.power]\n    reach: scope\n  \
+             own-keeper:\n    grants: [host.power]\n    reach: own\n  \
+             everything:\n    grants: ['*']\n    reach: scope\n",
+        );
+        let caller = |scope: &str, role: &str| Caller::Agent {
+            scope: scope.into(),
+            name: "w".into(),
+            role: Role::new(role),
+            run_id: None,
+        };
+        let set = || Request::HostPowerModeSet { mode: factory_core::protocol::PowerMode::HighPerformance };
+        assert!(!allowed(&e, &caller("demo", "keeper"), set()).await, "even an explicit grant in the root scope cannot change the host");
+        assert!(!allowed(&e, &caller("other", "keeper"), set()).await, "outside the root scope");
+        assert!(!allowed(&e, &caller("demo", "own-keeper"), set()).await, "own reach never covers the host");
+        assert!(!allowed(&e, &caller("demo", "everything"), set()).await, "`*` does not include host.power");
+        assert!(!allowed(&e, &caller("demo", "foreman"), set()).await, "foreman does not get it for free");
+        assert!(!allowed(&e, &worker("w"), set()).await);
+        assert!(allowed(&e, &worker("w"), Request::HostPowerMode).await, "reading the mode is open");
+        assert!(allowed(&e, &Caller::Owner, set()).await, "a person through the UI or CLI");
+        // Exercise the actual token/authorize/dispatch path, not just the
+        // grant predicate: a denied agent must reach no host command.
+        let host = crate::host_power::testing::FakeHost::mac();
+        host.install_rule();
+        e.host_power.replace_runner(host.clone());
+        let mut agent = AgentSession::new("demo", "w", "shell", "herdr", Lifetime::Permanent, Role::new("keeper"));
+        agent.assigned_role = Some(Role::new("keeper"));
+        agent.token = Some("host-power-agent-test".into());
+        e.store.put_agent(&agent).await.unwrap();
+        let response = e.handle(factory_core::protocol::Envelope {
+            token: agent.token,
+            request: set(),
+        }).await;
+        assert!(matches!(&response, factory_core::protocol::Response::Error { code, .. } if code == "denied"), "{response:?}");
+        assert!(host.calls().is_empty(), "an agent write reaches no command");
     }
 
     /// `#152`: verifying an encrypted snapshot decrypts it, so an `identity`

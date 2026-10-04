@@ -20,7 +20,7 @@ const { renderDoctor } = await import("../js/doctor.js");
 test("Doctor is the L1 tab between Infrastructure and Backup", () => {
   assert.match(page, /id="tab-infrastructure"[^>]*>Infrastructure<\/button>\s*<button id="tab-doctor" hidden>Doctor<\/button>\s*<button id="tab-environments" hidden>Operations<\/button>\s*<button id="tab-backup" hidden>Backup<\/button>/);
   assert.match(page, /id="view-doctor"/);
-  assert.match(app, /infra: \["infrastructure", "doctor", "environments", "backup", "dates"\]/);
+  assert.match(app, /infra: \["infrastructure", "doctor", "environments", "backup", "mac", "dates"\]/);
   assert.match(app, /doctor: \{ onShow: startDoctor, onHide: stopAgentPoll \}/);
 });
 

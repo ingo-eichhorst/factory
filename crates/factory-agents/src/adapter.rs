@@ -771,6 +771,11 @@ impl AgentContext {
                      PUT /api/secrets/<name>, not this CLI; the catalogue is company-wide, not scoped"
                         .to_string()
                 }
+                Grant::HostPower => {
+                    "host.power is reserved for the owner through the UI/CLI; an agent, task, schedule or run \
+                     cannot change the shared host's power mode, even with this grant. Reading is allowed."
+                        .to_string()
+                }
                 Grant::DashboardEdit => {
                     "dashboard.edit -> save or reset the dashboard layout for a scope; today that is the \
                      web UI's Dashboard > Customise, or PUT/DELETE /api/dashboard?scope=, not this CLI"

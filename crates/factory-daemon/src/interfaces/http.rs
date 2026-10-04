@@ -119,6 +119,8 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/dependencies", get(dependencies))
         .route("/api/dependencies/documents/{id}", get(dependency_document))
         .route("/api/doctor", get(doctor))
+        // The L1 Mac tab (`#260`): read the power mode, or set it.
+        .route("/api/host/power-mode", get(host_power_mode).post(host_power_mode_set))
         .route("/api/important-dates", get(important_dates))
         .route("/api/infrastructure", get(infrastructure))
         .route("/api/environments", get(environments))
@@ -514,6 +516,37 @@ async fn doctor(State(engine): State<Arc<Engine>>) -> AxumResponse {
 
 async fn important_dates(State(engine): State<Arc<Engine>>, Query(q): Query<PolicyQuery>) -> AxumResponse {
     run(&engine, Request::ImportantDates { scope: q.scope.filter(|scope| !scope.trim().is_empty()) }).await
+}
+
+async fn host_power_mode(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::HostPowerMode).await
+}
+
+/// `POST /api/host/power-mode`'s body: `{"mode": "automatic" |
+/// "high_performance" | "energy_saving"}` and nothing else.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PowerModeBody {
+    mode: factory_core::protocol::PowerMode,
+}
+
+/// Read by hand, so an empty body, a number, an unknown name or an extra
+/// field is a 400 in the usual envelope -- refused here, before the engine
+/// is asked and long before any command could be built (`#260`).
+fn power_mode_of(body: &[u8]) -> std::result::Result<factory_core::protocol::PowerMode, String> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Err("a power mode is required: {\"mode\": \"automatic\" | \"high_performance\" | \"energy_saving\"}".into());
+    }
+    serde_json::from_slice::<PowerModeBody>(body)
+        .map(|b| b.mode)
+        .map_err(|e| format!("not a power mode: {e}; use automatic, high_performance or energy_saving"))
+}
+
+async fn host_power_mode_set(State(engine): State<Arc<Engine>>, body: axum::body::Bytes) -> AxumResponse {
+    match power_mode_of(&body) {
+        Ok(mode) => run(&engine, Request::HostPowerModeSet { mode }).await,
+        Err(why) => refused(why),
+    }
 }
 
 async fn backup(State(engine): State<Arc<Engine>>) -> AxumResponse {
@@ -2606,6 +2639,53 @@ mod tests {
 
         let (status, _) = request(engine, "GET", "/api/tasks/nope/usage", None).await;
         assert_eq!(status, 404);
+    }
+
+    /// `#260`: anything but one of the three names is a 400 that runs
+    /// nothing; a name runs exactly its one command.
+    #[tokio::test]
+    async fn post_api_host_power_mode_refuses_every_other_value_before_any_command() {
+        use crate::host_power::testing::FakeHost;
+        let engine = engine_with_quality();
+        let host = FakeHost::mac();
+        host.install_rule();
+        engine.host_power.replace_runner(host.clone());
+
+        for body in [
+            r#"{"mode":"3"}"#,
+            r#"{"mode":3}"#,
+            r#"{"mode":"auto; rm"}"#,
+            r#"{"mode":""}"#,
+            r#"{"mode":"Automatic"}"#,
+            r#"{"mode":"automatic","extra":1}"#,
+            r#"{}"#,
+            "",
+            "3",
+            "not json",
+        ] {
+            let (status, json) = request(engine.clone(), "POST", "/api/host/power-mode", Some(body)).await;
+            assert_eq!(status, 400, "{body:?}: {json}");
+            assert_eq!(json["code"], "bad_request", "{body:?}: {json}");
+            assert!(host.calls().is_empty(), "{body:?} reached a command: {:?}", host.calls());
+        }
+
+        let (status, json) = request(engine.clone(), "GET", "/api/host/power-mode", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["kind"], "host_power_mode");
+        assert_eq!(json["data"]["report"]["ac"], "automatic");
+        assert_eq!(json["data"]["report"]["can_change"], true);
+        assert!(host.writes().is_empty(), "a read writes nothing");
+
+        let (status, json) =
+            request(engine.clone(), "POST", "/api/host/power-mode", Some(r#"{"mode":"high_performance"}"#)).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["report"]["ac"], "high_performance");
+        assert_eq!(json["data"]["report"]["battery"], "high_performance");
+        assert_eq!(json["data"]["report"]["changes"][0]["to"], "high_performance");
+        assert_eq!(
+            host.writes(),
+            vec![vec!["/usr/bin/sudo", "-n", "-k", "-u", "root", "--", "/usr/bin/pmset", "-a", "powermode", "2"]]
+        );
     }
 
     #[tokio::test]

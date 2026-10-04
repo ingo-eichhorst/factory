@@ -4653,6 +4653,43 @@ special case here: an encrypted newest snapshot counts toward
 `backup_verified` only once an owner has actually verified it with its
 identity, exactly as a plaintext one does.
 
+### The host's power mode (#260)
+
+The L1 **Mac** tab shows the Mac's energy mode -- *Automatic*, *High
+performance*, *Energy saving*, which `pmset` numbers `powermode 0`, `2` and
+`1` -- as a three-way segmented control. `GET /api/host/power-mode` (the
+`host.power_mode` request, `factory power-mode`) reads `pmset -g custom` for
+AC and battery separately, `pmset -g cap` for whether the host offers the
+modes (`lowpowermode` / `highpowermode`), and asks `sudo -n -k -l -l -u root --
+/usr/bin/pmset -a powermode N` for each offered mode. This never executes the
+command, ignores cached credentials and requires the matching verbose rule's
+explicit `!authenticate` (NOPASSWD) setting; exit zero from a listing alone
+does not prove passwordless write permission. AC and battery that disagree read *mixed*. Off
+macOS the answer is "not applicable", never an error.
+
+`POST /api/host/power-mode` with `{"mode": "automatic" | "high_performance" |
+"energy_saving"}` (the `host.power_mode.set` request, `factory power-mode
+high-performance`) runs `sudo -n -k -u root -- /usr/bin/pmset -a powermode N` for every
+power source, then reads it back. Missing, failed or disagreeing read-back
+returns an error, not success; an accepted write is still journaled with its
+confirmation status. An unreadable before-state refuses the write. Any other body -- a number, an unknown name,
+an extra field, nothing -- is a 400 before the engine is asked; the number
+comes from a `match` over the closed enum, and the command runner takes only
+`&'static str` arguments, so nothing a caller sent reaches a command. The
+daemon is a launchd job with no TTY, so `sudo -n` never prompts: setting works
+only once the owner installs a drop-in scoped to exactly the three commands,
+which the tab shows (with the user the daemon runs as) until it is there:
+
+    factory ALL=(root) NOPASSWD: /usr/bin/pmset -a powermode 0, /usr/bin/pmset -a powermode 1, /usr/bin/pmset -a powermode 2
+
+at `/etc/sudoers.d/factory-pmset`, checked with `visudo -cf` before it is
+installed `0440` root-owned. The `host.power` grant is explicit vocabulary
+and never part of a `*` or a `foreman`, but even an explicitly granted agent
+cannot write: only the owner through UI/CLI changes the mode, and
+the click is the confirmation. Each change is journaled under `factory:host`
+with who, from and to. Tests never run a real `pmset` or `sudo`: under
+`cfg(test)` there is no runner unless a test injects a fake.
+
 ## Writing a plugin
 
 A plugin is any program that reads one JSON object per line on stdin and writes
