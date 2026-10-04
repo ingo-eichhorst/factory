@@ -201,6 +201,8 @@ test("loading asks for the selected scope, then renders the board, delta table, 
   assert.match(elements["scn-signposts"].innerHTML, /scn-sp-triggered/, "the triggered throughput signpost lights up");
   assert.match(elements["scn-delta"].innerHTML, /Effective throughput/);
   assert.match(elements["scn-drivers"].innerHTML, /Capacity factor/);
+  assert.doesNotMatch(elements["scn-drivers"].innerHTML, /id="scn-slider-unit_cost"/);
+  assert.match(elements["scn-outcomes"].innerHTML, /Weekly USD: unavailable/);
   // Not just the `<option>` text (which would pass on an empty table too):
   // the cell itself, clickable and carrying its own scope/framework data.
   assert.match(elements["scn-matrix"].innerHTML, /data-matrix-scope="dev-scenarios-100" data-matrix-fw="ai-act"/);
@@ -227,4 +229,44 @@ test("a link with a level segment and an old bare link both land on the Scenario
   globalThis.location = { hash: "#all/scenarios" };
   assert.equal(readHash().page, "scenarios");
   delete globalThis.location;
+});
+
+test("complete measurements enable cost sliders, scope the what-if and expose USD/token sensitivity", async () => {
+  const elements = Object.fromEntries(["scn-drivers", "scn-outcomes", "scn-tornado", "scn-tornado-outcome"].map((id) => [id, stubElement()]));
+  globalThis.document = { ...bare, getElementById: (id) => elements[id] || null };
+  const report = structuredClone(REAL_REPORT);
+  report.baseline.drivers.unit_cost = 3;
+  report.baseline.drivers.tokens_per_run = 2000;
+  let body;
+  globalThis.fetch = async (path, options) => {
+    let data;
+    if (path.startsWith("/api/scenarios/whatif")) {
+      body = JSON.parse(options.body);
+      data = { result: { drivers: {
+        overridden: report.baseline.drivers,
+        outcomes_before: { effective_throughput: 10, weekly_cost: 30, weekly_tokens: 20000 },
+        outcomes_after: { effective_throughput: 10, weekly_cost: 30, weekly_tokens: 20000 },
+        tornado: [], tornados: { weekly_cost: [{ driver: "unit_cost", low_outcome: 24, high_outcome: 36, span: 12 }] },
+      }, forecast: report.baseline.forecast } };
+    } else if (path.startsWith("/api/metrics")) data = { registry: [] };
+    else data = { report };
+    return { status: 200, json: async () => ({ status: "ok", data }) };
+  };
+  state.scope = "demo";
+  try {
+    await loadScenarios();
+    assert.equal(body.scope, "demo");
+    assert.match(elements["scn-drivers"].innerHTML, /id="scn-slider-unit_cost"/);
+    assert.match(elements["scn-drivers"].innerHTML, /id="scn-slider-tokens_per_run"/);
+    assert.match(elements["scn-outcomes"].innerHTML, /Weekly USD: \$30.00 → \$30.00/);
+    assert.match(elements["scn-outcomes"].innerHTML, /Weekly tokens: 20000.00 → 20000.00/);
+    elements["scn-tornado-outcome"].value = "weekly_cost";
+    elements["scn-tornado-outcome"].onchange();
+    assert.match(elements["scn-tornado"].innerHTML, /swing on weekly_cost/);
+    assert.match(elements["scn-tornado"].innerHTML, /unit_cost/);
+  } finally {
+    state.scope = null;
+    globalThis.document = bare;
+    delete globalThis.fetch;
+  }
 });

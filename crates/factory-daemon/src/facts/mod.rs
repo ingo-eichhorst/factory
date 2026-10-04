@@ -131,11 +131,16 @@ mod tests {
     fn spend_consumers_have_no_second_aggregation_or_upward_l6_helper() {
         let budget = include_str!("../budgets.rs").split("#[cfg(test)]").next().unwrap();
         assert!(budget.contains("get::<CostReport>"));
+        assert!(budget.contains("budget_policy_input") && budget.contains("month_spend"));
         assert!(!budget.contains("runs_between") && !budget.contains("crate::costs"));
         let costs = include_str!("../costs.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!costs.contains("fn spend(") && !costs.contains("fn costs_report("));
         let producer = include_str!("l4.rs");
         assert!(!producer.contains("policies::subtree_scopes"));
         assert!(producer.contains("impl Provide<CostReport> for Provider"));
+        let metrics = include_str!("../metrics.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(metrics.contains("get::<factory_kernel::CostReport>") && metrics.contains("SpendBasis::Finished"));
+        let branch = metrics.split("} else if matches!(id.as_str(), \"unit_cost\" | \"tokens_per_run\") {").nth(1).unwrap().split("} else if is_usage_metric").next().unwrap();
+        assert!(branch.contains("sources.spend") && !branch.contains("usage_value"));
     }
 }

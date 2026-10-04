@@ -280,6 +280,9 @@ pub enum Check {
     /// other name is a [`Finding`] ([`FindingKind::UnknownDaemonFact`]) and
     /// stays `open`.
     Daemon { fact: String },
+    /// Authored monthly caps on this scope and its ancestors, evaluated
+    /// against their full subtrees through the L4 spend fact port (#164).
+    BudgetWithin,
     /// `#158` phase 1: whether finished runs of `category` actually
     /// conformed to their own control plan's `step`, within `max_age` --
     /// the "did the plant do what it says it does" counterpart to
@@ -334,6 +337,7 @@ impl Check {
             Check::Secrets { .. } => "secrets",
             Check::Dependencies { .. } => "dependencies",
             Check::Daemon { .. } => "daemon",
+            Check::BudgetWithin => "budget_within",
             Check::Attested { .. } => "attested",
         }
     }
@@ -389,6 +393,7 @@ impl Check {
                 }
             }
             Check::Daemon { fact } => format!("daemon: {fact}"),
+            Check::BudgetWithin => "budget_within: applicable authored monthly USD caps".into(),
             Check::Dependencies { sbom_max_age, built_sbom, max_open, exploited_open } => {
                 let mut terms = Vec::new();
                 if let Some(age) = sbom_max_age { terms.push(format!("SBOM max_age {age}")); }
@@ -1082,7 +1087,7 @@ fn daemon_fact_value(fact: &str, evidence: &Evidence) -> Option<Option<bool>> {
 /// Not `deny_unknown_fields`, for the same reason: a wire payload from a
 /// newer build of Factory naming a field this build does not know about yet
 /// should still parse.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Evidence {
     /// Every tag present anywhere in the knowledge vault.
     #[serde(default)]
@@ -1142,6 +1147,9 @@ pub struct Evidence {
     /// only when some applicable control names one.
     #[serde(default)]
     pub attested: Option<Vec<AttestedRun>>,
+    /// Authored configuration goes down; raw spend stays an L4 fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<crate::budget::PolicyInput>,
 }
 
 // =============================================================== evaluate
@@ -1727,6 +1735,10 @@ fn direct_status(applied: &Applied, evidence: &Evidence, now: DateTime<Utc>) -> 
                         None => open.push(format!("daemon: not resolved for `{fact}`")),
                     }
                 }
+            }
+            Check::BudgetWithin => {
+                let (within, reason) = crate::budget::within(evidence.budget.as_ref(), now);
+                if within == Some(true) { satisfied.push(reason); } else { open.push(reason); }
             }
             Check::Dependencies { sbom_max_age: _, built_sbom, max_open, exploited_open } => {
                 let Some(fact) = &evidence.dependencies else {

@@ -9,10 +9,8 @@
 //! (`GET /api/scenarios`); a scope selected narrows to that scope and its
 //! descendants (`GET /api/scenarios?scope=`) -- the daemon does the
 //! narrowing itself, the same pattern `policy.js`'s `loadPolicy` follows.
-//! `POST /api/scenarios/whatif` is the one exception: it carries no `scope`
-//! at all (README, "What-if"), so the driver panel always explores the
-//! whole instance even when a scope is selected on the rail -- `driverPanelHtml`
-//! says so in a caption rather than leaving a mismatch unexplained.
+//! `POST /api/scenarios/whatif` carries the selected scope too (#164), so
+//! measured baselines, outcomes and the slider panel share one subtree.
 
 import { $, api, esc, state } from "./core.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
@@ -314,7 +312,7 @@ function deltaTableHtml() {
     .map(
       (r) => `<tr>
     <td>${esc(r.label)} <span class="scn-band-tag">${r.exact ? "exact" : "p10–p90 band"}</span></td>
-    ${r.cells.map((c) => `<td class="scn-delta scn-tone-${c.tone} scn-mag-${c.mag}">${formatDeltaCell(c, r.unit)}</td>`).join("")}
+    ${r.cells.map((c) => `<td class="scn-delta scn-tone-${c.tone} scn-mag-${c.mag}" title="${esc(c.reason || "")}">${formatDeltaCell(c, r.unit)}</td>`).join("")}
   </tr>`,
     )
     .join("");
@@ -337,7 +335,7 @@ function currentDriverValues() {
 }
 
 function driverRowHtml(def, values) {
-  if (def.unavailable) {
+  if (def.unavailable || (def.measuredCost && !Number.isFinite(report.baseline.drivers[def.id]))) {
     return `<div class="scn-driver-row scn-driver-disabled">
       <div class="scn-driver-label">${esc(def.title)} <span class="scn-chip scn-assumption">unavailable</span></div>
       <div class="sub">${esc(driverUnavailableReason(def, report.baseline.metrics, metricDefs))}</div>
@@ -345,6 +343,7 @@ function driverRowHtml(def, values) {
   }
   const raw = moved[def.id] !== undefined ? moved[def.id] : values[def.id] !== undefined ? values[def.id] : neutralDefault(def.id);
   const range = driverRange(def.id, report.baseline.drivers[def.id]);
+  range.max = Math.max(range.max, raw);
   return `<div class="scn-driver-row">
     <div class="scn-driver-label">${esc(def.title)} ${def.assumption ? `<span class="scn-chip scn-assumption">assumption</span>` : ""}</div>
     <input type="range" id="scn-slider-${esc(def.id)}" min="${range.min}" max="${range.max}" step="${range.step}" value="${raw}" data-driver="${esc(def.id)}" aria-label="${esc(def.title)}">
@@ -357,29 +356,38 @@ function outcomeHtml() {
   if (!whatifResult) return `<div class="sub">Move a slider to see outcomes.</div>`;
   const before = whatifResult.drivers.outcomes_before.effective_throughput;
   const after = whatifResult.drivers.outcomes_after.effective_throughput;
-  // `effective_throughput = throughput_week × capacity_factor × first_pass_yield`
-  // -- zero on both sides means `throughput_week` itself is zero (a fresh
-  // instance, or a slider that has not moved it yet), which no amount of
-  // `capacity_factor`/`first_pass_yield` swinging can change. A note, not a
-  // "0.00 → 0.00" line that reads as though nothing happened.
-  if (before === 0 && after === 0) {
-    return `<div class="empty">Effective throughput is 0 -- move "Throughput per week" above to explore a hypothetical rate.</div>`;
+  if (!Number.isFinite(before) || !Number.isFinite(after)) {
+    return `<div class="empty">${esc(whatifResult.drivers.outcome_reasons_after?.effective_throughput || "Effective throughput is unavailable")}</div>`;
   }
+  const costs = [["weekly_cost", "Weekly USD", "$"], ["weekly_tokens", "Weekly tokens", ""]].map(([id, title, prefix]) => {
+    const a = whatifResult.drivers.outcomes_before[id];
+    const b = whatifResult.drivers.outcomes_after[id];
+    if (!Number.isFinite(a) || !Number.isFinite(b)) {
+      const reason = whatifResult.drivers.outcome_reasons_after?.[id] || whatifResult.drivers.outcome_reasons_before?.[id] || "complete measured usage is unavailable";
+      return `<div class="sub">${title}: unavailable — ${esc(reason)}</div>`;
+    }
+    return `<div class="scn-outcome">${title}: ${prefix}${a.toFixed(2)} → ${prefix}${b.toFixed(2)}</div>`;
+  }).join("");
   const tone = deltaTone(before, after, "higher");
   const fc = whatifResult.forecast.completion_week;
   return `<div class="scn-outcome scn-tone-${tone.tone}">Effective throughput: ${before.toFixed(2)} → ${after.toFixed(2)} / week</div>
+    ${before === 0 && after === 0 ? '<div class="empty">Effective throughput is 0 -- move "Throughput per week" above to explore a hypothetical rate.</div>' : ""}
+    ${costs}
     <div class="sub">completion: p50 ${esc(formatWeek(fc.p50))} · p90 ${esc(formatWeek(fc.p90))}</div>`;
 }
 
+let tornadoOutcome = "effective_throughput";
+
 function tornadoSvg() {
   if (!whatifResult) return "";
-  const layout = tornadoLayout(whatifResult.drivers.tornado);
+  const barsForOutcome = whatifResult.drivers.tornados?.[tornadoOutcome] || (tornadoOutcome === "effective_throughput" ? whatifResult.drivers.tornado : []);
+  const layout = tornadoLayout(barsForOutcome);
   if (!layout.bars.length) return `<div class="empty">No drivers to compare.</div>`;
   // Every bar spans zero exactly when `effective_throughput` itself is zero
   // on both sides (`outcomeHtml`'s own note covers why) -- three empty
   // hairlines say nothing a person can act on; one line does.
   if (layout.bars.every((b) => b.span === 0)) {
-    return `<div class="empty">No driver moves effective throughput right now -- see the note above.</div>`;
+    return `<div class="empty">No driver moves ${esc(tornadoOutcome)} right now -- see the note above.</div>`;
   }
   const rowH = 24;
   const gap = 8;
@@ -398,7 +406,7 @@ function tornadoSvg() {
     })
     .join("");
   return `<svg class="scn-tornado" viewBox="0 0 ${labelW + chartW} ${height}" role="img"
-      aria-label="Tornado chart: each driver's swing on effective throughput at plus or minus 20 percent.">${bars}</svg>`;
+      aria-label="Tornado chart: each driver's swing on ${esc(tornadoOutcome)} at plus or minus 20 percent.">${bars}</svg>`;
 }
 
 function driverPanelHtml() {
@@ -406,7 +414,7 @@ function driverPanelHtml() {
   const values = currentDriverValues();
   const scopeCaption =
     state.scope !== null
-      ? `<p class="env-note">Whole instance -- the what-if endpoint takes no scope, so this panel explores every scope even though <code class="id">${esc(state.scope)}</code> is selected on the rail.</p>`
+      ? `<p class="env-note">Selected scope and descendants: <code class="id">${esc(state.scope)}</code>. Cost and token baselines use fully measured finished runs.</p>`
       : "";
   const options =
     `<option value="" ${!driverScenario ? "selected" : ""}>Baseline</option>` +
@@ -414,6 +422,8 @@ function driverPanelHtml() {
       .map((s) => `<option value="${esc(s.scenario.name)}" ${driverScenario === s.scenario.name ? "selected" : ""}>${esc(s.scenario.title)}</option>`)
       .join("");
   const sliders = DRIVER_DEFS.map((def) => driverRowHtml(def, values)).join("");
+  const tornadoOptions = [["effective_throughput", "Effective throughput"], ["weekly_cost", "Weekly USD"], ["weekly_tokens", "Weekly tokens"]]
+    .map(([id, title]) => `<option value="${id}" ${tornadoOutcome === id ? "selected" : ""}>${title}</option>`).join("");
   return `
     <div class="bar"><h3>Driver panel</h3><span class="sp"></span>
       <select id="scn-driver-select">${options}</select>
@@ -423,7 +433,8 @@ function driverPanelHtml() {
     <div class="scn-driver-grid">${sliders}</div>
     <h4 class="pol-sub-head">Outcomes</h4>
     <div id="scn-outcomes">${outcomeHtml()}</div>
-    <h4 class="pol-sub-head">Tornado — effective throughput, ±20% per driver</h4>
+    <h4 class="pol-sub-head">Tornado — ±20% per driver</h4>
+    <select id="scn-tornado-outcome" aria-label="Tornado outcome">${tornadoOptions}</select>
     <div id="scn-tornado">${tornadoSvg()}</div>`;
 }
 
@@ -437,6 +448,12 @@ function renderDriverPanel() {
 function wireDriverPanel(root) {
   root = root || $("scn-drivers");
   if (!root) return;
+  const outcome = $("scn-tornado-outcome");
+  if (outcome) outcome.onchange = () => {
+    tornadoOutcome = outcome.value;
+    const chart = $("scn-tornado");
+    if (chart) chart.innerHTML = tornadoSvg();
+  };
   const select = $("scn-driver-select");
   if (select) {
     select.onchange = () => {
@@ -445,7 +462,7 @@ function wireDriverPanel(root) {
       whatifResult = null;
       whatifError = null;
       renderDriverPanel();
-      doWhatif();
+      void doWhatif();
     };
   }
   const reset = $("scn-driver-reset");
@@ -455,7 +472,7 @@ function wireDriverPanel(root) {
       whatifResult = null;
       whatifError = null;
       renderDriverPanel();
-      doWhatif();
+      void doWhatif();
     };
   }
   for (const input of root.querySelectorAll("input[type=range]")) {
@@ -485,7 +502,7 @@ function scheduleWhatif() {
 async function doWhatif() {
   if (!report) return;
   const mine = ++whatifAsked;
-  const body = whatifBody(driverScenario, moved);
+  const body = whatifBody(driverScenario, moved, state.scope);
   try {
     const answer = await api("/api/scenarios/whatif", { method: "POST", body: JSON.stringify(body) });
     if (mine !== whatifAsked) return;
@@ -834,6 +851,12 @@ async function loadMetricDefs() {
 
 export async function loadScenarios() {
   const mine = ++asked;
+  ++whatifAsked;
+  if (whatifTimer) clearTimeout(whatifTimer);
+  report = null;
+  whatifResult = null;
+  whatifError = null;
+  renderScenarios();
   const query = state.scope === null ? "" : `?scope=${encodeURIComponent(state.scope)}`;
   try {
     const answer = await api(`/api/scenarios${query}`);
@@ -856,7 +879,7 @@ export async function loadScenarios() {
   whatifResult = null;
   whatifError = null;
   renderScenarios();
-  if (report) doWhatif();
+  if (report) await doWhatif();
 }
 
 /// `policy_changed`/`goals_changed`: a scenario's own policy delta and goal
@@ -867,11 +890,11 @@ export async function loadScenarios() {
 /// already on screen, so a run finishing leaves Refresh to catch up rather
 /// than firing a reload on every one of them.
 export function reloadScenarios() {
-  loadScenarios();
+  void loadScenarios();
 }
 
 export function wireScenarios() {
   const button = $("scn-refresh");
-  if (button) button.onclick = () => loadScenarios();
+  if (button) button.onclick = () => void loadScenarios();
   wireModeSeg();
 }

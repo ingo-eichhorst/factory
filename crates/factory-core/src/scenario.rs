@@ -1216,8 +1216,7 @@ pub fn driver_defs() -> Vec<DriverDef> {
         // `capacity_factor`. Should either become unavailable again,
         // `validate_scenario` refuses a relative override against it
         // (`FindingKind::UnavailableDriver`); only `=N` would survive.
-        // Neither feeds `evaluate_outcomes`' throughput model yet -- cost
-        // drivers in Scenarios are #117's v3.
+        // Both feed measured weekly outcomes; neither assumes a token price.
         DriverDef {
             id: "unit_cost",
             title: "Unit cost",
@@ -1264,24 +1263,28 @@ pub enum Override {
 pub fn parse_override(raw: &str) -> std::result::Result<Override, String> {
     let s = raw.trim();
     let bad = || format!("{raw:?} is not a valid override: expected ×N, xN, +N%, -N%, +N, -N, or =N");
+    let number = |raw: &str| -> std::result::Result<f64, String> {
+        let value: f64 = raw.parse().map_err(|_| bad())?;
+        if value.is_finite() { Ok(value) } else { Err("driver overrides must be finite".into()) }
+    };
 
     if let Some(rest) = s.strip_prefix('=') {
-        let v: f64 = rest.trim().parse().map_err(|_| bad())?;
+        let v = number(rest.trim())?;
         return Ok(Override::Set(v));
     }
     if let Some(rest) = s.strip_prefix('×').or_else(|| s.strip_prefix(['x', 'X'])) {
-        let v: f64 = rest.trim().parse().map_err(|_| bad())?;
+        let v = number(rest.trim())?;
         return Ok(Override::Multiply(v));
     }
     if let Some(rest) = s.strip_suffix('%') {
         if !(rest.starts_with('+') || rest.starts_with('-')) {
             return Err(format!("{raw:?} is not a valid override: a percent change must start with + or -"));
         }
-        let v: f64 = rest.parse().map_err(|_| bad())?;
+        let v = number(rest)?;
         return Ok(Override::PercentChange(v / 100.0));
     }
     if s.starts_with('+') || s.starts_with('-') {
-        let v: f64 = s.parse().map_err(|_| bad())?;
+        let v = number(s)?;
         return Ok(Override::Delta(v));
     }
     Err(bad())
@@ -1329,10 +1332,36 @@ pub fn apply_overrides(baseline: &BTreeMap<DriverId, f64>, overrides: &BTreeMap<
 /// happens to carry.
 pub fn evaluate_outcomes(values: &BTreeMap<DriverId, f64>) -> BTreeMap<OutcomeId, f64> {
     let get = |id: &str, default: f64| values.get(id).copied().unwrap_or(default);
-    let effective_throughput = get("throughput_week", 0.0) * get("capacity_factor", 1.0) * get("first_pass_yield", 1.0);
+    let inputs = [get("throughput_week", 0.0), get("capacity_factor", 1.0), get("first_pass_yield", 1.0)];
+    let effective_throughput = inputs.iter().product::<f64>();
     let mut out = BTreeMap::new();
-    out.insert("effective_throughput".to_string(), effective_throughput);
+    let valid = inputs.iter().all(|v| v.is_finite() && *v >= 0.0) && effective_throughput.is_finite();
+    if valid {
+        out.insert("effective_throughput".to_string(), effective_throughput);
+    }
+    for (driver, outcome) in [("unit_cost", "weekly_cost"), ("tokens_per_run", "weekly_tokens")] {
+        if let Some(value) = values.get(driver).filter(|v| valid && v.is_finite() && **v >= 0.0) {
+            let product = effective_throughput * value;
+            if product.is_finite() && product >= 0.0 {
+                out.insert(outcome.to_string(), product);
+            }
+        }
+    }
     out
+}
+
+/// Missing or invalid cost measurements omit a forecast, never imply free usage.
+pub fn outcome_reasons(values: &BTreeMap<DriverId, f64>) -> BTreeMap<OutcomeId, String> {
+    let outcomes = evaluate_outcomes(values);
+    let mut reasons: BTreeMap<OutcomeId, String> = [("weekly_cost", "unit_cost"), ("weekly_tokens", "tokens_per_run")]
+        .into_iter()
+        .filter(|(outcome, _)| !outcomes.contains_key(*outcome))
+        .map(|(outcome, driver)| (outcome.into(), format!("{outcome} unavailable: requires a complete, finite nonnegative measured {driver} baseline and a finite nonnegative throughput")))
+        .collect();
+    if !outcomes.contains_key("effective_throughput") {
+        reasons.insert("effective_throughput".into(), "effective throughput requires finite nonnegative inputs and a finite result".into());
+    }
+    reasons
 }
 
 /// Weeks to clear `backlog` at `effective_throughput` -- its own function
@@ -1367,17 +1396,20 @@ pub struct TornadoBar {
 /// order is deterministic even when two drivers swing an outcome by exactly
 /// the same amount.
 pub fn tornado(baseline: &BTreeMap<DriverId, f64>, outcome_id: &str, swing: f64) -> Vec<TornadoBar> {
+    if !evaluate_outcomes(baseline).contains_key(outcome_id) || !swing.is_finite() || !(0.0..=1.0).contains(&swing) {
+        return Vec::new();
+    }
     let mut bars: Vec<TornadoBar> = baseline
         .iter()
-        .map(|(driver, &value)| {
+        .filter_map(|(driver, &value)| {
             let mut low_map = baseline.clone();
             let mut high_map = baseline.clone();
             low_map.insert(driver.clone(), value * (1.0 - swing));
             high_map.insert(driver.clone(), value * (1.0 + swing));
-            let a = evaluate_outcomes(&low_map).get(outcome_id).copied().unwrap_or(0.0);
-            let b = evaluate_outcomes(&high_map).get(outcome_id).copied().unwrap_or(0.0);
+            let a = evaluate_outcomes(&low_map).get(outcome_id).copied()?;
+            let b = evaluate_outcomes(&high_map).get(outcome_id).copied()?;
             let (low, high) = (a.min(b), a.max(b));
-            TornadoBar { driver: driver.clone(), low_outcome: low, high_outcome: high, span: high - low }
+            Some(TornadoBar { driver: driver.clone(), low_outcome: low, high_outcome: high, span: high - low })
         })
         .collect();
     bars.sort_by(|a, b| b.span.partial_cmp(&a.span).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.driver.cmp(&b.driver)));
@@ -1705,6 +1737,36 @@ mod tests {
     }
 
     #[test]
+    fn measured_cost_outcomes_and_sensitivity_never_assume_a_token_price() {
+        let values = [("throughput_week", 10.0), ("capacity_factor", 0.8), ("first_pass_yield", 0.5), ("unit_cost", 2.5), ("tokens_per_run", 1200.0)]
+            .into_iter().map(|(id, v)| (id.into(), v)).collect();
+        let outcomes = evaluate_outcomes(&values);
+        assert_eq!(outcomes["effective_throughput"], 4.0);
+        assert_eq!(outcomes["weekly_cost"], 10.0);
+        assert_eq!(outcomes["weekly_tokens"], 4800.0);
+        assert!(outcome_reasons(&values).is_empty());
+        let usd = tornado(&values, "weekly_cost", 0.2);
+        assert!(usd.iter().find(|b| b.driver == "unit_cost").unwrap().span > 0.0);
+        assert_eq!(usd.iter().find(|b| b.driver == "tokens_per_run").unwrap().span, 0.0);
+        assert!(tornado(&values, "weekly_tokens", 0.2).iter().find(|b| b.driver == "tokens_per_run").unwrap().span > 0.0);
+        assert!(tornado(&values, "unknown", 0.2).is_empty());
+    }
+
+    #[test]
+    fn absent_invalid_and_overflowing_costs_are_unavailable_not_zero() {
+        for cost in [None, Some(-1.0), Some(f64::NAN), Some(f64::INFINITY), Some(f64::MAX)] {
+            let mut values = BTreeMap::from([("throughput_week".into(), 2.0)]);
+            if let Some(cost) = cost { values.insert("unit_cost".into(), cost); }
+            assert!(!evaluate_outcomes(&values).contains_key("weekly_cost"));
+            assert!(outcome_reasons(&values).contains_key("weekly_cost"));
+            assert!(tornado(&values, "weekly_cost", 0.2).is_empty());
+        }
+        let values = BTreeMap::from([("throughput_week".into(), 2.0), ("unit_cost".into(), 0.0)]);
+        assert_eq!(evaluate_outcomes(&values)["weekly_cost"], 0.0, "a measured zero is valid");
+        assert!(!evaluate_outcomes(&values).contains_key("weekly_tokens"));
+    }
+
+    #[test]
     fn weeks_to_clear_handles_zero_throughput_and_zero_backlog() {
         assert_eq!(weeks_to_clear(0.0, 10.0), None);
         assert_eq!(weeks_to_clear(5.0, 0.0), Some(0.0));
@@ -1750,10 +1812,10 @@ mod tests {
         // capacity_factor is a multiplier the formula reads, but a lone
         // unrelated driver in `baseline` (e.g. an outcome id typo, or a
         // driver the chosen outcome simply never uses) must not panic --
-        // its span is 0, like scrap_rate's.
+        // an absent outcome has no sensitivity data, not fabricated zero bars.
         let baseline: BTreeMap<DriverId, f64> = [("capacity_factor".to_string(), 1.0)].into_iter().collect();
         let bars = tornado(&baseline, "not_a_real_outcome", 0.2);
-        assert_eq!(bars, vec![TornadoBar { driver: "capacity_factor".to_string(), low_outcome: 0.0, high_outcome: 0.0, span: 0.0 }]);
+        assert!(bars.is_empty());
     }
 
     // -- signposts ---------------------------------------------------------------

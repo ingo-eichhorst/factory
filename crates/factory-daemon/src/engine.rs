@@ -1005,8 +1005,8 @@ impl Engine {
             Request::ScenarioPromote { scenario, scope, agent } => Ok(Payload::ScenarioPromote {
                 result: self.scenario_promote(scenario, scope, agent).await?,
             }),
-            Request::ScenarioWhatIf { scenario, drivers } => Ok(Payload::ScenarioWhatIf {
-                result: self.scenario_whatif(scenario, drivers).await?,
+            Request::ScenarioWhatIf { scenario, drivers, scope } => Ok(Payload::ScenarioWhatIf {
+                result: self.scenario_whatif(scenario, drivers, scope.as_deref()).await?,
             }),
             // `Event::QualityChanged`, when due, is published inside
             // `quality_report` itself -- it is a read that notices, not a write.
@@ -1432,7 +1432,7 @@ impl Engine {
             }),
             Request::Costs { group_by, from, to, scope } => Ok(Payload::Costs {
                 report: crate::facts::Facts::<factory_kernel::L4>::new(self)
-                    .get::<factory_kernel::CostReport>(&factory_core::usage::SpendQuery { scope, from, to, group_by })
+                    .get::<factory_kernel::CostReport>(&factory_core::usage::SpendQuery { scope, from, to, group_by, ..Default::default() })
                     .await?,
             }),
             Request::RunEntries { id, limit } => Ok(Payload::Entries {

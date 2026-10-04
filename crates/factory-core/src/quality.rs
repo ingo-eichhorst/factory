@@ -1445,6 +1445,8 @@ pub fn gathered(check: &Check, evidence: &Evidence) -> bool {
         Check::Secrets { absent } if absent.is_empty() => evidence.secrets.contains_key("scope_env"),
         Check::Secrets { absent } => absent.iter().all(|n| evidence.secrets.contains_key(n)),
         Check::Daemon { .. } => evidence.daemon.is_some(),
+        Check::BudgetWithin => evidence.budget.as_ref().is_some_and(|input|
+            crate::budget::within(Some(input), input.month.as_of).0.is_some()),
         Check::Dependencies { .. } => evidence.dependencies.is_some(),
         Check::Attested { .. } => evidence.attested.is_some(),
     }

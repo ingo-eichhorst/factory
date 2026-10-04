@@ -149,7 +149,9 @@ fn driver_baseline(values: &BTreeMap<MetricId, MetricValue>) -> BTreeMap<DriverI
     for def in scenario::driver_defs() {
         if let Some(name) = def.metric {
             if let Ok(id) = MetricId::new(name) {
-                if let Some(value) = values.get(&id).and_then(|v| v.value) {
+                if let Some(value) = values.get(&id)
+                    .filter(|v| !matches!(def.id, "unit_cost" | "tokens_per_run") || v.reason.is_none())
+                    .and_then(|v| v.value).filter(|v| v.is_finite() && *v >= 0.0) {
                     out.insert(def.id.to_string(), value);
                 }
             }
@@ -157,6 +159,33 @@ fn driver_baseline(values: &BTreeMap<MetricId, MetricValue>) -> BTreeMap<DriverI
     }
     out.insert("capacity_factor".to_string(), 1.0);
     out
+}
+
+fn measured_overrides(baseline: &BTreeMap<DriverId, f64>, overrides: &BTreeMap<DriverId, scenario::Override>) -> BTreeMap<DriverId, f64> {
+    let mut values = scenario::apply_overrides(baseline, overrides);
+    for driver in ["unit_cost", "tokens_per_run"] {
+        if !baseline.contains_key(driver) { values.remove(driver); }
+    }
+    values
+}
+
+fn driver_result(baseline: &BTreeMap<DriverId, f64>, overridden: BTreeMap<DriverId, f64>, metrics: &BTreeMap<MetricId, MetricValue>) -> ScenarioDrivers {
+    let outcomes_before = scenario::evaluate_outcomes(baseline);
+    let outcomes_after = scenario::evaluate_outcomes(&overridden);
+    let reasons = |values: &BTreeMap<DriverId, f64>| {
+        let mut reasons = scenario::outcome_reasons(values);
+        for (outcome, driver) in [("weekly_cost", "unit_cost"), ("weekly_tokens", "tokens_per_run")] {
+            if let Some(reason) = MetricId::new(driver).ok().and_then(|id| metrics.get(&id)).and_then(|v| v.reason.as_ref()) {
+                if reasons.contains_key(outcome) { reasons.insert(outcome.into(), reason.clone()); }
+            }
+        }
+        reasons
+    };
+    let outcome_reasons_before = reasons(baseline);
+    let outcome_reasons_after = reasons(&overridden);
+    let tornados = outcomes_after.keys().map(|id| (id.clone(), scenario::tornado(&overridden, id, TORNADO_SWING))).collect();
+    let tornado = scenario::tornado(&overridden, KEY_OUTCOME, TORNADO_SWING);
+    ScenarioDrivers { overridden, outcomes_before, outcomes_after, outcome_reasons_before, outcome_reasons_after, tornado, tornados }
 }
 
 /// The multiplier driver overrides put on top of `weekly_throughput_history`
@@ -297,7 +326,7 @@ async fn evaluate_baseline_over_scopes(
         per_scope_applied.push((t, applied));
     }
 
-    let (gates, daemon_fact, credential_rows, backup_fact) = engine.dataset_level_facts(&per_scope_applied).await?;
+    let (gates, daemon_fact, credential_rows, backup_fact, budget_config) = engine.dataset_level_facts(&per_scope_applied).await?;
     let mut statuses_by_scope = BTreeMap::new();
     for (t, applied) in &per_scope_applied {
         let evidence = engine
@@ -311,6 +340,8 @@ async fn evaluate_baseline_over_scopes(
                 daemon_fact,
                 &credential_rows,
                 backup_fact.clone(),
+                budget_config.as_ref(),
+                now,
             )
             .await?;
         findings.extend(policy::evidence_findings(&evidence, &t.name));
@@ -351,7 +382,7 @@ async fn evaluate_scenario_over_scopes(
         per_scope_applied.push((t, applied));
     }
 
-    let (gates, daemon_fact, credential_rows, backup_fact) = engine.dataset_level_facts(&per_scope_applied).await?;
+    let (gates, daemon_fact, credential_rows, backup_fact, budget_config) = engine.dataset_level_facts(&per_scope_applied).await?;
     let mut statuses_by_scope = BTreeMap::new();
     for (t, applied) in &per_scope_applied {
         let evidence = engine
@@ -365,6 +396,8 @@ async fn evaluate_scenario_over_scopes(
                 daemon_fact,
                 &credential_rows,
                 backup_fact.clone(),
+                budget_config.as_ref(),
+                now,
             )
             .await?;
         policy_findings.extend(policy::evidence_findings(&evidence, &t.name));
@@ -529,7 +562,9 @@ impl Engine {
 
         let (asked, target_scopes) = subtree_scopes(&snapshot, scope)?;
         let all_attestations = self.policies.all().await?;
-        let tasks = self.store.list(&TaskFilter::default()).await?;
+        let target_names: BTreeSet<&str> = target_scopes.iter().map(|s| s.name.as_str()).collect();
+        let tasks: Vec<Task> = self.store.list(&TaskFilter::default()).await?.into_iter()
+            .filter(|task| target_names.contains(snapshot.canonical_scope_name(&task.scope).as_str())).collect();
 
         // Every metric any loaded scenario's drivers, signposts or goal
         // changes reference, computed once and shared by every scenario --
@@ -565,7 +600,7 @@ impl Engine {
                 }
             }
         }
-        let computed = self.metrics(&metric_ids, now).await?;
+        let computed = self.metrics_for(&metric_ids, now, asked.as_ref().map(|s| s.name.as_str()), None).await?;
         let values: BTreeMap<MetricId, MetricValue> = computed.values.iter().map(|v| (v.id.clone(), v.clone())).collect();
 
         let baseline_drivers = driver_baseline(&values);
@@ -600,10 +635,7 @@ impl Engine {
             let (per_scope_deltas, subtree_delta) = deltas_from_statuses(&target_scopes, &baseline_statuses, &scenario_statuses);
 
             let overrides = s.driver_overrides();
-            let overridden_drivers = scenario::apply_overrides(&baseline_drivers, &overrides);
-            let outcomes_before = scenario::evaluate_outcomes(&baseline_drivers);
-            let outcomes_after = scenario::evaluate_outcomes(&overridden_drivers);
-            let tornado = scenario::tornado(&overridden_drivers, KEY_OUTCOME, TORNADO_SWING);
+            let overridden_drivers = measured_overrides(&baseline_drivers, &overrides);
 
             let newly_open_controls = subtree_delta.newly_open.len();
             let open_goal_tasks = open_goal_task_count(&tasks, &s.goals);
@@ -640,12 +672,7 @@ impl Engine {
                 findings: own_findings,
                 policy: per_scope_deltas,
                 policy_subtree: subtree_delta,
-                drivers: ScenarioDrivers {
-                    overridden: overridden_drivers,
-                    outcomes_before,
-                    outcomes_after,
-                    tornado,
-                },
+                drivers: driver_result(&baseline_drivers, overridden_drivers, &values),
                 backlog,
                 forecast,
                 goals: goal_results,
@@ -746,7 +773,7 @@ impl Engine {
 
         let all_attestations = self.policies.all().await?;
         let per_scope_applied = vec![(&scope_obj, scenario_applied.clone())];
-        let (gates, daemon_fact, credential_rows, backup_fact) = self.dataset_level_facts(&per_scope_applied).await?;
+        let (gates, daemon_fact, credential_rows, backup_fact, budget_config) = self.dataset_level_facts(&per_scope_applied).await?;
         let evidence = self
             .evidence_for_scope(
                 &snapshot,
@@ -758,6 +785,8 @@ impl Engine {
                 daemon_fact,
                 &credential_rows,
                 backup_fact,
+                budget_config.as_ref(),
+                now,
             )
             .await?;
 
@@ -831,7 +860,7 @@ impl Engine {
     ///
     /// Backlog: with `scenario: Some`, the same subtree-wide policy-delta
     /// and goal-task backlog `scenarios_report` computes for that scenario
-    /// (over the whole instance -- this request carries no `scope`); with
+    /// (over the selected scope and descendants, or the whole instance); with
     /// `scenario: None`, `0.0`, so the forecast is honestly a bare
     /// throughput projection with nothing to clear, not a guessed number.
     /// Recomputing the policy delta here costs the same real work
@@ -840,9 +869,10 @@ impl Engine {
     /// than a slider tick strictly needs, but it is the honest number the
     /// issue's own data shape asks for; the UI is expected to debounce
     /// calls rather than this endpoint pretending backlog is free.
-    pub(crate) async fn scenario_whatif(self: &Arc<Self>, scenario_name: Option<String>, raw_drivers: BTreeMap<DriverId, String>) -> Result<ScenarioWhatIfResult> {
+    pub(crate) async fn scenario_whatif(self: &Arc<Self>, scenario_name: Option<String>, raw_drivers: BTreeMap<DriverId, String>, scope: Option<&str>) -> Result<ScenarioWhatIfResult> {
         let now = Utc::now();
         let snapshot = self.factory_snapshot();
+        let (asked, target_scopes) = subtree_scopes(&snapshot, scope)?;
 
         let mut overrides: BTreeMap<DriverId, scenario::Override> = BTreeMap::new();
         let mut horizon_weeks = scenario::Horizon::default().weeks();
@@ -871,7 +901,7 @@ impl Engine {
             };
             let (catalogues_with_drafts, _mf) = scenario::merge_catalogues(&real_catalogues, draft_catalogues);
             let all_attestations = self.policies.all().await?;
-            let (_asked, all_scopes) = subtree_scopes(&snapshot, None)?;
+            let all_scopes = &target_scopes;
 
             let (baseline_statuses, _bf) =
                 evaluate_baseline_over_scopes(self, &snapshot, &all_scopes, &real_catalogues, &tags, &all_attestations, now).await?;
@@ -879,12 +909,17 @@ impl Engine {
                 evaluate_scenario_over_scopes(self, &snapshot, &all_scopes, &s, &catalogues_with_drafts, &tags, &all_attestations, now).await?;
             let (_per_scope, subtree_delta) = deltas_from_statuses(&all_scopes, &baseline_statuses, &scenario_statuses);
 
-            let tasks = self.store.list(&TaskFilter::default()).await?;
+            let target_names: BTreeSet<&str> = target_scopes.iter().map(|s| s.name.as_str()).collect();
+            let tasks: Vec<Task> = self.store.list(&TaskFilter::default()).await?.into_iter()
+                .filter(|task| target_names.contains(snapshot.canonical_scope_name(&task.scope).as_str())).collect();
             let open_goal_tasks = open_goal_task_count(&tasks, &s.goals);
             backlog_total = (subtree_delta.newly_open.len() + open_goal_tasks) as f64;
         }
 
         for (id, raw) in &raw_drivers {
+            if !scenario::driver_defs().iter().any(|def| def.id == id) {
+                return Err(FactoryError::BadRequest(format!("unknown scenario driver: {id}")));
+            }
             let ov = scenario::parse_override(raw).map_err(|e| FactoryError::BadRequest(format!("driver {id:?}: {e}")))?;
             overrides.insert(id.clone(), ov);
         }
@@ -897,16 +932,13 @@ impl Engine {
                 }
             }
         }
-        let computed = self.metrics(&metric_ids, now).await?;
+        let computed = self.metrics_for(&metric_ids, now, asked.as_ref().map(|s| s.name.as_str()), None).await?;
         let values: BTreeMap<MetricId, MetricValue> = computed.values.into_iter().map(|v| (v.id.clone(), v)).collect();
         let baseline_drivers = driver_baseline(&values);
 
-        let overridden_drivers = scenario::apply_overrides(&baseline_drivers, &overrides);
-        let outcomes_before = scenario::evaluate_outcomes(&baseline_drivers);
-        let outcomes_after = scenario::evaluate_outcomes(&overridden_drivers);
-        let tornado = scenario::tornado(&overridden_drivers, KEY_OUTCOME, TORNADO_SWING);
+        let overridden_drivers = measured_overrides(&baseline_drivers, &overrides);
 
-        let daily = self.production(None, None, None).await?.daily;
+        let daily = self.subtree_daily(&target_scopes, asked.as_ref().map(|s| s.name.as_str())).await?;
         let history = weekly_throughput_history(&daily, THROUGHPUT_HISTORY_WEEKS);
         let factor = throughput_scale_factor(&baseline_drivers, &overridden_drivers);
         let scaled_history = scale_history(&history, factor);
@@ -916,12 +948,7 @@ impl Engine {
 
         Ok(ScenarioWhatIfResult {
             scenario: scenario_name,
-            drivers: ScenarioDrivers {
-                overridden: overridden_drivers,
-                outcomes_before,
-                outcomes_after,
-                tornado,
-            },
+            drivers: driver_result(&baseline_drivers, overridden_drivers, &values),
             forecast,
         })
     }
@@ -955,6 +982,20 @@ mod tests {
         assert_eq!(driver_baseline(&values).get("rework_rate"), Some(&0.2));
         assert_eq!(driver_baseline(&BTreeMap::new()).get("rework_rate"), None);
         assert_eq!(driver_baseline(&BTreeMap::new()).get("capacity_factor"), Some(&1.0));
+    }
+
+    #[test]
+    fn measured_subset_or_absent_cost_baselines_cannot_be_overridden_into_a_free_forecast() {
+        let now = Utc::now();
+        let id = MetricId::new("unit_cost").unwrap();
+        let values = BTreeMap::from([(id.clone(), MetricValue { id, value: Some(5.0), as_of: now, reason: Some("one unmeasured finished run".into()) })]);
+        let baseline = driver_baseline(&values);
+        assert!(!baseline.contains_key("unit_cost"));
+        let overridden = measured_overrides(&baseline, &BTreeMap::from([("unit_cost".into(), scenario::Override::Set(0.0))]));
+        let drivers = driver_result(&baseline, overridden, &values);
+        assert!(!drivers.outcomes_after.contains_key("weekly_cost"));
+        assert!(!drivers.tornados.contains_key("weekly_cost"));
+        assert!(drivers.outcome_reasons_after["weekly_cost"].contains("unmeasured"));
     }
 
     fn scope_at(id: &str, name: &str, path: &str) -> Scope {
@@ -1352,21 +1393,21 @@ mod tests {
         let engine = test_engine();
 
         // With no request-level override, the scenario's own "-20%" holds.
-        let named = engine.scenario_whatif(Some("ai-act-2027".to_string()), Default::default()).await.unwrap();
+        let named = engine.scenario_whatif(Some("ai-act-2027".to_string()), Default::default(), None).await.unwrap();
         let baseline_capacity = 1.0; // capacity_factor's own neutral baseline
         assert!((named.drivers.overridden["capacity_factor"] - baseline_capacity * 0.8).abs() < 1e-9, "{:#?}", named.drivers);
 
         // A request-level override for the same driver wins outright.
         let mut overrides = BTreeMap::new();
         overrides.insert("capacity_factor".to_string(), "=2.0".to_string());
-        let overridden = engine.scenario_whatif(Some("ai-act-2027".to_string()), overrides).await.unwrap();
+        let overridden = engine.scenario_whatif(Some("ai-act-2027".to_string()), overrides, None).await.unwrap();
         assert_eq!(overridden.drivers.overridden["capacity_factor"], 2.0);
 
         // With no scenario named at all, only the request's own overrides
         // apply, and the forecast has nothing to clear.
         let mut bare = BTreeMap::new();
         bare.insert("capacity_factor".to_string(), "=3.0".to_string());
-        let none_named = engine.scenario_whatif(None, bare).await.unwrap();
+        let none_named = engine.scenario_whatif(None, bare, None).await.unwrap();
         assert_eq!(none_named.drivers.overridden["capacity_factor"], 3.0);
         assert_eq!(none_named.forecast.completion_week.p50, Some(0), "nothing to clear with no scenario named");
     }
@@ -1376,7 +1417,7 @@ mod tests {
         let engine = test_engine();
         let mut overrides = BTreeMap::new();
         overrides.insert("capacity_factor".to_string(), "banana".to_string());
-        let err = engine.scenario_whatif(None, overrides).await.unwrap_err();
+        let err = engine.scenario_whatif(None, overrides, None).await.unwrap_err();
         assert!(err.to_string().contains("capacity_factor"), "{err}");
     }
 

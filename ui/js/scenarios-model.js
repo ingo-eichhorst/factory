@@ -23,10 +23,6 @@ import { routeHref } from "./scopes.js";
 
 // ------------------------------------------------------------------ drivers
 
-/// Why the cost drivers are disabled though their metrics are measured.
-const COST_DRIVER_NOT_MODELLED =
-  "measured per run since #117, but the forecast does not model cost yet (#117 v3)";
-
 /// The v1 built-in driver set (`factory_core::scenario::driver_defs()`),
 /// mirrored here because it is fixed vocabulary compiled into the daemon,
 /// never sent on the wire -- `ScenarioDrivers` only ever carries values keyed
@@ -39,21 +35,13 @@ export const DRIVER_DEFS = [
   { id: "scrap_rate", title: "Scrap rate", description: "scrapped/finished, trailing 28 days.", unit: "ratio", assumption: false, metric: "scrap_rate", better: "lower" },
   { id: "rework_rate", title: "Rework rate", description: "Re-attempts of work that did not succeed, over finished, trailing 28 days.", unit: "ratio", assumption: false, metric: "rework_rate", better: "lower" },
   { id: "capacity_factor", title: "Capacity factor", description: "A multiplier on effective throughput with no data source -- a person's own what-if.", unit: "multiplier", assumption: true, metric: null, better: "higher" },
-  // `unavailable: true` is fixed vocabulary, the same as `assumption` --
-  // never derived from whether `GET /api/metrics` happened to answer this
-  // load, so a slider for either of these is disabled even when that second
-  // fetch fails outright, not just when it succeeds and says so. Both
-  // metrics are measured since #117 v1; what is missing is the forecast
-  // using them, which is #117 v3 -- `unavailableReason` says so.
-  { id: "unit_cost", title: "Unit cost", description: "API-equivalent USD per finished unit, from each run's measured usage.", unit: "usd", assumption: false, unavailable: true, unavailableReason: COST_DRIVER_NOT_MODELLED, metric: "unit_cost", better: "lower" },
-  { id: "tokens_per_run", title: "Tokens per run", description: "Tokens spent per run, from each run's measured usage.", unit: "count", assumption: false, unavailable: true, unavailableReason: COST_DRIVER_NOT_MODELLED, metric: "tokens_per_run", better: "lower" },
+  { id: "unit_cost", title: "Unit cost", description: "API-equivalent USD per finished unit, from measured usage. Feeds weekly USD.", unit: "usd", assumption: false, measuredCost: true, metric: "unit_cost", better: "lower" },
+  { id: "tokens_per_run", title: "Tokens per run", description: "Measured tokens spent per run. Feeds weekly tokens, without an assumed token price.", unit: "count", assumption: false, measuredCost: true, metric: "tokens_per_run", better: "lower" },
 ];
 
-const UNAVAILABLE_REASON_FALLBACK = "this driver has no data source yet";
+const UNAVAILABLE_REASON_FALLBACK = "a complete measured baseline is not available for this scope";
 
-/// The reason a `def.unavailable` driver is disabled -- its own fixed
-/// `unavailableReason` when it has one (a driver whose metric is fine but
-/// which the forecast does not use yet), then
+/// Why a driver lacks a complete baseline: an explicit definition reason, then
 /// `baseline.metrics`' own `reason` (on the wire on every `GET /api/scenarios`
 /// answer, regardless of whether the second `GET /api/metrics?ids=…` fetch a
 /// driver panel also makes ever succeeds), then the registry def that second
@@ -82,6 +70,10 @@ export function driverRange(id, baselineValue) {
       return { min: 0, max: Math.max(10, (baselineValue || 0) * 2), step: 0.5 };
     case "capacity_factor":
       return { min: 0, max: 2, step: 0.05 };
+    case "unit_cost":
+      return { min: 0, max: Math.max(1, (baselineValue || 0) * 2), step: 0.01 };
+    case "tokens_per_run":
+      return { min: 0, max: Math.max(1000, (baselineValue || 0) * 2), step: 1 };
     default:
       return { min: 0, max: 1, step: 0.01 };
   }
@@ -340,6 +332,17 @@ export function deltaTable(report) {
     }),
   });
 
+  for (const [id, label, unit] of [["weekly_cost", "Weekly USD", "usd"], ["weekly_tokens", "Weekly tokens", "count"]]) {
+    if (!scenarios.some((s) => id in s.drivers.outcomes_after || s.drivers.outcome_reasons_after?.[id])) continue;
+    rows.push({ key: `outcome:${id}`, label, unit, kind: "outcome", exact: true,
+      cells: scenarios.map((s) => {
+        const before = s.drivers.outcomes_before[id];
+        const after = s.drivers.outcomes_after[id];
+        return { scenario: s.scenario.name, before, after, reason: s.drivers.outcome_reasons_after?.[id], ...deltaTone(before, after, "lower") };
+      }),
+    });
+  }
+
   for (const p of ["p50", "p90"]) {
     rows.push({
       key: `forecast:${p}`,
@@ -445,11 +448,12 @@ export function sliderToOverride(value) {
 /// actually moved (`moved`, `{id: number}`) -- never every driver on every
 /// call, so an untouched slider does not silently reassert its own starting
 /// value as an override on top of whichever scenario is selected.
-export function whatifBody(scenarioName, moved) {
+export function whatifBody(scenarioName, moved, scope = null) {
   const drivers = {};
   for (const [id, v] of Object.entries(moved || {})) drivers[id] = sliderToOverride(v);
   const body = { drivers };
   if (scenarioName) body.scenario = scenarioName;
+  if (scope !== null) body.scope = scope;
   return body;
 }
 

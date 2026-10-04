@@ -7676,7 +7676,7 @@ mod tests {
         let spent = CostRow { runs: 1, runs_unknown: 1, ..CostRow::new("total", None) };
         let assessment = budget::assess(Some(50.0), &spent, 1, &month);
         let report = budget::Report { catalogue: ".factory/budgets/limits.yaml".into(), group_by: CostGroupBy::Scope,
-            spend: CostReport { group_by: CostGroupBy::Scope, from: month.from, to: month.as_of, scope: Some("work".into()), rows: vec![spent.clone()], total: spent.clone(), unattributed_runs: 1, daily: Vec::new() },
+            spend: CostReport { basis: Default::default(), finished: None, group_by: CostGroupBy::Scope, from: month.from, to: month.as_of, scope: Some("work".into()), rows: vec![spent.clone()], total: spent.clone(), unattributed_runs: 1, daily: Vec::new() },
             budgets: vec![budget::ScopeBudget { id: "stable".into(), scope: "work".into(), path: "projects/work".into(), relation: "ancestor".into(), monthly_usd: Some(50.0), spent, unattributed_runs: 1, daily: Vec::new(), assessment }],
             month, findings: Vec::new() };
         let text = budget_text(&report);
@@ -7721,6 +7721,7 @@ mod tests {
         let mut row = CostRow::new("issue=117", None);
         row.add(None);
         let report = CostReport {
+            basis: Default::default(), finished: None,
             group_by: CostGroupBy::Issue,
             from: chrono::Utc::now() - chrono::Duration::days(30),
             to: chrono::Utc::now(),
@@ -7747,6 +7748,7 @@ mod tests {
         let mut nothing = CostRow::new("scope=demo", None);
         nothing.runs = 1;
         let report = CostReport {
+            basis: Default::default(), finished: None,
             group_by: CostGroupBy::Scope,
             from: chrono::Utc::now() - chrono::Duration::days(30),
             to: chrono::Utc::now(),

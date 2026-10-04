@@ -343,7 +343,7 @@ impl Engine {
         } else {
             BTreeSet::new()
         };
-        let (gates, daemon_fact, credential_rows, backup_fact) = self.dataset_level_facts(&per_scope_applied).await?;
+        let (gates, daemon_fact, credential_rows, backup_fact, budget_config) = self.dataset_level_facts(&per_scope_applied).await?;
 
         let mut reports = Vec::new();
         let mut findings = Vec::new();
@@ -359,6 +359,8 @@ impl Engine {
                     daemon_fact,
                     &credential_rows,
                     backup_fact.clone(),
+                    budget_config.as_ref(),
+                    now,
                 )
                 .await?;
             findings.extend(policy::evidence_findings(&evidence, &t.name).into_iter().map(|f| quality::Finding {
