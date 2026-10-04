@@ -116,7 +116,10 @@ fn every_mode_maps_to_its_pmset_number_and_the_commands_are_exact() {
     assert_eq!(pmset_value(PowerMode::Automatic), "0");
     assert_eq!(pmset_value(PowerMode::EnergySaving), "1");
     assert_eq!(pmset_value(PowerMode::HighPerformance), "2");
-    assert_eq!(sudo_set_args(PowerMode::HighPerformance), ["-n", "/usr/bin/pmset", "-a", "powermode", "2"]);
+    assert_eq!(
+        sudo_set_args(PowerMode::HighPerformance),
+        ["-n", "/usr/bin/pmset", "-a", "powermode", "2"]
+    );
     assert_eq!(
         sudo_probe_args(PowerMode::EnergySaving),
         ["-n", "-l", "/usr/bin/pmset", "-a", "powermode", "1"]
@@ -134,10 +137,15 @@ fn the_sudoers_rule_names_exactly_the_three_commands_for_the_daemons_user() {
     assert_eq!(rule.path, "/etc/sudoers.d/factory-pmset");
     // Checked before it is installed, installed root-owned and read-only.
     let check = rule.install.find("visudo -cf").unwrap();
-    let install = rule.install.find("install -m 0440 -o root -g wheel").unwrap();
+    let install = rule
+        .install
+        .find("install -m 0440 -o root -g wheel")
+        .unwrap();
     assert!(check < install, "{}", rule.install);
     assert!(rule.install.contains(&format!("'{}'", rule.rule)));
-    assert!(rule.install.ends_with("/etc/sudoers.d/factory-pmset; rm -f \"$f\""));
+    assert!(rule
+        .install
+        .ends_with("/etc/sudoers.d/factory-pmset; rm -f \"$f\""));
     assert_eq!(rule.check, "sudo visudo -c");
 }
 
@@ -155,7 +163,10 @@ fn json_names_are_the_three_closed_values() {
     }
     for bad in ["3", "auto; rm", "", "Automatic ", "high"] {
         assert!(bad.parse::<PowerMode>().is_err(), "{bad:?}");
-        assert!(serde_json::from_value::<PowerMode>(serde_json::json!(bad)).is_err(), "{bad:?}");
+        assert!(
+            serde_json::from_value::<PowerMode>(serde_json::json!(bad)).is_err(),
+            "{bad:?}"
+        );
     }
     assert!(serde_json::from_value::<PowerMode>(serde_json::json!(2)).is_err());
 }
@@ -171,8 +182,15 @@ async fn without_the_rule_the_mode_is_read_and_nothing_is_written() {
     assert_eq!(report.battery, Some(PowerMode::Automatic));
     assert!(report.permitted.is_empty());
     assert!(!report.can_change);
-    assert!(report.notes.is_empty(), "no rule is the ordinary state, not a note: {:?}", report.notes);
-    assert!(report.sudoers.rule.starts_with("factory ALL=(root) NOPASSWD: "));
+    assert!(
+        report.notes.is_empty(),
+        "no rule is the ordinary state, not a note: {:?}",
+        report.notes
+    );
+    assert!(report
+        .sudoers
+        .rule
+        .starts_with("factory ALL=(root) NOPASSWD: "));
     assert!(host.writes().is_empty(), "{:?}", host.calls());
     // Probed with `-l` for each mode, never run.
     let probes: Vec<_> = host.calls().into_iter().filter(|c| c[0] == SUDO).collect();
@@ -185,7 +203,9 @@ async fn setting_without_the_rule_is_refused_before_any_write() {
     let host = FakeHost::mac();
     let power = HostPower::with_runner(host.clone(), "factory");
     match power.set(PowerMode::HighPerformance).await {
-        Err(FactoryError::BadRequest(why)) => assert!(why.contains("/etc/sudoers.d/factory-pmset"), "{why}"),
+        Err(FactoryError::BadRequest(why)) => {
+            assert!(why.contains("/etc/sudoers.d/factory-pmset"), "{why}")
+        }
         other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
     }
     assert!(host.writes().is_empty(), "{:?}", host.calls());
@@ -206,7 +226,10 @@ async fn with_the_rule_each_mode_runs_its_own_command_and_reads_back() {
         let changed = power.set(mode).await.unwrap();
         let writes = host.writes();
         assert_eq!(writes.len(), before + 1);
-        assert_eq!(writes.last().unwrap(), &vec![SUDO, "-n", PMSET, "-a", "powermode", n]);
+        assert_eq!(
+            writes.last().unwrap(),
+            &vec![SUDO, "-n", PMSET, "-a", "powermode", n]
+        );
         assert_eq!(changed.after.ac, Some(mode));
         assert_eq!(changed.after.battery, Some(mode));
         let report = power.read().await;
@@ -225,12 +248,21 @@ async fn a_mode_the_host_does_not_offer_is_refused_before_sudo_is_asked() {
     });
     let power = HostPower::with_runner(host.clone(), "factory");
     let report = power.read().await;
-    assert_eq!(report.supported, vec![PowerMode::Automatic, PowerMode::EnergySaving]);
+    assert_eq!(
+        report.supported,
+        vec![PowerMode::Automatic, PowerMode::EnergySaving]
+    );
     assert!(report.can_change, "every mode the host offers is permitted");
     let asked = host.calls().len();
-    assert!(matches!(power.set(PowerMode::HighPerformance).await, Err(FactoryError::BadRequest(_))));
+    assert!(matches!(
+        power.set(PowerMode::HighPerformance).await,
+        Err(FactoryError::BadRequest(_))
+    ));
     let after: Vec<_> = host.calls().into_iter().skip(asked).collect();
-    assert!(after.iter().all(|c| c[0] == PMSET), "no sudo at all for an unoffered mode: {after:?}");
+    assert!(
+        after.iter().all(|c| c[0] == PMSET),
+        "no sudo at all for an unoffered mode: {after:?}"
+    );
 }
 
 #[tokio::test]
@@ -261,12 +293,18 @@ async fn no_runner_is_not_applicable_and_setting_is_refused() {
     assert!(!report.applicable);
     assert!(report.supported.is_empty());
     assert!(!report.can_change);
-    assert!(matches!(power.set(PowerMode::Automatic).await, Err(FactoryError::BadRequest(_))));
+    assert!(matches!(
+        power.set(PowerMode::Automatic).await,
+        Err(FactoryError::BadRequest(_))
+    ));
 }
 
 #[test]
 fn a_test_build_never_gets_the_real_runner() {
-    assert!(HostPower::new().runner().is_none(), "cargo test must never run a real pmset or sudo");
+    assert!(
+        HostPower::new().runner().is_none(),
+        "cargo test must never run a real pmset or sudo"
+    );
 }
 
 fn engine() -> Arc<Engine> {
@@ -275,7 +313,10 @@ fn engine() -> Arc<Engine> {
     )
     .unwrap();
     config.validate().unwrap();
-    let factory = Factory { root: PathBuf::from("/tmp/factory-host-power-test"), config };
+    let factory = Factory {
+        root: PathBuf::from("/tmp/factory-host-power-test"),
+        config,
+    };
     Arc::new(Engine::new(
         factory,
         Registry::with_builtins(),
@@ -287,7 +328,9 @@ fn engine() -> Arc<Engine> {
 
 fn report_of(response: Response) -> PowerModeReport {
     match response {
-        Response::Ok { data: Payload::HostPowerMode { report } } => report,
+        Response::Ok {
+            data: Payload::HostPowerMode { report },
+        } => report,
         other => panic!("expected a power mode report, got {other:?}"),
     }
 }
@@ -303,12 +346,25 @@ async fn through_the_engine_a_change_is_journaled_with_who_from_and_to() {
     assert!(report.changes.is_empty());
 
     // Refused without the rule: an error, and no journal line.
-    let refused = engine.handle_request(Request::HostPowerModeSet { mode: PowerMode::HighPerformance }).await;
-    assert!(matches!(&refused, Response::Error { code, .. } if code == "bad_request"), "{refused:?}");
+    let refused = engine
+        .handle_request(Request::HostPowerModeSet {
+            mode: PowerMode::HighPerformance,
+        })
+        .await;
+    assert!(
+        matches!(&refused, Response::Error { code, .. } if code == "bad_request"),
+        "{refused:?}"
+    );
     assert!(host.writes().is_empty());
 
     host.install_rule();
-    let report = report_of(engine.handle_request(Request::HostPowerModeSet { mode: PowerMode::HighPerformance }).await);
+    let report = report_of(
+        engine
+            .handle_request(Request::HostPowerModeSet {
+                mode: PowerMode::HighPerformance,
+            })
+            .await,
+    );
     assert_eq!(report.ac, Some(PowerMode::HighPerformance));
     assert_eq!(report.battery, Some(PowerMode::HighPerformance));
     assert_eq!(report.changes.len(), 1);
@@ -317,7 +373,10 @@ async fn through_the_engine_a_change_is_journaled_with_who_from_and_to() {
     assert_eq!(change.from_ac, Some(PowerMode::Automatic));
     assert_eq!(change.from_battery, Some(PowerMode::Automatic));
     assert_eq!(change.to, PowerMode::HighPerformance);
-    assert_eq!(change.message, "power mode: Automatic -> High performance by the owner");
+    assert_eq!(
+        change.message,
+        "power mode: Automatic -> High performance by the owner"
+    );
 
     // A later read still shows it.
     let report = report_of(engine.handle_request(Request::HostPowerMode).await);

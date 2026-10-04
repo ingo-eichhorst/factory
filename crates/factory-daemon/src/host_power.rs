@@ -198,13 +198,17 @@ pub(crate) fn parse_custom(text: &str) -> Custom {
         let (power, low) = &seen[slot];
         let mode = match (power, low) {
             (Some(v), _) => from_pmset(v).or_else(|| {
-                out.notes.push(format!("{name} reports powermode {v}, which this daemon does not know"));
+                out.notes.push(format!(
+                    "{name} reports powermode {v}, which this daemon does not know"
+                ));
                 None
             }),
             (None, Some(v)) if v == "1" => Some(PowerMode::EnergySaving),
             (None, Some(v)) if v == "0" => Some(PowerMode::Automatic),
             (None, Some(v)) => {
-                out.notes.push(format!("{name} reports lowpowermode {v}, which this daemon does not know"));
+                out.notes.push(format!(
+                    "{name} reports lowpowermode {v}, which this daemon does not know"
+                ));
                 None
             }
             (None, None) => None,
@@ -272,15 +276,21 @@ fn current_user() -> String {
         let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
         let mut buf = [0 as libc::c_char; 1024];
         let mut result: *mut libc::passwd = std::ptr::null_mut();
-        let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
+        let rc =
+            unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
         if rc == 0 && !result.is_null() && !pwd.pw_name.is_null() {
-            let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }.to_string_lossy().into_owned();
+            let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }
+                .to_string_lossy()
+                .into_owned();
             if !name.is_empty() {
                 return name;
             }
         }
     }
-    std::env::var("USER").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| "factory".to_string())
+    std::env::var("USER")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "factory".to_string())
 }
 
 /// What `Engine` holds. One runner, and one lock so two clicks cannot
@@ -384,7 +394,9 @@ impl HostPower {
                 permitted: Vec::new(),
                 can_change: false,
                 sudoers,
-                notes: vec!["The power mode is a macOS setting; this host is not macOS.".to_string()],
+                notes: vec![
+                    "The power mode is a macOS setting; this host is not macOS.".to_string()
+                ],
                 changes: Vec::new(),
             };
         };
@@ -453,7 +465,11 @@ impl HostPower {
             return Err(FactoryError::Other(anyhow::anyhow!(
                 "pmset -a powermode {} failed{}",
                 pmset_value(mode),
-                if why.is_empty() { String::new() } else { format!(": {why}") }
+                if why.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {why}")
+                }
             )));
         }
         let after = Self::custom(runner.as_ref()).await.unwrap_or_default();
@@ -484,7 +500,9 @@ fn modes_words(c: &Custom) -> String {
 }
 
 fn mode_of(data: &serde_json::Value, key: &str) -> Option<PowerMode> {
-    data.get(key).cloned().and_then(|v| serde_json::from_value(v).ok())
+    data.get(key)
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
 }
 
 impl crate::engine::Engine {
@@ -496,7 +514,11 @@ impl crate::engine::Engine {
     }
 
     async fn power_mode_changes(&self) -> Vec<factory_core::protocol::PowerModeChange> {
-        let entries = self.store.entries(HOST_JOURNAL, CHANGES_SHOWN).await.unwrap_or_default();
+        let entries = self
+            .store
+            .entries(HOST_JOURNAL, CHANGES_SHOWN)
+            .await
+            .unwrap_or_default();
         entries
             .into_iter()
             .filter(|e| e.kind == POWER_MODE_CHANGED)
@@ -504,7 +526,11 @@ impl crate::engine::Engine {
                 let data = e.data.clone().unwrap_or_default();
                 Some(factory_core::protocol::PowerModeChange {
                     at: e.at,
-                    by: data.get("by").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    by: data
+                        .get("by")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     from_ac: mode_of(&data, "from_ac"),
                     from_battery: mode_of(&data, "from_battery"),
                     to: mode_of(&data, "to")?,
@@ -523,7 +549,11 @@ impl crate::engine::Engine {
     ) -> Result<PowerModeReport> {
         let Changed { before, after } = self.host_power.set(mode).await?;
         let asked = crate::operations::Asked::new(caller, None);
-        let message = format!("power mode: {} -> {mode} {}", modes_words(&before), asked.words());
+        let message = format!(
+            "power mode: {} -> {mode} {}",
+            modes_words(&before),
+            asked.words()
+        );
         let entry = asked.entry(
             POWER_MODE_CHANGED,
             message,
@@ -538,11 +568,17 @@ impl crate::engine::Engine {
         if let Err(e) = self.store.append_entry(HOST_JOURNAL, &entry).await {
             tracing::warn!("the power mode was changed but not journaled: {e}");
         }
-        let read_back = [after.ac, after.battery].into_iter().flatten().all(|m| m == mode);
+        let read_back = [after.ac, after.battery]
+            .into_iter()
+            .flatten()
+            .all(|m| m == mode);
         if read_back {
             tracing::info!("power mode set to {mode} {}", asked.words());
         } else {
-            tracing::warn!("power mode set to {mode}, but pmset now reads {}", modes_words(&after));
+            tracing::warn!(
+                "power mode set to {mode}, but pmset now reads {}",
+                modes_words(&after)
+            );
         }
         Ok(self.host_power_report().await)
     }
@@ -557,7 +593,8 @@ pub(crate) mod testing {
     use super::*;
     use std::sync::Mutex;
 
-    pub(crate) const MAC_CAP: &str = "Capabilities for AC Power:\n displaysleep\n sleep\n lowpowermode\n highpowermode\n";
+    pub(crate) const MAC_CAP: &str =
+        "Capabilities for AC Power:\n displaysleep\n sleep\n lowpowermode\n highpowermode\n";
 
     pub(crate) struct FakeHost {
         pub cap: String,
@@ -593,7 +630,10 @@ pub(crate) mod testing {
 
         /// Every write -- a `sudo` that is not a `-l` listing.
         pub(crate) fn writes(&self) -> Vec<Vec<&'static str>> {
-            self.calls().into_iter().filter(|c| c[0] == SUDO && c.get(2) != Some(&"-l")).collect()
+            self.calls()
+                .into_iter()
+                .filter(|c| c[0] == SUDO && c.get(2) != Some(&"-l"))
+                .collect()
         }
 
         fn custom(&self) -> String {
@@ -609,16 +649,28 @@ pub(crate) mod testing {
     }
 
     fn ok(stdout: impl Into<String>) -> std::io::Result<Output> {
-        Ok(Output { success: true, stdout: stdout.into(), stderr: String::new() })
+        Ok(Output {
+            success: true,
+            stdout: stdout.into(),
+            stderr: String::new(),
+        })
     }
 
     fn refused() -> std::io::Result<Output> {
-        Ok(Output { success: false, stdout: String::new(), stderr: "sudo: a password is required\n".into() })
+        Ok(Output {
+            success: false,
+            stdout: String::new(),
+            stderr: "sudo: a password is required\n".into(),
+        })
     }
 
     #[async_trait::async_trait]
     impl Runner for FakeHost {
-        async fn run(&self, program: &'static str, args: &[&'static str]) -> std::io::Result<Output> {
+        async fn run(
+            &self,
+            program: &'static str,
+            args: &[&'static str],
+        ) -> std::io::Result<Output> {
             let mut call = vec![program];
             call.extend_from_slice(args);
             self.calls.lock().unwrap().push(call);
