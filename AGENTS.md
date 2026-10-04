@@ -5,6 +5,8 @@ A daemon that gives tasks to coding agents and watches what happens.
 ## Layout
 
     crates/factory-kernel    L0: pure shared vocabulary and every live fact schema (Level/Fact, nested statuses, grants and evidence); no other factory-* dependency
+    crates/factory-infrastructure L1: backup, running environments and renewal domain behaviour
+    crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
@@ -199,8 +201,16 @@ something impossible.
   kernel read boundary enforces a sealed `Producer: Below<Reader>` relation:
   strictly upward reads only, including adjacent levels. Same-level calls
   stay in their service. The router and page composition use `Facts<People>`
-  outside the ladder, not an internal level's identity. Crate splitting and
-  the strict command ladder remain in #193; the bound alone is not service
+  outside the ladder, not an internal level's identity. L1 infrastructure
+  and L2 environment domain owners now live in physical crates; core keeps
+  compatibility re-exports. A physical owner declares
+  `package.metadata.factory.level` and may depend on L0 or only the level
+  directly below. The Cargo metadata guard includes aliases, target tables
+  and dev/build dependencies. Do not add a core/facade back-edge, even for a
+  test: whole-instance integration tests belong outside the ladder. Shared
+  schedule, launch, time-span and error values are L0; domain decisions
+  remain in their owning level. Remaining crate/service splitting and the
+  strict command ladder remain in #193; the bound alone is not service
   isolation or an authorization boundary.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's

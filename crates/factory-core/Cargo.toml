@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 factory-kernel = { path = "../factory-kernel" }
+factory-infrastructure = { path = "../factory-infrastructure" }
+factory-environment = { path = "../factory-environment" }
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

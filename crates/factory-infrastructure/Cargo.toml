@@ -1,18 +1,17 @@
 [package]
-name = "factory-kernel"
+name = "factory-infrastructure"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [package.metadata.factory]
-level = 0
+level = 1
 
 [dependencies]
-anyhow.workspace = true
-async-trait.workspace = true
+factory-kernel = { path = "../factory-kernel" }
 chrono.workspace = true
 serde.workspace = true
-thiserror.workspace = true
+serde_yaml_ng.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

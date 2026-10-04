@@ -752,6 +752,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "csv",
+ "factory-environment",
+ "factory-infrastructure",
  "factory-kernel",
  "serde",
  "serde_json",
@@ -793,13 +795,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "factory-environment"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "factory-kernel",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2 0.10.9",
+ "uuid",
+]
+
+[[package]]
+name = "factory-infrastructure"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "factory-kernel",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+]
+
+[[package]]
 name = "factory-kernel"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

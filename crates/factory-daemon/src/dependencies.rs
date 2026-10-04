@@ -1021,9 +1021,9 @@ mod tests {
     #[test]
     fn reachability_is_display_only_and_keeps_its_immutable_source_when_resolved() {
         let sbom =
-            include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
+            include_bytes!("../../factory-environment/tests/fixtures/dependencies/build-sbom.cdx.json");
         let mut vulns: Value = serde_json::from_slice(include_bytes!(
-            "../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json"
+            "../../factory-environment/tests/fixtures/dependencies/vulnerabilities.cdx.json"
         ))
         .unwrap();
         vulns["vulnerabilities"][0]["analysis"] =
@@ -1103,9 +1103,9 @@ mod tests {
     #[test]
     fn reachability_properties_bind_exact_components_and_prose_is_not_classified() {
         let sbom =
-            include_bytes!("../../factory-core/tests/fixtures/dependencies/declared-sbom.cdx.json");
+            include_bytes!("../../factory-environment/tests/fixtures/dependencies/declared-sbom.cdx.json");
         let mut vuln: Value = serde_json::from_slice(include_bytes!(
-            "../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json"
+            "../../factory-environment/tests/fixtures/dependencies/vulnerabilities.cdx.json"
         ))
         .unwrap();
         vuln["vulnerabilities"][0]["affects"]
@@ -1207,9 +1207,9 @@ mod tests {
     #[test]
     fn newest_scan_is_open_and_an_absent_older_finding_is_resolved() {
         let sbom =
-            include_bytes!("../../factory-core/tests/fixtures/dependencies/declared-sbom.cdx.json");
+            include_bytes!("../../factory-environment/tests/fixtures/dependencies/declared-sbom.cdx.json");
         let vulns = include_bytes!(
-            "../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json"
+            "../../factory-environment/tests/fixtures/dependencies/vulnerabilities.cdx.json"
         );
         let empty = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","vulnerabilities":[]}"#;
         let docs = vec![
@@ -1258,9 +1258,9 @@ mod tests {
     fn stale_scan_never_claims_a_finding_was_resolved() {
         let age = "1h".parse().unwrap();
         let sbom =
-            include_bytes!("../../factory-core/tests/fixtures/dependencies/declared-sbom.cdx.json");
+            include_bytes!("../../factory-environment/tests/fixtures/dependencies/declared-sbom.cdx.json");
         let vulns = include_bytes!(
-            "../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json"
+            "../../factory-environment/tests/fixtures/dependencies/vulnerabilities.cdx.json"
         );
         let docs = vec![
             stored(
@@ -1292,10 +1292,10 @@ mod tests {
     #[test]
     fn a_new_sbom_without_an_assessment_never_proves_resolution() {
         let sbom = include_bytes!(
-            "../../factory-core/tests/fixtures/dependencies/declared-sbom.cdx.json"
+            "../../factory-environment/tests/fixtures/dependencies/declared-sbom.cdx.json"
         );
         let vulns = include_bytes!(
-            "../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json"
+            "../../factory-environment/tests/fixtures/dependencies/vulnerabilities.cdx.json"
         );
         let docs = vec![
             stored(AttachmentKind::Sbom, sbom, "2026-09-24T10:00:00Z", "s1", "r1"),
@@ -1317,7 +1317,7 @@ mod tests {
     #[test]
     fn policy_fact_projects_the_newest_build_sbom() {
         let built = include_bytes!(
-            "../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json"
+            "../../factory-environment/tests/fixtures/dependencies/build-sbom.cdx.json"
         );
         let docs = vec![stored(
             AttachmentKind::Sbom,
@@ -1351,7 +1351,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("factory-dependencies-{}", uuid::Uuid::new_v4()));
         let document = stored(
             AttachmentKind::Sbom,
-            include_bytes!("../../factory-core/tests/fixtures/dependencies/declared-sbom.cdx.json"),
+            include_bytes!("../../factory-environment/tests/fixtures/dependencies/declared-sbom.cdx.json"),
             "2026-09-25T10:00:00Z", "same", "run",
         );
         let first = b"original";
@@ -1380,8 +1380,8 @@ mod tests {
 
     #[test]
     fn one_qualifying_sighting_gives_one_item_at_the_vulnerability_documents_own_time() {
-        let sbom = include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
-        let vulns = include_bytes!("../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json");
+        let sbom = include_bytes!("../../factory-environment/tests/fixtures/dependencies/build-sbom.cdx.json");
+        let vulns = include_bytes!("../../factory-environment/tests/fixtures/dependencies/vulnerabilities.cdx.json");
         let docs = vec![
             stored(AttachmentKind::Sbom, sbom, "2026-09-24T10:00:00Z", "s1", "r1"),
             stored(AttachmentKind::Vulnerabilities, vulns, "2026-09-24T10:01:00Z", "v1", "r1"),
@@ -1401,8 +1401,8 @@ mod tests {
 
     #[test]
     fn a_declared_only_sbom_gives_no_exploited_findings() {
-        let sbom = include_bytes!("../../factory-core/tests/fixtures/dependencies/declared-sbom.cdx.json");
-        let vulns = include_bytes!("../../factory-core/tests/fixtures/dependencies/vulnerabilities.cdx.json");
+        let sbom = include_bytes!("../../factory-environment/tests/fixtures/dependencies/declared-sbom.cdx.json");
+        let vulns = include_bytes!("../../factory-environment/tests/fixtures/dependencies/vulnerabilities.cdx.json");
         let docs = vec![
             stored(AttachmentKind::Sbom, sbom, "2026-09-24T10:00:00Z", "s1", "r1"),
             stored(AttachmentKind::Vulnerabilities, vulns, "2026-09-24T10:01:00Z", "v1", "r1"),
@@ -1412,7 +1412,7 @@ mod tests {
 
     #[test]
     fn analysis_state_exploitable_still_counts_as_a_sighting() {
-        let sbom = include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
+        let sbom = include_bytes!("../../factory-environment/tests/fixtures/dependencies/build-sbom.cdx.json");
         let vulns = vuln_doc("0001", true, false, Some("exploitable"));
         let docs = vec![
             stored(AttachmentKind::Sbom, sbom, "2026-09-24T10:00:00Z", "s1", "r1"),
@@ -1426,7 +1426,7 @@ mod tests {
 
     #[test]
     fn a_later_not_affected_mention_excludes_the_item_but_never_its_awareness() {
-        let sbom = include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
+        let sbom = include_bytes!("../../factory-environment/tests/fixtures/dependencies/build-sbom.cdx.json");
         let first = vuln_doc("0002", true, false, None);
         let second = vuln_doc("0002", true, false, Some("not_affected"));
         let docs = vec![
@@ -1443,7 +1443,7 @@ mod tests {
 
     #[test]
     fn a_later_scan_without_the_vulnerability_keeps_the_item_with_reported_now_false() {
-        let sbom = include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
+        let sbom = include_bytes!("../../factory-environment/tests/fixtures/dependencies/build-sbom.cdx.json");
         let first = vuln_doc("0003", true, false, None);
         let empty = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","vulnerabilities":[]}"#;
         let docs = vec![
@@ -1461,7 +1461,7 @@ mod tests {
 
     #[test]
     fn kev_and_euvd_both_false_gives_no_exploited_findings() {
-        let sbom = include_bytes!("../../factory-core/tests/fixtures/dependencies/build-sbom.cdx.json");
+        let sbom = include_bytes!("../../factory-environment/tests/fixtures/dependencies/build-sbom.cdx.json");
         let vulns = vuln_doc("0004", false, false, None);
         let docs = vec![
             stored(AttachmentKind::Sbom, sbom, "2026-09-24T10:00:00Z", "s1", "r1"),
