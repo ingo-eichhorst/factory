@@ -126,6 +126,8 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/environments/samples", get(environment_samples))
         .route("/api/deployments", post(deploy_start))
         .route("/api/deployments/{id}/finish", post(deploy_finish))
+        .route("/api/deployments/{id}/mirror-plan", get(deploy_mirror_plan))
+        .route("/api/deployments/{id}/publish", post(deploy_publish))
         .route("/api/releases", post(release_add))
         .route("/api/releases/detail", get(release_detail))
         .route("/api/backup", get(backup))
@@ -445,6 +447,18 @@ struct DeployFinishBody {
     reason: Option<String>,
     #[serde(default)]
     verify: Option<bool>,
+}
+
+async fn deploy_mirror_plan(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::DeployMirrorPlan { id }).await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeployPublishBody { approval: String }
+
+async fn deploy_publish(State(engine): State<Arc<Engine>>, Path(id): Path<String>, Json(body): Json<DeployPublishBody>) -> AxumResponse {
+    run(&engine, Request::DeployPublish { id, approval: body.approval }).await
 }
 
 /// `POST /api/deployments/{id}/finish` `{status, reason?, verify?}`.

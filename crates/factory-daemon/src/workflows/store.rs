@@ -32,6 +32,14 @@ CREATE TABLE IF NOT EXISTS recovery_journal (
     UNIQUE(action_id, phase)
 );
 CREATE INDEX IF NOT EXISTS recovery_journal_scope ON recovery_journal(scope, at);
+CREATE TABLE IF NOT EXISTS deployment_mirrors (
+    id TEXT PRIMARY KEY,
+    deployment TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    at TEXT NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS deployment_mirrors_deployment ON deployment_mirrors(deployment);
 "#;
 
 fn error(error: impl std::fmt::Display) -> FactoryError {
@@ -64,6 +72,25 @@ pub struct WorkflowStore {
 }
 
 impl WorkflowStore {
+    pub async fn record_mirror(&self, receipt: &factory_kernel::DeploymentMirrorFact) -> Result<()> {
+        let receipt = receipt.clone();
+        self.with_conn(move |conn| {
+            conn.execute("INSERT INTO deployment_mirrors(id, deployment, scope, at, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![receipt.id, receipt.plan.deployment, receipt.plan.scope, receipt.at.to_rfc3339(), serde_json::to_string(&receipt).map_err(error)?]).map_err(error)?;
+            Ok(())
+        }).await
+    }
+
+    pub async fn mirror_receipts(&self, deployment: &str, limit: u32) -> Result<Vec<factory_kernel::DeploymentMirrorFact>> {
+        let deployment = deployment.to_owned();
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare("SELECT id, data FROM deployment_mirrors WHERE deployment=?1 ORDER BY rowid DESC LIMIT ?2").map_err(error)?;
+            let rows = stmt.query_map(params![deployment, limit.clamp(1, 200)], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(error)?.collect::<std::result::Result<Vec<_>, _>>().map_err(error)?;
+            Ok(decode_all(rows, "deployment_mirrors"))
+        }).await
+    }
+
     /// An append-only script action ledger, not a workflow or task status.
     pub async fn import_recovery(&self, action: &factory_kernel::ScriptRecoveryAction) -> Result<()> {
         factory_core::recovery_journal::validate(action)?;

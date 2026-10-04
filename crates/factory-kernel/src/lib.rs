@@ -41,6 +41,8 @@ pub use facts::{EnvironmentMetricFact, KnowledgeTags, ScopeCapacityFact};
 pub use facts::{EnvironmentRecoveryFact, RECOVERY_COMMIT_LABEL, RECOVERY_ENVIRONMENT_LABEL, RECOVERY_REASON_LABEL};
 pub use facts::{ReleaseBuildFact, ReleaseSbomFact};
 pub use facts::{RecoveryJournalFact, ScriptRecoveryAction, ScriptRecoveryFinish};
+pub use facts::{DeploymentMirrorFact, DeploymentMirrorPlan, DeploymentMirrorPhase};
+pub use facts::DeploymentPublicationFact;
 pub use ports::{Below, FactProvider, FactValue, Facts, People, Provide, Reader};
 
 pub use duration::Duration;

@@ -202,9 +202,10 @@ impl Engine {
             Request::IntakeTriage { .. } => Grant::IntakeTriage,
             Request::IntakeAssess { .. } => Grant::IntakeAssess,
             Request::IntakeDecide { .. } => Grant::IntakeDecide,
-            // The one outward-effect grant: never `foreman`'s free ALL,
-            // never a wildcard, named exactly or not at all (`#171`).
+            // Outward-effect grants: never `foreman`'s free ALL,
+            // never a wildcard, named exactly or not at all (`#171`, `#185`).
             Request::IntakePublish { .. } => Grant::IntakePublish,
+            Request::DeployPublish { .. } => Grant::DeployPublish,
             // Flagging only adds scrutiny -- the same door `intake.assess`
             // already opens, not a sixth grant (`#170`). Confirming or
             // dismissing is never an agent's, whatever it holds: see the
@@ -296,6 +297,7 @@ impl Engine {
             | Request::Backup
             // Samples and deployments folded on read; writes nothing.
             | Request::Environments { .. }
+            | Request::DeployMirrorPlan { .. }
             | Request::EnvironmentSamples(_)
             | Request::ReleaseDetail(_)
             | Request::DependencyDocument { .. }
@@ -752,6 +754,15 @@ impl Engine {
                     Reach::Scope => Ok(()),
                     Reach::Own if run_id.is_some() && deployment.actor.run_id == *run_id => Ok(()),
                     Reach::Own => Err(deny("finish a deployment its own run did not start")),
+                }
+            }
+            Request::DeployPublish { id, .. } => {
+                let deployment = self.environments.deployment(id).await?
+                    .ok_or_else(|| FactoryError::BadRequest(format!("no deployment {id}")))?;
+                in_scope(&deployment.scope)?;
+                match def.reach {
+                    Reach::Scope => Ok(()),
+                    Reach::Own => Err(deny("publish a scope deployment; that requires scope reach")),
                 }
             }
             Request::ReleaseAdd(req) => {
