@@ -87,6 +87,7 @@ fn a_process_task_projects_to_an_independent_wire_compatible_dispatch_snapshot()
         "labels":{"goal":"g", "arbitrary":"value"}, "worktree":true, "knowledge_hints":true,
         "after":["upstream"], "after_condition":"route", "depends_on":["dep"],
         "decomposition_part":"part", "parent_task_id":"parent", "category":"feature",
+        "bench_origin":{"bench_run_id":"b", "case_id":"c", "agent":"shell", "attempt":2},
         "workflow_origin":{"workflow_id":"w", "workflow_run_id":"wr", "node_id":"n",
             "workspace":{"base_ref":"integration"}},
         "ack_timeout_seconds":30, "timeout_seconds":60, "blocked_timeout_seconds":90,
@@ -104,4 +105,44 @@ fn a_process_task_projects_to_an_independent_wire_compatible_dispatch_snapshot()
     let restored: task::Task =
         serde_json::from_value(serde_json::to_value(assignment).unwrap()).unwrap();
     assert_eq!(serde_json::to_value(restored).unwrap(), original);
+}
+
+#[test]
+fn process_and_plan_paths_are_canonical_without_a_benchmark_type_in_l4() {
+    let old: Option<&dyn factory_core::adapter::TaskStore> = None;
+    let canonical: Option<&dyn factory_process::store::TaskStore> = old;
+    assert!(canonical.is_none());
+    let plan: factory_core::control_plan::ControlPlan =
+        factory_process::control_plan::ControlPlan::default();
+    assert_eq!(plan.steps.len(), 0);
+    let usage: factory_core::usage::RunUsage =
+        factory_process::usage::RunUsage::unknown("unknown", 1);
+    assert_eq!(usage.state, factory_process::usage::UsageState::Unknown);
+    let task: Option<factory_core::task::Task> = None;
+    let _: Option<factory_process::task::Task> = task;
+    let run: Option<factory_core::run::Run> = None;
+    let _: Option<factory_process::run::Run> = run;
+    let workflow: Option<factory_core::workflow::WorkflowDefinition> = None;
+    let _: Option<factory_process::workflow::WorkflowDefinition> = workflow;
+    let intake: Option<factory_core::intake::Intake> = None;
+    let _: Option<factory_process::intake::Intake> = intake;
+    let requirement: Option<factory_core::control_plan::Requirement> = None;
+    let _: Option<factory_assurance::control_plan::Requirement> = requirement;
+}
+
+#[test]
+fn benchmark_owner_decodes_the_same_legacy_wire_reference_after_l4_roundtrip() {
+    use factory_core::bench::BenchOrigin;
+    let origin = BenchOrigin {
+        bench_run_id: "b".into(),
+        case_id: "c".into(),
+        agent: "shell".into(),
+        attempt: 2,
+    };
+    let legacy = serde_json::to_value(&origin).unwrap();
+    let reference: factory_process::origin::OriginRef = origin.clone().into();
+    assert_eq!(serde_json::to_value(&reference).unwrap(), legacy);
+    assert_eq!(BenchOrigin::try_from(&reference).unwrap(), origin);
+    let unknown = factory_process::origin::OriginRef::opaque("unsupported-reference");
+    assert!(BenchOrigin::try_from(&unknown).is_err());
 }

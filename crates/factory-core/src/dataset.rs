@@ -187,15 +187,7 @@ impl Dataset {
     }
 }
 
-/// `^[a-z0-9][a-z0-9-]*$` -- a dataset's `name`, and a case's `id`.
-pub fn is_slug(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
+pub use factory_kernel::is_slug;
 
 /// A dataset `name` becomes a path component the moment it reaches `load` or
 /// `write_atomic` -- `is_slug` is what stands between that and `../elsewhere`

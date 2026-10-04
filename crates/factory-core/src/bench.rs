@@ -30,6 +30,24 @@ pub struct BenchOrigin {
     pub attempt: u32,
 }
 
+// Only the benchmark owner interprets its legacy reference. L4 forwards it
+// without depending on this type or gaining an accessor for its fields.
+impl From<BenchOrigin> for factory_process::origin::OriginRef {
+    fn from(origin: BenchOrigin) -> Self {
+        serde_json::from_value(serde_json::json!({
+            "bench_run_id": origin.bench_run_id, "case_id": origin.case_id,
+            "agent": origin.agent, "attempt": origin.attempt
+        })).expect("an opaque reference accepts plain JSON")
+    }
+}
+
+impl TryFrom<&factory_process::origin::OriginRef> for BenchOrigin {
+    type Error = serde_json::Error;
+    fn try_from(reference: &factory_process::origin::OriginRef) -> Result<Self, Self::Error> {
+        serde_json::from_value(serde_json::to_value(reference)?)
+    }
+}
+
 /// The configuration tuple an attempt actually dispatched with, snapshotted
 /// at the moment its task was created -- reusing `benchmark.rs`'s own
 /// derivation so a bench result and the Configurations tab never disagree

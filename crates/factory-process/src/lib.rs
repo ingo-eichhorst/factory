@@ -1,0 +1,20 @@
+//! L4 owns standing intent, attempts, workflows, intake and execution gates.
+//! Only L0 and the directly lower L3 contract may be imported here. Live
+//! services and command routing remain separate migration work in #193.
+//!
+//! L4 cannot reach a facade to recover upward imports:
+//! ```compile_fail
+//! use factory_core::task::Task;
+//! ```
+pub mod assignment;
+pub mod control_plan;
+pub mod intake;
+pub mod occupancy;
+pub mod origin;
+pub mod ready;
+pub mod run;
+pub mod store;
+pub mod task;
+pub mod usage;
+pub mod window;
+pub mod workflow;

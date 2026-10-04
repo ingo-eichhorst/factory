@@ -3142,7 +3142,7 @@ mod tests {
                 case_id: "c1".into(),
                 agent: "shell".into(),
                 attempt: 1,
-            });
+            }.into());
             engine.store.create(&t).await.unwrap()
         };
         let bench_run = engine

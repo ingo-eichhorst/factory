@@ -248,33 +248,7 @@ pub enum PaceBasis {
 
 // ================================================================ window
 
-/// A stretch of time, half-open at the start: `(from, to]`, so two windows
-/// that share a boundary never both count the run that ended on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Window {
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
-}
-
-impl Window {
-    /// The `days` ending at `now`.
-    pub fn trailing(now: DateTime<Utc>, days: i64) -> Self {
-        Self { from: now - Duration::days(days), to: now }
-    }
-
-    pub fn contains(&self, at: DateTime<Utc>) -> bool {
-        at > self.from && at <= self.to
-    }
-
-    fn days(&self) -> f64 {
-        seconds(self.to - self.from) / 86_400.0
-    }
-
-    fn previous(&self) -> Self {
-        let len = self.to - self.from;
-        Self { from: self.from - len, to: self.from }
-    }
-}
+pub use factory_process::window::Window;
 
 fn ended_in(run: &Run, window: &Window) -> bool {
     run.ended_at.is_some_and(|end| window.contains(end))
@@ -2140,7 +2114,7 @@ mod tests {
             case_id: "c".into(),
             agent: "pi".into(),
             attempt: 1,
-        });
+        }.into());
         let tasks = vec![task("recovered", "demo"), bench];
         let runs = vec![
             run("a", "recovered", 1, RunStatus::Failed, 30, Some(25)),

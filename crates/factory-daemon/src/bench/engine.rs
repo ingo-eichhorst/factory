@@ -344,16 +344,22 @@ impl Engine {
 
     /// Where a run's own worktree base is pinned, for `place_run`. `None`
     /// when this is not a bench task, or the run is gone.
-    pub(crate) async fn bench_case_base(&self, origin: &BenchOrigin) -> Option<String> {
-        let run = self.bench.get_run(&origin.bench_run_id).await.ok().flatten()?;
-        run.case_bases.get(&origin.case_id).cloned()
+    pub(crate) async fn bench_case_base(&self, origin: &factory_core::task::OriginRef) -> Result<Option<String>> {
+        let origin = BenchOrigin::try_from(origin).map_err(|error| {
+            FactoryError::BadRequest(format!("unsupported or invalid benchmark origin: {error}"))
+        })?;
+        let Some(run) = self.bench.get_run(&origin.bench_run_id).await.ok().flatten() else { return Ok(None) };
+        Ok(run.case_bases.get(&origin.case_id).cloned())
     }
 
     /// The case's reset command, for `place_run` to run before the agent
     /// starts.
-    pub(crate) async fn bench_case_reset(&self, origin: &BenchOrigin) -> Option<String> {
-        let run = self.bench.get_run(&origin.bench_run_id).await.ok().flatten()?;
-        run.cases.iter().find(|c| c.id == origin.case_id).and_then(|c| c.reset.clone())
+    pub(crate) async fn bench_case_reset(&self, origin: &factory_core::task::OriginRef) -> Result<Option<String>> {
+        let origin = BenchOrigin::try_from(origin).map_err(|error| {
+            FactoryError::BadRequest(format!("unsupported or invalid benchmark origin: {error}"))
+        })?;
+        let Some(run) = self.bench.get_run(&origin.bench_run_id).await.ok().flatten() else { return Ok(None) };
+        Ok(run.cases.iter().find(|c| c.id == origin.case_id).and_then(|c| c.reset.clone()))
     }
 
     /// Run a case's reset command in its fresh worktree. `Ok(())` only on
@@ -432,6 +438,14 @@ impl Engine {
             while let Some(task_id) = rx.recv().await {
                 if let Ok(Some(task)) = engine.store.get(&task_id).await {
                     if let Some(origin) = task.bench_origin.clone() {
+                        let origin = match BenchOrigin::try_from(&origin) {
+                            Ok(origin) => origin,
+                            Err(error) => {
+                                tracing::warn!(task = %task_id, "could not decode bench origin: {error}");
+                                engine.bench_judging.lock().unwrap().remove(&task_id);
+                                continue;
+                            }
+                        };
                         if let Err(e) = engine.judge_bench_attempt(&origin, &task).await {
                             tracing::warn!(task = %task_id, "could not judge bench attempt: {e}");
                         }
@@ -856,6 +870,21 @@ mod tests {
         // startup.
         engine.spawn_bench_judge();
         engine
+    }
+
+    #[tokio::test]
+    async fn undecodable_origins_cannot_silently_skip_the_benchmark_base_or_reset() {
+        let engine = test_engine(std::env::temp_dir().join("factory-bench-origin-no-dispatch"));
+        let reference = factory_core::task::OriginRef::opaque("unsupported-reference");
+        for error in [engine.bench_case_base(&reference).await.unwrap_err(), engine.bench_case_reset(&reference).await.unwrap_err()] {
+            assert_eq!(error.code(), "bad_request");
+            assert!(error.to_string().contains("benchmark origin"));
+        }
+        let known: factory_core::task::OriginRef = BenchOrigin {
+            bench_run_id: "missing-run".into(), case_id: "case".into(), agent: "shell".into(), attempt: 1,
+        }.into();
+        assert!(engine.bench_case_base(&known).await.unwrap().is_none());
+        assert!(engine.bench_case_reset(&known).await.unwrap().is_none());
     }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {

@@ -8,6 +8,8 @@ A daemon that gives tasks to coding agents and watches what happens.
     crates/factory-infrastructure L1: backup, running environments and renewal domain behaviour
     crates/factory-environment    L2: sandbox planning, secrets and dependency domain behaviour
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
+    crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy and TaskStore
+    crates/factory-assurance      L5: requirement validation and the single execution-plan compiler (other assurance services still pending)
     crates/factory-core      domain, events, wire protocol, the five adapter traits
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
@@ -204,7 +206,7 @@ something impossible.
   strictly upward reads only, including adjacent levels. Same-level calls
   stay in their service. The router and page composition use `Facts<People>`
   outside the ladder, not an internal level's identity. L1 infrastructure,
-  L2 environment and L3 agent/runtime domain owners live in physical crates; core keeps
+  L2 environment, L3 agent/runtime, L4 process and L5 plan-compiler domain owners live in physical crates; core keeps
   compatibility re-exports. A physical owner declares
   `package.metadata.factory.level` and may depend on L0 or only the level
   directly below. The Cargo metadata guard includes aliases, target tables
@@ -227,6 +229,14 @@ something impossible.
   Shared workflow references and knowledge hints are plain L0 command
   values, not new facts or knowledge-search logic. Live services and the
   strict command ladder remain separate unfinished requirements of #193.
+- Task/run/workflow/intake behavior, usage deltas and the TaskStore seam live
+  in L4. Its generic plans/gates never import L5 requirements or L6 policy
+  types. The sole execution-plan compiler is in L5; core's legacy `resolve`
+  path only adapts producer declarations to its command inputs. A process
+  task's origin is opaque: `.into()` a producer-owned `BenchOrigin` when
+  constructing it, and decode it only in the benchmark owner. Keep its legacy
+  JSON stable; never add benchmark accessors to L4. This does not finish the
+  benchmark timer, evaluator, live providers/services or command-ladder work.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's
   `scope.roles` down to that scope -- from the live snapshot, and `authorize`,

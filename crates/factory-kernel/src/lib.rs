@@ -37,6 +37,8 @@ pub use span::{parse_span, Span};
 mod session;
 pub use session::SessionRef;
 mod workflow_identity;
+mod slug;
+pub use slug::is_slug;
 pub use workflow_identity::{WorkflowOrigin, WorkflowWorkspace};
 mod knowledge_hints;
 pub use knowledge_hints::{KnowledgeHit, KnowledgeHints};
