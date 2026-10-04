@@ -343,7 +343,7 @@ function rerender(route) {
   // Same reason again: which objectives and roadmap items belong to a scope
   // is the daemon's own filter (`GET /api/goals?scope=`).
   else if (state.tab === "goals") loadGoals();
-  else if (state.tab === "budget") loadBudget();
+  else if (state.tab === "budget") void loadBudget();
   // Same reason again: which profiles bind a scope is its chain, folded by
   // the daemon (`GET /api/quality?scope=`).
   else if (state.tab === "quality") loadQuality();

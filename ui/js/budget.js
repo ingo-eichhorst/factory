@@ -9,16 +9,25 @@ let refreshTimer = null;
 function cardHtml(raw, month) {
   const c = budgetCard(raw);
   const chart = burnDown(raw, month);
+  const progress = c.usedPercent == null ? "" : `<progress max="100" value="${c.usedPercent}" aria-label="Monthly budget used"></progress>`;
+  const burn = chart ? `<svg class="budget-burn" viewBox="0 0 ${chart.width} ${chart.height}" role="img" aria-label="Observed remaining budget by UTC run-start day versus a linear monthly plan"><polyline class="budget-plan" points="${chart.planned}"/><polyline class="budget-observed" points="${chart.points}"/></svg><p class="sub">Solid: observed remaining (floored at $0); dashed: linear plan. Above-limit spend is shown in the verdict.</p>` : "";
+  const ancestor = c.ancestorNote ? `<p class="env-note">${esc(c.ancestorNote)}</p>` : "";
   return `<article class="budget-card budget-${esc(c.assessment.state)}">
     <div class="budget-title"><h3>${esc(c.scope)}</h3><span>${esc(c.status)}</span></div>
     <p class="sub">${esc(c.id)} · ${esc(c.path)}</p>
     <p>Monthly limit: ${esc(c.limit)} · ${esc(usd(c.spent.cost_usd))} known</p>
     <p>${esc(c.assessment.reason)}</p>
-    ${c.usedPercent == null ? "" : `<progress max="100" value="${c.usedPercent}" aria-label="Monthly budget used"></progress>`}
+    ${progress}
     <p>Remaining: ${esc(c.remaining)} · Month-end at current pace: ${esc(c.projected)}</p>
-    ${chart ? `<svg class="budget-burn" viewBox="0 0 ${chart.width} ${chart.height}" role="img" aria-label="Observed remaining budget by UTC run-start day versus a linear monthly plan"><polyline class="budget-plan" points="${chart.planned}"/><polyline class="budget-observed" points="${chart.points}"/></svg><p class="sub">Solid: observed remaining (floored at $0); dashed: linear plan. Above-limit spend is shown in the verdict.</p>` : ""}
-    ${c.ancestorNote ? `<p class="env-note">${esc(c.ancestorNote)}</p>` : ""}
+    ${burn}
+    ${ancestor}
   </article>`;
+}
+
+function spendTableHtml(rows) {
+  if (!rows.length) return '<p class="empty">No runs started in this month-to-date window.</p>';
+  const body = rows.map(r => `<tr><td>${esc(r.name)}</td><td>${r.runs}</td><td>${esc(r.cost)}</td><td>${esc(r.tokenText)}</td><td>${esc(r.uncertainty) || "—"}</td></tr>`).join("");
+  return `<table><thead><tr><th>Group</th><th>Runs</th><th>USD</th><th>Tokens</th><th>Uncertainty</th></tr></thead><tbody>${body}</tbody></table>`;
 }
 
 function render(report) {
@@ -31,7 +40,7 @@ function render(report) {
   const total = report.spend.total;
   $("budget-spend-note").textContent = `${state.scope || "Whole instance"} · ${total.runs} runs · ${usd(total.cost_usd)} known. ${uncertainty(total, report.spend.unattributed_runs)}`;
   const rows = spendRows(report.spend);
-  $("budget-spend").innerHTML = rows.length ? `<table><thead><tr><th>Group</th><th>Runs</th><th>USD</th><th>Tokens</th><th>Uncertainty</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.name)}</td><td>${r.runs}</td><td>${esc(r.cost)}</td><td>${esc(r.tokenText)}</td><td>${esc(r.uncertainty) || "—"}</td></tr>`).join("")}</tbody></table>` : '<p class="empty">No runs started in this month-to-date window.</p>';
+  $("budget-spend").innerHTML = spendTableHtml(rows);
 }
 
 export async function loadBudget() {
@@ -58,12 +67,12 @@ export function reloadBudget() {
   if (refreshTimer !== null) return;
   refreshTimer = setTimeout(() => {
     refreshTimer = null;
-    if (state.tab === "budget") loadBudget();
+    if (state.tab === "budget") void loadBudget();
   }, 1500);
 }
 
 export function wireBudget() {
   $("budget-group").innerHTML = GROUPS.map(([id, name]) => `<option value="${id}">${name}</option>`).join("");
-  $("budget-group").onchange = () => { group = $("budget-group").value; loadBudget(); };
+  $("budget-group").onchange = () => { group = $("budget-group").value; void loadBudget(); };
   $("budget-refresh").onclick = () => loadBudget();
 }

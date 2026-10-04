@@ -57,7 +57,7 @@ export function budgetCard(card) {
 /// Observed daily burn-down uses frozen run usage assigned to its UTC start
 /// day. Never draw an under-budget line if the amount remaining is unknown.
 export function burnDown(card, month, width = 280, height = 80) {
-  if (card.assessment.remaining_usd == null || !(card.monthly_usd > 0)) return null;
+  if (card.assessment.remaining_usd == null || !Number.isFinite(card.monthly_usd) || card.monthly_usd <= 0) return null;
   const from = Date.parse(month.from), until = Date.parse(month.until), now = Date.parse(month.as_of);
   if (![from, until, now].every(Number.isFinite) || until <= from) return null;
   const x = time => Math.max(0, Math.min(width, (time - from) / (until - from) * width));
