@@ -12,6 +12,7 @@
 //! import; this file only puts their answers on screen.
 
 import { $, api, esc, state } from "./core.js";
+import { dateBadges, loadDateBadges } from "./dates.js";
 import { scrim, dropModal, closeModal } from "./modal.js";
 import {
   CONFIG_SNIPPET,
@@ -260,7 +261,8 @@ export async function refreshEnvironments() {
   const button = $("environments-refresh");
   if (button) button.disabled = true;
   try {
-    if (await loadEnvironments()) renderEnvironments();
+    const [loaded] = await Promise.all([loadEnvironments(), loadDateBadges()]);
+    if (loaded) renderEnvironments();
   } finally {
     if (button) button.disabled = false;
   }
@@ -400,6 +402,7 @@ function card(c, now) {
     <header class="infra-card-head">
       <span class="sys-dot" data-tone="${tone}"></span>
       <h3 id="sys-${esc(c.name)}">${esc(c.name)}</h3>
+      ${dateBadges({ scope: c.scope, environment: c.name })}
       <span class="tag sys-badge" data-tone="${tone}">${esc(statusLabel(c.status))}</span>
       <span class="tag">${esc(tierLabel(c.tier))}</span>
       ${c.promotes_to ? `<span class="sub">promotes to ${esc(c.promotes_to)}</span>` : ""}

@@ -1055,6 +1055,8 @@ mod tests {
             ))
             .unwrap(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory { root, config };
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
@@ -1097,6 +1099,8 @@ mod tests {
             ))
             .unwrap(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory { root, config };
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
@@ -1166,6 +1170,8 @@ mod tests {
             ))
             .unwrap(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory { root, config };
         let mut engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
@@ -1439,6 +1445,8 @@ mod tests {
             ))
             .unwrap(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory { root, config };
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())

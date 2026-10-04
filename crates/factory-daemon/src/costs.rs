@@ -686,9 +686,12 @@ mod tests {
                 intake: Default::default(),
                 dependencies: Default::default(),
                 environments: Vec::new(),
+                renewals: Vec::new(),
             }],
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let mut registry = Registry::with_builtins();
         registry.add_runtime(

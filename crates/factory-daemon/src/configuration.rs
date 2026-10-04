@@ -1588,6 +1588,8 @@ mod tests {
                 quality: Default::default(),
                 infrastructure,
                 plugins_dir: None,
+                renewals: Vec::new(),
+                renewals_notify: None,
             },
         };
         Arc::new(Engine::new(

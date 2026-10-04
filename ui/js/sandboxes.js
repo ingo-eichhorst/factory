@@ -6,6 +6,7 @@
 
 import { $, api, esc, state } from "./core.js";
 import { inScope } from "./scopes.js";
+import { dateBadges } from "./dates.js";
 
 /// Narrow the sandbox rows to the rail's inclusive scope selection, the same
 /// way `agent-runtime.js` narrows its own scope list.
@@ -61,7 +62,7 @@ function sandboxRow(row) {
   return `<tr>
     <td><div class="title">${esc(row.scope)}</div><div class="sub">${esc(row.scope_path)}</div></td>
     <td>${esc(row.runtime)}</td>
-    <td>${esc(row.agent)}</td>
+    <td>${esc(row.agent)} ${dateBadges({ scope: row.scope, agent: row.agent })}</td>
     <td>${esc(row.harness)}</td>
     <td>${esc(row.lifetime)}</td>
     <td>${esc(row.sandbox)}${sandboxTag(row)}${readinessTag(row)}${readinessDetail(row.readiness)}</td>

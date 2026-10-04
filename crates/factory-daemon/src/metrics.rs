@@ -1485,6 +1485,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory { root, config };
         let registry = Registry::with_builtins();
@@ -1540,6 +1542,8 @@ mod tests {
             quality: vec!["baseline".into()],
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
             dashboard: None,
         };
         let database = root.join(".factory/metrics.sqlite");
@@ -3063,6 +3067,8 @@ mod tests {
             ))
             .unwrap(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory { root, config };
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
@@ -3473,6 +3479,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         Arc::new(Engine::new(

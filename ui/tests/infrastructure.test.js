@@ -86,7 +86,7 @@ test("L1 Infrastructure is live, with its sub-label, tab and view", () => {
 });
 
 test("LEVEL_VIEWS.infra names Infrastructure first, and the view is registered", () => {
-  assert.match(app, /infra: \["infrastructure", "doctor", "environments", "backup"\]/);
+  assert.match(app, /infra: \["infrastructure", "doctor", "environments", "backup", "dates"\]/);
   assert.match(app, /infrastructure: \{ onShow: startInfrastructure, onHide: stopAgentPoll \}/);
   assert.match(app, /state\.tab === "infrastructure"/, "the rail's re-render names every tab");
 });

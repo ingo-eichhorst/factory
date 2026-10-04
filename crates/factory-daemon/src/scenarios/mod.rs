@@ -1071,6 +1071,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         config.scopes = vec![
             scope_at("company-id", "company", "."),
@@ -1465,6 +1467,8 @@ mod tests {
             ))
             .unwrap(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory { root, config };
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
@@ -1550,6 +1554,8 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
         };
         let factory = Factory { root, config };
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());

@@ -92,6 +92,10 @@ macro_rules! port {
     };
 }
 port!(DaemonConfigFact, l1, (), DaemonConfigFact);
+port!(InfrastructureExpiryFact, l1, (), InfrastructureExpiryFact);
+port!(RenewalDeclarationsFact, l1, (), RenewalDeclarationsFact);
+port!(CredentialExpiryFact, l2, (), CredentialExpiryFact);
+port!(ScheduledRunDatesFact, l4, (), ScheduledRunDatesFact);
 port!(BackupFact, l1, DateTime<Utc>, BackupFact);
 port!(ScopeCapacityFact, l1, (), ScopeCapacityFact);
 port!(EnvironmentMetricFact, l1, Option<String>, BTreeMap<String, EnvironmentMetricFact>);

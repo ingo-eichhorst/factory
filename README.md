@@ -2347,6 +2347,118 @@ gate everything else does, instead of becoming a task directly.
   updating an item when its source message is later edited; duplicate
   detection across sources.
 
+## Important dates
+
+The Infrastructure **Important dates** tab, `factory dates [--scope NAME]`
+(`--json` for the complete report), and `GET /api/important-dates?scope=NAME`
+show one expiry ledger for credentials, certificates, domains, licences,
+subscriptions and other dated dependencies. The dashboard Customise catalogue
+includes **Important dates** (`view: important_dates`): next known future expiry
+and due-soon / overdue / unknown counts. Resolved native clocks are excluded
+from those counts. Agent/Scope dependencies light badges on the roster and
+Sandboxes; environment dependencies light badges on Operations.
+
+No renewal configuration is needed for metadata discovery. In the background,
+Factory reads Tailscale's local `status --json` and `serve status --json`, checks
+the macOS app-bundled CLI when `tailscale` is not on PATH, checks
+the standing HTTPS ports 8790/8791 and any other advertised HTTPS listeners,
+and checks configured `environments:` HTTPS URLs. It reads OpenShell's
+`gateway list -o json`, inspects gateway peer certificates and the gateway's
+public `mtls/ca.crt` and `mtls/tls.crt`. Only `openssl x509 -noout -enddate`
+output becomes an observation. Public-file symlinks are refused; private
+keys are never passed to a probe. A peer expiry is not a trust, hostname,
+readiness or health verdict, and does not require supplying mTLS credentials.
+
+OpenShell `provider list -o json` supplies credential expiry metadata; Factory
+never uses `provider get` for the ledger. Where no actual expiry is reported,
+a Claude provider may use its declared source file's modification time plus
+365 days: **derived**, explicitly approximate, not a claim about the token's
+contents. The standard source is `~/.config/factory/secrets/claude-oauth-token`.
+Discovery stats that file only, never reads its contents or evaluates any
+credential source command, environment variable or Keychain lookup. A cheap
+`gh api --hostname github.com --include user` call provides GitHub's expiry
+response header. A successful response without it says **no reported expiry**,
+not that GitHub has guaranteed the token never expires.
+
+Declare only what cannot be observed, in the root `renewals:` or a nested
+scope's `scope.renewals:`:
+
+```yaml
+renewals:
+  - name: claude-subscription-token
+    kind: credential
+    expires: 2027-10-04
+    lead: 30d
+    affects: [awesome-herdr/awesome-herdr-curator]
+    owner: owner
+    renew: "claude setup-token, then update the declared token file"
+  - name: domain
+    kind: domain
+    expires: 2027-01-01T00:00:00Z
+    affects: [environment:production]
+    renew: "renew with the registrar"
+```
+
+Dates accept RFC3339, a UTC `YYYY-MM-DD`, or `never`; a missing date is unknown.
+Lead defaults to 30 days. `affects` accepts actual scope names, `scope/agent`,
+`environment:name` and `provider:name`; unknown labels remain visibly
+unresolved, not invented dependencies. `observe: ID` binds a declaration to
+an observation id from the JSON report. The documented
+`claude-subscription-token` alias binds only an unambiguous matching Claude
+credential, narrowed by its actual dependants. Exact observed dates beat
+declarations and retain a conflicting declared date beside them; a declaration
+beats an approximate derived date. Editing declarations takes effect on the
+next read, without restarting. Invalid edits retain last-good metadata and
+show a finding; errors never echo raw configuration or subprocess output.
+
+The Inbox has one stable current item per renewal: at lead time, 7 days,
+1 day, and expiry. Advancing to a new milestone replaces that item; a renewed
+date resolves it. If a credential will lapse before an agent's authoritative
+next scheduled run, its item appears immediately even outside the lead
+window. This never pauses, blocks, cancels or reschedules a task.
+
+An optional, root-only standing notification hook pushes **only** at 1 day
+and expiry. It receives safe entry metadata as JSON on stdin, no task/run
+capability tokens, and has a bounded timeout (1s–60s; default 15s):
+
+```yaml
+renewals_notify:
+  command: /path/to/notify-owner
+  timeout: 15s
+```
+
+The command is owner-authored opt-in, not an automatically chosen channel.
+Its stdout/stderr are discarded. A durable receipt claims each entry/date/
+milestone before the attempt: restart or timeout does not duplicate it;
+failed/unknown delivery is not retried automatically or called delivered.
+The Inbox remains the visible warning. Hook configuration uses the daemon's
+normal startup configuration lifecycle.
+
+Discovery is bounded and refreshes about every five minutes, or after a
+configuration change; page/API reads use the current metadata cache and never
+wait on probes. Failed or incomplete discovery retains last-known dates,
+marked **unknown** with the failure and any existing warning, across restart.
+Declarations, infrastructure observations, credential observations and
+authoritative scheduled times each cross their producing level's L0 fact
+port. L6 combines them with its own policy state; the UI's L1 navigation
+location is not an upward read by L1. Policy attestation expiries and CRA
+deadlines are projected live and link back to Policy: their own validity,
+submission and withdrawal rules are unchanged, with no copied status table
+and no duplicate renewal Inbox/push alerts. Nothing renews a resource here.
+
+For isolated fixtures, `FACTORY_RENEWALS_DISCOVERY=0` disables host discovery;
+`FACTORY_DATES_METADATA_HOME` isolates both file metadata and the OpenShell
+public-certificate config directory. `FACTORY_DATES_OPENSSL`,
+`FACTORY_DATES_TAILSCALE`, `FACTORY_DATES_OPENSHELL`, and
+`FACTORY_DATES_GITHUB` select fixture tools. Tests include real TLS certificate
+inspection, unreadable dummy-token metadata, source-command nonexecution,
+native clock behavior, durable push receipts and a real daemon HTTP/CLI
+restart/scheduled-warning check. These fixtures do not themselves prove a
+particular live gateway or curator credential is installed and usable.
+When running a debug daemon directly outside Cargo, use the repository's
+configured debug stack headroom (`RUST_MIN_STACK=8388608`); Cargo supplies this
+automatically for its subprocesses. This is not a release-build requirement.
+
 ## Line
 
 L4 Process's last tab (`#106`), next to Tasks, Intake and Workflows: how the

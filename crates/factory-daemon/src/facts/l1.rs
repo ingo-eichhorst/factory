@@ -16,6 +16,26 @@ impl factory_kernel::FactProvider for Provider<'_> {
 }
 
 #[async_trait]
+impl Provide<factory_kernel::InfrastructureExpiryFact> for Provider<'_> {
+    type Query = ();
+    type Value = factory_kernel::InfrastructureExpiryFact;
+    type Error = FactoryError;
+    async fn get(&self, _: &()) -> Result<Self::Value> {
+        Ok(factory_kernel::InfrastructureExpiryFact { observations: self.engine.infrastructure_expiries.all().await? })
+    }
+}
+
+#[async_trait]
+impl Provide<factory_kernel::RenewalDeclarationsFact> for Provider<'_> {
+    type Query = ();
+    type Value = factory_kernel::RenewalDeclarationsFact;
+    type Error = FactoryError;
+    async fn get(&self, _: &()) -> Result<Self::Value> {
+        crate::renewals::declarations::read(self.engine).await
+    }
+}
+
+#[async_trait]
 impl Provide<factory_kernel::DeploymentPublicationFact> for Provider<'_> {
     type Query = String;
     type Value = Option<factory_kernel::DeploymentPublicationFact>;

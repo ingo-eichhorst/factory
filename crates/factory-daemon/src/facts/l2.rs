@@ -14,6 +14,16 @@ pub(crate) struct Provider<'a> {
 impl factory_kernel::FactProvider for Provider<'_> {
     type Level = factory_kernel::L2;
 }
+
+#[async_trait]
+impl Provide<factory_kernel::CredentialExpiryFact> for Provider<'_> {
+    type Query = ();
+    type Value = factory_kernel::CredentialExpiryFact;
+    type Error = FactoryError;
+    async fn get(&self, _: &()) -> Result<Self::Value> {
+        Ok(factory_kernel::CredentialExpiryFact { observations: self.engine.credential_expiries.all().await? })
+    }
+}
 #[async_trait]
 impl Provide<SecretsPresence> for Provider<'_> {
     type Query = BTreeSet<String>;

@@ -43,6 +43,8 @@ pub use facts::{ReleaseBuildFact, ReleaseSbomFact};
 pub use facts::{RecoveryJournalFact, ScriptRecoveryAction, ScriptRecoveryFinish};
 pub use facts::{DeploymentMirrorFact, DeploymentMirrorPlan, DeploymentMirrorPhase};
 pub use facts::DeploymentPublicationFact;
+pub mod renewals;
+pub use renewals::*;
 pub use ports::{Below, FactProvider, FactValue, Facts, People, Provide, Reader};
 
 pub use duration::Duration;

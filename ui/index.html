@@ -96,6 +96,7 @@
   <button id="tab-doctor" hidden>Doctor</button>
   <button id="tab-environments" hidden>Operations</button>
   <button id="tab-backup" hidden>Backup</button>
+  <button id="tab-dates" hidden>Important dates</button>
 </nav>
 </div>
 
@@ -1016,6 +1017,11 @@
     <div class="doctor-page" id="doctor" hidden></div>
   </div>
 
+  <div id="view-dates" hidden>
+    <div class="bar"><h2>Important dates</h2><button class="btn" id="dates-refresh">Refresh</button></div>
+    <p class="env-note">Expiry metadata only: no credential values, no automatic renewal. Observations refresh in the background; declarations are read live. Native policy and CRA clocks keep their own rules.</p>
+    <div class="bk-page" id="dates"></div>
+  </div>
   <div id="view-backup" hidden>
     <div class="bar">
       <h2>Backup</h2>

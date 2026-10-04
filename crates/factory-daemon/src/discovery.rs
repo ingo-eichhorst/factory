@@ -135,6 +135,7 @@ fn read_scope(path: &Path) -> Result<Scope> {
     // whole by `Factory::load` -- so this never refuses the one place the
     // block belongs.
     refuse_misplaced_scope_infrastructure(&document, path)?;
+    factory_core::config::refuse_misplaced_scope_renewals(&document, path)?;
     let file: ScopeFile = serde_yaml_ng::from_value(document).map_err(parsing)?;
     Ok(file.scope)
 }
@@ -261,6 +262,8 @@ mod tests {
                 quality: Default::default(),
                 infrastructure: Default::default(),
                 plugins_dir: None,
+                renewals: Vec::new(),
+                renewals_notify: None,
             },
         }
     }

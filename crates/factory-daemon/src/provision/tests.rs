@@ -140,6 +140,8 @@ fn fixture(block: &str, tools: impl FnOnce(&Path) -> Tools) -> Fixture {
         quality: Default::default(),
         infrastructure: Default::default(),
         plugins_dir: None,
+        renewals: Vec::new(),
+        renewals_notify: None,
     };
     let factory_bin = root.join("factory");
     std::fs::write(&factory_bin, "factory cli v1").unwrap();

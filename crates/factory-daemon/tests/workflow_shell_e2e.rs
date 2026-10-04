@@ -51,6 +51,7 @@ impl Daemon {
             .arg("run")
             .env("FACTORY_BIN", &self.factory_bin)
             .env("FACTORY_HERDR_BIN", &self.herdr_bin)
+            .env("FACTORY_RENEWALS_DISCOVERY", "0")
             .stdout(Stdio::from(log.try_clone().expect("dup log fd")))
             .stderr(Stdio::from(log));
         if let Some(directory) = &self.github_path {
@@ -337,6 +338,48 @@ fn provision() -> Daemon {
 }
 
 // -------------------------------------------------------------- the test
+
+#[test]
+fn important_dates_are_live_metadata_warnings_not_a_scheduler_gate() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision();
+    let base = daemon.base_url(); let path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["renewals"] = serde_yaml_ng::to_value(json!([{ "name": "subscription", "kind": "subscription", "expires": "2020-01-01", "affects": ["demo/shell"], "renew": "renew with the owner" }])).unwrap();
+    let alerts = daemon.root.join("expiry-alerts.json");
+    config["renewals_notify"] = serde_yaml_ng::to_value(json!({"command": format!("cat >> '{}'", alerts.display()), "timeout": "2s"})).unwrap();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    daemon.sigterm(); daemon.spawn();
+    let report = || expect_ok(&format!("{base}/api/important-dates"), &get(&format!("{base}/api/important-dates")))["report"].clone();
+    let first = report(); assert_eq!(first["overdue"], 1); assert_eq!(first["entries"][0]["milestone"], "expired");
+    let identity = first["entries"][0]["observation"]["id"].clone();
+    for _ in 0..3 { let r = report(); assert_eq!(r["entries"].as_array().unwrap().len(), 1); assert_eq!(r["entries"][0]["observation"]["id"], identity); }
+    wait_for("one overdue push receipt", Duration::from_secs(10), || std::fs::read(&alerts).ok().filter(|bytes| !bytes.is_empty()).map(|_| json!(true)));
+    let receipt = std::fs::read(&alerts).unwrap();
+    let cli = Command::new(&daemon.factory_bin).arg("--root").arg(&daemon.root).arg("--url").arg(&base).args(["--json", "dates", "--scope", "demo"]).env_remove("FACTORY_TOKEN").env_remove("FACTORY_TASK_TOKEN").env_remove("FACTORY_RUN_TOKEN").output().unwrap();
+    assert!(cli.status.success(), "{}", String::from_utf8_lossy(&cli.stderr));
+    let cli: Value = serde_json::from_slice(&cli.stdout).unwrap(); assert_eq!(cli["report"]["overdue"], 1);
+    let created = expect_ok(&format!("{base}/api/tasks"), &post(&format!("{base}/api/tasks"), &json!({"title": "scheduled audit", "instructions": "true", "scope": "demo", "agent": "shell", "schedule": {"every": {"seconds": 90 * 86400}}})));
+    let task = created["task"].clone();
+    let r = report(); assert_eq!(r["entries"][0]["scheduled_risks"][0]["task"], task["id"]);
+    assert_eq!(r["entries"][0]["scheduled_risks"][0]["next_run_at"], task["next_run_at"]);
+    // Expiry information is a warning. It never pauses/cancels the standing
+    // task or touches its authoritative due time.
+    let stored = tasks(&base).into_iter().find(|stored| stored["id"] == task["id"]).unwrap();
+    assert_eq!(stored["next_run_at"], task["next_run_at"]); assert_eq!(stored["status"], "pending");
+    assert_ne!(stored["schedule_paused"], true);
+    config["renewals"][0]["expires"] = "2090-01-01".into();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    let renewed = report(); assert_eq!(renewed["overdue"], 0); assert!(renewed["entries"][0]["milestone"].is_null());
+    assert_eq!(renewed["entries"][0]["observation"]["id"], identity);
+    daemon.sigterm(); daemon.spawn();
+    assert_eq!(report()["overdue"], 0); assert_eq!(std::fs::read(&alerts).unwrap(), receipt);
+    config["renewals"][0]["expires"] = "2020-01-01".into();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    daemon.sigterm(); daemon.spawn(); assert_eq!(report()["overdue"], 1);
+    assert_eq!(std::fs::read(&alerts).unwrap(), receipt, "returning to the same expired date after restart does not duplicate a push");
+    for asset in ["js/dates.js", "js/dates-model.js"] { assert_eq!(raw_request("GET", &format!("{base}/ui/{asset}"), None).unwrap().0, 200); }
+}
 
 #[test]
 fn approved_github_mirror_uses_the_real_cli_api_and_persistent_receipts_without_live_outbound_writes() {
