@@ -715,6 +715,78 @@ mod tests {
     }
 
     #[test]
+    fn policy_intent_owns_catalogues_receipts_budget_inputs_and_the_single_declaration_chain() {
+        let owner = include_str!("../../../factory-direction/src/policy_intent.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let compact: String = owner.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("Facts::<L6>::new().get::<KnowledgeTags,_>"));
+        for required in [
+            "policy::load_all",
+            "self.receipts.all()",
+            "budget::load",
+            "policy::applicable",
+            "policy::metric_subject",
+            "scope_ancestors",
+            "scope_subtree",
+        ] {
+            assert!(
+                owner.contains(required),
+                "Policy intent owner lost {required}"
+            );
+        }
+        for forbidden in [
+            "factory_core",
+            "factory_composition",
+            "factory_interfaces",
+            "factory_daemon",
+            "Engine",
+            "TaskStore",
+            "dyn Fn",
+            "BoxFuture",
+            "PolicyReport",
+            "CostReport",
+        ] {
+            assert!(
+                !owner.contains(forbidden),
+                "Policy intent gained backedge/result {forbidden}"
+            );
+        }
+        let config = include_str!("../../../factory-composition/src/config.rs");
+        assert!(config.contains("pub use factory_direction::policy_intent::PolicyDeclaration"));
+        assert!(config.contains("factory_direction::policy_intent::chain_for_scope("));
+        assert!(!config.contains("pub struct PolicyDeclaration"));
+        let wiring = include_str!("../policies/mod.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let metric_input = wiring
+            .split("pub(crate) async fn metric_policy_inputs(")
+            .nth(1)
+            .unwrap()
+            .split("/// Historical request failure")
+            .next()
+            .unwrap();
+        let compact_input: String = metric_input
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(compact_input.contains("policy_intent_service(snapshot).metric_inputs(scope)"));
+        for forbidden in [
+            "policy::load_all",
+            "policy::applicable",
+            "self.policies.all",
+            "check_budget_intent",
+        ] {
+            assert!(
+                !metric_input.contains(forbidden),
+                "Router retained policy input behavior {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn live_reads_use_the_kernel_boundary_and_router_facades_are_not_levels() {
         let wiring = include_str!("mod.rs").split("#[cfg(test)]").next().unwrap();
         assert!(wiring.contains("F::Producer: Below<R>"));

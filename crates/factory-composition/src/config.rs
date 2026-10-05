@@ -4,7 +4,9 @@ use factory_agents::role::{RoleSpec, Roles};
 #[cfg(test)]
 use factory_agents::role::{Role, RoleOrigin};
 use factory_assurance::quality::QualityLayer;
-use factory_direction::policy::{ControlRef, NotApplicable, PolicyLayer, Tighten};
+use factory_direction::policy::PolicyLayer;
+#[cfg(test)]
+use factory_direction::policy::ControlRef;
 use factory_kernel::{FactoryError, Result};
 use factory_process::ready::IntakeLayer;
 use serde::{Deserialize, Serialize};
@@ -40,34 +42,7 @@ pub use factory_environment::declarations::{
 /// would otherwise commit the company to nothing while parsing clean. For a
 /// regulatory declaration that is worth refusing loudly rather than quietly
 /// applying zero frameworks.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PolicyDeclaration {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub frameworks: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub tighten: BTreeMap<ControlRef, Tighten>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub not_applicable: Vec<NotApplicable>,
-}
-
-impl PolicyDeclaration {
-    pub fn is_empty(&self) -> bool {
-        self.frameworks.is_empty() && self.tighten.is_empty() && self.not_applicable.is_empty()
-    }
-
-    /// The one place a written declaration becomes a chain layer: `scope` is
-    /// the identity `applicable`'s findings point at, filled in by whichever
-    /// caller resolved which scope this declaration belongs to.
-    pub fn into_layer(self, scope: impl Into<String>) -> PolicyLayer {
-        PolicyLayer {
-            scope: scope.into(),
-            frameworks: self.frameworks,
-            tighten: self.tighten,
-            not_applicable: self.not_applicable,
-        }
-    }
-}
+pub use factory_direction::policy_intent::PolicyDeclaration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -265,15 +240,11 @@ impl Config {
     /// layer -- or from the instance name, for an instance that never opted
     /// its root into being a scope at all.
     fn root_policy_layer(&self) -> Option<PolicyLayer> {
-        if self.policies.is_empty() {
-            return None;
-        }
-        let root_name = self
-            .scope
-            .as_ref()
-            .map(|s| s.name.clone())
-            .unwrap_or_else(|| self.instance.name.clone());
-        Some(self.policies.clone().into_layer(root_name))
+        factory_direction::policy_intent::root_layer(
+            &self.policies,
+            self.scope.as_ref().map(|scope| scope.name.as_str()),
+            &self.instance.name,
+        )
     }
 
     /// Every policy layer that applies to `scope`, root first: the instance
@@ -293,18 +264,11 @@ impl Config {
     /// chain), so skipping empty layers below -- exactly as
     /// `roles_for_scope` already does -- keeps it from ever appearing twice.
     pub fn policy_chain_for_scope(&self, scope: &Scope) -> Vec<PolicyLayer> {
-        let mut chain: Vec<PolicyLayer> = self.root_policy_layer().into_iter().collect();
-        for layer in self
-            .ancestors_of(scope)
-            .into_iter()
-            .chain(std::iter::once(scope))
-        {
-            if layer.policies.is_empty() {
-                continue;
-            }
-            chain.push(layer.policies.clone().into_layer(layer.name.clone()));
-        }
-        chain
+        factory_direction::policy_intent::chain_for_scope(
+            self.root_policy_layer(),
+            &self.scopes,
+            scope,
+        )
     }
 
     /// The instance root's own quality layer, if it binds any profile --
@@ -3723,6 +3687,12 @@ impl factory_kernel::ScopeIdentity for Scope {
     }
     fn scope_path(&self) -> &Path {
         &self.path
+    }
+}
+
+impl factory_direction::policy_intent::ScopePolicies for Scope {
+    fn policy_declaration(&self) -> &PolicyDeclaration {
+        &self.policies
     }
 }
 

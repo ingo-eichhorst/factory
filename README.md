@@ -5336,6 +5336,18 @@ request-local L5 read-phase diagnostic preserves their error priority; it is
 never evidence, a cached metric/status, or something a level reader uses.
 Goal label execution still needs the remaining command-ladder migration.
 
+L6's live policy-intent service now owns authored catalogue reads, current
+policy receipts, applicability and raw budget inputs for metrics, Goals,
+Signposts, Policy, Quality and Scenarios. Its knowledge-tag read uses the
+actual L5 capability through `Facts<L6>`. Policy configuration canonically
+re-exports L6's declaration type and uses the same L6 path-chain algorithm;
+the service receives fresh raw scope declarations, never a resolved chain or
+Policy report. It rereads limits only when a check or Quality plan needs them,
+preserving invalid authored intent as error data for the L5 evaluator. No
+spend or compliance judgement is computed in this input service. Full Policy
+report/detail/attestation, Scenarios and other service/command isolation remain
+unfinished; moving their inputs is not completion of the six-service split.
+
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),
 with ADR 0004 amended to name the evidence channel. Every registered fact

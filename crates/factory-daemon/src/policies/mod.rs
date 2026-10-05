@@ -40,21 +40,52 @@ use crate::facts::NamedQuery;
 pub(crate) use factory_core::config::subtree_scopes;
 
 impl Engine {
+    /// Outside-only construction from the current raw declarations and own
+    /// L6 receipt store. No resolved chain, status or callback enters L6.
+    pub(crate) fn policy_intent_service<'a>(
+        &'a self,
+        snapshot: &Factory,
+    ) -> factory_direction::policy_intent::Service<'a> {
+        use factory_direction::policy_intent::{Configuration, Scope, Service};
+        Service::new(
+            snapshot.root.clone(),
+            Configuration {
+                scopes: snapshot
+                    .config
+                    .scopes
+                    .iter()
+                    .map(|scope| Scope {
+                        id: scope.id.clone(),
+                        name: scope.name.clone(),
+                        path: scope.path.clone(),
+                        policies: scope.policies.clone(),
+                    })
+                    .collect(),
+                root_policies: snapshot.config.policies.clone(),
+                root_name: snapshot
+                    .config
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.name.clone()),
+                instance_name: snapshot.config.instance.name.clone(),
+            },
+            &self.policies,
+        )
+    }
     /// Own catalogue read plus the L5 knowledge-tag port. Both filesystem
     /// walks stay off the async executor; providers own their fact reads.
     pub(crate) async fn load_catalogues_and_tags(
         &self,
-    ) -> Result<(Vec<policy::Catalogue>, Vec<policy::Finding>, BTreeSet<String>)> {
+    ) -> Result<(
+        Vec<policy::Catalogue>,
+        Vec<policy::Finding>,
+        BTreeSet<String>,
+    )> {
         let snapshot = self.factory_snapshot();
-        let policies_dir = snapshot.policies_dir();
-        let (catalogues, findings) = tokio::task::spawn_blocking(move || {
-            let (catalogues, findings) = policy::load_all(&policies_dir);
-            (catalogues, findings)
-        })
-        .await
-        .map_err(|e| FactoryError::Other(anyhow::anyhow!("policy catalogue walk: {e}")))?;
-        let tags = Facts::<L6>::new(self).get::<factory_kernel::KnowledgeTags>(&()).await?.tags;
-        Ok((catalogues, findings, tags))
+        let provider = <factory_kernel::KnowledgeTags as crate::facts::Port>::provider(self);
+        self.policy_intent_service(&snapshot)
+            .catalogues_with_tags(&provider)
+            .await
     }
 
     /// L6 alone owns authored monthly intent; no spend or verdict is
@@ -63,29 +94,15 @@ impl Engine {
         &self,
         per_scope: &[(&Scope, Vec<S>)],
     ) -> Result<Option<factory_core::budget::PolicyConfig>> {
-        if !per_scope.iter().any(|(_, a)| factory_assurance::evidence::needs_budget_facts(a)) {
-            return Ok(None);
-        }
-        self.load_check_budget_config().await.map(Some)
-    }
-
-    pub(crate) async fn load_check_budget_config(
-        &self,
-    ) -> Result<factory_core::budget::PolicyConfig> {
-        let root = self.factory_snapshot().root.clone();
-        let loaded = tokio::task::spawn_blocking(move || factory_core::budget::load(&root))
+        let snapshot = self.factory_snapshot();
+        self.policy_intent_service(&snapshot)
+            .budget_for(
+                &per_scope
+                    .iter()
+                    .map(|(_, subjects)| subjects.as_slice())
+                    .collect::<Vec<_>>(),
+            )
             .await
-            .map_err(|error| FactoryError::Other(anyhow::anyhow!("budget intent read: {error}")))?;
-        Ok(match loaded {
-            Ok(catalogue) => factory_core::budget::PolicyConfig {
-                catalogue: Some(catalogue),
-                error: None,
-            },
-            Err(error) => factory_core::budget::PolicyConfig {
-                catalogue: None,
-                error: Some(error),
-            },
-        })
     }
 
     /// Downward authored inputs only. Compliance is evaluated by L5, not
@@ -95,42 +112,9 @@ impl Engine {
         snapshot: &Factory,
         scope: Option<&str>,
     ) -> Result<factory_assurance::metrics_service::PolicyInputs> {
-        let dir = snapshot.policies_dir();
-        let (catalogues, _) = tokio::task::spawn_blocking(move || policy::load_all(&dir))
+        self.policy_intent_service(snapshot)
+            .metric_inputs(scope)
             .await
-            .map_err(|error| {
-                FactoryError::Other(anyhow::anyhow!("policy catalogue walk: {error}"))
-            })?;
-        let (_, targets) = snapshot.subtree_scopes(scope)?;
-        let attestations = self.policies.all().await?;
-        let mut applied = Vec::new();
-        for target in &targets {
-            let (subjects, _) =
-                policy::applicable(&catalogues, &snapshot.policy_chain(&target.name));
-            if !subjects.is_empty() {
-                applied.push((target, subjects));
-            }
-        }
-        let config = self.check_budget_config(&applied).await?;
-        let scopes = applied
-            .into_iter()
-            .map(
-                |(target, subjects)| factory_assurance::metrics_service::PolicyScope {
-                    scope: factory_kernel::ScopeNode {
-                        name: target.name.clone(),
-                        path: target.path.clone(),
-                    },
-                    subjects: subjects.iter().map(policy::metric_subject).collect(),
-                    budget: config.as_ref().map(|config| {
-                        crate::budgets::check_budget_intent(snapshot, target, config)
-                    }),
-                },
-            )
-            .collect();
-        Ok(factory_assurance::metrics_service::PolicyInputs {
-            scopes,
-            attestations,
-        })
     }
 
     /// Historical request failure dependencies from the full Policy page.
@@ -2328,5 +2312,73 @@ mod tests {
         assert_eq!(report.rows[0].statuses[0].status.kind(), StatusKind::Open);
         let detail = engine.policy_control(control, "demo").await.unwrap();
         assert_eq!(detail.status.kind(), StatusKind::Open);
+    }
+
+    #[tokio::test]
+    async fn physical_policy_inputs_use_new_raw_declarations_after_scope_rename_and_move() {
+        let engine = test_engine();
+        let first = engine
+            .metric_policy_inputs(&engine.factory_snapshot(), Some("demo-app"))
+            .await
+            .unwrap();
+        assert_eq!(first.scopes.len(), 1);
+        assert_eq!(first.scopes[0].scope.name, "demo-app");
+        assert!(first.scopes[0]
+            .subjects
+            .iter()
+            .find(|s| s.control.id == "c")
+            .unwrap()
+            .not_applicable
+            .is_some());
+        {
+            let mut child = engine.factory_snapshot().scope("demo-app").unwrap().clone();
+            child.name = "renamed".into();
+            child.path = "elsewhere/demo".into();
+            child.policies.frameworks = vec!["cra".into()];
+            child.policies.not_applicable.clear();
+            child.policies.tighten.insert(
+                "cra/a".parse().unwrap(),
+                factory_core::policy::Tighten {
+                    max_age: Some("3d".parse().unwrap()),
+                },
+            );
+            engine.replace_scope("demo-app-id", child);
+        }
+        let snapshot = engine.factory_snapshot();
+        let next = engine
+            .metric_policy_inputs(&snapshot, Some("elsewhere/demo"))
+            .await
+            .unwrap();
+        assert_eq!(next.scopes.len(), 1);
+        assert_eq!(next.scopes[0].scope.name, "renamed");
+        assert_eq!(
+            next.scopes[0].subjects[0].max_age,
+            Some("3d".parse().unwrap())
+        );
+        assert!(next.scopes[0]
+            .subjects
+            .iter()
+            .all(|s| s.not_applicable.is_none()));
+        let old = match engine
+            .metric_policy_inputs(&snapshot, Some("demo-app"))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("removed scope accepted"),
+        };
+        assert_eq!(old.code(), "no_such_scope");
+        let parent = engine
+            .metric_policy_inputs(&snapshot, Some("engineering"))
+            .await
+            .unwrap();
+        assert_eq!(
+            parent.scopes.len(),
+            1,
+            "moved child must no longer appear under the old parent"
+        );
+        assert_eq!(parent.scopes[0].scope.name, "engineering");
+        let (catalogues, _, tags) = engine.load_catalogues_and_tags().await.unwrap();
+        assert!(tags.contains("control/cra/a"));
+        assert_eq!(catalogues[0].controls.len(), 6);
     }
 }

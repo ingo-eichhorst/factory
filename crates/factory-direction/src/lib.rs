@@ -19,6 +19,7 @@ pub mod goals_view;
 pub mod goals_store;
 pub mod policy;
 pub mod policy_export;
+pub mod policy_intent;
 pub mod policy_report;
 pub mod policy_store;
 pub mod reporting_clock;

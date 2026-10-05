@@ -493,3 +493,29 @@ fn metric_identity_values_and_goals_views_are_canonical_with_the_original_wire_s
     let _: Option<factory_interfaces::protocol::GoalsReport> = report;
     assert!(factory_kernel::MetricId::new("invalid..id").is_err());
 }
+
+#[test]
+fn policy_declaration_is_canonical_l6_data_with_the_original_config_json() {
+    let owned: factory_direction::policy_intent::PolicyDeclaration =
+        serde_json::from_value(json!({
+            "frameworks": ["cra"], "tighten": {"cra/a": {"max_age": "7d"}},
+            "not_applicable": [{"control": "cra/b", "rationale": "not used"}]
+        }))
+        .unwrap();
+    let legacy: factory_core::config::PolicyDeclaration = owned.clone();
+    let outside: factory_composition::config::PolicyDeclaration = legacy;
+    assert_eq!(outside, owned);
+    assert_eq!(
+        serde_json::to_value(outside).unwrap(),
+        json!({
+            "frameworks": ["cra"], "tighten": {"cra/a": {"max_age": "1w"}},
+            "not_applicable": [{"control": "cra/b", "rationale": "not used"}]
+        })
+    );
+    assert!(
+        serde_json::from_value::<factory_core::config::PolicyDeclaration>(
+            json!({"framework": ["cra"]})
+        )
+        .is_err()
+    );
+}

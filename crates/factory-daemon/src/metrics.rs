@@ -18,8 +18,10 @@ use factory_core::{
 };
 #[cfg(test)]
 use factory_kernel::L6;
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     sync::Arc,
 };
 
@@ -67,26 +69,9 @@ impl Engine {
         snapshot: &factory_core::config::Factory,
         plan: &factory_assurance::metrics_service::Plan,
     ) -> factory_assurance::metrics_service::QualityBudgets {
-        let needed = plan.quality_budget_ids();
-        if needed.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        let config = self
-            .load_check_budget_config()
+        self.policy_intent_service(snapshot)
+            .quality_budgets(&plan.quality_budget_ids())
             .await
-            .map_err(|error| error.to_string())?;
-        Ok(snapshot
-            .config
-            .scopes
-            .iter()
-            .filter(|scope| needed.contains(&scope.id.as_str()))
-            .map(|scope| {
-                (
-                    scope.id.clone(),
-                    crate::budgets::check_budget_intent(snapshot, scope, &config),
-                )
-            })
-            .collect())
     }
 
     /// The default `ids` for `Request::Metrics` when a caller's own list is

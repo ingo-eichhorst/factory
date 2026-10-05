@@ -1892,3 +1892,137 @@ fn goals_service_uses_live_metrics_and_retains_manual_checkins_through_cli_and_r
         0.5
     );
 }
+
+#[test]
+fn policy_intent_rereads_catalogues_and_receipts_after_shell_completion_and_restart() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let config_path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["policies"] = serde_yaml_ng::from_str("frameworks: [cra]").unwrap();
+    std::fs::write(&config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    let directory = daemon.root.join(".factory/policies");
+    std::fs::create_dir_all(&directory).unwrap();
+    let catalogue = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {id: a, title: Knowledge, evidence: [{check: knowledge}]}\n  - {id: b, title: Attestation, evidence: [{check: attestation}]}\n";
+    std::fs::write(directory.join("cra.yaml"), catalogue).unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let metrics_url = format!("{base}/api/metrics?ids=compliance.cra&scope=demo");
+    let current = || {
+        expect_ok(&metrics_url, &get(&metrics_url))["values"][0]["value"]
+            .as_f64()
+            .unwrap()
+    };
+    assert_eq!(current(), 0.0);
+    let cli_root = daemon.root.clone();
+    let cli_factory = daemon.factory_bin.clone();
+    let cli = |args: &[&str]| {
+        let output = Command::new(&cli_factory)
+            .arg("--root")
+            .arg(&cli_root)
+            .arg("--url")
+            .arg(&base)
+            .arg("--json")
+            .args(args)
+            .env_remove("FACTORY_TOKEN")
+            .env_remove("FACTORY_TASK_TOKEN")
+            .env_remove("FACTORY_RUN_TOKEN")
+            .env_remove("FACTORY_SOCKET")
+            .env_remove("FACTORY_URL")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let attested = cli(&[
+        "policy",
+        "attest",
+        "cra/b",
+        "--scope",
+        "demo",
+        "--evidence",
+        "QA evidence",
+        "--expires",
+        "3d",
+    ]);
+    let attestation_id = attested["attestation"]["id"].as_str().unwrap().to_string();
+    assert_eq!(current(), 0.5);
+    let knowledge = daemon.root.join(".factory/knowledge");
+    std::fs::create_dir_all(&knowledge).unwrap();
+    std::fs::write(
+        knowledge.join("qa.md"),
+        "---\ntags: [control/cra/a]\n---\n# Evidence\n",
+    )
+    .unwrap();
+    assert_eq!(current(), 1.0);
+    let policy_url = format!("{base}/api/policy?scope=demo");
+    let board = expect_ok(&policy_url, &get(&policy_url));
+    assert_eq!(
+        board["report"]["rows"][0]["statuses"][0]["status"],
+        "satisfied"
+    );
+    assert_eq!(
+        board["report"]["rows"][0]["statuses"][1]["status"],
+        "attested"
+    );
+    // A new authored control counts immediately, not only after a reload.
+    std::fs::write(
+        directory.join("cra.yaml"),
+        format!("{catalogue}  - {{id: c, title: Missing, evidence: [{{check: knowledge}}]}}\n"),
+    )
+    .unwrap();
+    assert!((current() - 2.0 / 3.0).abs() < f64::EPSILON);
+    let workflow_url = format!("{base}/api/workflows");
+    let created = expect_ok(
+        &workflow_url,
+        &post(
+            &workflow_url,
+            &json!({"name": "policy-intent-smoke", "scope": "demo", "nodes": [task_node("intent", "printf 'policy intent smoke\\n'")], "edges": []}),
+        ),
+    );
+    let start_url = format!(
+        "{workflow_url}/{}/run",
+        created["workflow"]["id"].as_str().unwrap()
+    );
+    let started = expect_ok(&start_url, &post(&start_url, &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let finished = wait_for(
+        "policy intent shell run to settle",
+        Duration::from_secs(30),
+        || {
+            let run = run_status(&base, run_id);
+            matches!(
+                run["status"].as_str(),
+                Some("done" | "failed" | "cancelled")
+            )
+            .then_some(run)
+        },
+    );
+    assert_eq!(finished["status"], "done", "{finished}");
+    assert!((current() - 2.0 / 3.0).abs() < f64::EPSILON);
+    cli(&[
+        "policy",
+        "withdraw",
+        &attestation_id,
+        "--reason",
+        "QA withdrawal",
+    ]);
+    assert!((current() - 1.0 / 3.0).abs() < f64::EPSILON);
+    daemon.sigterm();
+    daemon.spawn();
+    assert!((current() - 1.0 / 3.0).abs() < f64::EPSILON);
+    let restored = cli(&["metrics", "--scope", "demo", "compliance.cra"]);
+    assert!((restored["values"][0]["value"].as_f64().unwrap() - current()).abs() < f64::EPSILON);
+    let detail_url = format!("{base}/api/policy/controls/cra/b?scope=demo");
+    let detail = expect_ok(&detail_url, &get(&detail_url));
+    assert_eq!(detail["detail"]["attestations"][0]["id"], attestation_id);
+    assert!(detail["detail"]["attestations"][0]["withdrawn"].is_object());
+}

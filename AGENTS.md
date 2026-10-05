@@ -312,6 +312,16 @@ something impossible.
   request-local provider read-phase diagnostic may sequence those errors but
   is never metric evidence/status or a level reader's channel. Goal label
   execution still needs its adjacent command migration.
+  L6's live policy-intent service owns authored catalogue and receipt reads,
+  applicability, lazy raw budget resolution and Quality's selected budget
+  inputs. It reads the actual KnowledgeTags port through Facts<L6> and never
+  accepts computed tags or an Engine callback. PolicyDeclaration and the
+  additive path-chain algorithm are canonical L6, re-exported/called by the
+  outside configuration owner. Constructors capture fresh raw declarations,
+  not resolved chains or flat caches; preserve aliases, first-match precedence,
+  vanished-scope root fallback and independent ancestor caps. Invalid limits
+  stay raw error inputs, not absent defaults or L6 compliance verdicts.
+  Full Policy reports/details/attestations and Scenarios still need migration.
   The complete six-service split still remains.
   L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.
