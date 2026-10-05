@@ -3,7 +3,8 @@
 //! *what* a control is (`factory_core::policy`, pure and tested on its
 //! own), re-read on every request. L6 supplies resolved declarations,
 //! receipts and budget intent; the physical L5 evidence service performs
-//! every live lower check read. Report/link composition remains here.
+//! every live lower check read. L6 owns report/detail/link composition;
+//! only transport wiring, workflow previews and remaining commands stay here.
 //!
 //! The one piece of state this module owns is the attestations themselves,
 //! kept in `PolicyStore` (`store.rs`), append-only.
@@ -20,10 +21,12 @@ use factory_core::error::{FactoryError, Result};
 use factory_core::policy::{self, Attestation, ControlRef, Withdrawal};
 use factory_core::policy_export;
 use factory_core::checks::CheckSource;
-use factory_core::protocol::{CatalogueSummary, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy, WorkflowEnforcement, WorkflowEnforcementFinding};
+use factory_core::protocol::{PolicyControlDetail, PolicyReport, WorkflowEnforcement, WorkflowEnforcementFinding};
 use factory_core::reporting_clock::{self, ClockDeadlineState, ClockMark};
 use factory_core::task::Task;
-use factory_kernel::{SecretsPresence, L6};
+use factory_kernel::SecretsPresence;
+#[cfg(test)]
+use factory_kernel::L6;
 use crate::facts::{Facts, TaskInventoryQuery};
 use factory_kernel::TaskInventoryFact;
 
@@ -233,205 +236,45 @@ impl Engine {
         Ok((enforcement, findings))
     }
 
-    /// The L6 Policy tab: `Request::Policy`.
-    pub(crate) async fn policy_report(&self, scope: Option<&str>) -> Result<PolicyReport> {
-        let snapshot = self.factory_snapshot();
-        let (catalogues, mut findings, tags) = self.load_catalogues_and_tags().await?;
-        let (asked, target_scopes) = subtree_scopes(&snapshot, scope)?;
-
-        let all_attestations = self.policies.all().await?;
-        let now = Utc::now();
-
-        let mut rows = Vec::new();
-        let mut per_scope_statuses: Vec<Vec<policy::ControlStatus>> = Vec::new();
-        let mut not_applicable: BTreeSet<(ControlRef, String, String)> = BTreeSet::new();
-
-        // First pass: resolve applicability for every scope. A scope whose
-        // whole chain applies no framework has nothing to show -- omitted
-        // rather than an empty row nobody asked to see.
-        let mut per_scope_applied: Vec<(&factory_core::config::Scope, Vec<policy::Applied>)> = Vec::new();
-        for t in &target_scopes {
-            // `Engine::policy_chain` (#76) is the one place a scope name
-            // becomes the chain `applicable` folds -- root first, through
-            // every ancestor, to `t` itself.
-            let chain = self.policy_chain(&t.name);
-            let (applied, chain_findings) = policy::applicable(&catalogues, &chain);
-            findings.extend(chain_findings);
-
-            for a in &applied {
-                if let Some(na) = &a.not_applicable {
-                    not_applicable.insert((a.control.clone(), na.scope.clone(), na.rationale.clone()));
-                }
-            }
-
-            if applied.is_empty() {
-                continue;
-            }
-            per_scope_applied.push((t, applied));
-        }
-
-        // Second pass: `dataset_level_facts` resolves what every scope
-        // shares (gate datasets, the daemon fact, the credential inventory)
-        // in one pass over the whole subtree, and `evidence_for_scope`
-        // builds each scope's own `Evidence` from those plus its own
-        // per-scope facts (tasks, workflows, agents, secrets) -- the same
-        // two calls `scenarios::Engine::scenarios_report` (`#100`) makes
-        // against its own, larger `applied` sets, so a policy fact is
-        // gathered by exactly one function regardless of which report is
-        // asking for it.
-        let (gates, daemon_fact, credential_rows, backup_fact, budget_config) = self.dataset_level_facts(&per_scope_applied).await?;
-        for (t, applied) in &per_scope_applied {
-            let evidence = self
-                .evidence_for_scope(
-                    &snapshot,
-                    t,
-                    applied,
-                    &tags,
-                    &all_attestations,
-                    &gates,
-                    daemon_fact,
-                    &credential_rows,
-                    backup_fact.clone(),
-                    budget_config.as_ref(),
-                    now,
-                )
-                .await?;
-            findings.extend(policy::evidence_findings(&evidence, &t.name));
-
-            let statuses = policy::evaluate(applied, &evidence, now);
-            let scope_rollup = policy::rollup(&statuses);
-            per_scope_statuses.push(statuses.clone());
-            rows.push(ScopePolicy {
-                scope: t.name.clone(),
-                statuses,
-                rollup: scope_rollup,
-                open_tasks: BTreeMap::new(),
-            });
-        }
-
-        // One unscoped read for every open remediation task, rather than one
-        // per row -- the same read `quality_report` makes. A `policy=` label
-        // names no scope (unlike `quality=`), so the task's own scope is half
-        // the key; the store already filters on exactly that column when
-        // `policy_remediate` asks it for one scope, so the two agree.
-        if !rows.is_empty() {
-            let mut open: BTreeMap<(String, String), String> = BTreeMap::new();
-            for task in Facts::<L6>::new(self).get::<TaskInventoryFact>(&TaskInventoryQuery::All).await? {
-                if let Some(label) = open_policy_label(&task) {
-                    // Newest first: keep the one `policy_remediate`'s own
-                    // `find` would name, should two ever carry one label.
-                    open.entry((task.scope.clone(), label.to_string())).or_insert_with(|| task.id.clone());
-                }
-            }
-            for row in &mut rows {
-                for status in &row.statuses {
-                    let label = status.control.to_string();
-                    if let Some(id) = open.get(&(row.scope.clone(), label.clone())) {
-                        row.open_tasks.insert(label, id.clone());
-                    }
-                }
-            }
-        }
-
-        let subtree_rollup = policy::rollup(&policy::worst_across_scopes(&per_scope_statuses));
-
-        findings.sort_by(|a, b| a.subject.cmp(&b.subject).then(a.kind.cmp(&b.kind)).then(a.detail.cmp(&b.detail)));
-        findings.dedup();
-
-        let catalogues_summary = catalogues
-            .iter()
-            .map(|c| CatalogueSummary {
-                framework: c.framework.clone(),
-                title: c.title.clone(),
-                kind: c.kind,
-                controls: c.controls.len(),
-            })
-            .collect();
-
-        // Show what policy `requires:` entries do to stored workflows. Box
-        // this sizeable lint pass so `handle_request`'s future stays small --
-        // every request shares that future's stack layout.
-        let (workflow_enforcement, workflow_findings) =
-            Box::pin(self.policy_workflow_enforcement(&target_scopes)).await?;
-
-        Ok(PolicyReport {
-            // The canonical name, like `RoleBoard.scope` -- a caller that
-            // asked by a legacy bare name still gets back exactly what
-            // `rows[].scope` uses, not the spelling it happened to type.
-            scope: asked.as_ref().map(|s| s.name.clone()),
-            rows,
-            rollup: subtree_rollup,
-            not_applicable: not_applicable
-                .into_iter()
-                .map(|(control, scope, rationale)| NotApplicableEntry { control, scope, rationale })
-                .collect(),
-            findings,
-            workflow_enforcement,
-            workflow_findings,
-            catalogues: catalogues_summary,
-        })
+    pub(crate) fn policy_service<'a>(
+        &'a self,
+        snapshot: &Factory,
+    ) -> factory_direction::policy_service::Service<'a> {
+        factory_direction::policy_service::Service::new(self.policy_intent_service(snapshot))
     }
 
-    /// One control's full detail at `scope`: `Request::PolicyControl`.
-    pub(crate) async fn policy_control(&self, control: ControlRef, scope: &str) -> Result<PolicyControlDetail> {
+    /// Outside transport wiring; L6 owns the actual Policy read. Workflow
+    /// preview decorations keep their historical final failure precedence.
+    pub(crate) async fn policy_report(&self, scope: Option<&str>) -> Result<PolicyReport> {
+        use crate::facts::Port;
         let snapshot = self.factory_snapshot();
-        let scope_obj = snapshot.scope(scope)?.clone();
-        let (catalogues, _findings, tags) = self.load_catalogues_and_tags().await?;
+        let knowledge = factory_kernel::KnowledgeTags::provider(self);
+        let checks = factory_kernel::CheckEvaluationFact::provider(self);
+        let inventory = TaskInventoryFact::provider(self);
+        let mut report = self
+            .policy_service(&snapshot)
+            .report(scope, &knowledge, &checks, &inventory)
+            .await?;
+        let (_, targets) = snapshot.subtree_scopes(scope)?;
+        let (enforcement, findings) = Box::pin(self.policy_workflow_enforcement(&targets)).await?;
+        report.workflow_enforcement = enforcement;
+        report.workflow_findings = findings;
+        Ok(report)
+    }
 
-        let chain = self.policy_chain(&scope_obj.name);
-        let (applied, _findings) = policy::applicable(&catalogues, &chain);
-        let found = applied.iter().find(|a| a.control == control).ok_or_else(|| {
-            FactoryError::BadRequest(format!(
-                "{control} does not apply at {:?}, or is not a control any loaded catalogue defines",
-                scope_obj.name
-            ))
-        })?;
-
-        let ancestor_names: BTreeSet<&str> = snapshot
-            .config
-            .ancestors_of(&scope_obj)
-            .iter()
-            .map(|ancestor| ancestor.name.as_str())
-            .collect();
-        let mut history: Vec<Attestation> = self
-            .policies
-            .all()
-            .await?
-            .into_iter()
-            .filter(|att| att.control == control && (att.scope == scope_obj.name || ancestor_names.contains(att.scope.as_str())))
-            .collect();
-        history.sort_by_key(|a| std::cmp::Reverse(a.attested_at));
-
-        // The full `applied` set, not just `found`, the same as `policy_report`:
-        // a `maps_to` neighbour's own `task`/`workflow`/`gate` check can
-        // still decide this control's status, so its name has to resolve
-        // too, or propagation would see it as wrongly `open`.
-        let (gates, daemon, credentials, backup, config) = self.dataset_level_facts(&[(&scope_obj, applied.clone())]).await?;
-        let now = Utc::now();
-        let evidence = self.evidence_for_scope(
-            &snapshot, &scope_obj, &applied, &tags, &history, &gates,
-            daemon, &credentials, backup, config.as_ref(), now,
-        ).await?;
-        let evaluated = policy::evaluate(&applied, &evidence, now)
-            .into_iter()
-            .find(|s| s.control == control)
-            .ok_or_else(|| FactoryError::Other(anyhow::anyhow!("{control} evaluated to no status")))?;
-        let open_task = self.open_policy_task(&control, &scope_obj.name).await?.map(|t| t.id);
-
-        Ok(PolicyControlDetail {
-            control: found.control.clone(),
-            title: found.title.clone(),
-            kind: found.kind,
-            checks: found.evidence.clone(),
-            maps_to: found.maps_to.clone(),
-            max_age: found.max_age,
-            not_applicable: found.not_applicable.clone(),
-            remediation: found.remediation.clone(),
-            refs: evaluated.refs,
-            status: evaluated.status,
-            open_task,
-            attestations: history,
-        })
+    pub(crate) async fn policy_control(
+        &self,
+        control: ControlRef,
+        scope: &str,
+    ) -> Result<PolicyControlDetail> {
+        use crate::facts::Port;
+        let snapshot = self.factory_snapshot();
+        let knowledge = factory_kernel::KnowledgeTags::provider(self);
+        let checks = factory_kernel::CheckEvaluationFact::provider(self);
+        let inventory = TaskInventoryFact::provider(self);
+        self.policy_service(&snapshot)
+            .detail(control, scope, &knowledge, &checks, &inventory)
+            .await
     }
 
     /// Record an attestation: `Request::PolicyAttest`. Refuses empty
@@ -620,6 +463,7 @@ impl Engine {
     /// is open: what `policy_remediate` refuses a second task over, and what
     /// `policy_control` reports as `open_task` (`#98`). An exact match on
     /// the label, never a title guess.
+    #[cfg(test)]
     async fn open_policy_task(&self, control: &ControlRef, scope: &str) -> Result<Option<TaskInventoryFact>> {
         let label = control.to_string();
         Ok(Facts::<L6>::new(self)
@@ -709,6 +553,7 @@ pub(crate) fn caller_name(caller: &Caller) -> String {
 /// terminal, or when it carries no such label. The one predicate
 /// `policy_report`'s `open_tasks` and `open_policy_task` both read, so the
 /// tab's "Task open" and the remediation refusal can never disagree.
+#[cfg(test)]
 use factory_direction::remediation::open_policy_label;
 
 #[cfg(test)]

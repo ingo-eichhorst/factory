@@ -2026,3 +2026,88 @@ fn policy_intent_rereads_catalogues_and_receipts_after_shell_completion_and_rest
     assert_eq!(detail["detail"]["attestations"][0]["id"], attestation_id);
     assert!(detail["detail"]["attestations"][0]["withdrawn"].is_object());
 }
+
+#[test]
+fn policy_service_uses_live_l5_check_results_and_maps_real_reported_runs_after_restart() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let config_path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["policies"] = serde_yaml_ng::from_str("frameworks: [cra]").unwrap();
+    std::fs::write(config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    let directory = daemon.root.join(".factory/policies");
+    std::fs::create_dir_all(&directory).unwrap();
+    let catalogue = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {id: plant, title: Plant, evidence: [{check: task, task: policy-proof}]}\n  - {id: mapped, title: Mapped, maps_to: [cra/plant], evidence: [{check: knowledge}]}\n";
+    std::fs::write(directory.join("cra.yaml"), catalogue).unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let board_url = format!("{base}/api/policy?scope=demo");
+    let detail_url = format!("{base}/api/policy/controls/cra/mapped?scope=demo");
+    let first = expect_ok(&board_url, &get(&board_url));
+    assert!(first["report"]["rows"][0]["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|status| status["status"] == "open"));
+    let workflows_url = format!("{base}/api/workflows");
+    let created = expect_ok(
+        &workflows_url,
+        &post(
+            &workflows_url,
+            &json!({"name":"policy-service-proof", "scope":"demo", "nodes":[task_node("policy-proof", "printf 'policy service proof\\n'")], "edges":[]}),
+        ),
+    );
+    let start_url = format!(
+        "{workflows_url}/{}/run",
+        created["workflow"]["id"].as_str().unwrap()
+    );
+    let started = expect_ok(&start_url, &post(&start_url, &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let finished = wait_for(
+        "reported policy service proof",
+        Duration::from_secs(30),
+        || {
+            let run = run_status(&base, run_id);
+            matches!(
+                run["status"].as_str(),
+                Some("done" | "failed" | "cancelled")
+            )
+            .then_some(run)
+        },
+    );
+    assert_eq!(finished["status"], "done", "{finished}");
+    let current = expect_ok(&board_url, &get(&board_url));
+    assert!(
+        current["report"]["rows"][0]["statuses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|status| status["status"] == "satisfied"),
+        "{current}"
+    );
+    let detail = expect_ok(&detail_url, &get(&detail_url));
+    assert_eq!(detail["detail"]["status"]["status"], "satisfied");
+    assert!(detail["detail"]["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reference| reference["kind"] == "run"));
+    std::fs::write(
+        directory.join("cra.yaml"),
+        catalogue.replace("title: Mapped", "title: Updated"),
+    )
+    .unwrap();
+    assert_eq!(
+        expect_ok(&detail_url, &get(&detail_url))["detail"]["title"],
+        "Updated"
+    );
+    daemon.sigterm();
+    daemon.spawn();
+    let restored = expect_ok(&detail_url, &get(&detail_url));
+    assert_eq!(restored["detail"]["status"]["status"], "satisfied");
+    assert_eq!(restored["detail"]["refs"], detail["detail"]["refs"]);
+}

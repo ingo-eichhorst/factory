@@ -519,3 +519,24 @@ fn policy_declaration_is_canonical_l6_data_with_the_original_config_json() {
         .is_err()
     );
 }
+
+#[test]
+fn check_results_are_canonical_kernel_data_with_unchanged_policy_wire_fields() {
+    let wire = json!({"control": "cra/a", "title": "A", "kind": "regulation",
+        "status": "stale", "reasons": ["expired"], "refs": [{"kind": "attestation", "id": "receipt"}]});
+    let owned: factory_kernel::EvaluationResult<factory_direction::policy::Kind> =
+        serde_json::from_value(wire.clone()).unwrap();
+    let assurance: factory_assurance::checks::EvaluationResult<factory_direction::policy::Kind> =
+        owned;
+    let legacy: factory_core::policy::ControlStatus = assurance;
+    assert_eq!(serde_json::to_value(&legacy).unwrap(), wire);
+    let status: factory_kernel::Status = legacy.status;
+    let _: factory_core::policy::Status = status;
+    let reference: factory_kernel::EvidenceRef = legacy.refs[0].clone();
+    let _: factory_assurance::checks::EvidenceRef = reference;
+    let finding: factory_assurance::checks::EvidenceFinding = factory_kernel::EvidenceFinding {
+        subject: "demo".into(),
+        detail: "ambiguous".into(),
+    };
+    assert_eq!(finding.detail, "ambiguous");
+}

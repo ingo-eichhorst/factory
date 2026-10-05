@@ -70,7 +70,7 @@ impl<P: metrics_service::Ports + Send + Sync> Provide<MetricValuesFact> for Prov
 // upper-level verdict. Preserve the existing public error variant and prose
 // when reporting a borrowed input problem; the original source remains owned
 // by the caller's Read, so repeated failed reads return the same error.
-fn copy_input_error(error: &FactoryError) -> FactoryError {
+pub(crate) fn copy_input_error(error: &FactoryError) -> FactoryError {
     match error {
         FactoryError::TaskNotFound(id) => FactoryError::TaskNotFound(id.clone()),
         FactoryError::NoSuchAdapter {

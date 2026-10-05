@@ -5344,9 +5344,21 @@ re-exports L6's declaration type and uses the same L6 path-chain algorithm;
 the service receives fresh raw scope declarations, never a resolved chain or
 Policy report. It rereads limits only when a check or Quality plan needs them,
 preserving invalid authored intent as error data for the L5 evaluator. No
-spend or compliance judgement is computed in this input service. Full Policy
-report/detail/attestation, Scenarios and other service/command isolation remain
-unfinished; moving their inputs is not completion of the six-service split.
+spend or compliance judgement is computed in this input service.
+
+Policy report/detail reads now belong to a physical L6 service. It owns
+applicability, receipt history, authored classifications, rollups, findings
+and remediation links, reading the actual L5 `CheckEvaluationFact` and L4
+inventory through `Facts<L6>`. The L5 producer gathers lower evidence live
+with its existing service, then calls the sole unchanged check evaluator.
+The fact contains only plain L0 observations, statuses, references and
+findings, never L6 classifications or a Policy report. Status precedence
+and result construction stay private to L5; legacy status/result types are
+canonical L0 re-exports with unchanged JSON. Shared lower failures precede
+deferred raw-budget errors, and report/detail clock timing stays distinct.
+Workflow preview decorations remain outside the service. Attestation/clock
+commands, Scenarios and other service/command isolation remain unfinished;
+these live read paths do not complete the six-service split.
 
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),

@@ -139,9 +139,9 @@ impl Configuration {
 }
 
 pub struct Service<'a> {
-    root: PathBuf,
-    config: Configuration,
-    receipts: &'a PolicyStore,
+    pub(crate) root: PathBuf,
+    pub(crate) config: Configuration,
+    pub(crate) receipts: &'a PolicyStore,
 }
 impl<'a> Service<'a> {
     pub fn new(root: PathBuf, config: Configuration, receipts: &'a PolicyStore) -> Self {

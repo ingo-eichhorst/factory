@@ -1,6 +1,15 @@
 //! Outside-stack construction of the physical L5 provider. No gathering here.
 use crate::engine::Engine;
 
+pub(super) fn check_provider(
+    engine: &Engine,
+) -> factory_assurance::check_evaluation::Provider<'_, super::checks::Ports<'_>> {
+    factory_assurance::check_evaluation::Provider::new(super::checks::service(
+        engine,
+        engine.factory_snapshot().scope_tree(),
+    ))
+}
+
 pub(super) fn metric_provider(
     engine: &Engine,
 ) -> factory_assurance::metric_values::Provider<'_, super::checks::Ports<'_>> {

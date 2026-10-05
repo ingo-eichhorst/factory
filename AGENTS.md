@@ -321,7 +321,17 @@ something impossible.
   not resolved chains or flat caches; preserve aliases, first-match precedence,
   vanished-scope root fallback and independent ancestor caps. Invalid limits
   stay raw error inputs, not absent defaults or L6 compliance verdicts.
-  Full Policy reports/details/attestations and Scenarios still need migration.
+  L6's physical Policy report/detail service reads CheckEvaluationFact and
+  process inventory through Facts<L6>, owning its declarations, receipt
+  history, classification, rollups, findings and remediation links. The
+  physical L5 producer owns live gathering and the sole evaluator, returning
+  kindless plain L0 observations/status/reference/finding data, never an
+  upper report or classification. Precedence and result construction stay
+  private L5 behaviour; canonical legacy status/result re-exports keep JSON.
+  Preserve shared-gather failure priority over deferred raw budget errors,
+  distinct report/detail clock timing and full maps_to subject sets.
+  Outside workflow preview decorations, attestation/clock commands and
+  Scenarios still need migration.
   The complete six-service split still remains.
   L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.

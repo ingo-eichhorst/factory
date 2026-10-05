@@ -1714,4 +1714,140 @@ mod tests {
             "only empty task/workflow owner fast paths were called"
         );
     }
+
+    #[tokio::test]
+    async fn physical_check_fact_owns_live_evaluation_and_shared_selective_reads() {
+        use crate::check_evaluation::{Provider, Read, ScopeInput};
+        use factory_kernel::{CheckEvaluationFact, StatusKind, L6};
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let owner = service(&recorder, &bench);
+        let mut knowledge = subject(vec![Check::Knowledge { tag: None }]);
+        knowledge.control = "test/knowledge".parse().unwrap();
+        let mut host = subject(vec![Check::Daemon {
+            fact: "foreman_enabled".into(),
+        }]);
+        host.control = "test/host".parse().unwrap();
+        let mut task = subject(vec![Check::Task {
+            task: "named".into(),
+            max_age: None,
+        }]);
+        task.control = "test/task".parse().unwrap();
+        let scopes = owner.scopes.scopes[..2]
+            .iter()
+            .map(|scope| ScopeInput {
+                scope: scope.clone(),
+                subjects: vec![knowledge.clone(), host.clone(), task.clone()],
+            })
+            .collect();
+        let read = Read {
+            scopes,
+            tags: BTreeSet::new(),
+            attestations: Vec::new(),
+            budgets: Ok(vec![None, None]),
+            now: Some(time()),
+        };
+        let provider = Provider::new(owner);
+        let facts = Facts::<L6>::new();
+        let first = facts
+            .get::<CheckEvaluationFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(first.at, time());
+        assert_eq!(first.scopes.len(), 2);
+        assert_eq!(first.scopes[0].statuses[0].control.id, "host");
+        assert_eq!(first.scopes[0].statuses[0].status.kind(), StatusKind::Open);
+        assert_eq!(recorder.calls("daemon").len(), 1);
+        assert!(recorder.calls("dependencies").is_empty());
+        assert!(recorder.calls("secrets").is_empty());
+        assert!(recorder.calls("agents").is_empty());
+        recorder.generation.store(1, Ordering::SeqCst);
+        let next = facts
+            .get::<CheckEvaluationFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(
+            next.scopes[0].statuses[0].status.kind(),
+            StatusKind::Satisfied,
+            "{next:?}"
+        );
+        assert_ne!(
+            next.scopes[1].statuses[2].refs,
+            first.scopes[1].statuses[2].refs
+        );
+        assert_eq!(
+            recorder.calls("daemon").len(),
+            2,
+            "shared once per read, not once forever"
+        );
+        assert_eq!(
+            recorder.calls("tasks").len(),
+            4,
+            "fresh per-scope reads on each request"
+        );
+        assert!(serde_json::to_value(&next.scopes[0].statuses[0])
+            .unwrap()
+            .get("kind")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn physical_check_fact_preserves_shared_failure_priority_and_retries_without_cache() {
+        use crate::check_evaluation::{Provider, Read, ScopeInput};
+        use factory_kernel::{CheckEvaluationFact, L6};
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let owner = service(&recorder, &bench);
+        let mut read = Read {
+            scopes: vec![ScopeInput {
+                scope: owner.scopes.scopes[1].clone(),
+                subjects: vec![subject(vec![Check::Daemon {
+                    fact: "foreman_enabled".into(),
+                }])],
+            }],
+            tags: BTreeSet::new(),
+            attestations: Vec::new(),
+            budgets: Err(FactoryError::BadRequest(
+                "authored budget unavailable".into(),
+            )),
+            now: None,
+        };
+        let provider = Provider::new(owner);
+        let facts = Facts::<L6>::new();
+        *recorder.failing.lock().unwrap() = Some("daemon");
+        assert_eq!(
+            facts
+                .get::<CheckEvaluationFact, _>(&provider, &read)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "invalid request: daemon unavailable"
+        );
+        *recorder.failing.lock().unwrap() = None;
+        assert_eq!(
+            facts
+                .get::<CheckEvaluationFact, _>(&provider, &read)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "invalid request: authored budget unavailable"
+        );
+        read.budgets = Ok(vec![None]);
+        *recorder.failing.lock().unwrap() = Some("tasks");
+        assert_eq!(
+            facts
+                .get::<CheckEvaluationFact, _>(&provider, &read)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "invalid request: tasks unavailable"
+        );
+        *recorder.failing.lock().unwrap() = None;
+        let before = Utc::now();
+        let recovered = facts
+            .get::<CheckEvaluationFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert!(recovered.at >= before && recovered.at <= Utc::now());
+    }
 }

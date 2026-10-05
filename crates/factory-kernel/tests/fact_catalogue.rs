@@ -18,6 +18,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<BenchResolutionFact, L5>("BenchResolutionFact", "L5");
     assert_producer::<SignpostFact, L5>("SignpostFact", "L5");
     assert_producer::<MetricValuesFact, L5>("MetricValuesFact", "L5");
+    assert_producer::<CheckEvaluationFact, L5>("CheckEvaluationFact", "L5");
     assert_producer::<InfrastructureExpiryFact, L1>("InfrastructureExpiryFact", "L1");
     assert_producer::<RenewalDeclarationsFact, L1>("RenewalDeclarationsFact", "L1");
     assert_producer::<CredentialExpiryFact, L2>("CredentialExpiryFact", "L2");
@@ -66,6 +67,31 @@ fn metric_values_are_plain_validated_identity_data_without_registry_resolution()
         ]}))
         .is_err()
     );
+}
+
+#[test]
+fn check_evaluation_is_plain_kindless_data_with_canonical_status_and_reference_json() {
+    let wire = serde_json::json!({
+        "at": "2026-10-16T12:00:00Z", "scopes": [{"scope": "demo", "statuses": [{
+            "control": "cra/a", "title": "A", "status": "satisfied", "reasons": ["live run"],
+            "refs": [{"kind": "run", "id": "run-1"}]
+        }], "findings": [{"subject": "demo", "detail": "ambiguous title"}]}]
+    });
+    let fact: CheckEvaluationFact = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&fact).unwrap(), wire);
+    assert_eq!(
+        fact.scopes[0].statuses[0].status.kind(),
+        StatusKind::Satisfied
+    );
+    assert_eq!(fact.scopes[0].statuses[0].status.reasons(), ["live run"]);
+    assert_eq!(
+        fact.scopes[0].statuses[0].refs[0].kind,
+        EvidenceRefKind::Run
+    );
+    assert!(serde_json::to_value(&fact.scopes[0].statuses[0])
+        .unwrap()
+        .get("kind")
+        .is_none());
 }
 
 #[test]
@@ -144,6 +170,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "ProductionFact", "ProcessMetricFact", "BenchResolutionFact",
         "SignpostFact",
         "MetricValuesFact",
+        "CheckEvaluationFact",
         "InfrastructureExpiryFact", "CredentialExpiryFact", "ScheduledRunDatesFact",
         "RenewalDeclarationsFact",
         "DaemonConfigFact",

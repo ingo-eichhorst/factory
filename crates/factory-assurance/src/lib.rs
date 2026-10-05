@@ -14,6 +14,7 @@ pub mod bench_timer;
 pub mod benchmark;
 pub mod budget;
 pub mod checks;
+pub mod check_evaluation;
 pub mod conformance;
 pub mod control_plan;
 pub mod dataset;

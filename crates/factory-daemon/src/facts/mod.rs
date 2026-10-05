@@ -145,6 +145,13 @@ port!(
     l5::metric_provider
 );
 port!(
+    CheckEvaluationFact,
+    factory_assurance::check_evaluation::Provider<'a, checks::Ports<'a>>,
+    factory_assurance::check_evaluation::Read,
+    CheckEvaluationFact,
+    l5::check_provider
+);
+port!(
     BackupFact,
     factory_infrastructure::backup_facts::Provider<'a>,
     DateTime<Utc>,
@@ -594,6 +601,7 @@ mod tests {
         registered::<BenchResolutionFact>();
         registered::<SignpostFact>();
         registered::<MetricValuesFact>();
+        registered::<CheckEvaluationFact>();
         registered::<DaemonConfigFact>();
         registered::<BackupFact>();
         registered::<ScopeCapacityFact>();
@@ -629,6 +637,85 @@ mod tests {
         wired.sort_unstable();
         catalogue.sort_unstable();
         assert_eq!(wired, catalogue);
+    }
+
+    #[test]
+    fn physical_policy_service_reads_live_check_facts_and_classifies_only_its_own_declarations() {
+        let owner = include_str!("../../../factory-direction/src/policy_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let compact: String = owner.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("Facts::<L6>::new().get::<CheckEvaluationFact,_>"));
+        assert!(compact.contains("Facts::<L6>::new().get::<TaskInventoryFact,_>"));
+        assert!(owner.contains("kind: declaration.kind"));
+        for forbidden in [
+            "Engine",
+            "factory_core",
+            "factory_composition",
+            "factory_interfaces",
+            "factory_daemon",
+            "TaskStore",
+            "dyn Fn",
+            "BoxFuture",
+            "policy::evaluate(",
+        ] {
+            assert!(
+                !owner.contains(forbidden),
+                "Policy service gained backedge/evaluator {forbidden}"
+            );
+        }
+        let producer = include_str!("../../../factory-assurance/src/check_evaluation.rs");
+        for required in [
+            "Provide<CheckEvaluationFact>",
+            "self.evidence.shared",
+            ".for_scope(",
+            "checks::evaluate",
+            "checks::evidence_findings",
+        ] {
+            assert!(producer.contains(required), "provider lost {required}");
+        }
+        for forbidden in [
+            "Engine",
+            "factory_core",
+            "factory_direction",
+            "factory_composition",
+            "factory_interfaces",
+            "TaskStore",
+            "dyn Fn",
+            "PolicyReport",
+        ] {
+            assert!(
+                !producer.contains(forbidden),
+                "check provider gained {forbidden}"
+            );
+        }
+        let schema = include_str!("../../../factory-kernel/src/check_results.rs");
+        assert!(
+            !schema.contains("fn rank(")
+                && !schema.contains("fn from_kind(")
+                && !schema.contains("fn evaluate(")
+        );
+        let evaluator = include_str!("../../../factory-assurance/src/checks.rs");
+        assert!(evaluator.contains("impl StatusOrder for StatusKind"));
+        assert!(evaluator.contains("impl BuildStatus for Status"));
+        let wiring = include_str!("../policies/mod.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let endpoint = wiring
+            .split("pub(crate) async fn policy_report(")
+            .nth(1)
+            .unwrap()
+            .split("/// Record an attestation:")
+            .next()
+            .unwrap();
+        assert!(endpoint.contains("policy_service(&snapshot)"));
+        assert!(
+            !endpoint.contains("policy::evaluate(")
+                && !endpoint.contains("evidence_for_scope(")
+                && !endpoint.contains("policy::applicable(")
+        );
     }
 
     #[test]

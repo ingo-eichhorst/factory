@@ -2849,4 +2849,123 @@ mod tests {
             "the next request must not retain the failed read"
         );
     }
+
+    #[tokio::test]
+    async fn actual_check_fact_rereads_runs_propagates_maps_to_and_retries_a_failed_lower_store() {
+        use factory_assurance::check_evaluation::{Read, ScopeInput};
+        use factory_assurance::checks::{Check, EvaluationSubject};
+        use factory_kernel::{CheckEvaluationFact, StatusKind};
+        let (engine, database) = scoped_engine();
+        let now = Utc::now();
+        let task = EvaluationSubject {
+            control: "test/plant".parse().unwrap(),
+            title: "Plant".into(),
+            kind: (),
+            maps_to: Vec::new(),
+            evidence: vec![Check::Task {
+                task: "live evidence".into(),
+                max_age: None,
+            }],
+            max_age: None,
+            not_applicable: None,
+        };
+        let mapped = EvaluationSubject {
+            control: "test/mapped".parse().unwrap(),
+            title: "Mapped".into(),
+            kind: (),
+            maps_to: vec![task.control.clone()],
+            evidence: vec![Check::Knowledge { tag: None }],
+            max_age: None,
+            not_applicable: None,
+        };
+        let snapshot = engine.factory_snapshot();
+        let scope = snapshot.scope("work").unwrap();
+        let read = Read {
+            scopes: vec![ScopeInput {
+                scope: factory_kernel::ScopeNode {
+                    name: scope.name.clone(),
+                    path: scope.path.clone(),
+                },
+                subjects: vec![task.clone(), mapped],
+            }],
+            tags: Default::default(),
+            attestations: Vec::new(),
+            budgets: Ok(vec![None]),
+            now: Some(now),
+        };
+        let provider = <CheckEvaluationFact as crate::facts::Port>::provider(&engine);
+        let facts = factory_kernel::Facts::<L6>::new();
+        let first = facts
+            .get::<CheckEvaluationFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert!(first.scopes[0]
+            .statuses
+            .iter()
+            .all(|s| s.status.kind() == StatusKind::Open));
+        let (_, run) = timed_run(
+            &engine,
+            &database,
+            "live evidence",
+            "work",
+            RunStatus::Done,
+            now - chrono::Duration::hours(2),
+            Some(now - chrono::Duration::hours(1)),
+            None,
+        )
+        .await;
+        let next = facts
+            .get::<CheckEvaluationFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert!(next.scopes[0]
+            .statuses
+            .iter()
+            .all(|s| s.status.kind() == StatusKind::Satisfied));
+        assert!(next.scopes[0]
+            .statuses
+            .iter()
+            .find(|status| status.control.id == "mapped")
+            .unwrap()
+            .refs
+            .iter()
+            .any(|reference| reference.id == run.id));
+        engine
+            .store
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Failed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let failed = facts
+            .get::<CheckEvaluationFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert!(failed.scopes[0]
+            .statuses
+            .iter()
+            .all(|s| s.status.kind() == StatusKind::Open));
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute("ALTER TABLE runs RENAME TO qa_check_hidden_runs", [])
+            .unwrap();
+        assert!(facts
+            .get::<CheckEvaluationFact, _>(&provider, &read)
+            .await
+            .is_err());
+        connection
+            .execute("ALTER TABLE qa_check_hidden_runs RENAME TO runs", [])
+            .unwrap();
+        assert_eq!(
+            facts
+                .get::<CheckEvaluationFact, _>(&provider, &read)
+                .await
+                .unwrap(),
+            failed
+        );
+    }
 }

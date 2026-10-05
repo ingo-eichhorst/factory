@@ -26,6 +26,11 @@
 //!   identifies page/API composition outside the six-level ladder.
 
 mod duration;
+mod check_results;
+pub use check_results::{
+    CheckEvaluationFact, CheckObservation, EvidenceFinding, EvidenceRef, EvidenceRefKind, EvaluationResult,
+    ScopeCheckEvaluation, Status, StatusKind,
+};
 mod evaluation_receipts;
 pub use evaluation_receipts::{
     Attestation, ClockDeadlineKind, ClockItemRef, ClockMark, ControlRef, CorrectiveMeasureMark,
