@@ -54,7 +54,6 @@ impl<'a, P: metrics_service::Ports> Provider<'a, P> {
 
     /// One scope's evidence: everything `for_scope` gathers, plus the
     /// metric values its `check: metric`s name, if any do.
-    #[allow(clippy::too_many_arguments)]
     async fn scope_evidence(
         &self,
         input: &ScopeInput,
