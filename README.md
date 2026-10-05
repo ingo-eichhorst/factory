@@ -1286,8 +1286,8 @@ empty one is a finding and the control stays applicable — and every `n/a`, at
 whichever scope declared it, is always listed rather than left silent: ISO
 27001 calls this a Statement of Applicability, and ADR 0004 keeps the name.
 
-**Checks and statuses.** Evidence is evaluated per check kind, and all eleven
-are evaluated for real: `knowledge` (a vault page tagged
+**Checks and statuses.** Evidence is evaluated per check kind, and every
+kind is evaluated for real: `knowledge` (a vault page tagged
 `control/<framework>/<id>`, or a check's own `tag`), `attestation` (an
 unexpired, unwithdrawn attestation recorded for the control), `task` and
 `workflow` (the newest *finished* run — done, failed or cancelled; a run
@@ -1386,13 +1386,57 @@ controls actually name one:
   never judged twice; a review or approval step leaves no attestation in v1
   (`#118`), so a check on one reads `open` until that lands. `refs` names
   the task and run behind each reason, the same as `task`/`workflow`.
+- **`metric { metric, above | below, max_age }`** (`#278`, phase 2) — a
+  registry metric (see "Goals" below for the vocabulary) held to one
+  threshold, judged exactly like a quality `MetricMeasure`: the bound is
+  inclusive; a value whose `as_of` is older than the control's effective
+  `max_age` (the check's own `max_age` folds into it like `task`'s does) is
+  `stale` whatever it says; and a value of `None` is `open` with the
+  metric's own reason — a missing or unparsable file, a `null` with the
+  file's own reason, an id the source does not report. Exactly one of
+  `above` or `below`, and it has to agree with the metric's direction:
+  `above` where higher is better, `below` where lower is — for a
+  `reported.*` metric, the `better` its scope declared. This is how a
+  scope's own reported metric closes a control rather than leaving it to
+  an attestation:
 
-Neither `roles`/`sandbox`/`secrets`/`daemon`/`dependencies` carries a `refs` entry: nothing
+  ```yaml
+  # .factory/policies/gobd.yaml, bound by scope `finance`
+  - id: belegprinzip
+    title: Every booking references its source document
+    max_age: 35d
+    evidence:
+      - check: metric
+        metric: reported.finance.beleg_coverage
+        above: 0.98
+  ```
+
+  Values are read live for the evaluated scope's own subtree — the rule
+  every other check follows, so a control's status at a scope never
+  depends on which report asked. A built-in metric is that subtree's own
+  figure; a `reported.*` metric is `open` ("declared by scope …, outside
+  the selected subtree") at any scope whose subtree does not hold the
+  declaring scope. A metric is computed only when some applicable control
+  names one, a source's file is read at most once per evaluated scope, and
+  nothing is stored. Refused — a finding when the catalogue loads, and
+  `open` at evaluation whatever the value: `compliance.*`,
+  `open_controls.*` and `quality.*`, which are computed from policy and
+  quality verdicts, so a control would be judged by its own status
+  (`circular_metric`); a metric the registry does not know
+  (`unknown_metric`); no bound, both bounds, or a bound that is not a
+  finite number (`bad_threshold`); and a bound against the metric's
+  direction (`wrong_direction` — a built-in metric's when the file loads, a
+  reported one's against its scope's live declaration). A quality measure
+  does not take this spelling — it names the metric directly, `{ metric:
+  …, above: … }` — so `check: metric` there is a parse error.
+
+Neither `roles`/`sandbox`/`secrets`/`daemon`/`dependencies`/`metric` carries a `refs` entry: nothing
 behind them is an id a UI could link to yet (an agent name is not one of
-`EvidenceRefKind`'s kinds, and a daemon/secrets fact is not tied to any one
-record at all) — the L6 Policy tab instead links a gap in one of these to
-the level that can close it (Roles, Sandboxes, Secrets, Dependencies, or L1
-Infrastructure). A control's status is `satisfied` (a check found current
+`EvidenceRefKind`'s kinds, and a daemon/secrets fact or a metric value is
+not tied to any one record at all) — the L6 Policy tab instead links a gap
+in one of these to the level that can close it (Roles, Sandboxes, Secrets,
+Dependencies, or L1 Infrastructure); a `metric` gap has no one page that
+closes it, so it carries no link. A control's status is `satisfied` (a check found current
 evidence), `attested` (an unexpired attestation covers it), `stale`
 (evidence or an attestation existed but is older than `max_age`, or the
 attestation expired), `open` (no evidence), or `n/a` (does not apply here,
@@ -1761,7 +1805,8 @@ answer, never a crash and never silently `0`. Reading is **computed on
 read**: the file is opened read-only, `O_NOFOLLOW` (a symlink swapped in
 after validation is refused too), bounded in size, at most once per
 `metrics`/`quality`/`goals` request — however many of its own ids that
-request asks for — and never cached, copied into a table, watched or
+request asks for — or per evaluated scope for a policy control's `check:
+metric` — and never cached, copied into a table, watched or
 pushed over the observer bus. `value` is `None`, with a reason, for each of:
 a source or metric id nobody declared, a missing file, a file that does
 not parse or is too large, an id the file does not report, a `null` value
@@ -1773,7 +1818,8 @@ verbatim (escaped by the renderer, the same as any other finding's text)
 in the CLI and UI, and never stored. A reported metric's own `coverage` is
 `scope_aware`, so `quality.<characteristic>` and a Goals key result read it
 exactly like a built-in one — see "Quality attributes" below for a worked
-`measure:`.
+`measure:` — and a policy control can name it as evidence with `check:
+metric`, held to its declared direction — see "Policies" above.
 
 **Scoring.** A key result is scored linearly from `baseline` to `target`,
 clamped to `0.0..=1.0`, whichever direction the metric actually improves —
@@ -2132,7 +2178,8 @@ H attribute hides behind three green L ones.
   kinds some scenario asks. `task`/`workflow` name one in the evaluated
   scope; a name that matches more than one is an `ambiguous_check_target`
   finding. "Never gathered" and "nothing finished yet" are `no_data`, not
-  `not_met`.
+  `not_met`. Policy's own `check: metric` is not one of these: a metric
+  measure already says it, so that spelling is a parse error here.
 - An **`attestation`** check is `no_data`, with the reason. The attestation
   store keys a row by a policy `ControlRef` it parses back on every read,
   and a quality scenario's `quality/<attribute>/<scenario>` does not parse,

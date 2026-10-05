@@ -328,6 +328,18 @@ test("describeCheck matches the CLI's own describe_check, one line per check kin
     describeCheck({ check: "attested", category: "feature", step: "tests", max_age: "1w" }),
     "attested: feature/tests (max_age 1w)",
   );
+  assert.equal(
+    describeCheck({ check: "metric", metric: "reported.finance.beleg_coverage", above: 0.98, max_age: "5w" }),
+    "metric reported.finance.beleg_coverage >= 0.98 (max_age 5w)",
+  );
+  assert.equal(describeCheck({ check: "metric", metric: "fail_rate", below: 0 }), "metric fail_rate <= 0");
+});
+
+test("closingLinks reads a metric reason's kind but links nowhere (#278)", () => {
+  const reasons = ["metric: reported.finance.beleg_coverage = 0.9 as of 2026-10-05 09:00:00 UTC, below the required 0.98"];
+  assert.deepEqual(reasonCheckKinds(reasons), ["metric"]);
+  assert.deepEqual(closingLinks("demo", reasons), []);
+  assert.equal(checkTarget("demo", "gobd/belegprinzip", { check: "metric", metric: "fail_rate", below: 0 }), null);
 });
 
 test("looksLikeExpiry accepts policy::Duration's grammar and the two absolute forms, softly", () => {

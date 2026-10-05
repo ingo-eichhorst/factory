@@ -216,7 +216,8 @@ export function reasonCheckKinds(reasons) {
 /// `#87`, the `infrastructure` page under level `infra`) now that it exists.
 /// `attested` (`#158`) points at Tasks, same as `task` -- what closes the
 /// gap is a run of the named category actually attesting the step, and
-/// that is where runs live.
+/// that is where runs live. `metric` (`#278`) is left out too: whatever
+/// moves the number -- the scope's own books, its runs -- is not one page.
 const REMEDIATION = {
   knowledge: { page: "knowledge", label: "Knowledge" },
   task: { page: "tasks", label: "Tasks" },
@@ -317,6 +318,13 @@ export function describeCheck(check) {
       return describeDependencies(check);
     case "attested":
       return `attested: ${check.category}/${check.step} (max_age ${check.max_age})`;
+    case "metric":
+      return [
+        `metric ${check.metric}`,
+        ...(check.above !== undefined && check.above !== null ? [`>= ${check.above}`] : []),
+        ...(check.below !== undefined && check.below !== null ? [`<= ${check.below}`] : []),
+        ...(check.max_age ? [`(max_age ${check.max_age})`] : []),
+      ].join(" ");
     default:
       return check.check;
   }
