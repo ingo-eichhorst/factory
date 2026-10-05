@@ -5356,9 +5356,15 @@ findings, never L6 classifications or a Policy report. Status precedence
 and result construction stay private to L5; legacy status/result types are
 canonical L0 re-exports with unchanged JSON. Shared lower failures precede
 deferred raw-budget errors, and report/detail clock timing stays distinct.
-Workflow preview decorations remain outside the service. Attestation/clock
-commands, Scenarios and other service/command isolation remain unfinished;
-these live read paths do not complete the six-service split.
+The same L6 service now owns reporting-clock subtree selection, live typed
+L2 exploited-finding and L4 confirmed-report reads, receipt history and the
+canonical deadline fold. It owns attestation/withdrawal validation and writes
+to its existing append-only store too, preserving error priority, exact item
+scope, corrective anchors and submission deduplication. The router supplies
+only raw caller/request inputs and physical providers; it retains its one
+authorization check and existing receipt-change events. Workflow preview
+decorations remain outside; Scenarios and other service/command isolation
+remain unfinished. These paths do not complete the six-service split.
 
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),

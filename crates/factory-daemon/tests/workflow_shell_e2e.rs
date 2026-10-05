@@ -2228,3 +2228,144 @@ fn waiting_restart_repeatedly_retains_dispatch_and_completion_evidence() {
         eprintln!("waiting restart trial {trial} completed");
     }
 }
+
+#[test]
+fn policy_clock_owner_reads_confirmed_intake_and_keeps_receipts_through_real_restart() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let config_path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["policies"] = serde_yaml_ng::from_str("frameworks: [cra]").unwrap();
+    std::fs::write(config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    let directory = daemon.root.join(".factory/policies");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("cra.yaml"), "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {id: art-14, title: Reporting, evidence: [{check: attestation}]}\n").unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let workflows_url = format!("{base}/api/workflows");
+    let created = expect_ok(
+        &workflows_url,
+        &post(
+            &workflows_url,
+            &json!({"name":"clock-owner-proof", "scope":"demo", "nodes":[task_node("clock-proof", "printf 'clock owner proof\\n'")], "edges":[]}),
+        ),
+    );
+    let start_url = format!(
+        "{workflows_url}/{}/run",
+        created["workflow"]["id"].as_str().unwrap()
+    );
+    let started = expect_ok(&start_url, &post(&start_url, &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let finished = wait_for(
+        "reported clock-owner proof",
+        Duration::from_secs(30),
+        || {
+            let run = run_status(&base, run_id);
+            matches!(
+                run["status"].as_str(),
+                Some("done" | "failed" | "cancelled")
+            )
+            .then_some(run)
+        },
+    );
+    assert_eq!(finished["status"], "done", "{finished}");
+    let clock_url = format!("{base}/api/policy/clock?scope=demo");
+    assert!(expect_ok(&clock_url, &get(&clock_url))["clock"]["items"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let intake_url = format!("{base}/api/intake");
+    let intake = expect_ok(
+        &intake_url,
+        &post(
+            &intake_url,
+            &json!({"title":"QA-only security report", "scope":"demo", "security":true}),
+        ),
+    );
+    let item_id = intake["task"]["id"].as_str().unwrap();
+    let awareness = intake["task"]["intake"]["received_at"].clone();
+    let confirm_url = format!("{intake_url}/{item_id}/security");
+    expect_ok(
+        &confirm_url,
+        &post(
+            &confirm_url,
+            &json!({"verdict":"confirm", "evidence":"own isolated QA fixture"}),
+        ),
+    );
+    let first = expect_ok(&clock_url, &get(&clock_url));
+    assert_eq!(first["clock"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(first["clock"]["items"][0]["awareness_at"], awareness);
+    assert_eq!(first["clock"]["items"][0]["item"]["item"], item_id);
+    assert_eq!(
+        first["clock"]["items"][0]["deadlines"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let attest_url = format!("{base}/api/policy/attestations");
+    let item = format!("report:{item_id}");
+    let available = chrono::Utc::now() - chrono::Duration::hours(1);
+    let corrective_body = json!({"control":"cra/art-14", "scope":"demo", "evidence":"QA corrective evidence", "expires":"3d", "corrective_item":item, "available_at":available});
+    let anchor = expect_ok(&attest_url, &post(&attest_url, &corrective_body));
+    let anchor_id = anchor["attestation"]["id"].as_str().unwrap().to_owned();
+    let current = expect_ok(&clock_url, &get(&clock_url));
+    assert_eq!(
+        current["clock"]["items"][0]["corrective_measure"]["attestation"],
+        anchor_id
+    );
+    assert_eq!(
+        current["clock"]["items"][0]["deadlines"][2]["due_at"],
+        serde_json::to_value(available + chrono::Duration::days(14)).unwrap()
+    );
+    let submission_body = json!({"control":"cra/art-14", "scope":"demo", "evidence":"QA final notice", "expires":"3d", "clock_item":item, "deadline":"final_report"});
+    let submitted = expect_ok(&attest_url, &post(&attest_url, &submission_body));
+    let submitted_id = submitted["attestation"]["id"].as_str().unwrap().to_owned();
+    let (_, refused) = raw_request("POST", &attest_url, Some(&submission_body)).unwrap();
+    assert!(
+        refused.contains("already has a live submission"),
+        "{refused}"
+    );
+    daemon.sigterm();
+    daemon.spawn();
+    let restored = expect_ok(&clock_url, &get(&clock_url));
+    assert_eq!(restored["clock"]["items"][0]["awareness_at"], awareness);
+    assert_eq!(
+        restored["clock"]["items"][0]["corrective_measure"]["attestation"],
+        anchor_id
+    );
+    assert_eq!(
+        restored["clock"]["items"][0]["deadlines"][2]["state"],
+        "met"
+    );
+    assert_eq!(
+        restored["clock"]["items"][0]["deadlines"][2]["submission"]["attestation"],
+        submitted_id
+    );
+    let withdraw_url = format!("{attest_url}/{anchor_id}/withdraw?reason=incorrect");
+    expect_ok(&withdraw_url, &post(&withdraw_url, &json!({})));
+    let current = expect_ok(&clock_url, &get(&clock_url));
+    assert_eq!(
+        current["clock"]["items"][0]["deadlines"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(current["clock"]["items"][0]
+        .get("corrective_measure")
+        .is_none());
+    daemon.sigterm();
+    daemon.spawn();
+    assert_eq!(
+        expect_ok(&clock_url, &get(&clock_url))["clock"]["items"][0]["deadlines"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}

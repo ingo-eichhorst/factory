@@ -9,6 +9,8 @@ use factory_kernel::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod receipts;
+
 pub struct Service<'a> {
     intent: policy_intent::Service<'a>,
 }

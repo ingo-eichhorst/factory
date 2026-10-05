@@ -5,9 +5,9 @@
 //! Pure, like `policy.rs`: `compute` takes the L2 exploited findings, the L4
 //! confirmed security reports, and the attestation store's rows, and folds
 //! them into a clock with no status table of its own (ADR 0004) -- the same
-//! reasoning `policy::evaluate` is built on. `factory-daemon/src/policies/
-//! clock.rs` is the only caller, and it never reads these inputs for any
-//! other reason.
+//! reasoning `policy::evaluate` is built on. L6's live Policy service reads
+//! these inputs through typed fact capabilities and its own receipt store;
+//! the daemon's `policies/clock.rs` only constructs those capabilities.
 //!
 //! A clock **item** is either an exploited finding or a confirmed security
 //! report ([`ClockItemRef`]). A submission against one is recorded as an

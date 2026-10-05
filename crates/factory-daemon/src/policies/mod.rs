@@ -18,11 +18,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::Utc;
 use factory_core::config::{Factory, Scope};
 use factory_core::error::{FactoryError, Result};
-use factory_core::policy::{self, Attestation, ControlRef, Withdrawal};
+use factory_core::policy::{self, Attestation, ControlRef};
 use factory_core::policy_export;
 use factory_core::checks::CheckSource;
 use factory_core::protocol::{PolicyControlDetail, PolicyReport, WorkflowEnforcement, WorkflowEnforcementFinding};
-use factory_core::reporting_clock::{self, ClockDeadlineState, ClockMark};
+use factory_core::reporting_clock::{self, ClockMark};
+#[cfg(test)]
+use factory_core::reporting_clock::ClockDeadlineState;
 use factory_core::task::Task;
 use factory_kernel::SecretsPresence;
 #[cfg(test)]
@@ -40,7 +42,6 @@ use factory_kernel::{TaskFact, DaemonConfigFact};
 #[cfg(test)]
 use crate::facts::NamedQuery;
 
-pub(crate) use factory_core::config::subtree_scopes;
 
 impl Engine {
     /// Outside-only construction from the current raw declarations and own
@@ -300,132 +301,39 @@ impl Engine {
         clock: Option<ClockMark>,
         corrective: Option<reporting_clock::CorrectiveMeasureMark>,
     ) -> Result<Attestation> {
-        if evidence.trim().is_empty() {
-            return Err(FactoryError::BadRequest("evidence must not be empty".into()));
-        }
-        let now = Utc::now();
-        if expires_at <= now {
-            return Err(FactoryError::BadRequest(format!(
-                "expires_at {expires_at} must be in the future"
-            )));
-        }
-        if clock.is_some() && corrective.is_some() {
-            return Err(FactoryError::BadRequest("record a submission or a corrective measure, not both".into()));
-        }
-        if corrective.as_ref().is_some_and(|m| m.available_at > now) {
-            return Err(FactoryError::BadRequest("available_at must not be in the future".into()));
-        }
-        if clock.is_some() || corrective.is_some() {
-            let art_14 = reporting_clock::art_14();
-            if control != art_14 {
-                return Err(FactoryError::BadRequest(format!(
-                    "a reporting-clock submission may only be recorded against {art_14}, not {control}"
-                )));
-            }
-        }
-
+        use crate::facts::Port;
         let snapshot = self.factory_snapshot();
-        // Canonicalizes the name the same way every other scoped write does,
-        // and refuses one that names no scope at all.
-        let scope = snapshot.scope(&scope)?.name.clone();
-        let (catalogues, _findings, _tags) = self.load_catalogues_and_tags().await?;
-        let chain = self.policy_chain(&scope);
-        let (applied, _findings) = policy::applicable(&catalogues, &chain);
-        let found = applied.iter().find(|a| a.control == control).ok_or_else(|| {
-            FactoryError::BadRequest(format!(
-                "{control} does not apply at {scope:?}, or is not a control any loaded catalogue defines"
-            ))
-        })?;
-        if let Some(na) = &found.not_applicable {
-            return Err(FactoryError::BadRequest(format!(
-                "{control} is marked not applicable at {:?}: {}",
-                na.scope, na.rationale
-            )));
-        }
-
-        if let Some(mark_item) = clock.as_ref().map(|m| &m.item).or_else(|| corrective.as_ref().map(|m| &m.item)) {
-            // The item's own scope must *equal* the canonical `scope` --
-            // `policy_clock(Some(&scope))` rolls up the subtree the same way
-            // `Request::Policy` does, so a descendant's item can appear in
-            // it too; only an exact match may be attested here.
-            let clock_now = self.policy_clock(Some(&scope)).await?;
-            let item = clock_now.items.iter().find(|i| &i.item == mark_item).ok_or_else(|| {
-                FactoryError::BadRequest(format!(
-                    "{} is not a reporting-clock item in {scope:?}'s subtree",
-                    mark_item
-                ))
-            })?;
-            if item.scope != scope {
-                return Err(FactoryError::BadRequest(format!(
-                    "{} belongs to scope {:?}, not {scope:?} -- attest it there",
-                    mark_item, item.scope
-                )));
-            }
-            if let Some(state) = &item.excluded {
-                return Err(FactoryError::BadRequest(format!(
-                    "{} is excluded ({state}); there is nothing left to report",
-                    mark_item
-                )));
-            }
-            if let Some(mark) = &clock {
-                let deadline = item
-                    .deadlines
-                    .iter()
-                    .find(|d| d.deadline == mark.deadline)
-                    .ok_or_else(|| FactoryError::BadRequest("record an evidenced corrective measure before submitting the final report".into()))?;
-                if matches!(deadline.state, ClockDeadlineState::Met | ClockDeadlineState::Late) {
-                    return Err(FactoryError::BadRequest(format!(
-                        "{} already has a live submission for its {} deadline",
-                        mark.item, mark.deadline
-                    )));
-                }
-            }
-            if corrective.is_some() && item.corrective_measure.is_some() {
-                return Err(FactoryError::BadRequest("this item already has a live corrective-measure record; withdraw it before correcting it".into()));
-            }
-        }
-
-        let attestation = Attestation {
-            id: uuid::Uuid::new_v4().to_string(),
-            control,
-            scope,
-            evidence,
-            note,
-            attested_by: caller_name(caller),
-            attested_at: now,
-            expires_at,
-            withdrawn: None,
-            clock,
-            corrective,
-        };
-        self.policies.append_attestation(&attestation).await?;
-        Ok(attestation)
+        let knowledge = factory_kernel::KnowledgeTags::provider(self);
+        let findings = factory_kernel::ExploitedFinding::provider(self);
+        let reports = factory_kernel::ConfirmedSecurityReport::provider(self);
+        self.policy_service(&snapshot)
+            .attest(
+                &caller_name(caller),
+                control,
+                scope,
+                evidence,
+                note,
+                expires_at,
+                clock,
+                corrective,
+                &knowledge,
+                &findings,
+                &reports,
+            )
+            .await
     }
 
-    /// Withdraw a previously recorded attestation: `Request::PolicyWithdraw`.
-    /// Appends a new row referencing `id` -- the store refuses a second
-    /// withdrawal of the same attestation on its own, so this only refuses
-    /// the friendlier way, before the write is even attempted.
-    pub(crate) async fn policy_withdraw(&self, caller: &Caller, id: String, reason: Option<String>) -> Result<Attestation> {
-        let existing = self
-            .policies
-            .get(&id)
-            .await?
-            .ok_or_else(|| FactoryError::BadRequest(format!("no such attestation: {id:?}")))?;
-        if existing.withdrawn.is_some() {
-            return Err(FactoryError::BadRequest(format!("attestation {id:?} is already withdrawn")));
-        }
-        let withdrawal = Withdrawal {
-            at: Utc::now(),
-            by: caller_name(caller),
-            reason,
-        };
-        self.policies
-            .append_withdrawal(&id, &existing.control, &existing.scope, &withdrawal)
-            .await?;
-        let mut withdrawn = existing;
-        withdrawn.withdrawn = Some(withdrawal);
-        Ok(withdrawn)
+    /// Outside wiring only; L6 owns validation and the append-only write.
+    pub(crate) async fn policy_withdraw(
+        &self,
+        caller: &Caller,
+        id: String,
+        reason: Option<String>,
+    ) -> Result<Attestation> {
+        let snapshot = self.factory_snapshot();
+        self.policy_service(&snapshot)
+            .withdraw(&caller_name(caller), id, reason)
+            .await
     }
 
     /// Close a gap: `Request::PolicyRemediate`. Creates the task through the

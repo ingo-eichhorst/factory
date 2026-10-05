@@ -719,6 +719,73 @@ mod tests {
     }
 
     #[test]
+    fn policy_clock_and_receipts_have_actual_direction_owners_not_router_callbacks() {
+        let owner = include_str!("../../../factory-direction/src/policy_service/receipts.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let compact: String = owner.chars().filter(|c| !c.is_whitespace()).collect();
+        for required in [
+            "Facts::<L6>::new()",
+            ".get::<ExploitedFinding,_>",
+            ".get::<ConfirmedSecurityReport,_>",
+            "reporting_clock::compute(",
+            ".receipts.append_attestation(",
+            ".receipts.append_withdrawal(",
+            "self.intent.catalogues_with_tags(knowledge)",
+        ] {
+            assert!(
+                compact.contains(required),
+                "L6 clock/receipt service lost {required}"
+            );
+        }
+        for forbidden in [
+            "Engine",
+            "factory_core",
+            "factory_process",
+            "factory_environment",
+            "factory_interfaces",
+            "TaskStore",
+            "dyn Fn",
+            "BoxFuture",
+            "self.policy_clock(",
+        ] {
+            assert!(
+                !owner.contains(forbidden),
+                "L6 clock service gained callback/backedge {forbidden}"
+            );
+        }
+        let clock_wire = include_str!("../policies/clock.rs");
+        assert!(clock_wire.contains("policy_service(&snapshot)"));
+        assert!(
+            !clock_wire.contains("reporting_clock::compute(")
+                && !clock_wire.contains(".get::<")
+                && !clock_wire.contains("self.policies")
+        );
+        let wiring = include_str!("../policies/mod.rs");
+        let endpoints = wiring
+            .split("pub(crate) async fn policy_attest(")
+            .nth(1)
+            .unwrap()
+            .split("/// Close a gap:")
+            .next()
+            .unwrap();
+        assert!(endpoints.contains(".attest(") && endpoints.contains(".withdraw("));
+        for forbidden in [
+            "append_attestation",
+            "append_withdrawal",
+            "policy::applicable",
+            "self.policy_clock(",
+            "self.policies",
+        ] {
+            assert!(
+                !endpoints.contains(forbidden),
+                "router kept receipt behaviour {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn goals_own_live_reads_and_checkins_and_the_metric_fact_owns_its_computation() {
         let goals = include_str!("../../../factory-direction/src/goals_service.rs")
             .split("#[cfg(test)]")

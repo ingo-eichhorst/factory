@@ -330,8 +330,12 @@ something impossible.
   private L5 behaviour; canonical legacy status/result re-exports keep JSON.
   Preserve shared-gather failure priority over deferred raw budget errors,
   distinct report/detail clock timing and full maps_to subject sets.
-  Outside workflow preview decorations, attestation/clock commands and
-  Scenarios still need migration.
+  The same L6 service owns live reporting-clock subtree selection, typed
+  L2 exploited-finding/L4 confirmed-report reads and receipt-history folds.
+  Attestation and withdrawal validation/writes stay with its own append-only
+  store. Preserve failure order, exact item scope, corrective anchors and
+  deadline deduplication; a withdrawal is a new row, never a status update.
+  Outside workflow preview decorations and Scenarios still need migration.
   The complete six-service split still remains.
   L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.
