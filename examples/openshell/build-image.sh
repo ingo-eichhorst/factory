@@ -18,8 +18,9 @@
 # Both produce the same filesystem: NVIDIA's community base image, plus
 # Factory's CLI (a static aarch64 Linux build, cross-compiled here with
 # rust-lld and a digest-pinned Zig C cross-compiler), herdr's and jq's Linux builds,
-# Claude Code's managed settings, a git config that uses gh for GitHub, and a
-# Claude Code home that has finished onboarding and trusts /sandbox/work.
+# Claude Code's managed settings, a git config that uses gh for GitHub, a gh
+# config with its own telemetry off, and a Claude Code home that has finished
+# onboarding and trusts /sandbox/work.
 #
 # Environment:
 #   BASE_IMAGE      default: the pinned community-base digest below
@@ -75,7 +76,7 @@ case "$mode" in docker|rootfs) ;; *) echo "usage: $0 [docker|rootfs]" >&2; exit 
 work=$(mktemp -d "${TMPDIR:-/tmp}/factory-openshell-image-XXXXXX")
 trap 'rm -rf "$work"' EXIT
 stage="$work/stage"
-mkdir -p "$stage/usr/local/bin" "$stage/etc/claude-code" "$stage/sandbox"
+mkdir -p "$stage/usr/local/bin" "$stage/etc/claude-code" "$stage/sandbox/.config/gh"
 
 verify_digest() {
   actual=$(shasum -a 256 "$1" | cut -d ' ' -f 1)
@@ -150,6 +151,7 @@ chmod 0755 "$stage/usr/local/bin/factory" "$stage/usr/local/bin/herdr" "$stage/u
 
 cp "$here/managed-settings.json" "$stage/etc/claude-code/managed-settings.json"
 cp "$here/claude.json" "$stage/sandbox/.claude.json"
+cp "$here/gh-config.yml" "$stage/sandbox/.config/gh/config.yml"
 {
   printf '[credential "https://github.com"]\n\thelper =\n\thelper = !/usr/bin/gh auth git-credential\n'
   printf '[credential "https://gist.github.com"]\n\thelper =\n\thelper = !/usr/bin/gh auth git-credential\n'
@@ -178,6 +180,9 @@ crane export --platform linux/arm64 "$base" "$work/base.tar"
   echo "./etc/claude-code/managed-settings.json type=file uid=0 gid=0 mode=0644 contents=$stage/etc/claude-code/managed-settings.json"
   echo "./etc/gitconfig type=file uid=0 gid=0 mode=0644 contents=$stage/etc/gitconfig"
   echo "./sandbox/.claude.json type=file uid=1000 gid=1000 mode=0644 contents=$stage/sandbox/.claude.json"
+  echo "./sandbox/.config type=dir uid=1000 gid=1000 mode=0755"
+  echo "./sandbox/.config/gh type=dir uid=1000 gid=1000 mode=0755"
+  echo "./sandbox/.config/gh/config.yml type=file uid=1000 gid=1000 mode=0644 contents=$stage/sandbox/.config/gh/config.yml"
 } > "$work/overlay.mtree"
 
 mkdir -p "$out"

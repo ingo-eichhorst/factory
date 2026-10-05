@@ -169,12 +169,22 @@ fn signpost_fact_roundtrips_as_plain_read_only_observations() {
 fn sandbox_service_evidence_roundtrips_in_l0_with_unknown_empty_defaults() {
     let empty: SandboxServiceEvidenceFact = serde_json::from_value(serde_json::json!({"scope": "demo"})).unwrap();
     assert!(empty.captures.is_empty() && empty.findings.is_empty());
+    // A record stored before `reason` (#274) existed has no such key at all;
+    // `#[serde(default)]` must still load it, and `reason` must default to
+    // `None` so its content identity (`capture_identity()`) is unchanged.
     let fact: SandboxServiceEvidenceFact = serde_json::from_value(serde_json::json!({
         "scope": "demo", "captures": [{"id": "receipt", "run_id": "run", "task_id": "task", "agent": "curator",
             "sandbox": "factory-run", "captured_at": "2026-10-04T12:00:00Z", "source": "OpenShell supervisor/proxy OCSF", "partial": true,
-            "accesses": [{"at": "2026-10-04T11:59:00Z", "transport": "network", "target": "api.github.com:443", "disposition": "denied"}]}]
+            "accesses": [{"at": "2026-10-04T11:59:00Z", "transport": "network", "target": "api.github.com:443", "disposition": "denied"},
+                {"at": "2026-10-04T11:59:30Z", "transport": "network", "target": "host.openshell.internal:18958", "disposition": "denied",
+                    "reason": "policy generation is stale"}]}]
     })).unwrap();
     assert_eq!(fact.captures[0].accesses[0].disposition, AccessDisposition::Denied);
+    assert_eq!(fact.captures[0].accesses[0].reason, None);
+    assert_eq!(
+        fact.captures[0].accesses[1].reason.as_deref(),
+        Some("policy generation is stale")
+    );
     assert_eq!(serde_json::from_value::<SandboxServiceEvidenceFact>(serde_json::to_value(&fact).unwrap()).unwrap(), fact);
 }
 

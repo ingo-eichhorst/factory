@@ -30,6 +30,12 @@ pub struct ObservedServiceAccess {
     pub process: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<String>,
+    /// OpenShell's own `[reason:...]` text, kept verbatim (it can contain
+    /// spaces). Absent for a decision the log gave no reason for, and for
+    /// every record captured before this field existed -- `#[serde(default)]`
+    /// keeps old stored receipts and `capture_identity()` loading unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
