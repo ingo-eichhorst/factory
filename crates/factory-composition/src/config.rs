@@ -1390,6 +1390,14 @@ pub struct ScopeMetricsDeclared {
     pub id: String,
     pub title: String,
     pub unit: String,
+    /// `higher` or `lower` -- required, not defaulted: `metrics::resolve`
+    /// is pure and has no access to this declaration, so a missing
+    /// direction can never be guessed at `higher` without risking exactly
+    /// the wrong-direction Goals finding this field exists to prevent for
+    /// a metric that is actually lower-is-better. Validated (and an
+    /// unknown spelling turned into a finding, never a parse failure) by
+    /// L5's `reported::validate`, the same as `unit` above.
+    pub better: String,
 }
 
 
@@ -2934,8 +2942,8 @@ mod tests {
              \x20\x20\x20\x20id: finance\n\
              \x20\x20\x20\x20file: ../data/finance/metrics.json\n\
              \x20\x20declare:\n\
-             \x20\x20\x20\x20- { id: beleg_coverage, title: Beleg coverage, unit: ratio }\n\
-             \x20\x20\x20\x20- { id: unresolved_transactions, title: Unresolved transactions, unit: count }\n";
+             \x20\x20\x20\x20- { id: beleg_coverage, title: Beleg coverage, unit: ratio, better: higher }\n\
+             \x20\x20\x20\x20- { id: unresolved_transactions, title: Unresolved transactions, unit: count, better: lower }\n";
         let s: Scope = serde_yaml_ng::from_str(yaml).unwrap();
         let declaration = s.metrics.as_ref().unwrap();
         let source = declaration.source.as_ref().unwrap();
@@ -2945,6 +2953,8 @@ mod tests {
         assert_eq!(declaration.declare[0].id, "beleg_coverage");
         assert_eq!(declaration.declare[0].title, "Beleg coverage");
         assert_eq!(declaration.declare[0].unit, "ratio");
+        assert_eq!(declaration.declare[0].better, "higher");
+        assert_eq!(declaration.declare[1].better, "lower");
 
         let reparsed: Scope =
             serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&s).unwrap()).unwrap();

@@ -604,8 +604,12 @@ impl<'a, P: Ports> Service<'a, P> {
             let mut def_view: MetricDefView = def.into();
             // `#278`: `resolve`'s own `reported_def` is a generic
             // placeholder (it has no access to the declaration); overlay
-            // the scope's own declared title and unit here, the one place
-            // that declaration is actually in scope.
+            // the scope's own declared title, unit and direction here, the
+            // one place that declaration is actually in scope -- this is
+            // also how the dashboard tile glyph (`ui/js/dashboard-tiles-
+            // model.js`'s `betterGlyph`) ends up reading the real
+            // direction, since it reads `better` off this same registry
+            // entry, never `metrics::resolve` fresh.
             if let Some((source_id, metric_id)) = reported_segments(id.as_str()) {
                 if let Some(declared) = plan
                     .catalogue
@@ -615,6 +619,7 @@ impl<'a, P: Ports> Service<'a, P> {
                 {
                     def_view.title = declared.title.clone();
                     def_view.unit = declared.unit;
+                    def_view.better = declared.better;
                 }
             }
             registry.push(def_view);

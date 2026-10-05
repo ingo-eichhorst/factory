@@ -1036,11 +1036,13 @@ mod tests {
                             id: "a".into(),
                             title: "A".into(),
                             unit: "count".into(),
+                            better: "higher".into(),
                         },
                         crate::reported::RawDeclared {
                             id: "b".into(),
                             title: "B".into(),
                             unit: "count".into(),
+                            better: "higher".into(),
                         },
                     ],
                 }),

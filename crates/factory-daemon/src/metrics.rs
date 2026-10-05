@@ -229,6 +229,7 @@ pub(crate) fn reported_configuration(
                                     id: declared.id.clone(),
                                     title: declared.title.clone(),
                                     unit: declared.unit.clone(),
+                                    better: declared.better.clone(),
                                 })
                                 .collect(),
                         }
@@ -320,7 +321,7 @@ mod tests {
         root_scope.path = PathBuf::from(".");
         let mut work: Scope = serde_yaml_ng::from_str(
             "id: work-id\nname: work\nagents:\n  - { name: worker, harness: shell, sandbox: docker }\npolicies:\n  not_applicable:\n    - { control: cra/a, rationale: test }\n\
-             metrics:\n  source: { id: demo, file: ../../data/demo/metrics.json }\n  declare:\n    - { id: x, title: Demo X, unit: ratio }\n",
+             metrics:\n  source: { id: demo, file: ../../data/demo/metrics.json }\n  declare:\n    - { id: x, title: Demo X, unit: ratio, better: higher }\n    - { id: y, title: Demo Y, unit: count, better: lower }\n",
         )
         .unwrap();
         work.path = PathBuf::from("projects/work");
@@ -1375,6 +1376,7 @@ mod tests {
         let def = in_work.registry.iter().find(|d| d.id == "reported.demo.x").unwrap();
         assert_eq!(def.title, "Demo X");
         assert_eq!(def.unit, factory_assurance::metrics::Unit::Ratio);
+        assert_eq!(def.better, factory_assurance::metrics::Better::Higher);
 
         let unscoped = engine.metrics_for(&ids, now, None, None).await.unwrap();
         assert_eq!(unscoped.values[0].value, Some(0.9), "an unscoped read sees every declaring scope");
@@ -1386,6 +1388,38 @@ mod tests {
             "{:?}",
             in_side.values[0].reason
         );
+    }
+
+    /// `#278` fix: `reported_def`'s own pure placeholder is always
+    /// `Better::Higher` -- the scope's own declared direction (`work`
+    /// declares `y` as `better: lower`) must overlay it in the listing,
+    /// never leave the wrong arrow showing for a metric like
+    /// `unresolved_transactions` where lower is actually better.
+    #[tokio::test]
+    async fn the_listing_shows_each_reported_metrics_own_declared_direction_not_a_fixed_default() {
+        let (engine, _database) = scoped_engine();
+        let computed = engine
+            .metrics_for(
+                &[
+                    MetricId::new("reported.demo.x").unwrap(),
+                    MetricId::new("reported.demo.y").unwrap(),
+                ],
+                Utc::now(),
+                Some("work"),
+                None,
+            )
+            .await
+            .unwrap();
+        let better_of = |id: &str| {
+            computed
+                .registry
+                .iter()
+                .find(|d| d.id == id)
+                .unwrap()
+                .better
+        };
+        assert_eq!(better_of("reported.demo.x"), factory_assurance::metrics::Better::Higher);
+        assert_eq!(better_of("reported.demo.y"), factory_assurance::metrics::Better::Lower);
     }
 
     #[tokio::test]
@@ -1417,7 +1451,7 @@ mod tests {
             r#"{"as_of":"2026-10-05T09:00:00Z","metrics":[{"id":"x","value":0.9}]}"#,
         );
         let undeclared = engine
-            .metrics_for(&[MetricId::new("reported.demo.y").unwrap()], now, Some("work"), None)
+            .metrics_for(&[MetricId::new("reported.demo.z").unwrap()], now, Some("work"), None)
             .await
             .unwrap();
         assert_eq!(undeclared.values[0].value, None);

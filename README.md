@@ -1708,19 +1708,30 @@ scope:
       id: finance                       # a slug, unique across the instance
       file: ../data/finance/metrics.json  # relative to this scope's own directory
     declare:
-      - { id: beleg_coverage, title: Beleg coverage, unit: ratio }
-      - { id: unresolved_transactions, title: Unresolved transactions, unit: count }
+      - { id: beleg_coverage, title: Beleg coverage, unit: ratio, better: higher }
+      - { id: unresolved_transactions, title: Unresolved transactions, unit: count, better: lower }
 ```
 
 Each declared metric reads as `reported.<source.id>.<declare[].id>` —
 `reported.finance.beleg_coverage` above. `factory metrics`/`GET
-/api/metrics` list every declared one with its own `title` and `unit`, not
-a generic placeholder. The declaration is validated when it is read, never
-at daemon startup: a bad slug, a source id already used by another scope,
-a `file` that normalizes outside the instance root or through a path
-component named `secrets`, or a path that is (or passes through) a
-symlink, is a *finding* — shown beside the response, never a reason the
-daemon fails to start or the whole call to refuse.
+/api/metrics` list every declared one with its own `title`, `unit` and
+`better` (`higher`/`lower`), not a generic placeholder — `better` is
+required, not defaulted: the registry's own pure vocabulary has no way to
+guess it (unlike a built-in metric, there is no live declaration behind
+`metrics::resolve` to consult), and a wrong default would mis-score a
+Goals key result and point the dashboard's arrow the wrong way for a
+metric like `unresolved_transactions`, where *lower* is actually better.
+The declaration is validated when it is read, never at daemon startup: a
+bad slug, a source id already used by another scope, a `file` that
+normalizes outside the instance root or through a path component named
+`secrets`, a path that is (or passes through) a symlink, or a `better`
+that is not `higher`/`lower`, is a *finding* — shown beside the response,
+never a reason the daemon fails to start or the whole call to refuse. A
+Goals key result bound to a `reported.*` metric is checked against this
+same declared direction, not a fixed default, so `unresolved_transactions`
+falling toward `0` is never flagged `wrong_direction` the way it would be
+if the registry's own generic placeholder (always `higher`) were used
+instead.
 
 `file`'s own JSON, written by the scope's tooling at the end of its own
 run (the first producer is `finance metrics --json`, in the

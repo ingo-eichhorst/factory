@@ -624,6 +624,7 @@ mod tests {
                 id: "x".into(),
                 title: "Demo X".into(),
                 unit: "ratio".into(),
+                better: "higher".into(),
             }],
         });
         let config = Config {

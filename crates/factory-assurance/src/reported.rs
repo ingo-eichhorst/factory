@@ -23,7 +23,7 @@
 //! that exact source's `Document` -- there is no cache, no table and no
 //! background read. See `metrics_service.rs`'s own doc comments for how the
 //! three pieces are actually wired into one `metrics_for` call.
-use crate::metrics::Unit;
+use crate::metrics::{Better, Unit};
 use chrono::{DateTime, Utc};
 use factory_kernel::{is_metric_segment, is_slug, MetricId, MetricValue, ScopeNode};
 use serde::Deserialize;
@@ -50,6 +50,13 @@ pub struct RawDeclared {
     pub id: String,
     pub title: String,
     pub unit: String,
+    /// `"higher"` or `"lower"` -- see `metrics::Better`. Required at the
+    /// config layer (`ScopeMetricsDeclared.better`); validated here like
+    /// `unit`, never defaulted, since `resolve`'s own placeholder cannot
+    /// know it and a wrong default would risk exactly the false
+    /// wrong-direction (or false not-wrong) Goals finding this exists to
+    /// prevent.
+    pub better: String,
 }
 
 /// One scope's identity plus its raw declaration, handed in fresh by the
@@ -89,6 +96,8 @@ pub enum FindingKind {
     PathIsSymlink,
     /// `declare[].unit` is not one of `metrics::Unit`'s spellings.
     UnknownUnit,
+    /// `declare[].better` is not `higher` or `lower`.
+    UnknownBetter,
 }
 
 /// One authoring mistake in a `scope.metrics` declaration -- never a reason
@@ -120,14 +129,16 @@ fn sort_findings(findings: &mut [Finding]) {
 
 // ================================================================= valid
 
-/// One metric a source declares, with its unit already a real [`Unit`] --
-/// the only place the declared `title`/`unit` enter L5's registry listing
-/// (`metrics_service::finish` overlays them onto the generic `resolve`d
-/// definition).
+/// One metric a source declares, with its unit and direction already a
+/// real [`Unit`]/[`Better`] -- the only place the declared `title`/`unit`/
+/// `better` enter L5's registry listing (`metrics_service::finish`
+/// overlays them onto the generic `resolve`d definition) and L6 Goals'
+/// own wrong-direction check (`directions`, below).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclaredMetric {
     pub title: String,
     pub unit: Unit,
+    pub better: Better,
 }
 
 /// One source that passed [`validate`]: a slug id, the scope that declared
@@ -235,11 +246,20 @@ pub fn validate(root: &Path, configuration: &Configuration) -> Catalogue {
                 ));
                 continue;
             };
+            let Some(better) = parse_better(&d.better) else {
+                findings.push(finding(
+                    FindingKind::UnknownBetter,
+                    &metric_subject,
+                    format!("{:?} is not `higher` or `lower`", d.better),
+                ));
+                continue;
+            };
             declared.insert(
                 d.id.clone(),
                 DeclaredMetric {
                     title: d.title.clone(),
                     unit,
+                    better,
                 },
             );
         }
@@ -261,6 +281,27 @@ pub fn validate(root: &Path, configuration: &Configuration) -> Catalogue {
 
 fn parse_unit(raw: &str) -> Option<Unit> {
     serde_json::from_value(serde_json::Value::String(raw.to_string())).ok()
+}
+
+fn parse_better(raw: &str) -> Option<Better> {
+    serde_json::from_value(serde_json::Value::String(raw.to_string())).ok()
+}
+
+/// Every valid source's declared direction, keyed by its full
+/// `reported.<source>.<metric>` id -- the plain input a caller like L6
+/// Goals threads into its own wrong-direction check, since `metrics::
+/// resolve` is pure and has no access to a live declaration. An id this
+/// map has nothing for (an unknown source, an unknown metric, or simply a
+/// caller that never built one) is never judged wrong either way by
+/// whoever reads it -- see `goals::load_with_reported_directions`.
+pub fn directions(catalogue: &Catalogue) -> BTreeMap<String, Better> {
+    let mut out = BTreeMap::new();
+    for source in catalogue.sources.values() {
+        for (metric_id, declared) in &source.declared {
+            out.insert(format!("reported.{}.{metric_id}", source.id), declared.better);
+        }
+    }
+    out
 }
 
 /// `file` resolved against `root_norm.join(scope_path)`, lexically
@@ -537,16 +578,17 @@ mod tests {
         }
     }
 
-    fn source(id: &str, file: &str, declare: &[(&str, &str, &str)]) -> RawSource {
+    fn source(id: &str, file: &str, declare: &[(&str, &str, &str, &str)]) -> RawSource {
         RawSource {
             id: id.to_string(),
             file: file.to_string(),
             declare: declare
                 .iter()
-                .map(|(id, title, unit)| RawDeclared {
+                .map(|(id, title, unit, better)| RawDeclared {
                     id: id.to_string(),
                     title: title.to_string(),
                     unit: unit.to_string(),
+                    better: better.to_string(),
                 })
                 .collect(),
         }
@@ -573,7 +615,7 @@ mod tests {
                 source: Some(source(
                     "finance",
                     "../../data/finance/metrics.json",
-                    &[("beleg_coverage", "Beleg coverage", "ratio")],
+                    &[("beleg_coverage", "Beleg coverage", "ratio", "higher")],
                 )),
             }],
         };
@@ -718,7 +760,7 @@ mod tests {
                 source: Some(source(
                     "finance",
                     "../../data/finance/metrics.json",
-                    &[("x", "X", "count")],
+                    &[("x", "X", "count", "higher")],
                 )),
             }],
         };
@@ -728,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_metric_slug_and_an_unknown_unit_are_findings_but_keep_the_source() {
+    fn a_bad_metric_slug_an_unknown_unit_and_an_unknown_better_are_findings_but_keep_the_source() {
         let root = tmp_root();
         let config = Configuration {
             scopes: vec![ScopeDeclaration {
@@ -737,9 +779,10 @@ mod tests {
                     "finance",
                     "metrics.json",
                     &[
-                        ("Bad Id", "Bad", "ratio"),
-                        ("good_one", "Good", "ratio"),
-                        ("other", "Other", "furlongs"),
+                        ("Bad Id", "Bad", "ratio", "higher"),
+                        ("good_one", "Good", "ratio", "higher"),
+                        ("other", "Other", "furlongs", "higher"),
+                        ("sideways", "Sideways", "ratio", "sideways"),
                     ],
                 )),
             }],
@@ -748,7 +791,7 @@ mod tests {
         let source = catalogue.sources.get("finance").unwrap();
         assert_eq!(source.declared.len(), 1);
         assert!(source.declared.contains_key("good_one"));
-        assert_eq!(catalogue.findings.len(), 2);
+        assert_eq!(catalogue.findings.len(), 3);
         assert!(catalogue
             .findings
             .iter()
@@ -757,6 +800,10 @@ mod tests {
             .findings
             .iter()
             .any(|f| f.kind == FindingKind::UnknownUnit));
+        assert!(catalogue
+            .findings
+            .iter()
+            .any(|f| f.kind == FindingKind::UnknownBetter));
     }
 
     #[test]
@@ -768,7 +815,10 @@ mod tests {
                 source: Some(source(
                     "finance",
                     "metrics.json",
-                    &[("x", "First", "ratio"), ("x", "Second", "count")],
+                    &[
+                        ("x", "First", "ratio", "higher"),
+                        ("x", "Second", "count", "lower"),
+                    ],
                 )),
             }],
         };
@@ -776,6 +826,38 @@ mod tests {
         let source = catalogue.sources.get("finance").unwrap();
         assert_eq!(source.declared["x"].title, "First");
         assert_eq!(catalogue.findings[0].kind, FindingKind::DuplicateMetricId);
+    }
+
+    #[test]
+    fn a_declared_metric_carries_its_own_direction_into_declaredmetric() {
+        let root = tmp_root();
+        let config = Configuration {
+            scopes: vec![ScopeDeclaration {
+                scope: scope("finance", "projects/finance"),
+                source: Some(source(
+                    "finance",
+                    "metrics.json",
+                    &[
+                        ("higher_one", "Higher", "ratio", "higher"),
+                        ("lower_one", "Lower", "count", "lower"),
+                    ],
+                )),
+            }],
+        };
+        let catalogue = validate(&root, &config);
+        let source = catalogue.sources.get("finance").unwrap();
+        assert_eq!(source.declared["higher_one"].better, Better::Higher);
+        assert_eq!(source.declared["lower_one"].better, Better::Lower);
+
+        let directions = directions(&catalogue);
+        assert_eq!(
+            directions.get("reported.finance.higher_one"),
+            Some(&Better::Higher)
+        );
+        assert_eq!(
+            directions.get("reported.finance.lower_one"),
+            Some(&Better::Lower)
+        );
     }
 
     // ------------------------------------------------------------ read_source
@@ -865,6 +947,10 @@ mod tests {
     }
 
     fn one_source_catalogue(declare: &[(&str, &str, Unit)]) -> Catalogue {
+        // `better` plays no part in `value_for`'s own job (reading a
+        // number), so every caller of this helper gets a fixed, arbitrary
+        // direction -- `directions`/the Goals wrong-direction check are
+        // covered by their own tests above and in `goals.rs`.
         let mut declared = BTreeMap::new();
         for (id, title, unit) in declare {
             declared.insert(
@@ -872,6 +958,7 @@ mod tests {
                 DeclaredMetric {
                     title: title.to_string(),
                     unit: *unit,
+                    better: Better::Higher,
                 },
             );
         }

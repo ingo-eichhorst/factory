@@ -25,11 +25,23 @@ impl Engine {
     ) -> Result<GoalsReport> {
         let now = Utc::now();
         let snapshot = self.factory_snapshot();
+        // `#278`: every scope's own declared `reported.*` direction, so
+        // the WrongDirection check judges a reported key result the same
+        // way it already judges a built-in one. `metrics::resolve` cannot
+        // know this itself (it is pure); this is the one live read that
+        // hands it in, fresh, the same way `reported_configuration` below
+        // feeds the metric values themselves.
+        let reported_catalogue = factory_assurance::reported::validate(
+            &snapshot.root,
+            &crate::metrics::reported_configuration(&snapshot),
+        );
+        let reported_directions = factory_assurance::reported::directions(&reported_catalogue);
         let service = factory_direction::goals_service::Service::new(
             snapshot.root.clone(),
             snapshot.scope_tree(),
             snapshot.config.scope.as_ref().map(|s| s.name.clone()),
             &self.goals,
+            reported_directions,
         );
         let plan = service.prepare(scope, cycle_id, now).await?;
         let metric_plan = factory_assurance::metrics_service::Plan::prepare(
@@ -85,6 +97,10 @@ impl Engine {
             snapshot.scope_tree(),
             snapshot.config.scope.as_ref().map(|s| s.name.clone()),
             &self.goals,
+            // A check-in only needs to find the key result and confirm it
+            // is manual -- it never reads WrongDirection, so there is
+            // nothing for a live direction map to change here.
+            Default::default(),
         )
         .checkin(
             kr,
@@ -236,6 +252,7 @@ mod tests {
                 id: "x".into(),
                 title: "Demo X".into(),
                 unit: "ratio".into(),
+                better: "higher".into(),
             }],
         });
         let config = Config {
@@ -281,6 +298,153 @@ mod tests {
         let report = engine.goals_report(None, Some("2026-q4")).await.unwrap();
         let kr_result = &report.report.as_ref().unwrap().objectives[0].key_results[0];
         assert_eq!(kr_result.value, Some(0.75));
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.kind == goals::FindingKind::WrongDirection),
+            "a rising target is right for this higher-declared metric: {:?}",
+            report.findings
+        );
+    }
+
+    /// `#278` fix, end to end through the daemon: `goals_report` threads
+    /// the scope's own live declared direction into the WrongDirection
+    /// check, not `metrics::resolve`'s fixed `Higher` placeholder -- a
+    /// lower-declared reported metric with a *rising* target is flagged,
+    /// the same as a built-in lower-is-better metric would be.
+    #[tokio::test]
+    async fn a_lower_declared_reported_key_result_moving_the_wrong_way_is_flagged_end_to_end() {
+        let root = std::env::temp_dir()
+            .join(format!("factory-goals-reported-wrong-direction-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut company = scope_at("company-id", "company", ".");
+        company.metrics = Some(factory_core::config::ScopeMetricsDeclaration {
+            source: Some(factory_core::config::ScopeMetricsSource {
+                id: "finance".into(),
+                file: "metrics.json".into(),
+            }),
+            declare: vec![factory_core::config::ScopeMetricsDeclared {
+                id: "unresolved_transactions".into(),
+                title: "Unresolved transactions".into(),
+                unit: "count".into(),
+                better: "lower".into(),
+            }],
+        });
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            secrets: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(
+            Factory { root: root.clone(), config },
+            registry,
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
+
+        // baseline 0 -> target 12 asks unresolved transactions to *rise* --
+        // the wrong way for a lower-is-better metric.
+        write(
+            &goals::goals_dir(&engine.factory_snapshot().root),
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives:\n\
+             \x20\x20- id: obj\n\x20\x20\x20\x20title: T\n\x20\x20\x20\x20key_results:\n\
+             \x20\x20\x20\x20\x20\x20- {id: kr, title: KR, kind: committed, metric: reported.finance.unresolved_transactions, baseline: 0, target: 12}\n",
+        );
+
+        let report = engine.goals_report(None, Some("2026-q4")).await.unwrap();
+        let f = report
+            .findings
+            .iter()
+            .find(|f| f.kind == goals::FindingKind::WrongDirection)
+            .unwrap_or_else(|| panic!("{:?}", report.findings));
+        assert!(f.detail.contains("obj/kr"), "{}", f.detail);
+    }
+
+    /// The reverse of the test above: a higher-declared reported metric
+    /// with a *falling* target is flagged end to end -- proving the
+    /// daemon's own live direction map actually carries `Higher` through
+    /// to `goals_report`, not just that an empty map stays quiet.
+    #[tokio::test]
+    async fn a_higher_declared_reported_key_result_moving_the_wrong_way_is_flagged_end_to_end() {
+        let root = std::env::temp_dir().join(format!(
+            "factory-goals-reported-wrong-direction-higher-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut company = scope_at("company-id", "company", ".");
+        company.metrics = Some(factory_core::config::ScopeMetricsDeclaration {
+            source: Some(factory_core::config::ScopeMetricsSource {
+                id: "finance".into(),
+                file: "metrics.json".into(),
+            }),
+            declare: vec![factory_core::config::ScopeMetricsDeclared {
+                id: "beleg_coverage".into(),
+                title: "Beleg coverage".into(),
+                unit: "ratio".into(),
+                better: "higher".into(),
+            }],
+        });
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            secrets: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(
+            Factory { root: root.clone(), config },
+            registry,
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
+
+        // baseline 0.9 -> target 0.5 asks coverage to *fall* -- the wrong
+        // way for a higher-is-better metric.
+        write(
+            &goals::goals_dir(&engine.factory_snapshot().root),
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives:\n\
+             \x20\x20- id: obj\n\x20\x20\x20\x20title: T\n\x20\x20\x20\x20key_results:\n\
+             \x20\x20\x20\x20\x20\x20- {id: kr, title: KR, kind: committed, metric: reported.finance.beleg_coverage, baseline: 0.9, target: 0.5}\n",
+        );
+
+        let report = engine.goals_report(None, Some("2026-q4")).await.unwrap();
+        let f = report
+            .findings
+            .iter()
+            .find(|f| f.kind == goals::FindingKind::WrongDirection)
+            .unwrap_or_else(|| panic!("{:?}", report.findings));
+        assert!(f.detail.contains("obj/kr"), "{}", f.detail);
     }
 
     #[tokio::test]
