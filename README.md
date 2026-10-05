@@ -603,7 +603,7 @@ It uses a credential-free fixture to verify detection, naming, prompt delivery
 and cleanup through a real VM/PTY. It does not prove Claude's screen rules or
 the credentialed curator's publishing outcome.
 
-When the run ends -- done, failed, cancelled -- `close_session`
+When the run ends -- done, failed, blocked timeout, cancelled -- `close_session`
 closes the pane, and then, in the background so the run's own status is
 written first, optionally downloads the working tree back into the run's
 directory (never `.git`), optionally fast-forwards the host checkout to its
@@ -618,8 +618,51 @@ for a later restart. Active runs and other instances are left alone.
 
 A blocked run is not terminal in Factory: its session waits for an answer
 or verification repair, so its sandbox remains until it resumes or is
-cancelled/times out. Immediate sandbox removal on blocking, with preserved
-conversation and answerability, is still a lifecycle follow-up in #218.
+cancelled/times out -- the existing `blocked_timeout_seconds`/`--blocked-timeout`
+reclaims it, tearing it down the same way any other ended run is.
+
+**Preserving the conversation (`#274`).** Every teardown -- not only a
+blocked reclaim -- preserves a claude-code run's conversation before its
+sandbox is deleted: the sandbox is per run, so its whole `$HOME/.claude/projects/`
+directory holds only this run's session, and downloading it whole needs no
+awareness of Claude's own cwd-encoding rule for the project directory
+nested underneath. It is kept per *task*, not per run, under
+`.factory/openshell/sessions/<task>/` -- the same owner-only permissions as
+a cleanup record -- with a small record naming the run it came from, the
+session id (when the download holds exactly one `<dir>/<id>.jsonl`), the
+sandbox working directory it was captured from, and its size. A later run's
+preservation replaces the earlier one; above a 64 MiB cap the content is
+dropped and only the size is kept, so the reason a later resume gives is
+exact. Only `claude-code` has a conversation worth preserving -- `shell` has
+no `Agent::resume_spec` and nothing is captured for it. A failed capture
+never keeps the sandbox alive: it is journaled and the sandbox is deleted
+regardless, the same as every other teardown step.
+
+A sandboxed claude-code run's `--continue` (and workflow feedback's resume)
+now goes through the same `resolve_continue` every other harness does, and
+resumes only when a preserved conversation exists for the task, it came
+from the exact run being continued, its recorded session id matches the one
+`resolve_continue` resolved (from `usage_snapshots`, or the `turn_ended_session_id`
+a sandboxed run's `Stop` hook relays over `FACTORY_URL`), its recorded
+working directory equals the new dispatch's, and it is within the cap.
+Otherwise it dispatches fresh, with the specific reason journaled as a
+`continue_fallback` entry, exactly as any other fallback is. In `prepare`,
+after the sandbox is created, the preserved directory is uploaded into the
+new sandbox's `$HOME/.claude/projects/` before the run's own files are --
+the run launches with `--resume` only once that upload actually succeeds; a
+failed upload falls back to a fresh launch and leaves the preserved copy for
+a later attempt to retry, journaled why. The preserved copy is deleted only
+once the new run's session has actually started, so a failure after a
+successful upload cannot lose the only copy. `factory task run --continue`
+now also accepts a run that ended on the blocked timeout (previously
+refused as not an infrastructure failure): resuming after a reclaim is the
+point of preserving a blocked sandbox's conversation in the first place. A
+task's preserved conversation is removed when the task is closed or
+deleted, the same per-task release point its worktree uses.
+
+`openshell sandbox stop`/`start` and reattaching the sandbox directly
+(rather than reclaiming it through the blocked timeout) remain a further
+lifecycle follow-up, pending whether herdr can reattach `sandbox exec --tty`.
 
 **The three host-shaped problems**, and what this does about each:
 

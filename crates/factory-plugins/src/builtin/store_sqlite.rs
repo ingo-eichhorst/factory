@@ -712,6 +712,9 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.continued_from {
                 run.continued_from = Some(v);
             }
+            if patch.clear_resumed_session {
+                run.resumed_session = None;
+            }
             if let Some(v) = patch.resumed_session {
                 run.resumed_session = Some(v);
             }

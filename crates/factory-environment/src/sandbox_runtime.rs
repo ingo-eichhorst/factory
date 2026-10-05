@@ -10,7 +10,7 @@
 //! the dispatch caller turns into a failed run with that reason. Nothing here
 //! ever hands back a launch that would start the harness on the host.
 
-use crate::openshell::{Plan, LABEL_INSTANCE, LABEL_RUN};
+use crate::openshell::{Plan, LABEL_INSTANCE, LABEL_RUN, SANDBOX_CLAUDE_PROJECTS};
 use factory_kernel::error::{FactoryError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -19,6 +19,11 @@ use tokio::process::Command;
 
 /// The session-meta key `close_session` finds the teardown under.
 pub const META_KEY: &str = "openshell";
+
+/// Above this, a preserved conversation is not kept (`#274`): the point is
+/// resuming a sandboxed claude-code run cheaply, not an unbounded transcript
+/// store. The size is journaled and the next run falls back to fresh.
+pub const PRESERVE_CAP_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A gateway answers status in well under a second; creating a sandbox
 /// waits for the image (a first pull can take minutes) and for the
@@ -43,23 +48,58 @@ pub struct Teardown {
     pub delete: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_evidence: Option<crate::service_observations::CaptureContext>,
+    /// The task this run belongs to -- `#274`'s preserved conversation is
+    /// kept per task, not per run, so a later run's preservation can find
+    /// and replace an earlier one. Empty on a teardown recorded before this
+    /// field existed; preservation is then skipped rather than guessed at.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub task: String,
+    /// The sandbox working directory this run used, carried along so a
+    /// later `--continue` can check a preserved session was captured from
+    /// the same place it would now resume into.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workdir: String,
+    /// `sandbox download <name> SANDBOX_CLAUDE_PROJECTS <incoming>/projects`,
+    /// built once at dispatch from the plan actually used -- `Some` only for
+    /// a claude-code run, which is the one harness `Agent::resume_spec`
+    /// supports; `shell` has no conversation to preserve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_download: Option<Vec<String>>,
 }
 
 impl Teardown {
-    pub fn of(plan: &Plan, cwd: &Path, fast_forward: bool) -> Self {
+    pub fn of(plan: &Plan, cwd: &Path, fast_forward: bool, task: &str) -> Self {
+        let state_dir = plan
+            .policy_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let preserve_download = (plan.launch.agent_kind.as_deref() == Some("claude")).then(|| {
+            let sessions_root = sessions_root_of(&state_dir);
+            let mut argv = plan.base.clone();
+            argv.extend([
+                "sandbox".to_string(),
+                "download".to_string(),
+                plan.sandbox.clone(),
+                SANDBOX_CLAUDE_PROJECTS.to_string(),
+                incoming_projects_dir(&sessions_root, task)
+                    .display()
+                    .to_string(),
+            ]);
+            argv
+        });
         Self {
             sandbox: plan.sandbox.clone(),
-            state_dir: plan
-                .policy_path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default(),
+            state_dir,
             cwd: cwd.to_path_buf(),
             download: plan.download.clone(),
             download_dir: plan.download_dir.clone(),
             fast_forward,
             delete: plan.delete.clone(),
             service_evidence: None,
+            task: task.to_string(),
+            workdir: plan.workdir.clone(),
+            preserve_download,
         }
     }
 
@@ -71,6 +111,34 @@ impl Teardown {
         meta.get(META_KEY)
             .and_then(|raw| serde_json::from_str(raw).ok())
     }
+}
+
+/// `.factory/openshell/sessions/`, beside the per-run `state_dir`s --
+/// never inside a scope, like every other daemon-owned OpenShell state.
+/// `state_dir` is `<instance>/.factory/openshell/<run>`; its parent is the
+/// shared `openshell` directory every one of these roots sits under.
+fn sessions_root_of(state_dir: &Path) -> PathBuf {
+    state_dir
+        .parent()
+        .map(|openshell_dir| openshell_dir.join("sessions"))
+        .unwrap_or_default()
+}
+
+/// Where a task's preserved conversation lives once captured.
+pub fn preserved_dir(sessions_root: &Path, task: &str) -> PathBuf {
+    sessions_root.join(task)
+}
+
+/// Where a task's preserved conversation lands while it is being captured,
+/// before it is promoted over the previous one -- a fixed name rather than
+/// a random one, so `Pending::valid_at` can check it exactly and a crashed
+/// capture leaves a name the next one reuses rather than litters.
+pub fn incoming_dir(sessions_root: &Path, task: &str) -> PathBuf {
+    sessions_root.join(format!("{task}-incoming"))
+}
+
+pub fn incoming_projects_dir(sessions_root: &Path, task: &str) -> PathBuf {
+    incoming_dir(sessions_root, task).join("projects")
 }
 
 /// Written before create, outside the uploaded run files. Configuration
@@ -128,6 +196,26 @@ impl Pending {
                     .last()
                     .is_some_and(|path| Path::new(path) == self.teardown.download_dir)
         });
+        // `#274`: the preserve-download argv, when a claude-code run staged
+        // one, names exactly the incoming directory this task's run would
+        // use -- never a path a tampered record could redirect.
+        let preserve_valid = self.teardown.preserve_download.as_ref().is_none_or(|argv| {
+            safe_run_id(&self.task)
+                && self.teardown.task == self.task
+                && argv.len() == self.base.len() + 5
+                && argv.starts_with(&self.base)
+                && argv[self.base.len()..self.base.len() + 4]
+                    == [
+                        "sandbox",
+                        "download",
+                        self.teardown.sandbox.as_str(),
+                        crate::openshell::SANDBOX_CLAUDE_PROJECTS,
+                    ]
+                && argv.last().is_some_and(|path| {
+                    Path::new(path)
+                        == incoming_projects_dir(&sessions_root_of(directory), &self.task)
+                })
+        });
         self.instance == instance
             && safe_run_id(&self.run)
             && directory
@@ -141,6 +229,7 @@ impl Pending {
             && !self.base[0].is_empty()
             && self.teardown.delete == delete
             && download_valid
+            && preserve_valid
             && self
                 .teardown
                 .service_evidence
@@ -378,10 +467,11 @@ pub fn write_files(plan: &Plan) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Make the run's sandbox: preflight, write the files, create, upload. On
-/// any failure past `create`, the sandbox is deleted before the reason is
-/// returned, so a failed dispatch leaves nothing running.
-pub async fn prepare(plan: &Plan, providers: &[String]) -> Result<()> {
+/// Make the run's sandbox: preflight, write the files, create, restore a
+/// tentative resume (`#274`), upload. On any failure past `create`, the
+/// sandbox is deleted before the reason is returned, so a failed dispatch
+/// leaves nothing running.
+pub async fn prepare(plan: &Plan, providers: &[String], restore: Option<&Restore>) -> Result<RestoreOutcome> {
     let fail = |reason: String| {
         FactoryError::BadRequest(format!(
             "{reason}. The run was not started on the host instead"
@@ -408,6 +498,44 @@ pub async fn prepare(plan: &Plan, providers: &[String]) -> Result<()> {
         discard(plan).await;
         return Err(fail(reason));
     }
+
+    // `#274`: attempted before the run's own files are uploaded, so a
+    // failed restore can still correct the host copy of `launch.sh` and
+    // `prompt.md` -- which `write_files` staged as the plan's own, fresh
+    // versions -- before either ever leaves the host. Never attempted
+    // after: by then the sandbox would already be running on whichever
+    // version it got, and re-uploading over a session already launched
+    // into is not a thing to try.
+    let outcome = match restore {
+        None => RestoreOutcome::NotAttempted,
+        Some(restore) => {
+            let mut upload = plan.base.clone();
+            upload.extend([
+                "sandbox".to_string(),
+                "upload".to_string(),
+                plan.sandbox.clone(),
+                restore.local_dir.join("projects").display().to_string(),
+                crate::openshell::SANDBOX_CLAUDE_DIR.to_string(),
+                "--no-git-ignore".to_string(),
+            ]);
+            match run(
+                &upload,
+                TRANSFER,
+                &format!("restoring the preserved conversation into sandbox {}", plan.sandbox),
+            )
+            .await
+            {
+                Err(reason) => RestoreOutcome::FellBack(reason),
+                Ok(_) => match stage_resume_files(&restore.override_files) {
+                    Ok(()) => RestoreOutcome::Restored { local_dir: restore.local_dir.clone() },
+                    Err(e) => RestoreOutcome::FellBack(format!(
+                        "the preserved conversation uploaded, but its launcher could not be staged: {e}"
+                    )),
+                },
+            }
+        }
+    };
+
     for upload in &plan.uploads {
         if let Err(reason) = run(
             upload,
@@ -423,6 +551,18 @@ pub async fn prepare(plan: &Plan, providers: &[String]) -> Result<()> {
     // The env file carries the run token. It is inside the sandbox now; the
     // host copy has done its job.
     let _ = std::fs::remove_file(plan.stage_dir.join("env"));
+    Ok(outcome)
+}
+
+/// Overwrite the plan's own (fresh) `launch.sh`/`prompt.md` with the
+/// resumed versions, on the host, before the stage directory that holds
+/// them is uploaded.
+fn stage_resume_files(files: &[(PathBuf, String, u32)]) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for (path, contents, mode) in files {
+        std::fs::write(path, contents)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(*mode))?;
+    }
     Ok(())
 }
 
@@ -517,6 +657,9 @@ pub async fn finish(teardown: &Teardown) -> Vec<String> {
             _ => notes.push("sandbox service evidence could not be preserved".into()),
         }
     }
+    if let Some(download) = &teardown.preserve_download {
+        notes.push(preserve(teardown, download).await);
+    }
     let mut retain = false;
     let mut restore_failed = false;
     if let Some(download) = &teardown.download {
@@ -575,6 +718,231 @@ pub async fn finish(teardown: &Teardown) -> Vec<String> {
         let _ = std::fs::remove_dir_all(&teardown.state_dir);
     }
     notes
+}
+
+/// What a teardown's preserve step left behind for the task, once captured
+/// -- `#274`. `record.json`, beside `projects/` (absent when the capture
+/// was over the cap), inside `preserved_dir`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreservedRecord {
+    pub task: String,
+    pub run: String,
+    /// The one session this preserved tree holds, when exactly one
+    /// `projects/<dir>/<id>.jsonl` was found at the expected depth. `None`
+    /// when none or more than one was -- resuming needs it unambiguous.
+    pub session_id: Option<String>,
+    /// The sandbox working directory the download was taken from, matched
+    /// against the next dispatch's own before it is trusted.
+    pub workdir: String,
+    pub bytes: u64,
+}
+
+/// Capture a claude-code sandbox's conversation before its sandbox is
+/// deleted, keeping it per task so the task's next run can resume it
+/// (`#274`). One note, win or lose, for the run's journal -- the deletion
+/// of the sandbox itself is `finish`'s to report, not this.
+async fn preserve(teardown: &Teardown, download: &[String]) -> String {
+    if teardown.task.is_empty() {
+        return "sandbox conversation not preserved: no task id was recorded for this run".into();
+    }
+    let sessions_root = sessions_root_of(&teardown.state_dir);
+    let incoming = incoming_dir(&sessions_root, &teardown.task);
+    let incoming_projects = incoming_projects_dir(&sessions_root, &teardown.task);
+    let _ = std::fs::remove_dir_all(&incoming);
+    if let Err(e) = std::fs::create_dir_all(&incoming_projects) {
+        return format!("sandbox conversation not preserved: could not make {}: {e}", incoming.display());
+    }
+    if let Err(e) = lock_down(&incoming) {
+        let _ = std::fs::remove_dir_all(&incoming);
+        return format!("sandbox conversation not preserved: {e}");
+    }
+    if let Err(reason) = run(download, TRANSFER, "preserving the sandboxed conversation").await {
+        let _ = std::fs::remove_dir_all(&incoming);
+        return format!("sandbox conversation not preserved: {reason}");
+    }
+    // OpenShell's own download writes with whatever modes it chooses;
+    // never trust them for what the rest of this code treats as an
+    // owner-only record (`Pending::save`'s own rule).
+    if let Err(e) = lock_down_tree(&incoming_projects) {
+        let _ = std::fs::remove_dir_all(&incoming);
+        return format!("sandbox conversation not preserved: {e}");
+    }
+    let bytes = match tree_bytes(&incoming_projects) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&incoming);
+            return format!("sandbox conversation not preserved: {e}");
+        }
+    };
+    let over_cap = bytes > PRESERVE_CAP_BYTES;
+    let session_id = if over_cap { None } else { sole_session_id(&incoming_projects) };
+    if over_cap {
+        // The point is a cheap resume, not an unbounded transcript store --
+        // keep the size on record (so the next dispatch's reason is exact)
+        // but never the content itself.
+        let _ = std::fs::remove_dir_all(&incoming_projects);
+    }
+    let run_id = teardown
+        .state_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let record = PreservedRecord {
+        task: teardown.task.clone(),
+        run: run_id,
+        session_id,
+        workdir: teardown.workdir.clone(),
+        bytes,
+    };
+    if let Err(e) = write_record(&incoming, &record) {
+        let _ = std::fs::remove_dir_all(&incoming);
+        return format!("sandbox conversation not preserved: {e}");
+    }
+    let preserved = preserved_dir(&sessions_root, &teardown.task);
+    let _ = std::fs::remove_dir_all(&preserved);
+    if let Err(e) = std::fs::rename(&incoming, &preserved) {
+        let _ = std::fs::remove_dir_all(&incoming);
+        return format!("sandbox conversation not preserved: {e}");
+    }
+    if over_cap {
+        format!(
+            "the sandboxed conversation was {bytes} bytes, over the {PRESERVE_CAP_BYTES}-byte cap; not kept for resume"
+        )
+    } else {
+        format!("preserved the sandboxed conversation ({bytes} bytes) for this task's next run to resume")
+    }
+}
+
+fn lock_down(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Every directory 0o700, every file 0o600 -- owner-only, the same as
+/// `Pending::save`, regardless of what the download wrote them as.
+fn lock_down_tree(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            lock_down_tree(&path)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        } else if entry.file_type()?.is_file() {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(())
+}
+
+fn tree_bytes(dir: &Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        total += if metadata.is_dir() { tree_bytes(&entry.path())? } else { metadata.len() };
+    }
+    Ok(total)
+}
+
+/// The session id a preserved tree holds, when it is unambiguous: exactly
+/// one `<projects>/<cwd-dir>/<id>.jsonl` at this exact depth. Claude Code
+/// nests subagent transcripts deeper still, under a session's own
+/// directory, which this never descends into -- so a run with subagent
+/// activity correctly reads as ambiguous rather than picking the wrong one.
+fn sole_session_id(projects: &Path) -> Option<String> {
+    let mut found = None;
+    for cwd_dir in std::fs::read_dir(projects).ok()?.flatten() {
+        if !cwd_dir.file_type().ok()?.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(cwd_dir.path()).ok()?.flatten() {
+            if !entry.file_type().ok()?.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let id = path.file_stem()?.to_str()?.to_string();
+            if found.is_some() {
+                return None;
+            }
+            found = Some(id);
+        }
+    }
+    found
+}
+
+fn write_record(incoming: &Path, record: &PreservedRecord) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(incoming.join("record.json"))?;
+    file.write_all(&serde_json::to_vec(record)?)
+}
+
+/// This task's preserved conversation, when there is one -- bounded and
+/// symlink-refused the same way `pending()` reads `pending.json`.
+pub fn load_preserved(sessions_root: &Path, task: &str) -> Option<PreservedRecord> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = preserved_dir(sessions_root, task).join("record.json");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    if file.take(64 * 1024 + 1).read_to_end(&mut bytes).is_err() || bytes.len() > 64 * 1024 {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Both a settled preserved conversation and an interrupted capture --
+/// `#274`: a task closed or deleted keeps neither.
+pub fn remove_preserved(sessions_root: &Path, task: &str) {
+    let _ = std::fs::remove_dir_all(preserved_dir(sessions_root, task));
+    let _ = std::fs::remove_dir_all(incoming_dir(sessions_root, task));
+}
+
+/// What `prepare` should try to resume into the new sandbox: the preserved
+/// conversation `resolve_continue` already matched against this dispatch,
+/// and the exact `launch.sh`/`prompt.md` content that resumes it. `prepare`
+/// stages the plan's own (fresh) files first and only switches to these
+/// once the upload actually lands -- fail-closed by construction, rather
+/// than staging the resumed files and trying to undo that on a late
+/// failure.
+#[derive(Debug, Clone)]
+pub struct Restore {
+    /// `preserved_dir` for this task: holds `projects/`.
+    pub local_dir: PathBuf,
+    pub override_files: Vec<(PathBuf, String, u32)>,
+}
+
+/// What happened to a tentative resume, once `prepare` returns.
+#[derive(Debug)]
+pub enum RestoreOutcome {
+    /// Nothing was attempted: a fresh dispatch, or a non-sandboxed one.
+    NotAttempted,
+    /// The preserved conversation is uploaded and staged as the run's
+    /// `launch.sh`. The caller deletes `local_dir` only once the run's
+    /// session has actually started -- an earlier delete would lose the
+    /// only copy to a later failure this function cannot see.
+    Restored { local_dir: PathBuf },
+    /// The upload (or staging the resumed files) failed; `prepare` left the
+    /// plan's fresh files in place and `local_dir` untouched for a later
+    /// run to try again.
+    FellBack(String),
 }
 
 /// Copy `from` into `to`, overwriting what is there and deleting nothing,
@@ -844,7 +1212,7 @@ mod tests {
              'provider get') if [ \"$3\" = '{missing}' ]; then echo '  × provider not found' >&2; exit 1; fi ;;\n\
              'sandbox create') if [ {create_fails} = 1 ]; then printf 'Provisioning sandbox...\\n  × sandbox entered error phase: ConfigurationInvalid\\n' >&2; exit 1; fi; echo '{{\"phase\":\"Ready\"}}' ;;\n\
              'sandbox get') echo '{{\"labels\":{{\"factory.instance\":\"inst\",\"factory.run\":\"aaaabbbb-run\"}}}}' ;;\n\
-             'sandbox download') mkdir -p \"$5\" && echo downloaded > \"$5/result.txt\" && mkdir -p \"$5/.git\" && echo x > \"$5/.git/HEAD\" ;;\n\
+             'sandbox download') if [ \"$4\" = '/sandbox/.claude/projects' ]; then mkdir -p \"$5/cwd-dir\" && echo '{{}}' > \"$5/cwd-dir/session-abc.jsonl\"; else mkdir -p \"$5\" && echo downloaded > \"$5/result.txt\" && mkdir -p \"$5/.git\" && echo x > \"$5/.git/HEAD\"; fi ;;\n\
              'sandbox list') echo '{{\"sandboxes\":[{{\"name\":\"factory-aaaa\",\"labels\":{{\"factory.instance\":\"inst-1\",\"factory.run\":\"run-a\"}}}},{{\"name\":\"factory-bbbb\",\"labels\":{{\"factory.instance\":\"inst-1\",\"factory.run\":\"run-b\"}}}}]}}' ;;\n\
              esac\n",
             calls = calls.display(),
@@ -915,6 +1283,45 @@ mod tests {
         (plan, cwd)
     }
 
+    /// Same shape as `a_plan`, but the shell agent -- which has no
+    /// `Agent::resume_spec` and so nothing `#274` preserves.
+    fn a_shell_plan(dir: &Path, cli: &Path) -> (Plan, PathBuf) {
+        let cwd = dir.join("scope");
+        let guides = dir.join("guides");
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        std::fs::create_dir_all(&guides).unwrap();
+        let config: OpenshellConfig = serde_yaml_ng::from_str(
+            "image: img\nproviders: [factory-claude]\npolicy:\n  network_policies: {}\n",
+        )
+        .unwrap();
+        let launch = LaunchSpec {
+            kind: LaunchKind::Command(Vec::new()),
+            args: Vec::new(),
+            env: BTreeMap::from([("FACTORY_TOKEN".to_string(), "tok".to_string())]),
+            agent_kind: None,
+        };
+        let target = CallbackTarget { host: "host.openshell.internal".into(), port: 8787 };
+        let state = dir.join("state/run-1");
+        let providers: Vec<String> = config.providers.iter().map(|p| p.gateway_name("inst")).collect();
+        let plan = plan(&PlanInput {
+            config: &config,
+            cli: &cli.display().to_string(),
+            image: config.image.as_deref().unwrap_or_default(),
+            providers: &providers,
+            instance_id: "inst",
+            run_id: "aaaabbbb-run",
+            task_id: "t1",
+            cwd: &cwd,
+            guides_dir: &guides,
+            state_dir: &state,
+            launch: &launch,
+            prompt: ". /sandbox/.factory-run/run.sh\n",
+            callback: &target,
+        })
+        .unwrap();
+        (plan, cwd)
+    }
+
     #[tokio::test]
     async fn a_missing_cli_is_a_reason_and_never_a_fallback() {
         let e = resolve_cli(Some("/nonexistent/openshell"))
@@ -923,7 +1330,7 @@ mod tests {
         assert!(e.contains("does not exist"), "{e}");
         let dir = tempdir();
         let (plan, _) = a_plan(&dir.0, &dir.0.join("absent-openshell"), false);
-        let e = prepare(&plan, &["factory-claude".into()])
+        let e = prepare(&plan, &["factory-claude".into()], None)
             .await
             .unwrap_err()
             .to_string();
@@ -942,7 +1349,7 @@ mod tests {
         let dir = tempdir();
         let cli = fake_cli(&dir.0, "disconnected", None, false);
         let (plan, _) = a_plan(&dir.0, &cli, false);
-        let e = prepare(&plan, &[]).await.unwrap_err().to_string();
+        let e = prepare(&plan, &[], None).await.unwrap_err().to_string();
         assert!(e.contains("disconnected, not connected"), "{e}");
         assert!(
             !calls(&dir.0).iter().any(|c| c.starts_with("sandbox")),
@@ -956,7 +1363,7 @@ mod tests {
         let dir = tempdir();
         let cli = fake_cli(&dir.0, "connected", Some("factory-github"), false);
         let (plan, _) = a_plan(&dir.0, &cli, false);
-        let e = prepare(&plan, &["factory-claude".into(), "factory-github".into()])
+        let e = prepare(&plan, &["factory-claude".into(), "factory-github".into()], None)
             .await
             .unwrap_err()
             .to_string();
@@ -992,9 +1399,14 @@ mod tests {
         let (plan, cwd) = a_plan(&dir.0, Path::new("openshell"), false);
         let root = dir.0.join("pending");
         let directory = root.join("aaaabbbb-run");
-        let mut teardown = Teardown::of(&plan, &cwd, false);
+        let mut teardown = Teardown::of(&plan, &cwd, false, "t1");
         teardown.state_dir = directory.clone();
         teardown.download_dir = directory.join("download");
+        if let Some(argv) = &mut teardown.preserve_download {
+            *argv.last_mut().unwrap() = incoming_projects_dir(&sessions_root_of(&directory), "t1")
+                .display()
+                .to_string();
+        }
         let record = Pending {
             instance: "inst".into(),
             run: "aaaabbbb-run".into(),
@@ -1017,14 +1429,20 @@ mod tests {
             std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
             0o700
         );
-        for mutation in 0..5 {
+        for mutation in 0..7 {
             let mut invalid = record.clone();
             match mutation {
                 0 => invalid.run = "../outside".into(),
                 1 => invalid.teardown.state_dir = dir.0.clone(),
                 2 => invalid.teardown.download_dir = dir.0.clone(),
                 3 => invalid.teardown.delete.push("unexpected".into()),
-                _ => invalid.teardown.sandbox = "factory-other".into(),
+                4 => invalid.teardown.sandbox = "factory-other".into(),
+                5 => invalid.teardown.task = "../outside".into(),
+                _ => {
+                    if let Some(argv) = &mut invalid.teardown.preserve_download {
+                        *argv.last_mut().unwrap() = dir.0.join("elsewhere").display().to_string();
+                    }
+                }
             }
             std::fs::write(
                 directory.join("pending.json"),
@@ -1053,7 +1471,7 @@ mod tests {
         let dir = tempdir();
         let cli = fake_cli(&dir.0, "connected", None, true);
         let (plan, _) = a_plan(&dir.0, &cli, false);
-        let e = prepare(&plan, &[]).await.unwrap_err().to_string();
+        let e = prepare(&plan, &[], None).await.unwrap_err().to_string();
         assert!(
             e.contains("ConfigurationInvalid") && !e.contains("Provisioning sandbox"),
             "{e}"
@@ -1072,7 +1490,7 @@ mod tests {
         let dir = tempdir();
         let cli = fake_cli(&dir.0, "connected", None, false);
         let (plan, _) = a_plan(&dir.0, &cli, false);
-        prepare(&plan, &["factory-claude".into()]).await.unwrap();
+        prepare(&plan, &["factory-claude".into()], None).await.unwrap();
         let log = calls(&dir.0);
         let sandbox: Vec<&String> = log.iter().filter(|c| c.starts_with("sandbox")).collect();
         assert!(
@@ -1118,7 +1536,7 @@ mod tests {
         );
         std::fs::write(&cli, script).unwrap();
         let (plan, _) = a_plan(&dir.0, &cli, false);
-        assert!(prepare(&plan, &[]).await.is_err());
+        assert!(prepare(&plan, &[], None).await.is_err());
         assert!(!calls(&dir.0)
             .iter()
             .any(|call| call.starts_with("sandbox delete")));
@@ -1150,9 +1568,9 @@ mod tests {
         let dir = tempdir();
         let cli = fake_cli(&dir.0, "connected", None, false);
         let (plan, cwd) = a_plan(&dir.0, &cli, true);
-        prepare(&plan, &[]).await.unwrap();
+        prepare(&plan, &[], None).await.unwrap();
         std::fs::write(cwd.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-        let teardown = Teardown::of(&plan, &cwd, false);
+        let teardown = Teardown::of(&plan, &cwd, false, "t1");
         let restored = Teardown::from_meta(&BTreeMap::from([(
             META_KEY.to_string(),
             teardown.to_meta(),
@@ -1205,6 +1623,9 @@ mod tests {
             download_dir: dir.0.join("dl"),
             fast_forward: false,
             service_evidence: None,
+            task: String::new(),
+            workdir: String::new(),
+            preserve_download: None,
             delete: vec![
                 "/bin/sh".into(),
                 "-c".into(),
@@ -1223,11 +1644,11 @@ mod tests {
         let dir = tempdir();
         let cli = fake_cli(&dir.0, "connected", None, false);
         let (plan, cwd) = a_plan(&dir.0, &cli, true);
-        prepare(&plan, &[]).await.unwrap();
+        prepare(&plan, &[], None).await.unwrap();
         let outside = dir.0.join("host.txt");
         std::fs::write(&outside, "host data").unwrap();
         std::os::unix::fs::symlink(&outside, cwd.join("result.txt")).unwrap();
-        let teardown = Teardown::of(&plan, &cwd, false);
+        let teardown = Teardown::of(&plan, &cwd, false, "t1");
         let notes = finish(&teardown).await;
         assert_eq!(std::fs::read_to_string(outside).unwrap(), "host data");
         assert_eq!(
@@ -1393,4 +1814,242 @@ mod tests {
             "Error:   × sandbox provisioning timed out after 300s. Last reported status: ConfigurationInvalid: Effective configuration could not be activated; replace the policy"
         );
     }
+
+    // -- `#274`: preserving a sandboxed conversation and resuming it -------
+
+    #[tokio::test]
+    async fn finish_preserves_a_claude_runs_conversation_under_its_task_and_still_deletes_the_sandbox() {
+        let dir = tempdir();
+        let cli = fake_cli(&dir.0, "connected", None, false);
+        let (plan, cwd) = a_plan(&dir.0, &cli, false);
+        prepare(&plan, &[], None).await.unwrap();
+        let teardown = Teardown::of(&plan, &cwd, false, "t1");
+        assert!(
+            teardown.preserve_download.is_some(),
+            "a claude-code plan stages a preserve download"
+        );
+        let sessions_root = sessions_root_of(&teardown.state_dir);
+        let notes = finish(&teardown).await;
+        assert!(
+            notes.iter().any(|n| n.contains("preserved the sandboxed conversation")),
+            "{notes:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n == "deleted sandbox factory-aaaabbbb"),
+            "{notes:?}"
+        );
+        let record = load_preserved(&sessions_root, "t1").expect("a record was saved");
+        assert_eq!(record.task, "t1");
+        // `preserve` reads the run id off `state_dir`'s own basename --
+        // true in production (`factory_dir/openshell/<run>`), and `a_plan`'s
+        // fixture names its state directory `run-1` rather than the
+        // `run_id` it otherwise uses.
+        assert_eq!(record.run, "run-1");
+        assert_eq!(record.session_id.as_deref(), Some("session-abc"));
+        assert_eq!(record.workdir, plan.workdir);
+        assert!(preserved_dir(&sessions_root, "t1")
+            .join("projects/cwd-dir/session-abc.jsonl")
+            .is_file());
+        assert!(
+            !incoming_dir(&sessions_root, "t1").exists(),
+            "the incoming staging name is gone once promoted"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_preserves_nothing_for_the_shell_agent_which_has_no_resume_spec() {
+        let dir = tempdir();
+        let cli = fake_cli(&dir.0, "connected", None, false);
+        let (plan, cwd) = a_shell_plan(&dir.0, &cli);
+        prepare(&plan, &[], None).await.unwrap();
+        let teardown = Teardown::of(&plan, &cwd, false, "t1");
+        assert!(teardown.preserve_download.is_none());
+        let notes = finish(&teardown).await;
+        assert!(
+            !notes.iter().any(|n| n.contains("preserved") || n.contains("conversation")),
+            "{notes:?}"
+        );
+        let sessions_root = sessions_root_of(&teardown.state_dir);
+        assert!(load_preserved(&sessions_root, "t1").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_run_that_ends_blocked_timeout_still_preserves_and_deletes() {
+        // `finish` has no notion of why the run ended -- `close_session` and
+        // `reconcile_openshell` call it the same way whatever the run's
+        // terminal status, which is what makes "every teardown preserves"
+        // true for done, failed and a blocked-timeout reclaim alike.
+        let dir = tempdir();
+        let cli = fake_cli(&dir.0, "connected", None, false);
+        let (plan, cwd) = a_plan(&dir.0, &cli, false);
+        prepare(&plan, &[], None).await.unwrap();
+        let teardown = Teardown::of(&plan, &cwd, false, "t1");
+        let sessions_root = sessions_root_of(&teardown.state_dir);
+        let notes = finish(&teardown).await;
+        assert!(notes.iter().any(|n| n.contains("preserved")));
+        assert!(load_preserved(&sessions_root, "t1").is_some());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_capture_keeps_its_size_on_record_but_not_the_transcript() {
+        let dir = tempdir();
+        let cli = fake_cli(&dir.0, "connected", None, false);
+        // `truncate` makes a sparse file of exactly this logical size
+        // without writing real bytes, so the test stays fast.
+        let script = std::fs::read_to_string(&cli).unwrap().replace(
+            "mkdir -p \"$5/cwd-dir\" && echo '{}' > \"$5/cwd-dir/session-abc.jsonl\"",
+            "mkdir -p \"$5/cwd-dir\" && truncate -s 67108865 \"$5/cwd-dir/session-abc.jsonl\"",
+        );
+        std::fs::write(&cli, script).unwrap();
+        let (plan, cwd) = a_plan(&dir.0, &cli, false);
+        prepare(&plan, &[], None).await.unwrap();
+        let teardown = Teardown::of(&plan, &cwd, false, "t1");
+        let sessions_root = sessions_root_of(&teardown.state_dir);
+        let notes = finish(&teardown).await;
+        assert!(
+            notes.iter().any(|n| n.contains("over the") && n.contains("cap")),
+            "{notes:?}"
+        );
+        let record = load_preserved(&sessions_root, "t1").expect("the size is still recorded");
+        assert_eq!(record.bytes, 67108865);
+        assert!(record.session_id.is_none(), "no content was kept to derive one from");
+        assert!(
+            !preserved_dir(&sessions_root, "t1").join("projects").exists(),
+            "the oversized transcript itself is never kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_preserved_deletes_a_settled_record_and_an_interrupted_capture() {
+        let dir = tempdir();
+        let cli = fake_cli(&dir.0, "connected", None, false);
+        let (plan, cwd) = a_plan(&dir.0, &cli, false);
+        prepare(&plan, &[], None).await.unwrap();
+        let teardown = Teardown::of(&plan, &cwd, false, "t1");
+        let sessions_root = sessions_root_of(&teardown.state_dir);
+        finish(&teardown).await;
+        assert!(load_preserved(&sessions_root, "t1").is_some());
+        // An interrupted capture: the fixed incoming name, with no record
+        // promoted over it yet.
+        std::fs::create_dir_all(incoming_dir(&sessions_root, "t1")).unwrap();
+        remove_preserved(&sessions_root, "t1");
+        assert!(load_preserved(&sessions_root, "t1").is_none());
+        assert!(!preserved_dir(&sessions_root, "t1").exists());
+        assert!(!incoming_dir(&sessions_root, "t1").exists());
+    }
+
+    #[tokio::test]
+    async fn an_old_format_pending_record_with_no_preserve_field_still_loads() {
+        let dir = tempdir();
+        let (plan, cwd) = a_plan(&dir.0, Path::new("openshell"), false);
+        let root = dir.0.join("pending");
+        let directory = root.join("aaaabbbb-run");
+        let teardown = Teardown::of(&plan, &cwd, false, "t1");
+        // The shape `Pending::save` wrote before `#274`: no `task`,
+        // `workdir` or `preserve_download` on the teardown at all.
+        let old = serde_json::json!({
+            "instance": "inst",
+            "run": "aaaabbbb-run",
+            "task": "t1",
+            "base": plan.base,
+            "teardown": {
+                "sandbox": teardown.sandbox,
+                "state_dir": directory,
+                "cwd": cwd,
+                "download_dir": directory.join("download"),
+                "delete": plan
+                    .base
+                    .iter()
+                    .cloned()
+                    .chain(["sandbox".to_string(), "delete".to_string(), teardown.sandbox.clone()])
+                    .collect::<Vec<_>>(),
+            },
+        });
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("pending.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+        let loaded = pending(&root, "inst").unwrap();
+        assert_eq!(loaded.len(), 1, "an old-format record is still readable");
+        assert_eq!(loaded[0].teardown.task, "", "new fields default rather than fail to parse");
+        assert!(loaded[0].teardown.preserve_download.is_none());
+    }
+
+    #[tokio::test]
+    async fn prepare_restores_a_preserved_conversation_before_the_runs_own_files_upload() {
+        let dir = tempdir();
+        let cli = fake_cli(&dir.0, "connected", None, false);
+        let (plan, _cwd) = a_plan(&dir.0, &cli, false);
+        let local_dir = dir.0.join("preserved-t1");
+        std::fs::create_dir_all(local_dir.join("projects")).unwrap();
+        let override_launch = plan.stage_dir.join("launch.sh");
+        let override_prompt = plan.stage_dir.join("prompt.md");
+        let restore = Restore {
+            local_dir: local_dir.clone(),
+            override_files: vec![
+                (override_launch.clone(), "exec claude --resume session-abc\n".into(), 0o644),
+                (override_prompt.clone(), "continue where you left off".into(), 0o644),
+            ],
+        };
+        let outcome = prepare(&plan, &[], Some(&restore)).await.unwrap();
+        assert!(matches!(outcome, RestoreOutcome::Restored { .. }));
+        let log = calls(&dir.0);
+        let restore_upload = log
+            .iter()
+            .find(|c| c.starts_with("sandbox upload factory-aaaabbbb") && c.contains("/sandbox/.claude"))
+            .unwrap_or_else(|| panic!("no restore upload in {log:?}"));
+        let stage_upload_index = log
+            .iter()
+            .position(|c| c.contains(&plan.stage_dir.display().to_string()))
+            .expect("the run's own files are still uploaded");
+        let restore_index = log.iter().position(|c| c == restore_upload).unwrap();
+        assert!(
+            restore_index < stage_upload_index,
+            "the restore upload happens before the run's own files upload: {log:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&override_launch).unwrap(),
+            "exec claude --resume session-abc\n",
+            "the staged launcher now carries the resumed command"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_falls_back_to_the_fresh_files_when_the_restore_upload_fails() {
+        let dir = tempdir();
+        let cli = fake_cli(&dir.0, "connected", None, false);
+        // Make `sandbox upload` fail only for the restore's own source path.
+        let script = std::fs::read_to_string(&cli).unwrap().replace(
+            "case \"$1 $2\" in\n",
+            "case \"$1 $2\" in\n'sandbox upload') case \"$4\" in */preserved-t1/projects) exit 1 ;; esac ;;\n",
+        );
+        std::fs::write(&cli, script).unwrap();
+        let (plan, _cwd) = a_plan(&dir.0, &cli, false);
+        let local_dir = dir.0.join("preserved-t1");
+        std::fs::create_dir_all(local_dir.join("projects")).unwrap();
+        let override_launch = plan.stage_dir.join("launch.sh");
+        let fresh_launch = plan
+            .stage_files
+            .iter()
+            .find(|(path, _, _)| path == &override_launch)
+            .map(|(_, contents, _)| contents.clone())
+            .expect("the plan stages its own fresh launch.sh");
+        let restore = Restore {
+            local_dir: local_dir.clone(),
+            override_files: vec![(override_launch.clone(), "exec claude --resume session-abc\n".into(), 0o644)],
+        };
+        let outcome = prepare(&plan, &[], Some(&restore)).await.unwrap();
+        let reason = match outcome {
+            RestoreOutcome::FellBack(reason) => reason,
+            other => panic!("expected FellBack, got {other:?}"),
+        };
+        assert!(!reason.is_empty());
+        // `write_files` already staged the fresh launcher before `create`;
+        // a failed restore leaves it exactly as it was.
+        assert_eq!(
+            std::fs::read_to_string(&override_launch).unwrap(),
+            fresh_launch,
+            "the fresh launcher is untouched by a failed restore"
+        );
+        assert!(local_dir.exists(), "a failed restore leaves the preserved copy for a later run");
+    }
+
 }
