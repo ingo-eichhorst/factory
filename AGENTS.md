@@ -143,9 +143,9 @@ Those internal merges are coordination, not permission to merge the final PR.
 Whoever writes a task says so too, and never writes "do not push".
 `.agents/skills/implement-github-issue` is the whole procedure for an issue.
 
-**The hook is the enforcement, and it is weaker than it looks.** GitHub cannot
-do this for us: the repository is private on a free plan, where rulesets and
-branch protection are both paid. So `.githooks/pre-push` refuses the push, and
+**The hook is the enforcement, and it is weaker than it looks.** GitHub does
+not do this for us today: the repository is public, and its `protect main`
+ruleset exists but is disabled. So `.githooks/pre-push` refuses the push, and
 it only runs if `core.hooksPath` was set, to an absolute path -- a fresh clone,
 a machine nobody configured, or a relative path read from a worktree all leave
 no guard at all, and none of them say so. Set it first; do not assume it is
