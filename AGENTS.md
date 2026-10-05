@@ -288,7 +288,14 @@ something impossible.
   load/fingerprint/dependency expansion is canonical too. L6 supplies raw
   applicable subjects, counting instructions, receipts and caps, never a
   Policy report/rollup. Request-only page failure preflights stay outside.
-  Signposts and the complete six-service split still remain.
+  Signposts use an actual L5 provider and canonical evaluator, computing
+  their own metrics from raw authored thresholds, subjects, receipts and
+  caps. L0 holds only plain observations. Dashboard and Inbox read the
+  people-side fact directly; Operations never gathers it or counts it as
+  attention. Cache only successful snapshots for a minute, invalidating on
+  scenario metadata changes; never cache failed reads or invent task actions.
+  L6 retains authored scenario intent and canonical compatibility exports.
+  The complete six-service split still remains.
   L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.
   L6 still owns authored policy and budget intent. Policy remediation and
@@ -300,7 +307,7 @@ something impossible.
   The router hydrates legacy task payloads through People's live L4
   TaskSnapshotFact, never a level service. The sealed Commands relation allows
   exactly five adjacent edges; no callback into Engine supplies creation.
-  Signposts, the other command paths and full live service isolation remain
+  The other command paths and full live service isolation remain
   separate #193 requirements.
 - Benchmark/dataset/knowledge behavior and the KnowledgeProvider seam belong
   to L5. Core's configuration adapter projects resolved agents into L5's
@@ -324,7 +331,7 @@ something impossible.
   tables, indexes, append-only records and JSON. Never make L6 store or read
   process evidence directly; upward live reads still use its fact ports.
   Splitting storage does not finish service/provider isolation. The
-  signpost reader move and live adjacent command ports still remain in #193.
+  remaining live adjacent command ports still remain in #193.
 - L1 owns backup history, deployment/health history and infrastructure expiry
   cache stores. L2 owns the credential expiry cache; L6 owns renewal push
   attempt receipts. Each opens only its own existing tables on the instance
@@ -358,8 +365,8 @@ something impossible.
   dev/target table. They are not extra level services or a fact channel.
   Keep the lossy observer bus and run-token redaction unchanged. Actual mounts,
   `Engine::handle(Envelope)` and the single `access.rs` authorization check
-  remain in the daemon; six-service/command-port isolation and the Operations
-  signpost reader move are still unfinished #193 work.
+  remain in the daemon; complete six-service/command-port isolation is still
+  unfinished #193 work.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's
   `scope.roles` down to that scope -- from the live snapshot, and `authorize`,

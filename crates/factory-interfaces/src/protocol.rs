@@ -849,6 +849,9 @@ pub enum Request {
         #[serde(default)]
         scope: Option<String>,
     },
+    /// L5 signpost observations, read directly by the Dashboard.
+    #[serde(rename = "signposts")]
+    Signposts,
     /// Turn a chosen scenario into real work: one task per newly-open
     /// control in `scope`'s own slice of that scenario's policy delta,
     /// through the exact path `Request::TaskCreate`/`Request::PolicyRemediate`
@@ -1395,6 +1398,9 @@ pub enum Payload {
     Scenarios {
         report: ScenariosReport,
     },
+    Signposts {
+        fact: factory_kernel::SignpostFact,
+    },
     /// The answer to `Request::ScenarioPromote` -- see `ScenarioPromoteResult`.
     ScenarioPromote {
         result: ScenarioPromoteResult,
@@ -1921,6 +1927,16 @@ pub struct TriggeredSignpost {
     pub scenario: String,
     pub metric: factory_assurance::metrics::MetricId,
     pub reason: String,
+}
+impl TryFrom<factory_kernel::SignpostObservation> for TriggeredSignpost {
+    type Error = String;
+    fn try_from(row: factory_kernel::SignpostObservation) -> Result<Self, Self::Error> {
+        Ok(Self {
+            scenario: row.scenario,
+            metric: factory_assurance::metrics::MetricId::new(row.metric)?,
+            reason: row.reason,
+        })
+    }
 }
 
 /// The L6 Scenarios tab's whole answer: `Request::Scenarios`'s response.
@@ -2571,6 +2587,35 @@ pub use factory_kernel::{ProductionBin, ProductionBucket, ProductionFact as Prod
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn signpost_fact_adapter_preserves_legacy_json_and_validates_metric_identity() {
+        let row = factory_kernel::SignpostObservation {
+            scenario: "slow-year".into(),
+            metric: "fail_rate".into(),
+            reason: "4 is above 2".into(),
+        };
+        let wire = TriggeredSignpost::try_from(row.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&wire).unwrap(),
+            serde_json::to_value(row).unwrap()
+        );
+        assert!(
+            TriggeredSignpost::try_from(factory_kernel::SignpostObservation {
+                scenario: "x".into(),
+                metric: "bad metric".into(),
+                reason: "x".into()
+            })
+            .is_err()
+        );
+        let request: Request =
+            serde_json::from_value(serde_json::json!({"op":"signposts"})).unwrap();
+        assert!(matches!(request, Request::Signposts));
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({"op":"signposts"})
+        );
+    }
+
     use super::*;
 
     #[test]

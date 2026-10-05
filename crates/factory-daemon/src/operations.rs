@@ -28,13 +28,8 @@
 //!   journal still has it.
 //! * **Standing agents** as the store has them; the model judges only a
 //!   permanent agent, and only on whether its session is there.
-//! * **Signposts** through `Engine::triggered_signposts`, the cheap half of
-//!   the Scenarios report, and only for the unscoped report: a signpost
-//!   watches a company-wide metric and belongs to a scenario, not a scope.
-//!   A scenario directory that cannot be read costs the report its
-//!   signposts, never the report itself. They are kept for
-//!   [`SIGNPOST_TTL`] while the scenario files are unchanged; a failure
-//!   is never kept.
+//! Scenario signposts are not a process input. The Dashboard reads L5's
+//! fact directly; this report never evaluates or gathers them.
 //!
 //! ## Capacity, where it is declared (`#179`)
 //!
@@ -68,7 +63,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use factory_core::error::{FactoryError, Result};
 use factory_core::operations::{
-    self, HealthWindow, OperationsInput, OperationsReport, ScopeFilter, SkippedSlots, TriggeredSignpost,
+    self, HealthWindow, OperationsInput, OperationsReport, ScopeFilter, SkippedSlots,
 };
 use factory_core::run::RunStatus;
 use factory_core::task::{CloseReason, Task, TaskClosure, TaskEntry, TaskFilter, TaskPatch, TaskStatus};
@@ -98,40 +93,6 @@ pub(crate) const ANSWER_KIND: &str = "answer";
 /// `queued_at` -- how the report tells an agent's run from a person's.
 pub(crate) const RUN_REQUESTED_KIND: &str = "run_requested";
 
-/// How long the report reuses the triggered signposts it computed. They
-/// are an observation at the bottom of the queue, a minute stale is fine,
-/// and each computation runs the metrics the signposts name -- production
-/// and policy evaluation among them -- which a report re-read on every
-/// event must not pay for every time.
-const SIGNPOST_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Each scenario file's name, modification time and size: an edit to the
-/// directory shows here, so a changed scenario is not answered from the
-/// cache for up to a minute.
-type Fingerprint = Vec<(std::ffi::OsString, Option<std::time::SystemTime>, u64)>;
-
-/// The last triggered signposts computed, when, and over which files.
-pub(crate) struct SignpostCache {
-    at: std::time::Instant,
-    fingerprint: Fingerprint,
-    signposts: Vec<factory_core::protocol::TriggeredSignpost>,
-}
-
-fn fingerprint(dir: &std::path::Path) -> Fingerprint {
-    let mut out: Fingerprint = std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter_map(|e| {
-                    let meta = e.metadata().ok()?;
-                    Some((e.file_name(), meta.modified().ok(), meta.len()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    out.sort();
-    out
-}
 
 /// Who asked for an action and why, as the journal records it: the entry's
 /// `source` says whether a person or an agent asked, `data.by` which one,
@@ -279,17 +240,6 @@ impl Engine {
             }
         }
 
-        let signposts = if scope.is_none() {
-            match self.triggered_signposts_cached(now).await {
-                Ok(found) => found.into_iter().map(signpost).collect(),
-                Err(e) => {
-                    tracing::warn!("operations: leaving scenario signposts out: {e}");
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
-        };
 
         // Every scope's own `max_sessions` (`#179`), root included --
         // discovery already folds the root's own `scope:` block into
@@ -311,7 +261,7 @@ impl Engine {
             block_reasons,
             last_progress,
             skipped,
-            signposts,
+            signposts: Vec::new(),
             answers,
             agent_runs,
             // Two ticks: a slot the next tick is about to fire is not late
@@ -342,33 +292,6 @@ impl Engine {
             .collect()
     }
 
-    /// `Engine::triggered_signposts`, reused for [`SIGNPOST_TTL`] while the
-    /// scenario files are unchanged. A failure is never kept: the next read
-    /// tries again.
-    pub(crate) async fn triggered_signposts_cached(
-        self: &Arc<Self>,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<factory_core::protocol::TriggeredSignpost>> {
-        let dir = factory_core::scenario::scenarios_dir(&self.factory_snapshot().root);
-        let print = tokio::task::spawn_blocking(move || fingerprint(&dir))
-            .await
-            .map_err(|e| FactoryError::Other(anyhow::anyhow!("scenario directory walk: {e}")))?;
-        {
-            let cache = self.signpost_cache.lock().unwrap();
-            if let Some(c) = cache.as_ref() {
-                if c.fingerprint == print && c.at.elapsed() < SIGNPOST_TTL {
-                    return Ok(c.signposts.clone());
-                }
-            }
-        }
-        let signposts = self.triggered_signposts(now).await?;
-        *self.signpost_cache.lock().unwrap() = Some(SignpostCache {
-            at: std::time::Instant::now(),
-            fingerprint: print,
-            signposts: signposts.clone(),
-        });
-        Ok(signposts)
-    }
 
     /// `Request::TaskSkipNext`: pass over a scheduled task's next firing.
     ///
@@ -712,13 +635,6 @@ fn skipped_slots(task_id: String, entry: &TaskEntry) -> Option<SkippedSlots> {
     })
 }
 
-fn signpost(t: factory_core::protocol::TriggeredSignpost) -> TriggeredSignpost {
-    TriggeredSignpost {
-        scenario: t.scenario,
-        metric: t.metric,
-        reason: t.reason,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1046,7 +962,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_triggered_signpost_is_an_observation_on_the_unscoped_report_only() {
+    async fn operations_never_gathers_signposts_and_dashboard_fact_matches_scenarios() {
         let (engine, _, root) = test_engine();
         std::fs::create_dir_all(root.join(".factory/scenarios")).unwrap();
         std::fs::write(
@@ -1055,10 +971,13 @@ mod tests {
         )
         .unwrap();
 
+        assert!(!engine.signpost_cache.is_populated());
         let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
-        let e = report.attention.iter().find(|e| e.kind == ExceptionKind::TriggeredSignpost).expect("signpost");
-        assert!(e.observation);
-        assert_eq!(e.title.as_deref(), Some("slow-year"));
+        assert!(!kinds(&report).contains(&ExceptionKind::TriggeredSignpost));
+        assert!(!engine.signpost_cache.is_populated(), "Operations never consulted the signpost provider");
+        let fact = engine.signposts_fact(Utc::now(), true).await.unwrap();
+        assert_eq!(fact.triggered.len(), 1);
+        assert_eq!(fact.triggered[0].scenario, "slow-year");
         // The full Scenarios report says the same thing.
         let full = engine.scenarios_report(None).await.unwrap();
         assert_eq!(full.triggered.len(), 1);
@@ -1461,7 +1380,7 @@ mod tests {
 
         let now = Utc::now();
         assert_eq!(engine.triggered_signposts_cached(now).await.unwrap().len(), 1);
-        assert!(engine.signpost_cache.lock().unwrap().is_some(), "kept");
+        assert!(engine.signpost_cache.is_populated(), "kept by L5");
         assert_eq!(engine.triggered_signposts_cached(now).await.unwrap().len(), 1, "served from the cache");
 
         std::fs::remove_file(&file).unwrap();

@@ -373,10 +373,8 @@ pub struct Engine {
     /// `task.skip_next`. Each re-reads the task under it, so a slot is
     /// either fired or skipped, never both (`#106`).
     pub(crate) schedule_lock: tokio::sync::Mutex<()>,
-    /// The Operations report's triggered signposts, kept for a minute --
-    /// computing them runs the metrics they name. See
-    /// `Engine::triggered_signposts_cached`.
-    pub(crate) signpost_cache: std::sync::Mutex<Option<crate::operations::SignpostCache>>,
+    /// L5's signpost fact provider owns its short cache.
+    pub(crate) signpost_cache: factory_assurance::signposts::Cache,
     /// Serializes a `max_sessions` admission decision with the run it gates
     /// (`#179`): read the live counts, decide, `create_run` -- all under this
     /// one lock, so two dispatches racing for the last slot cannot both take
@@ -475,7 +473,7 @@ impl Engine {
             quality_seen: Default::default(),
             quality_guide_cache: Default::default(),
             schedule_lock: tokio::sync::Mutex::new(()),
-            signpost_cache: std::sync::Mutex::new(None),
+            signpost_cache: factory_assurance::signposts::Cache::default(),
             admission_lock: tokio::sync::Mutex::new(()),
             promotion_lock: tokio::sync::Mutex::new(()),
             intake_receipt_lock: tokio::sync::Mutex::new(()),
@@ -1073,6 +1071,9 @@ impl Engine {
             }
             Request::Scenarios { scope } => Ok(Payload::Scenarios {
                 report: self.scenarios_report(scope.as_deref()).await?,
+            }),
+            Request::Signposts => Ok(Payload::Signposts {
+                fact: self.signposts_fact(chrono::Utc::now(), true).await?,
             }),
             // No event of its own: every fact it reads changes through
             // `TaskUpdated`, `RunUpdated`, `TaskEntry` or `AgentUpdated`

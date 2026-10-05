@@ -131,6 +131,13 @@ port!(
     l5::provider
 );
 port!(
+    SignpostFact,
+    factory_assurance::signposts::Provider<'a, checks::Ports<'a>>,
+    factory_assurance::signposts::Read,
+    SignpostFact,
+    l5::signpost_provider
+);
+port!(
     BackupFact,
     factory_infrastructure::backup_facts::Provider<'a>,
     DateTime<Utc>,
@@ -578,6 +585,7 @@ mod tests {
         registered::<ProductionFact>();
         registered::<ProcessMetricFact>();
         registered::<BenchResolutionFact>();
+        registered::<SignpostFact>();
         registered::<DaemonConfigFact>();
         registered::<BackupFact>();
         registered::<ScopeCapacityFact>();
@@ -823,6 +831,75 @@ mod tests {
             assert!(compact.contains("get::<TaskInventoryFact,_>"));
             assert!(!compact.contains("TaskStore") && !compact.contains("Engine"));
         }
+    }
+
+    #[test]
+    fn signposts_are_computed_in_l5_and_read_directly_by_people_not_operations() {
+        let owner = include_str!("../../../factory-assurance/src/signposts.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let compact: String = owner.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("typeLevel=L5"));
+        assert!(compact.contains("Provide<SignpostFact>"));
+        assert!(
+            compact.contains("self.metrics.gather(") && compact.contains("self.metrics.finish(")
+        );
+        assert!(compact.contains("evaluate_signposts(&scenario.signposts"));
+        for forbidden in [
+            "factory_core",
+            "factory_direction",
+            "factory_interfaces",
+            "Engine",
+            "dyn Fn",
+            "BoxFuture",
+        ] {
+            assert!(
+                !owner.contains(forbidden),
+                "upper/outside backedge in signpost producer: {forbidden}"
+            );
+        }
+        let query = owner
+            .split("pub struct Read")
+            .nth(1)
+            .unwrap()
+            .split("pub fn metric_ids")
+            .next()
+            .unwrap();
+        assert!(
+            !query.contains("MetricValue")
+                && !query.contains("SignpostStatus")
+                && !query.contains("SignpostFact")
+        );
+        let wiring = include_str!("../signposts.rs")
+            .split("#[cfg(test)]\n    pub(crate)")
+            .next()
+            .unwrap();
+        let compact_wiring: String = wiring.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact_wiring.contains("Facts::<People>::new(self).get::<SignpostFact>"));
+        assert!(!wiring.contains("self.metrics("));
+        let operations = include_str!("../operations.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(operations.contains("signposts: Vec::new()"));
+        assert!(
+            !operations.contains("triggered_signposts") && !operations.contains("signpost_cache")
+        );
+        let direction = include_str!("../../../factory-direction/src/scenario.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert!(!direction.contains("fn evaluate_signpost("));
+        assert!(direction.contains("factory_assurance::signposts::Signpost"));
+        let dashboard = include_str!("../../../../ui/js/dashboard.js");
+        assert!(dashboard.contains("api(\"/api/signposts\")"));
+        let schema = FACT_CATALOGUE
+            .iter()
+            .find(|entry| entry.fact == "SignpostFact")
+            .unwrap();
+        assert_eq!(schema.producer, "L5");
+        assert_eq!(schema.readers, ["People Dashboard"]);
     }
 
     #[test]

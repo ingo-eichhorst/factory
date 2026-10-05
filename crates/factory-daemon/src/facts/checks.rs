@@ -9,7 +9,7 @@ use factory_kernel::{
     TaskFact,
 };
 
-struct Ports<'a> {
+pub(crate) struct Ports<'a> {
     process: factory_process::facts::Provider<'a>,
     measurements: factory_process::measurements::MeasurementProvider<'a>,
     agents: factory_agents::roster::Provider,
@@ -99,7 +99,7 @@ impl<'a> MetricPorts for Ports<'a> {
 pub(crate) fn service(
     engine: &Engine,
     scopes: factory_kernel::ScopeTree,
-) -> Service<'_, impl MetricPorts + '_> {
+) -> Service<'_, Ports<'_>> {
     Service::new(
         Ports {
             process: TaskFact::provider(engine),

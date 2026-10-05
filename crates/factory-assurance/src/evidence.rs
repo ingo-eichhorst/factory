@@ -1148,6 +1148,154 @@ mod tests {
         assert_eq!(output.values[1].value, Some(2.0));
         assert!(recorder.calls("production").is_empty() && recorder.calls("attested").is_empty());
     }
+    async fn signpost_read(evidence: &Service<'_, Inputs>) -> crate::signposts::Read {
+        crate::signposts::Read {
+            now: time(),
+            plan: metric_plan(evidence, &["fail_rate"], None).await,
+            scenarios: vec![crate::signposts::ScenarioInput {
+                name: "slow-year".into(),
+                signposts: vec![crate::signposts::Signpost {
+                    metric: metrics::MetricId::new("fail_rate").unwrap(),
+                    below: None,
+                    above: Some(2.0),
+                    from: None,
+                }],
+            }],
+            policy: None,
+            budgets: Ok(BTreeMap::new()),
+            revision: vec![("slow.yaml".into(), None, 1)],
+            use_cache: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn signpost_owner_computes_live_metrics_and_caches_only_successful_revisions() {
+        use crate::signposts::{Cache, Provider};
+        use factory_kernel::{People, SignpostFact};
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let mut read = signpost_read(&evidence).await;
+        let cache = Cache::default();
+        let provider = Provider::new(crate::metrics_service::Service::new(evidence), &cache);
+        let facts = Facts::<People>::new();
+        recorder.generation.store(4, Ordering::SeqCst);
+        let original = facts
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(original.at, read.now);
+        assert_eq!(original.triggered.len(), 1);
+        assert_eq!(original.triggered[0].scenario, "slow-year");
+        assert_eq!(original.triggered[0].metric, "fail_rate");
+        assert_eq!(original.triggered[0].reason, "4 is above 2");
+        assert_eq!(
+            recorder.calls("process"),
+            [vec![String::new(), "fail_rate".into()]]
+        );
+        assert!(cache.is_populated());
+        recorder.generation.store(0, Ordering::SeqCst);
+        read.now += chrono::Duration::seconds(1);
+        assert_eq!(
+            facts
+                .get::<SignpostFact, _>(&provider, &read)
+                .await
+                .unwrap(),
+            original
+        );
+        assert_eq!(recorder.calls("process").len(), 1);
+        read.revision[0].2 = 2;
+        let quiet = facts
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert!(quiet.triggered.is_empty());
+        assert_eq!(quiet.at, read.now);
+        assert_eq!(recorder.calls("process").len(), 2);
+        read.revision[0].2 = 3;
+        *recorder.failing.lock().unwrap() = Some("process");
+        assert!(facts
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .is_err());
+        assert_eq!(recorder.calls("process").len(), 3);
+        *recorder.failing.lock().unwrap() = None;
+        recorder.generation.store(5, Ordering::SeqCst);
+        let retried = facts
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(retried.triggered[0].reason, "5 is above 2");
+        assert_eq!(
+            recorder.calls("process").len(),
+            4,
+            "failed computation was not cached"
+        );
+        assert!(recorder.calls("production").is_empty());
+        assert!(recorder.calls("spend").is_empty());
+        assert!(recorder.calls("backup").is_empty());
+    }
+
+    #[tokio::test]
+    async fn signpost_owner_fresh_reads_preserve_authored_order_and_never_populate_cache() {
+        use crate::signposts::{Cache, Provider, ScenarioInput};
+        use factory_kernel::{People, SignpostFact};
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let mut read = signpost_read(&evidence).await;
+        read.use_cache = false;
+        read.scenarios.push(ScenarioInput {
+            name: "second".into(),
+            signposts: read.scenarios[0].signposts.clone(),
+        });
+        let cache = Cache::default();
+        let provider = Provider::new(crate::metrics_service::Service::new(evidence), &cache);
+        let facts = Facts::<People>::new();
+        recorder.generation.store(3, Ordering::SeqCst);
+        let fact = facts
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(
+            fact.triggered
+                .iter()
+                .map(|r| r.scenario.as_str())
+                .collect::<Vec<_>>(),
+            ["slow-year", "second"]
+        );
+        recorder.generation.store(2, Ordering::SeqCst);
+        assert!(facts
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .unwrap()
+            .triggered
+            .is_empty());
+        assert_eq!(recorder.calls("process").len(), 2);
+        assert!(!cache.is_populated());
+    }
+
+    #[tokio::test]
+    async fn signpost_owner_empty_inputs_do_not_probe_any_lower_fact() {
+        use crate::signposts::{Cache, Provider};
+        use factory_kernel::{People, SignpostFact};
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let mut read = signpost_read(&evidence).await;
+        read.plan = metric_plan(&evidence, &[], None).await;
+        read.scenarios.clear();
+        let cache = Cache::default();
+        let provider = Provider::new(crate::metrics_service::Service::new(evidence), &cache);
+        assert!(Facts::<People>::new()
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .unwrap()
+            .triggered
+            .is_empty());
+        assert!(recorder.calls.lock().unwrap().is_empty());
+    }
+
     fn subject(evidence: Vec<Check>) -> EvaluationSubject {
         EvaluationSubject {
             control: "test/check".parse().unwrap(),

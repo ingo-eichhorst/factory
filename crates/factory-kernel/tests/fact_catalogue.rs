@@ -16,6 +16,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<ProductionFact, L4>("ProductionFact", "L4");
     assert_producer::<ProcessMetricFact, L4>("ProcessMetricFact", "L4");
     assert_producer::<BenchResolutionFact, L5>("BenchResolutionFact", "L5");
+    assert_producer::<SignpostFact, L5>("SignpostFact", "L5");
     assert_producer::<InfrastructureExpiryFact, L1>("InfrastructureExpiryFact", "L1");
     assert_producer::<RenewalDeclarationsFact, L1>("RenewalDeclarationsFact", "L1");
     assert_producer::<CredentialExpiryFact, L2>("CredentialExpiryFact", "L2");
@@ -64,6 +65,24 @@ fn task_inventory_is_plain_metadata_and_preserves_label_defaults() {
 }
 
 #[test]
+fn signpost_fact_roundtrips_as_plain_read_only_observations() {
+    let fact = SignpostFact {
+        at: "2026-10-16T00:00:00Z".parse().unwrap(),
+        triggered: vec![SignpostObservation {
+            scenario: "slow-year".into(),
+            metric: "fail_rate".into(),
+            reason: "4 is above 2".into(),
+        }],
+    };
+    let json = serde_json::to_value(&fact).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"at": "2026-10-16T00:00:00Z", "triggered": [{"scenario":"slow-year", "metric":"fail_rate", "reason":"4 is above 2"}]})
+    );
+    assert_eq!(serde_json::from_value::<SignpostFact>(json).unwrap(), fact);
+}
+
+#[test]
 fn sandbox_service_evidence_roundtrips_in_l0_with_unknown_empty_defaults() {
     let empty: SandboxServiceEvidenceFact = serde_json::from_value(serde_json::json!({"scope": "demo"})).unwrap();
     assert!(empty.captures.is_empty() && empty.findings.is_empty());
@@ -103,6 +122,7 @@ fn renewal_fact_metadata_and_nested_dependencies_roundtrip_without_core() {
 fn catalogue_is_complete_unique_and_has_readers() {
     let mut expected = vec![
         "ProductionFact", "ProcessMetricFact", "BenchResolutionFact",
+        "SignpostFact",
         "InfrastructureExpiryFact", "CredentialExpiryFact", "ScheduledRunDatesFact",
         "RenewalDeclarationsFact",
         "DaemonConfigFact",

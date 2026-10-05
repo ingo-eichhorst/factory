@@ -133,7 +133,9 @@
 use crate::goals::KrRef;
 use crate::policy::{self, ControlRef, ControlStatus, PolicyLayer};
 use chrono::{DateTime, NaiveDate, Utc};
-use factory_assurance::metrics::{self, MetricError, MetricId, MetricSeries, MetricValue};
+use factory_assurance::metrics::{self, MetricError, MetricId, MetricSeries};
+#[cfg(test)]
+use factory_assurance::metrics::MetricValue;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -311,22 +313,7 @@ pub enum RawOverride {
     Number(f64),
 }
 
-/// A threshold on a registry metric, watched on every read -- "is reality
-/// moving towards this scenario". Never itself starts, stops, or gates
-/// anything (design §8, same as everywhere else in this module); see
-/// [`evaluate_signposts`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Signpost {
-    pub metric: MetricId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub below: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub above: Option<f64>,
-    /// Inactive before this date -- `None` means active immediately.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<NaiveDate>,
-}
+pub use factory_assurance::signposts::Signpost;
 
 /// The qualitative workshop layer -- a 2x2's axes and chosen quadrant,
 /// PESTLE drivers, a pre-mortem's list of things that went wrong. Free text,
@@ -1669,110 +1656,7 @@ pub fn goal_probability(
 
 // ================================================================ signposts
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SignpostState {
-    /// Active and within bounds.
-    Quiet,
-    /// Active and past a threshold.
-    Triggered,
-    /// Before its own `from` date.
-    NotYetActive,
-    /// Active, but there is no metric value to check it against.
-    NoData,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SignpostStatus {
-    pub metric: MetricId,
-    pub state: SignpostState,
-    pub reason: String,
-}
-
-/// Evaluate every signpost against `values` (already-computed metric
-/// values, `factory-daemon`'s job to gather, exactly like `goals::evaluate`
-/// takes them) as of `now`. Preserves `signposts`' own order -- like an
-/// objective's key results in `goals.rs`, that order is itself information
-/// (an author's own priority), not something to sort away.
-///
-/// `below`/`above` are both checked when both are set -- `Triggered` if
-/// either is breached -- rather than one refusing the other, since a
-/// two-sided band (e.g. "watch if this share leaves 0.4..0.8") is a
-/// legitimate signpost, not an authoring mistake; [`load`] never requires
-/// exactly one, only that at least one is set
-/// ([`FindingKind::SignpostMissingThreshold`]). Both comparisons are
-/// strict (`<`/`>`): a value sitting exactly on a threshold reads `Quiet`,
-/// the same "not yet past it" reading `within_max_age`'s own `<=` gives a
-/// control right at its freshness window in `policy.rs`.
-pub fn evaluate_signposts(
-    signposts: &[Signpost],
-    values: &BTreeMap<MetricId, MetricValue>,
-    now: DateTime<Utc>,
-) -> Vec<SignpostStatus> {
-    signposts
-        .iter()
-        .map(|sp| evaluate_signpost(sp, values, now))
-        .collect()
-}
-
-fn evaluate_signpost(
-    sp: &Signpost,
-    values: &BTreeMap<MetricId, MetricValue>,
-    now: DateTime<Utc>,
-) -> SignpostStatus {
-    if let Some(from) = sp.from {
-        let start = from.and_hms_opt(0, 0, 0).unwrap().and_utc();
-        if now < start {
-            return SignpostStatus {
-                metric: sp.metric.clone(),
-                state: SignpostState::NotYetActive,
-                reason: format!("active from {from}"),
-            };
-        }
-    }
-
-    let Some(mv) = values.get(&sp.metric) else {
-        return SignpostStatus {
-            metric: sp.metric.clone(),
-            state: SignpostState::NoData,
-            reason: "no metric value supplied".to_string(),
-        };
-    };
-    let Some(value) = mv.value else {
-        let reason = mv
-            .reason
-            .clone()
-            .unwrap_or_else(|| "no reason given".to_string());
-        return SignpostStatus {
-            metric: sp.metric.clone(),
-            state: SignpostState::NoData,
-            reason,
-        };
-    };
-
-    let below_hit = sp.below.is_some_and(|t| value < t);
-    let above_hit = sp.above.is_some_and(|t| value > t);
-    if below_hit || above_hit {
-        let mut parts = Vec::new();
-        if below_hit {
-            parts.push(format!("{value} is below {}", sp.below.unwrap()));
-        }
-        if above_hit {
-            parts.push(format!("{value} is above {}", sp.above.unwrap()));
-        }
-        SignpostStatus {
-            metric: sp.metric.clone(),
-            state: SignpostState::Triggered,
-            reason: parts.join("; "),
-        }
-    } else {
-        SignpostStatus {
-            metric: sp.metric.clone(),
-            state: SignpostState::Quiet,
-            reason: format!("{value} within bounds"),
-        }
-    }
-}
+pub use factory_assurance::signposts::{SignpostState, SignpostStatus, evaluate_signposts};
 
 #[cfg(test)]
 mod tests {

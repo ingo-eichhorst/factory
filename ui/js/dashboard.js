@@ -46,13 +46,16 @@
 //! render cycle and only when the resolved layout actually names a tile
 //! that needs it (`neededEndpoints`/`neededMetricIds`,
 //! `dashboard-tiles-model.js`): the default layout names none of them, so it
-//! starts no new request. `/api/metrics`, `/api/occupancy` and `/api/costs`
+//! starts no new tile request. `/api/metrics`, `/api/occupancy` and `/api/costs`
 //! follow the dashboard's own window the same as `/api/production` does, so
 //! a window change refetches all four (`reloadTileData`); `/api/policy` and
 //! `/api/operations` do not, and only reload with the layout, on a scope
 //! change. `/api/occupancy` carries no `scope` on the wire at all
 //! (`Request::Occupancy`) -- every tile reading it narrows client-side with
 //! `inScope`, the same as the occupancy chart itself.
+//! Signposts are separate read-only observations: `/api/signposts` is read
+//! once per load even on the default layout, never through Operations or
+//! counted as waiting Inbox work.
 //!
 //! Recent events: dropped, on purpose, rather than duplicated. Activity
 //! already is that view -- a tail of what this page has seen since it opened,
@@ -76,6 +79,7 @@ import { $, esc, api, state } from "./core.js";
 import { inScope, routeHref, scopeLabel } from "./scopes.js";
 import { ACTION_LABELS, actionRequest, fmtAge, inboxItems } from "./operations-model.js";
 import { inboxClockRows } from "./clock-model.js";
+import { signpostObservations } from "./signposts-model.js";
 import { fetchDates } from "./dates.js";
 import { renewalInboxRows, datesSummary } from "./dates-model.js";
 import { taskUsageLine, costFigure } from "./usage-model.js";
@@ -177,7 +181,8 @@ export async function loadDashboard() {
   // only once the layout is resolved does anything know which of the new
   // shared reads (if any) the tiles on it actually need.
   await Promise.all([loadProduction(), loadLayout()]);
-  await loadTileData(resolveDashboard(layoutTiles));
+  const tiles = resolveDashboard(layoutTiles);
+  await Promise.all([loadTileData(tiles), neededEndpoints(tiles).operations ? Promise.resolve() : loadSignposts()]);
   renderDashboard();
 }
 
@@ -310,6 +315,7 @@ function renderDashSource() {
 }
 
 export function renderDashboard() {
+  renderSignposts();
   renderDashSource();
   const el = $("dash");
   if (!el) return;
@@ -958,6 +964,8 @@ let inboxReport;
 /// `inboxClockRows` already returns `[]` for a `null` clock (`clock-model.js`).
 let clockReport;
 let renewalReport;
+let signpostReport;
+let signpostsAsked = 0;
 let inboxAsked = 0;
 let inboxReceivedAt = 0; // when it arrived, on this browser's clock -- ages grow from there
 
@@ -966,6 +974,31 @@ async function fetchOperationsReport() {
     return (await api("/api/operations")).report;
   } catch {
     return null;
+  }
+}
+
+async function loadSignposts() {
+  const mine = ++signpostsAsked;
+  let fact;
+  try {
+    fact = (await api("/api/signposts")).fact;
+    if (!fact || !Array.isArray(fact.triggered)) fact = null;
+  } catch { fact = null; }
+  if (mine !== signpostsAsked) return;
+  signpostReport = fact;
+  renderSignposts();
+}
+
+function renderSignposts() {
+  const rows = signpostObservations(signpostReport, routeHref(null, "scenarios"));
+  for (const id of ["dash-signposts", "inbox-signposts"]) {
+    const host = $(id);
+    if (!host) continue;
+    host.hidden = signpostReport !== null && rows.length === 0;
+    host.innerHTML = signpostReport === null
+      ? '<p class="sub">Scenario observations are unavailable; process attention is separate.</p>'
+      : '<h3>Scenario observations</h3><p class="sub">Read-only signposts; no automatic action.</p><div class="inbox-list">' + rows.map(inboxItemRow).join("") + "</div>";
+    wireInboxRows(host);
   }
 }
 
@@ -1014,7 +1047,7 @@ export async function loadInbox() {
   // Two refetches can overlap; only the newest one's answer is drawn, or a
   // slow old read could land last and bring back what was just resolved.
   const mine = ++inboxAsked;
-  const [ops, clock, renewals] = await Promise.all([fetchOperationsReport(), fetchClock(), fetchDates()]);
+  const [ops, clock, renewals] = await Promise.all([fetchOperationsReport(), fetchClock(), fetchDates(), loadSignposts()]);
   if (mine !== inboxAsked) return;
   inboxReport = ops;
   clockReport = clock;

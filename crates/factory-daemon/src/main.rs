@@ -43,6 +43,7 @@ mod quality;
 mod resume;
 mod roles;
 mod scenarios;
+mod signposts;
 mod scheduler;
 mod secrets;
 mod service_observations;

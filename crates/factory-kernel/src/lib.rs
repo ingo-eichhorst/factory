@@ -91,6 +91,7 @@ pub use facts::{
     GateFact, RunFact, TaskFact, TaskInventoryFact, WorkflowFact, WorkflowRunFact,
 };
 pub use facts::TaskSnapshotFact;
+pub use facts::{SignpostFact, SignpostObservation};
 pub use facts::{
     BackupFact, DaemonConfigFact, Fact, FactCatalogueEntry, Level, SecretsPresence, VerifySummary,
     FACT_CATALOGUE, KNOWN_DAEMON_FACTS, KNOWN_SECRETS_LOCATIONS, L1, L2, L3, L4, L5, L6,

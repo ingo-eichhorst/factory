@@ -1850,14 +1850,16 @@ reads — `Quiet`, `Triggered`, `NotYetActive` (before its own `from`), or
 `NoData`. Never itself starts, stops, or gates anything (design §8). A
 triggered signpost is meant to be visible outside the Scenarios tab too —
 on the dashboard, in the inbox, as an **observation**, never an automatic
-consequence. The Inbox (`ui/js/dashboard.js`'s `inboxItems`) is built
-entirely client-side, off the task list alone, with no daemon-side inbox
-aggregate to add to; instead, `ScenariosReport::triggered` flattens every
-currently-`Triggered` signpost across every scenario, named alongside the
-scenario it belongs to, so a dashboard or inbox reader does not have to
-walk every card itself. The L6 Scenarios UI slice
-(`ui/js/{scenarios,scenarios-model}.js`, not part of this slice) is
-expected to read this field and render it on the dashboard. A signpost
+consequence. L5 owns the canonical threshold evaluator and live
+`SignpostFact` provider; it computes the named metrics itself. The Dashboard
+and Inbox read `GET /api/signposts` directly through the people-side fact
+channel, not through Operations or an L6 report. They render observations in
+a separate section with no task actions and no contribution to the waiting
+count. A failed read shows an availability warning, not an empty success.
+The provider may reuse a successful fact for a minute while scenario-file
+metadata is unchanged; errors are not cached. `ScenariosReport::triggered`
+keeps its existing flattened wire projection and shares the L5 evaluator.
+A signpost
 names any registry metric with no scenario code of its own required to
 support it -- `backup_age_hours` and `backup_verified_age_days` (`#154`,
 "Policy facts and metrics" under "Backup") work exactly the same way as
@@ -2640,8 +2642,9 @@ the queue however long ago it failed -- open runs' own journals for their last w
 blocked run's reason, `schedule_skipped` entries from the last day, and
 answers and run requests over both windows (`TaskStore::entries_of_kinds`,
 one query rather than a walk over every journal; a store that cannot search
-returns nothing). Triggered signposts are reused for a minute while the
-scenario files are unchanged -- computing them runs the metrics they name.
+returns nothing). Operations never gathers signposts. The Dashboard reads
+their separate L5 fact; signpost evaluation and its short cache do not belong
+to process attention.
 
 **Exceptions.** Only what a person can act on:
 
@@ -2654,7 +2657,6 @@ scenario files are unchanged -- computing them runs the metrics they name.
 | `schedule_late` | a slot passed two ticks ago and nothing was dispatched | medium |
 | `schedule_missed` | slots the scheduler passed over (`schedule_skipped`) in the last day | medium |
 | `liveness_lost` | a **permanent** agent's session is gone -- never judged on being quiet | high |
-| `triggered_signpost` | a scenario signpost is past its threshold -- an observation, on the unscoped report only | low |
 
 A run appears once, as its most severe kind, with any other kinds it matched
 in `also`. Each exception lists the actions it allows.
@@ -5046,7 +5048,7 @@ ports, preserving unknown values, existing window rules, scoped production
 and series/current-value agreement. Production's old wire names re-export
 the L0 schema unchanged. Shared subtree resolution now belongs to the common
 scope model, not L6 Policy, so lower levels do not import a policy helper.
-This does not finish the evaluator, signpost, crate or service migrations.
+This does not finish the complete live service migration.
 
 Standing-task inventory reads also use an L4-owned port. Its L0 metadata
 contains the task id, title, persisted scope, labels and authoritative
@@ -5102,8 +5104,8 @@ OpenShell execution/cleanup records and its evidence collector move together
 into L2, with canonical daemon re-exports. Their command argv, ownership checks,
 fail-closed behavior, evidence bounds/redaction and restart/cleanup contracts
 stay the same. Attachment authorization and task journaling still sit outside
-L2 pending the strict adjacent-command migration. The six-service, signpost and
-upper-level routing work remain unfinished.
+L2 pending the strict adjacent-command migration. The complete six-service
+split and remaining adjacent command paths are unfinished.
 
 L3's `factory-agents` owns standing-agent state, role resolution, harness
 health, both agent adapter traits and the cumulative session-usage contract.
@@ -5168,8 +5170,8 @@ hub or agent-lifecycle dependency enters L5. Stored and wire JSON is unchanged.
 The benchmark progress backstop has an independent L5 timer: immediate first
 tick, the same startup cadence, delayed missed ticks, one sweep at a time and
 explicit shutdown. L4's process scheduler no longer sweeps benchmark runs.
-Full provider/service isolation, signposts and remediation/promotion routing
-remain unfinished.
+Complete live service isolation and the remaining adjacent command paths
+are unfinished.
 
 `Task.bench_origin` is an L4 `OriginRef`, opaque to process. It has no
 benchmark-field API; the benchmark owner alone decodes its legacy object
@@ -5233,8 +5235,7 @@ adapter methods intact. The observer stream remains lossy, with no subscribers
 normal and whole-run tokens/digests redacted before publication; it is not a
 fact log. Concrete HTTP/socket mounts, the actual router and its single
 `Engine::handle(Envelope)`/`access.rs` authorization entry remain in the daemon.
-Moving page projections does not isolate their live gatherers or claim to
-finish the Operations signpost reader move.
+Moving page projections does not isolate all their live gatherers.
 
 The live benchmark resolution, gate and knowledge-tag providers now live in
 L5's `factory-assurance`, holding only its benchmark store and instance root.
@@ -5302,14 +5303,23 @@ profile loading, fingerprints and recursion-safe metric dependencies live
 there too. L6 projects raw applicable controls, receipts and budget limits;
 L5 evaluates them, never asking for a Policy page or accepting an upper-level
 rollup. The outside request retains historical Policy page failure preflights
-without passing their decorations into L5. Signposts and the complete
-six-service split still remain.
+without passing their decorations into L5.
+
+Signposts are an actual L5-produced L0 fact. The provider receives raw
+authored thresholds, policy subjects, receipts and caps, then uses L5's live
+metric service and canonical evaluator itself. It holds no Engine callback
+and accepts no precomputed metric values or upper-level verdicts. Its own
+short in-memory cache preserves successful snapshots only, invalidates on
+scenario-file metadata changes and never persists a status table. Dashboard
+and Inbox read the people-side fact directly; Operations never gathers it.
+Authored scenario intent remains in L6, which re-exports the canonical L5
+threshold/evaluator types for unchanged scenario projections.
 
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),
 with ADR 0004 amended to name the evidence channel. Every registered fact
-provider has a physical producing-level owner. The signpost producer/reader
-move, six complete live services and the other adjacent command paths remain
+provider has a physical producing-level owner. Six complete live services
+and the other adjacent command paths remain
 in #193.
 
 ## Layout

@@ -653,6 +653,30 @@ impl Fact for AttestedRun {
 }
 // =============================================================== catalogue
 
+/// A current observation, not a task, command or stored scenario status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignpostObservation {
+    pub scenario: String,
+    pub metric: String,
+    pub reason: String,
+}
+/// L5 observations cannot be read downward by L4 Operations.
+///
+/// ```compile_fail
+/// use factory_kernel::{Facts, Provide, SignpostFact, L4};
+/// async fn downward<P: Provide<SignpostFact>>(provider: &P, query: &P::Query) {
+///     Facts::<L4>::new().get::<SignpostFact, P>(provider, query).await;
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignpostFact {
+    pub at: DateTime<Utc>,
+    pub triggered: Vec<SignpostObservation>,
+}
+impl Fact for SignpostFact {
+    type Producer = L5;
+}
+
 /// One row of [`FACT_CATALOGUE`]: a fact's name, the level that produces it,
 /// which levels read it today, and where its shared schema lives.
 #[derive(Debug, Clone, Copy)]
@@ -671,6 +695,10 @@ pub struct FactCatalogueEntry {
 /// a wrong level reader a compile error instead of a comment. All listed schemas
 /// and their nested vocabulary now live in L0.
 pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
+    FactCatalogueEntry {
+        fact: "SignpostFact", producer: "L5", readers: &["People Dashboard"],
+        lives_in_kernel: true, note: "live metric-backed scenario observations, with no automatic consequences",
+    },
     FactCatalogueEntry {
         fact: "ProductionFact", producer: "L4", readers: &["L6 metrics and Scenarios", "People production"],
         lives_in_kernel: true, note: "live production buckets with the producer's rework and scope rules",

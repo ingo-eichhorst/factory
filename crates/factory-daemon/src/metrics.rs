@@ -62,7 +62,7 @@ impl Engine {
         service.finish(&plan, gathered, &budgets, now, window).await
     }
 
-    async fn metric_quality_budgets(
+    pub(crate) async fn metric_quality_budgets(
         &self,
         snapshot: &factory_core::config::Factory,
         plan: &factory_assurance::metrics_service::Plan,
