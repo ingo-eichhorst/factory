@@ -543,9 +543,14 @@ impl TaskStore for SqliteStore {
     async fn create_run(&self, new: &NewRun) -> Result<Run> {
         let new = new.clone();
         self.with_conn(move |conn| {
-            // One transaction, so the attempt number a run gets cannot be the
-            // one another dispatch is about to take.
-            let tx = conn.transaction().map_err(adapter_err)?;
+            // Reserve the writer before reading the next attempt. A deferred
+            // WAL read cannot upgrade while another owner's connection writes;
+            // that fails immediately, even with a busy timeout, and strands a
+            // released workflow node without a run. The run and task mirror
+            // still commit atomically in the same transaction.
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(adapter_err)?;
 
             let attempt: u32 = tx
                 .query_row(
@@ -1623,5 +1628,67 @@ mod tests {
         let own: Vec<String> = store.task_own_entries("t", 200).await.unwrap().into_iter().map(|e| e.kind).collect();
         assert_eq!(own, vec!["schedule_paused", "schedule_resumed"], "oldest first, no run's lines");
         assert_eq!(store.task_own_entries("t", 1).await.unwrap()[0].kind, "schedule_resumed", "the newest when limited");
+    }
+
+    #[tokio::test]
+    async fn run_allocation_waits_for_an_independent_wal_writer_before_reading_its_attempt() {
+        use std::time::Duration;
+        struct Root(std::path::PathBuf);
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let root =
+            Root(std::env::temp_dir().join(format!("factory-run-writer-{}", uuid::Uuid::new_v4())));
+        std::fs::create_dir_all(&root.0).unwrap();
+        let database = root.0.join("tasks.sqlite");
+        let store = Arc::new(SqliteStore::open(&database).unwrap());
+        store.create(&sample_task("queued")).await.unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .busy_timeout(Duration::from_secs(2))
+            .unwrap();
+        let mut writer = Connection::open(&database).unwrap();
+        writer.execute_batch("CREATE TABLE other_owner (id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO other_owner VALUES (1, 0);").unwrap();
+        let transaction = writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        transaction
+            .execute("UPDATE other_owner SET value = 1 WHERE id = 1", [])
+            .unwrap();
+        let allocator = store.clone();
+        let mut pending =
+            tokio::spawn(async move { allocator.create_run(&sample_new_run("queued")).await });
+        // Wait until the allocator has entered its own connection, not for an
+        // arbitrary delay before the blocking worker has even been scheduled.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if pending.is_finished() || store.conn.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let early = tokio::time::timeout(Duration::from_millis(100), &mut pending).await;
+        transaction.commit().unwrap();
+        assert!(early.is_err(), "allocation must wait at its write reservation, not read a WAL snapshot then fail to upgrade: {early:?}");
+        let run = pending.await.unwrap().unwrap();
+        assert_eq!(run.attempt, 1);
+        let task = store.get("queued").await.unwrap().unwrap();
+        assert_eq!(task.runs, 1);
+        assert_eq!(task.status, TaskStatus::Dispatching);
+        assert_eq!(store.runs("queued", 10).await.unwrap().len(), 1);
+        assert_eq!(
+            writer
+                .query_row::<i64, _, _>("SELECT value FROM other_owner WHERE id = 1", [], |row| row
+                    .get(0))
+                .unwrap(),
+            1
+        );
     }
 }

@@ -2111,3 +2111,120 @@ fn policy_service_uses_live_l5_check_results_and_maps_real_reported_runs_after_r
     assert_eq!(restored["detail"]["status"]["status"], "satisfied");
     assert_eq!(restored["detail"]["refs"], detail["detail"]["refs"]);
 }
+
+#[test]
+fn waiting_restart_repeatedly_retains_dispatch_and_completion_evidence() {
+    if missing_prerequisites() {
+        return;
+    }
+    fn redact(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                map.retain(|key, _| !key.to_ascii_lowercase().contains("token"));
+                for child in map.values_mut() {
+                    redact(child);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    redact(child);
+                }
+            }
+            Value::String(text)
+                if text.contains("--token") || text.contains("FACTORY_RUN_TOKEN") =>
+            {
+                *text = "<redacted reporting command>".into()
+            }
+            _ => {}
+        }
+    }
+    for trial in 0..8 {
+        let mut daemon = provision();
+        let base = daemon.base_url();
+        let release = daemon.root.join("release-parent");
+        let instruction = format!(
+            "while ! test -f '{}'; do sleep 0.1; done; printf 'bound at dispatch\\n'",
+            release.display()
+        );
+        let url = format!("{base}/api/workflows");
+        let created = expect_ok(
+            &url,
+            &post(
+                &url,
+                &json!({"name":"waiting", "scope":"demo", "nodes":[task_node("parent", &instruction), task_node("child", "cat \"$FACTORY_UPSTREAM_FILE\"")], "edges":[edge("parent-child", "parent", "child")]}),
+            ),
+        );
+        let start_url = format!("{url}/{}/run", created["workflow"]["id"].as_str().unwrap());
+        let started = expect_ok(&start_url, &post(&start_url, &json!({})));
+        let run_id = started["run"]["id"].as_str().unwrap();
+        let initial = tasks(&base);
+        let parent = initial
+            .iter()
+            .find(|task| task["title"] == "parent")
+            .unwrap();
+        let child = initial
+            .iter()
+            .find(|task| task["title"] == "child")
+            .unwrap();
+        assert_eq!(child["after"], json!([parent["id"]]));
+        let (_, refusal) = raw_request(
+            "POST",
+            &format!("{base}/api/tasks/{}/run", child["id"].as_str().unwrap()),
+            Some(&json!({})),
+        )
+        .unwrap();
+        assert!(refusal.contains("override-wait"));
+        wait_for("parent launch", Duration::from_secs(15), || {
+            tasks(&base)
+                .into_iter()
+                .find(|task| task["id"] == parent["id"] && task["status"] == "running")
+        });
+        daemon.sigterm();
+        daemon.spawn();
+        std::fs::write(&release, b"released").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let final_run = loop {
+            let run = run_status(&base, run_id);
+            if run["status"] == "done" || Instant::now() >= deadline {
+                break run;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        };
+        if final_run["status"] != "done" {
+            let mut observations =
+                json!({"trial":trial, "workflow_run": final_run, "tasks": tasks(&base)});
+            for task in [&parent, &child] {
+                let id = task["id"].as_str().unwrap();
+                for suffix in ["runs", "entries", "output"] {
+                    let url = format!("{base}/api/tasks/{id}/{suffix}");
+                    if let Some((code, body)) = raw_request("GET", &url, None) {
+                        observations[format!("{}-{suffix}", task["title"].as_str().unwrap())] = json!({"http":code, "body":serde_json::from_str::<Value>(&body).unwrap_or(Value::String(body))});
+                    }
+                }
+            }
+            redact(&mut observations);
+            eprintln!(
+                "WAITING_RESTART_OBSERVATIONS {}",
+                serde_json::to_string_pretty(&observations).unwrap()
+            );
+            let log = std::fs::read_to_string(daemon.root.join("daemon.log")).unwrap_or_default();
+            for line in log
+                .lines()
+                .rev()
+                .take(100)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
+                if !line.to_ascii_lowercase().contains("token") {
+                    eprintln!("DAEMON {line}");
+                }
+            }
+        }
+        assert_eq!(
+            final_run["status"], "done",
+            "trial {trial} failed after restart; diagnostics above"
+        );
+        eprintln!("waiting restart trial {trial} completed");
+    }
+}
