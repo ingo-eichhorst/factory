@@ -2,12 +2,19 @@
 //! match into a compliance verdict or a claim of complete service usage.
 import { esc } from "./core.js";
 
+// OpenShell's own `[reason:...]` text (#274) for a connection cut only
+// because the sandbox's policy was mid-switch, not refused on its merits.
+// An exact match on OpenShell's wording: any other reason -- including an
+// absent one -- stays an ordinary, unlabeled denial.
+const STALE_POLICY_REASON = "policy generation is stale";
+export const isTransientPolicySwitch = (access) => access?.reason === STALE_POLICY_REASON;
+
 export function observedAccesses(evidence) {
   const unique = new Map();
   for (const capture of evidence?.captures || []) {
     for (const access of capture.accesses || []) {
       const key = JSON.stringify([capture.run_id, access.at, access.transport,
-        access.target, access.disposition, access.process, access.policy]);
+        access.target, access.disposition, access.process, access.policy, access.reason]);
       if (!unique.has(key)) unique.set(key, { ...access, capture });
     }
   }
@@ -37,8 +44,14 @@ export function observedCell(service, evidence) {
   const rows = matchingAccesses(service, evidence);
   if (!rows.length) return '<span class="sub">unknown · no matching access evidence</span>';
   const counts = new Map();
-  for (const row of rows) counts.set(row.disposition, (counts.get(row.disposition) || 0) + 1);
-  return [...counts].map(([disposition, count]) => `${esc(count)} ${esc(disposition)}`).join(" · ")
+  for (const row of rows) {
+    // A transient policy-switch refusal counts apart from an ordinary
+    // denial of the same disposition; it is never folded into it, and
+    // never dropped from the count either.
+    const label = isTransientPolicySwitch(row) ? `${row.disposition} (policy switch)` : row.disposition;
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  return [...counts].map(([label, count]) => `${esc(count)} ${esc(label)}`).join(" · ")
     + '<div class="sub">partial log · same endpoint, not a verdict</div>';
 }
 
@@ -52,9 +65,10 @@ export function evidenceCards(evidence) {
     ${capture.issue ? `<p class="env-note">${esc(capture.issue)}</p>` : ""}
   </details>`).join("");
   const accesses = rows.map((row) => `<article class="dep-doc">
-    <strong>${esc(row.transport)} <code>${esc(row.target)}</code></strong> · ${esc(row.disposition)}
+    <strong>${esc(row.transport)} <code>${esc(row.target)}</code></strong> · ${esc(row.disposition)}${isTransientPolicySwitch(row)
+      ? ' <span class="sub">(policy switch, transient -- not a refusal)</span>' : ""}
     <div class="sub">${esc(row.at)} · ${esc(row.capture.agent)} · run <code>${esc(row.capture.run_id)}</code></div>
-    <div class="sub">${esc(row.process || "process unknown")} · policy ${esc(row.policy || "unknown")}</div>
+    <div class="sub">${esc(row.process || "process unknown")} · policy ${esc(row.policy || "unknown")}${row.reason ? ` · reason ${esc(row.reason)}` : ""}</div>
   </article>`).join("");
   const empty = rows.length ? "" : '<p class="empty">Access is unknown: no supported access records in the available evidence.</p>';
   return '<p class="env-note">Observed requests, not a compliance verdict. Evidence is a bounded, partial log; no record does not mean no access. Socket and file use need actual access records; configured paths and listeners are not observations.</p>'

@@ -196,6 +196,13 @@ pub fn parse(logs: &str) -> Vec<ObservedServiceAccess> {
             .and_then(|(_, value)| value.split([' ', ']']).next())
             .filter(|value| safe_text(value, 256))
             .map(str::to_string);
+        // Unlike `[policy:...]`, a reason is prose and can contain spaces
+        // ("policy generation is stale"), so split only on the closing `]`.
+        let reason = detail
+            .split_once("[reason:")
+            .and_then(|(_, value)| value.split(']').next())
+            .filter(|value| safe_text(value, 256))
+            .map(str::to_string);
         rows.push(ObservedServiceAccess {
             at,
             transport: ObservedTransport::Network,
@@ -203,6 +210,7 @@ pub fn parse(logs: &str) -> Vec<ObservedServiceAccess> {
             disposition,
             process,
             policy,
+            reason,
         });
     }
     normalize(&mut rows);
@@ -532,6 +540,10 @@ fn archived(
                             .policy
                             .as_ref()
                             .is_some_and(|value| !safe_text(value, 256))
+                        || row
+                            .reason
+                            .as_ref()
+                            .is_some_and(|value| !safe_text(value, 256))
                 })
             {
                 return Err(std::io::Error::new(
@@ -771,7 +783,9 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].at.timestamp_millis(), 1775014132118);
         assert_eq!(rows[0].target, "api.github.com:443");
+        assert_eq!(rows[0].reason, None);
         assert_eq!(rows[1].disposition, AccessDisposition::Denied);
+        assert_eq!(rows[1].reason.as_deref(), Some("no matching policy"));
         assert_eq!(rows[2].target, "api.github.com:443");
         assert!(!serde_json::to_string(&rows)
             .unwrap()
@@ -1001,9 +1015,28 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows[0].process.is_none());
         assert_eq!(rows[0].target, "host.openshell.internal:18958");
+        // The reason is prose with spaces; splitting on `]` alone (not on
+        // space, as `[policy:...]` does) must keep it whole.
+        assert_eq!(rows[0].reason.as_deref(), Some("policy generation is stale"));
         assert_eq!(rows[1].target, "198.18.0.2:1");
+        assert_eq!(rows[1].reason, None);
         assert!(rows
             .iter()
             .all(|row| row.disposition == AccessDisposition::Denied));
+    }
+
+    #[tokio::test]
+    async fn an_unsafe_reason_is_rejected_by_the_archive_the_same_way_an_unsafe_policy_is() {
+        let rig = Rig::new();
+        let mut capture = collect(&rig.context, &rig.teardown).await;
+        capture.accesses[0].reason = Some("control\u{0}char".into());
+        capture.id = capture_identity(&rig.context.instance, &rig.context.scope, &capture);
+        save(&rig.context, &rig.teardown, &capture).unwrap();
+        let fact = archived(&rig.root, "inst", "demo").unwrap();
+        assert!(fact.captures.is_empty());
+        assert!(fact
+            .findings
+            .iter()
+            .any(|row| row.contains("could not be read safely")));
     }
 }
