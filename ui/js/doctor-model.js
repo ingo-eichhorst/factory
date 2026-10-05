@@ -65,3 +65,16 @@ function startedLine(row) {
   const how = row.started_with ? " with " + row.started_with : "";
   return "started by Factory at " + row.started_at + how;
 }
+
+/// The server observed a failed rebuild and an older selected image. Never
+/// infer failure from a Ready agent or from an image's filename alone.
+export function imageFailureSummary(row) {
+  return {
+    name: `${row?.scope || "?"} / ${row?.agent || "?"}`,
+    key: row?.failure?.expected_key || "unknown",
+    reason: row?.failure?.reason || "build failed",
+    since: row?.failure?.since || "unknown",
+    image: row?.image || "unknown",
+    command: row?.failure?.command || null,
+  };
+}

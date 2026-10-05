@@ -46,6 +46,7 @@ pub(crate) fn project(
         running,
         findings,
         openshell: Vec::new(),
+        openshell_image_failures: Vec::new(),
     }
 }
 
@@ -70,6 +71,7 @@ impl Engine {
         // The OpenShell gateways sandboxed agents use, as the provisioner
         // last found them -- and whether it had to start one (`#234`).
         report.openshell = self.provision.gateway_rows();
+        report.openshell_image_failures = self.provision.image_failures();
         Ok(report)
     }
 }

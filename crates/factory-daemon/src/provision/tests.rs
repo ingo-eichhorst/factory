@@ -479,6 +479,59 @@ async fn an_agent_that_names_nothing_the_daemon_keeps_is_checked_but_never_gated
 }
 
 #[tokio::test]
+async fn failed_rebuild_keeps_old_image_usable_but_is_visible_until_recovery() {
+    let f = fixture(&MANAGED.replace("image: ROOT/image.tar.gz\n", ""), |dir| {
+        let script = dir.join("build.sh");
+        executable(&script, &format!(
+            "#!/bin/sh\nsleep 1\nif [ -e '{d}/fail-build' ]; then echo 'missing musl C compiler' >&2; exit 1; fi\nmkdir -p \"$OUT\" && echo rootfs > \"$OUT/factory-agent-rootfs.tar.gz\"\n",
+            d = dir.display()
+        ));
+        Tools { build_script: Some(script), ..no_build(dir) }
+    });
+    private_file(&f.root.join("secrets/claude"), "file-secret-123", 0o600);
+    private_file(&f.root.join("secrets/gh"), "cmd-secret-456", 0o600);
+    assert_eq!(f.pass().await.state, ReadinessState::Preparing);
+    tokio::time::timeout(Duration::from_secs(10), f.engine.provision.wake.notified()).await.unwrap();
+    let ready = f.pass().await;
+    assert_eq!(ready.state, ReadinessState::Ready);
+    let old_image = ready.image.unwrap();
+
+    std::fs::write(f.dir.join("fail-build"), "").unwrap();
+    std::fs::write(f.root.join("factory"), "factory cli v2").unwrap();
+    let rebuilding = f.pass().await;
+    assert!(rebuilding.image_build_failure.is_none(), "in-progress is not failure");
+    tokio::time::timeout(Duration::from_secs(10), f.engine.provision.wake.notified()).await.unwrap();
+    let stale = f.pass().await;
+    assert_eq!(stale.state, ReadinessState::Ready, "the older smoke-tested image can still run");
+    assert_eq!(stale.image.as_deref(), Some(old_image.as_str()));
+    let failure = stale.image_build_failure.unwrap();
+    assert!(failure.reason.contains("missing musl C compiler"));
+    assert!(failure.reason.contains(".log"));
+    assert!(failure.command.is_some());
+    let gate = f.engine.sandbox_gate(&f.key(), &declared(&f.engine)[0].config).await.unwrap();
+    assert_eq!(gate.image, old_image);
+
+    let doctor = f.engine.doctor_report().await.unwrap();
+    assert_eq!(doctor.openshell_image_failures.len(), 1);
+    let row = &doctor.openshell_image_failures[0];
+    assert_eq!((&*row.scope, &*row.agent), ("demo", "boxed"));
+    assert_eq!(row.image, old_image);
+    assert_eq!(row.failure, failure);
+    let repeated = f.pass().await;
+    assert_eq!(repeated.image_build_failure.unwrap().since, failure.since, "evidence time is not refreshed on read");
+
+    std::fs::remove_file(f.dir.join("fail-build")).unwrap();
+    std::fs::write(f.root.join("factory"), "factory cli v3").unwrap();
+    assert!(f.pass().await.image_build_failure.is_none(), "a different build is not the old failure");
+    tokio::time::timeout(Duration::from_secs(10), f.engine.provision.wake.notified()).await.unwrap();
+    let recovered = f.pass().await;
+    assert_eq!(recovered.state, ReadinessState::Ready);
+    assert_ne!(recovered.image.unwrap(), old_image);
+    assert!(recovered.image_build_failure.is_none());
+    assert!(f.engine.doctor_report().await.unwrap().openshell_image_failures.is_empty());
+}
+
+#[tokio::test]
 async fn two_agents_declaring_one_provider_differently_are_both_told() {
     let a: Declared = Declared {
         key: ("a".into(), "x".into()),
@@ -526,6 +579,7 @@ async fn the_gate_waits_briefly_for_a_first_judgement_and_never_lets_a_needs_thr
         since: now,
         checked_at: now,
         image: None,
+        image_build_failure: None,
         notes: vec![],
         expiring: vec![],
     };

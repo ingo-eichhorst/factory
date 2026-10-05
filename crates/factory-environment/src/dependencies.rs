@@ -282,6 +282,9 @@ pub struct DoctorReport {
     /// daemon last found it -- and when it last had to start one (`#234`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub openshell: Vec<crate::openshell::GatewayRow>,
+    /// Failed current-image rebuilds while agents select an older image.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openshell_image_failures: Vec<factory_kernel::SandboxImageFailure>,
 }
 
 pub use factory_kernel::ExploitedFinding;

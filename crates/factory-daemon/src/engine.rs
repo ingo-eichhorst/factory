@@ -9631,6 +9631,7 @@ edges: [{id: next, from: implement, to: review}]
                 since: at,
                 checked_at: at,
                 image: image.map(str::to_string),
+                image_build_failure: None,
                 notes: vec![],
                 expiring: vec![],
             };

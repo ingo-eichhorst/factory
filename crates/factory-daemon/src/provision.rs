@@ -205,8 +205,8 @@ fn default_source() -> Option<PathBuf> {
 struct BuildState {
     /// The key being built now.
     running: Option<(String, DateTime<Utc>)>,
-    /// The last failure: key, when, why.
-    failed: Option<(String, Instant, String)>,
+    /// The last failure: key, monotonic retry time, wall-clock evidence time, why.
+    failed: Option<(String, Instant, DateTime<Utc>, String)>,
 }
 
 #[derive(Default)]
@@ -287,6 +287,17 @@ impl Provisioner {
 
     pub(crate) fn gateway_rows(&self) -> Vec<GatewayRow> {
         lock(&self.gateways).values().filter_map(|g| g.row.clone()).collect()
+    }
+
+    pub(crate) fn image_failures(&self) -> Vec<factory_kernel::SandboxImageFailure> {
+        lock(&self.readiness).iter().filter_map(|((scope, agent), readiness)| {
+            Some(factory_kernel::SandboxImageFailure {
+                scope: scope.clone(),
+                agent: agent.clone(),
+                image: readiness.image.clone()?,
+                failure: readiness.image_build_failure.clone()?,
+            })
+        }).collect()
     }
 
     fn set(&self, key: &AgentKey, mut next: Readiness) {
@@ -436,9 +447,10 @@ impl Engine {
             let now = Utc::now();
             let mut notes = Vec::new();
             let mut image = None;
+            let mut image_build_failure = None;
             let outcome = match conflicts.get(&agent.key) {
                 Some(conflict) => Err(needs(conflict.clone(), None)),
-                None => Box::pin(self.provision_agent(agent, &mut notes, &mut image)).await,
+                None => Box::pin(self.provision_agent(agent, &mut notes, &mut image, &mut image_build_failure)).await,
             };
             let today = now.date_naive();
             let expiring = agent
@@ -467,7 +479,7 @@ impl Engine {
             let changed = previous.as_ref().is_none_or(|p| p.state != state || p.thing != thing);
             self.provision.set(
                 &agent.key,
-                Readiness { state, thing, command, since: now, checked_at: now, image, notes, expiring },
+                Readiness { state, thing, command, since: now, checked_at: now, image, image_build_failure, notes, expiring },
             );
             if changed {
                 let readiness = self.provision.readiness(&agent.key);
@@ -486,6 +498,7 @@ impl Engine {
         agent: &Declared,
         notes: &mut Vec<String>,
         image: &mut Option<String>,
+        image_build_failure: &mut Option<factory_kernel::ImageBuildFailure>,
     ) -> Result<(), Unready> {
         let config = &agent.config;
         if let Some(missing) = &agent.unresolved {
@@ -514,7 +527,8 @@ impl Engine {
                 explicit.clone()
             }
             None => {
-                let (path, note) = self.ensure_image(&factory.factory_dir())?;
+                let (path, note, failure) = self.ensure_image(&factory.factory_dir())?;
+                *image_build_failure = failure;
                 if let Some(note) = note {
                     notes.push(note);
                 }
@@ -658,28 +672,35 @@ impl Engine {
     /// Step 2 for Factory's own image: the current key's, else the newest
     /// previous one while the current builds, else `preparing`. A note says
     /// when a rebuild is under way.
-    fn ensure_image(self: &Arc<Self>, factory_dir: &Path) -> Result<(String, Option<String>), Unready> {
+    fn ensure_image(self: &Arc<Self>, factory_dir: &Path) -> Result<(String, Option<String>, Option<factory_kernel::ImageBuildFailure>), Unready> {
         let dir = images_dir(factory_dir);
         let cli_digest = file_digest(&self.factory_bin).unwrap_or_else(|| "unreadable".into());
         let key = os::image_key(&cli_digest);
         let current = dir.join(&key).join(os::IMAGE_FILE);
         if current.is_file() {
             gc_images(&dir, &key);
-            return Ok((current.display().to_string(), None));
+            return Ok((current.display().to_string(), None, None));
         }
         let started = self.start_build(&dir, &key);
         let previous = newest_image(&dir, &key);
-        let failure = lock(&self.provision.build).failed.clone().filter(|(k, _, _)| *k == key);
+        let failure = lock(&self.provision.build).failed.clone().filter(|(k, _, _, _)| *k == key);
         match (previous, failure) {
             (Some(previous), None) => Ok((
                 previous.display().to_string(),
                 Some(format!("a new image ({key}) is being built in the background; runs use {} until it is ready", previous.display())),
+                None,
             )),
-            (Some(previous), Some((_, _, reason))) => Ok((
+            (Some(previous), Some((_, _, since, reason))) => Ok((
                 previous.display().to_string(),
                 Some(format!("the new image ({key}) did not build ({reason}); runs use {}", previous.display())),
+                Some(factory_kernel::ImageBuildFailure {
+                    expected_key: key,
+                    reason,
+                    since,
+                    command: Some(self.build_command(&dir)),
+                }),
             )),
-            (None, Some((_, _, reason))) => Err(needs(
+            (None, Some((_, _, _, reason))) => Err(needs(
                 format!("Factory's sandbox image, whose build failed: {reason}"),
                 Some(self.build_command(&dir)),
             )),
@@ -708,7 +729,7 @@ impl Engine {
             if build.running.is_some() {
                 return Ok(());
             }
-            if let Some((failed, at, _)) = &build.failed {
+            if let Some((failed, at, _, _)) = &build.failed {
                 if failed == key && at.elapsed() < BUILD_RETRY {
                     return Ok(());
                 }
@@ -725,7 +746,7 @@ impl Engine {
                 build.running = None;
                 match &outcome {
                     Ok(()) => build.failed = None,
-                    Err(reason) => build.failed = Some((key.clone(), Instant::now(), reason.clone())),
+                    Err(reason) => build.failed = Some((key.clone(), Instant::now(), Utc::now(), reason.clone())),
                 }
             }
             match outcome {
@@ -964,6 +985,7 @@ fn needs_reason(thing: String, command: Option<String>) -> String {
         since: now,
         checked_at: now,
         image: None,
+        image_build_failure: None,
         notes: Vec::new(),
         expiring: Vec::new(),
     }

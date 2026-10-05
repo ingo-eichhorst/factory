@@ -126,3 +126,30 @@ test("the checked-in workflow builds auditable releases and scans the two instal
   assert.match(scan, /task attach --kind sbom/);
   assert.match(scan, /task attach --kind vulnerabilities/);
 });
+
+test("Doctor shows stale image failures separately and escapes build output", () => {
+  const elements = { doctor: { hidden: true, innerHTML: "" } };
+  globalThis.document = { ...bareDocument, getElementById: (id) => elements[id] || null };
+  state.doctor = {
+    status: "current", findings: [], openshell_image_failures: [{
+      scope: "demo", agent: "curator", image: "/old/image.tar.gz", failure: {
+        expected_key: "new-key", reason: "<script>bad</script>", since: "2026-10-05T08:00:00Z", command: "build && retry",
+      },
+    }],
+  };
+  try {
+    renderDoctor();
+    const html = elements.doctor.innerHTML;
+    assert.match(html, /stale image/);
+    assert.match(html, /demo \/ curator/);
+    assert.match(html, /new-key/);
+    assert.match(html, /2026-10-05T08:00:00Z/);
+    assert.match(html, /\/old\/image.tar.gz/);
+    assert.match(html, /&lt;script&gt;bad&lt;\/script&gt;/);
+    assert.match(html, /build &amp;&amp; retry/);
+    assert.doesNotMatch(html, /<script>/);
+  } finally {
+    state.doctor = null;
+    globalThis.document = bareDocument;
+  }
+});

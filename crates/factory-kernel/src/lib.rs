@@ -26,6 +26,8 @@
 //!   identifies page/API composition outside the six-level ladder.
 
 mod duration;
+mod image_build;
+pub use image_build::{ImageBuildFailure, SandboxImageFailure};
 mod check_results;
 mod execution_plan;
 mod workflow_preview;

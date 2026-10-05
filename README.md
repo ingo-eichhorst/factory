@@ -493,12 +493,18 @@ command that supplies it, on L2 Sandboxes and the roster:
    installed `factory` CLI's digest name it, so a change to either is a new
    image, built in the background with `build-image.sh rootfs` into
    `<instance>/.factory/openshell-images/<key>/` and renamed into place when
-   complete. Runs keep using the previous image until then, and the previous
+   complete. Runs keep using the previous image until then. A failed rebuild
+   keeps a previously smoke-tested image usable, but raises a stale-image
+   warning in Doctor and Inbox with the failed build key, log and rebuild
+   command; readiness does not claim that the image is current. The previous
    one is kept after; older ones are removed. The in-image CLI is
    cross-compiled from the Factory checkout the daemon was built from (or
    `FACTORY_OPENSHELL_SOURCE`), into a cargo target directory under
    `openshell-images/`, never the checkout's own `target/`. Needs `cargo` with
-   `rustup`, `crane` and `bsdtar` on the host; the build log is beside the
+   `rustup`, `crane` and `bsdtar` on the host. The recipe downloads a
+   digest-pinned, host-native Zig C compiler into its temporary directory
+   to compile bundled SQLite for aarch64 musl; it installs no global
+   toolchain. The build log is beside the
    image. A named `image:` is only checked, never built.
 3. **Profiles.** The two Factory ships (`claude-code-oauth`,
    `github-publish`) are imported when a provider names them.
@@ -631,7 +637,8 @@ conversation and answerability, is still a lifecycle follow-up in #218.
   The daemon has to serve the http interface (it does by default).
 - **The binaries.** The image carries its own Linux `factory` and `herdr`.
   `examples/openshell/build-image.sh` builds it: Factory's CLI cross-compiled
-  to static aarch64 Linux with `rust-lld` (no Linux toolchain), herdr's and
+  to static aarch64 Linux with `rust-lld` and a temporary, digest-pinned Zig
+  C cross-compiler (including the bundled SQLite dependency), herdr's and
   jq's Linux releases, Claude Code's managed settings with the allow rules an
   unattended run needs (`git push`, `gh pr create`, `gh pr merge`), a git
   config using `gh` for GitHub credentials, and a Claude Code home that has
