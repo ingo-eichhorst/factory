@@ -88,6 +88,12 @@ pub struct Plan {
     catalogue: reported::Catalogue,
     scope: Option<String>,
     members: BTreeSet<String>,
+    /// `#278` phase 2: the plain inputs this plan was built from, kept so
+    /// `gather_policy`'s own nested `Check::Metric` read
+    /// (`Service::metric_values`) can share this exact computation rather
+    /// than opening a second, different path to the same values.
+    root: PathBuf,
+    reported: reported::Configuration,
 }
 impl Plan {
     /// Scope and ids resolve before any IO. Quality's own authored read is
@@ -105,6 +111,8 @@ impl Plan {
         reported: &reported::Configuration,
         scope: Option<&str>,
     ) -> Result<Self> {
+        let plan_root = root.clone();
+        let plan_reported = reported.clone();
         let catalogue = reported::validate(&root, reported);
         let (asked, targets) = scopes.subtree_scopes(scope)?;
         let canonical_scope = asked.map(|s| s.name.clone());
@@ -166,6 +174,8 @@ impl Plan {
             catalogue,
             scope: canonical_scope,
             members,
+            root: plan_root,
+            reported: plan_reported,
         })
     }
     pub fn scope(&self) -> Option<&str> {
@@ -242,6 +252,7 @@ impl<'a, P: Ports> Service<'a, P> {
                 policy.ok_or_else(|| {
                     FactoryError::BadRequest("policy metric declarations were not resolved".into())
                 })?,
+                plan,
             )
             .await?;
         }
@@ -383,8 +394,9 @@ impl<'a, P: Ports> Service<'a, P> {
         &self,
         gathered: &mut Gathered,
         inputs: &PolicyInputs,
+        plan: &Plan,
     ) -> Result<()> {
-        gathered.policy = Some(self.policy_measurements(inputs).await?);
+        gathered.policy = Some(self.policy_measurements(inputs, plan).await?);
         Ok(())
     }
 
@@ -393,24 +405,31 @@ impl<'a, P: Ports> Service<'a, P> {
     /// across every scope and control in this evaluation -- the lazy,
     /// shared batching the issue asks for, and the same simplification
     /// `quality::evaluate`'s own shared `values` map already makes for a
-    /// Quality `MetricMeasure` (a `reported.*` id's scope coverage is not
-    /// enforced here, exactly as it is not for Quality today). Circular
-    /// (`checks::is_circular_metric`) and unresolvable ids are dropped
-    /// before any plan exists -- `checks::evaluate` then reads them `open`
-    /// with its own reason, and `checks::check_vocabulary` already caught
-    /// the same mistake as a finding when the catalogue loaded. Empty does
-    /// no work at all: no plan, no gather. `root`/`reported` are the
-    /// caller's own plain config projection, the same raw input
-    /// `Plan::prepare` always takes; validating it again here costs no
-    /// more than the handful of path checks `Plan::prepare` already does
-    /// unconditionally on every call.
+    /// Quality `MetricMeasure`. Circular (`checks::is_circular_metric`) and
+    /// unresolvable ids are dropped before any plan exists --
+    /// `checks::evaluate` then reads them `open` with its own reason, and
+    /// `checks::check_vocabulary` already caught the same mistake as a
+    /// finding when the catalogue loaded. Empty does no work at all: no
+    /// plan, no gather. `root`/`reported` are the caller's own plain
+    /// config projection, the same raw input `Plan::prepare` always takes;
+    /// validating it again here costs no more than the handful of path
+    /// checks `Plan::prepare` already does unconditionally on every call.
+    ///
+    /// This is unscoped by design -- it does not itself enforce a
+    /// `reported.*` id's scope coverage (the same simplification Quality's
+    /// own shared `values` map already makes). The returned
+    /// [`reported::Catalogue`] is how a caller applies that coverage rule
+    /// afterward, per evaluated scope: see
+    /// [`metrics_for_evaluated_scope`], which both `check_evaluation`'s
+    /// provider and [`Service::policy_measurements`] call on this same
+    /// computation -- never a second read or a second path to the value.
     pub async fn metric_values<S: checks::CheckSource>(
         &self,
         per_scope: &[(&str, &[S])],
         root: PathBuf,
         reported: &reported::Configuration,
         now: DateTime<Utc>,
-    ) -> Result<BTreeMap<MetricId, MetricValue>> {
+    ) -> Result<(BTreeMap<MetricId, MetricValue>, reported::Catalogue)> {
         let mut ids = Vec::new();
         for (_, subjects) in per_scope {
             for id in evidence::metric_check_ids(subjects) {
@@ -420,7 +439,7 @@ impl<'a, P: Ports> Service<'a, P> {
             }
         }
         if ids.is_empty() {
-            return Ok(BTreeMap::new());
+            return Ok((BTreeMap::new(), reported::Catalogue::default()));
         }
         let plan = Plan::prepare(
             &ids,
@@ -435,14 +454,19 @@ impl<'a, P: Ports> Service<'a, P> {
         let computed = self
             .finish(&plan, gathered, &Ok(BTreeMap::new()), now, None)
             .await?;
-        Ok(computed
+        let values = computed
             .values
             .into_iter()
             .map(|v| (v.id.clone(), v))
-            .collect())
+            .collect();
+        Ok((values, plan.catalogue))
     }
 
-    async fn policy_measurements(&self, inputs: &PolicyInputs) -> Result<PolicyMeasurements> {
+    async fn policy_measurements(
+        &self,
+        inputs: &PolicyInputs,
+        plan: &Plan,
+    ) -> Result<PolicyMeasurements> {
         let tags = Provide::<KnowledgeTags>::get(&self.evidence.own, &())
             .await?
             .tags;
@@ -453,8 +477,25 @@ impl<'a, P: Ports> Service<'a, P> {
             .map(|s| (s.scope.name.as_str(), s.subjects.as_slice()))
             .collect();
         let shared = self.evidence.shared(&targets).await?;
+        // `#278` phase 2: the Policy tab (`check_evaluation::Provider`) and
+        // this rollup (`compliance.<framework>`/`open_controls.<framework>`,
+        // which feeds Goals, Quality measures and dashboard tiles) must
+        // agree on a `check: metric` control's status -- one gatherer, per
+        // AGENTS.md. Same shared, unscoped computation; narrowed per
+        // evaluated scope below, exactly the way the Policy tab already
+        // does it.
+        let (metric_values, reported_catalogue) = self
+            .metric_values(&targets, plan.root.clone(), &plan.reported, now)
+            .await?;
         let mut per_scope = Vec::new();
         for scope in &inputs.scopes {
+            let subtree = subtree_names(&self.evidence.scopes, &scope.scope.name)?;
+            let scoped_metrics = metrics_for_evaluated_scope(
+                &metric_values,
+                &reported_catalogue,
+                &subtree,
+                now,
+            );
             let evidence = self
                 .evidence
                 .for_scope(
@@ -464,15 +505,7 @@ impl<'a, P: Ports> Service<'a, P> {
                     &inputs.attestations,
                     &shared,
                     scope.budget.as_ref(),
-                    // `#278`: a `Check::Metric` folded into this rollup
-                    // (`compliance.<framework>`/`open_controls.<framework>`)
-                    // reads `open` here -- known, documented in the PR,
-                    // not wired to `metric_values` to avoid threading a
-                    // `root`/`reported::Configuration` through `gather`/
-                    // `gather_policy`'s existing public signature and
-                    // every test that calls it. The Policy tab itself
-                    // (`check_evaluation::Provider`) reads the real value.
-                    &BTreeMap::new(),
+                    &scoped_metrics,
                     now,
                 )
                 .await?;
@@ -1074,6 +1107,55 @@ fn is_reported_metric(id: &str) -> bool {
 /// into `computing`.
 fn reported_segments(id: &str) -> Option<(&str, &str)> {
     id.strip_prefix("reported.")?.split_once('.')
+}
+
+/// `#278` phase 2: `scope_name`'s own subtree -- itself and everything
+/// below it, by name -- the selection phase 1's coverage rule
+/// (`reported::value_for`'s `in_subtree`) already reads a `reported.*` id
+/// against for a scoped metrics request. A `check: metric` applies the
+/// exact same rule per *evaluated* scope instead: see
+/// [`metrics_for_evaluated_scope`].
+pub(crate) fn subtree_names(scopes: &ScopeTree, scope_name: &str) -> Result<BTreeSet<String>> {
+    let (_, targets) = scopes.subtree_scopes(Some(scope_name))?;
+    Ok(targets.iter().map(|s| s.name.clone()).collect())
+}
+
+/// `#278` phase 2: [`Service::metric_values`]'s shared, unscoped read,
+/// narrowed to what a control evaluated *at* `subtree`'s own scope may
+/// actually read as evidence -- a cheap post-filter on the one shared
+/// computation, never a second read or a second path to the value. A
+/// built-in id passes through untouched, keeping whatever scoping
+/// `metric_values` already gave it (Quality stays instance-wide and
+/// unchanged; this rule is for `check: metric` alone). A
+/// `reported.<source>.<metric>` id whose declaring scope falls outside
+/// `subtree` is replaced with [`reported::outside_subtree`]'s own `None`
+/// and reason -- the identical wording a scoped `/api/metrics` read
+/// already gives for the same gap (`reported::value_for`), so the two
+/// never explain one absence two different ways. An id whose source does
+/// not resolve at all keeps whatever reason the unscoped read already
+/// gave it (an unknown source, say) -- there is no declaring scope to
+/// compare `subtree` against, so this filter has nothing to add.
+pub(crate) fn metrics_for_evaluated_scope(
+    values: &BTreeMap<MetricId, MetricValue>,
+    catalogue: &reported::Catalogue,
+    subtree: &BTreeSet<String>,
+    now: DateTime<Utc>,
+) -> BTreeMap<MetricId, MetricValue> {
+    values
+        .iter()
+        .map(|(id, value)| {
+            let Some((source_id, _metric_id)) = reported_segments(id.as_str()) else {
+                return (id.clone(), value.clone());
+            };
+            match catalogue.sources.get(source_id) {
+                Some(source) if !subtree.contains(&source.scope.name) => (
+                    id.clone(),
+                    reported::outside_subtree(id, source_id, &source.scope.name, now),
+                ),
+                _ => (id.clone(), value.clone()),
+            }
+        })
+        .collect()
 }
 
 /// `availability.<env>` and its siblings (`#185`): the metric's name and

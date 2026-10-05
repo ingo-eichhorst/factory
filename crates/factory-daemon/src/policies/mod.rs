@@ -650,6 +650,126 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// `#278` phase 2: a `reported.*` id belongs to its declaring scope --
+    /// a root-declared control naming `reported.finance.x` reads
+    /// `satisfied` for `finance` itself and for `company` (the root,
+    /// whose subtree includes `finance`), but `open` -- with phase 1's own
+    /// "outside the selected subtree" reason -- for `sibling`, which has
+    /// nothing to do with finance's number. Overclaiming a sibling's
+    /// evidence from an unrelated scope's reported metric is exactly the
+    /// direction ADR 0004 forbids.
+    #[tokio::test]
+    async fn a_metric_check_applies_phase_1s_scope_coverage_per_evaluated_scope() {
+        let root = std::env::temp_dir()
+            .join(format!("factory-policy-reported-coverage-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/gobd.yaml"),
+            "framework: gobd\ntitle: GoBD\nkind: regulation\ncontrols:\n\
+             \x20\x20- id: belegprinzip\n\x20\x20\x20\x20title: Belegprinzip\n\x20\x20\x20\x20evidence:\n\
+             \x20\x20\x20\x20\x20\x20- check: metric\n\x20\x20\x20\x20\x20\x20\x20\x20metric: reported.finance.beleg_coverage\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20above: 0.98\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("metrics.json"),
+            r#"{"as_of":"2026-10-05T09:00:00Z","metrics":[{"id":"beleg_coverage","value":0.99}]}"#,
+        )
+        .unwrap();
+
+        let company = scope_at("company-id", "company", ".", "");
+        let mut finance = scope_at("finance-id", "finance", "finance", "");
+        finance.metrics = Some(factory_core::config::ScopeMetricsDeclaration {
+            source: Some(factory_core::config::ScopeMetricsSource {
+                id: Some("finance".into()),
+                file: Some("../metrics.json".into()),
+            }),
+            declare: vec![factory_core::config::ScopeMetricsDeclared {
+                id: Some("beleg_coverage".into()),
+                title: Some("Beleg coverage".into()),
+                unit: Some("ratio".into()),
+                better: Some("higher".into()),
+            }],
+        });
+        let sibling = scope_at("sibling-id", "sibling", "sibling", "");
+        let config = Config {
+            version: 1,
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company, finance, sibling],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration {
+                frameworks: vec!["gobd".to_string()],
+                ..Default::default()
+            },
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            secrets: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(
+            Factory {
+                root: root.clone(),
+                config,
+            },
+            registry,
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
+
+        let control = ControlRef::new("gobd", "belegprinzip");
+        let report = engine.policy_report(None).await.unwrap();
+        let status_at = |scope: &str| {
+            report
+                .rows
+                .iter()
+                .find(|r| r.scope == scope)
+                .unwrap()
+                .statuses
+                .iter()
+                .find(|s| s.control == control)
+                .unwrap()
+                .status
+                .clone()
+        };
+
+        assert_eq!(
+            status_at("finance").kind(),
+            StatusKind::Satisfied,
+            "finance is its own declaring scope"
+        );
+        assert_eq!(
+            status_at("company").kind(),
+            StatusKind::Satisfied,
+            "finance is inside the root's own subtree"
+        );
+        let sibling_status = status_at("sibling");
+        assert_eq!(
+            sibling_status.kind(),
+            StatusKind::Open,
+            "sibling has nothing to do with finance's own reported number"
+        );
+        assert!(
+            sibling_status
+                .reasons()
+                .iter()
+                .any(|r| r.contains("outside the selected subtree")),
+            "{sibling_status:?}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[tokio::test]
     async fn a_scope_query_covers_the_asked_scope_and_its_descendants_only() {
         let engine = test_engine();

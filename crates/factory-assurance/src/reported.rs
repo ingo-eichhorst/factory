@@ -567,10 +567,7 @@ pub fn value_for(
         return none(format!("no scope declares a metrics source {source_id:?}"));
     };
     if !in_subtree {
-        return none(format!(
-            "{source_id:?} is declared by scope {:?}, outside the selected subtree",
-            source.scope.name
-        ));
+        return outside_subtree(full_id, source_id, &source.scope.name, now);
     }
     if !source.declared.contains_key(metric_id) {
         return none(format!(
@@ -611,6 +608,28 @@ pub fn value_for(
             as_of,
             reason: None,
         },
+    }
+}
+
+/// The one `None` this family gives for a source whose declaring scope is
+/// not in the selection -- factored out of [`value_for`] so a `policy`
+/// `check: metric` (`#278` phase 2) can give exactly this same reason when
+/// it applies phase 1's own coverage rule per *evaluated* scope, instead of
+/// per request: `metrics_service`'s own per-scope post-filter calls this
+/// too, rather than inventing a second wording for the same gap.
+pub fn outside_subtree(
+    full_id: &MetricId,
+    source_id: &str,
+    declaring_scope: &str,
+    now: DateTime<Utc>,
+) -> MetricValue {
+    MetricValue {
+        id: full_id.clone(),
+        value: None,
+        as_of: now,
+        reason: Some(format!(
+            "{source_id:?} is declared by scope {declaring_scope:?}, outside the selected subtree"
+        )),
     }
 }
 

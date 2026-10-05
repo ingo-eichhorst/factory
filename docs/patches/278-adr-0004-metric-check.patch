@@ -5,14 +5,16 @@
 #   .specs/adr/0004-policy-controls.md -- bumps the Status line and adds
 #     amendment 10, recording the new `check: metric` kind, its fields,
 #     its judgement (shared with Quality's own metric measure), the
-#     families it refuses as circular, and why: scope-reported metrics
-#     (#278, phase 1) needed a way to close an L6 control.
+#     families it refuses as circular, its per-evaluated-scope coverage
+#     rule for a `reported.*` id, and why: scope-reported metrics (#278,
+#     phase 1) needed a way to close an L6 control, consistently between
+#     the Policy tab and compliance.<framework>/open_controls.<framework>.
 #
 # This repository (`projects/factory`) does not own `.specs/`; the ADR
 # lives in the company root (`business-factory`). Apply from there with:
 #   patch -p1 < 278-adr-0004-metric-check.patch
 --- a/.specs/adr/0004-policy-controls.md	2026-10-05 23:38:57
-+++ b/.specs/adr/0004-policy-controls.md	2026-10-05 23:39:19
++++ b/.specs/adr/0004-policy-controls.md	2026-10-06 00:04:20
 @@ -1,7 +1,7 @@
  # ADR 0004: Policies as a control catalogue checked against evidence
 
@@ -23,7 +25,7 @@
  - Date: 2026-09-24
  - Decision owners: Business Factory
  - Tracking: https://github.com/ingo-eichhorst/factory/issues/74
-@@ -266,3 +266,29 @@
+@@ -266,3 +266,40 @@
     are still being migrated in #193; accepting the rule does not assert
     those steps are finished. Persisting the facts a decision acted on is
     deferred to a separate ADR, without removing existing audit records.
@@ -50,6 +52,17 @@
 +    as a catalogue finding when the file loads and again, defensively, if
 +    one survives into evaluation anyway. An unknown metric id is a finding
 +    too, the same treatment an unknown `daemon` fact or `secrets` location
-+    already gets. This is a new evidence kind, so it amends this ADR's
-+    check vocabulary; it changes no existing check's meaning, freshness
-+    rule, status or rollup.
++    already gets. A `reported.<source>.<metric>` id counts as evidence for
++    a control only at its declaring scope and the scopes above it --
++    phase 1's own coverage rule, applied per evaluated scope rather than
++    per request: outside that subtree it reads `None` with phase 1's own
++    "outside the selected subtree" reason, which this check reads `open`,
++    never a pass, the same as any other no-value reading. A built-in
++    metric keeps whatever scoping it already had; Quality's own metric
++    measure stays instance-wide, unchanged -- this rule is for `check:
++    metric` alone. `compliance.<framework>` and `open_controls.<framework>`
++    apply it too and read a `check: metric` control exactly as the Policy
++    tab does: one gatherer, not two, so the same control is never
++    `satisfied` to one reader and `open` to another. This is a new
++    evidence kind, so it amends this ADR's check vocabulary; it changes no
++    existing check's meaning, freshness rule, status or rollup.

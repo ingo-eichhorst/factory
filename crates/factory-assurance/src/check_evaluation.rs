@@ -61,13 +61,18 @@ impl<'a, P: metrics_service::Ports> Provider<'a, P> {
 
     /// `#278`: every metric id a `Check::Metric` among `per_scope` asks
     /// for, computed once and shared across every scope and control in
-    /// this read -- see `metrics_service::Service::metric_values`.
+    /// this read -- see `metrics_service::Service::metric_values`. The
+    /// returned `reported::Catalogue` is what callers pass to
+    /// `metrics_service::metrics_for_evaluated_scope` to apply phase 1's
+    /// scope-coverage rule per evaluated scope.
     async fn metric_values<S: checks::CheckSource>(
         &self,
         per_scope: &[(&str, &[S])],
         now: DateTime<Utc>,
-    ) -> Result<std::collections::BTreeMap<crate::metrics::MetricId, crate::metrics::MetricValue>>
-    {
+    ) -> Result<(
+        std::collections::BTreeMap<crate::metrics::MetricId, crate::metrics::MetricValue>,
+        reported::Catalogue,
+    )> {
         self.metrics
             .metric_values(per_scope, self.root.clone(), &self.reported, now)
             .await
@@ -95,9 +100,21 @@ impl<P: metrics_service::Ports + Send + Sync> Provide<CheckEvaluationFact> for P
             ));
         }
         let now = read.now.unwrap_or_else(Utc::now);
-        let metric_values = self.metric_values(&targets, now).await?;
+        let (metric_values, reported_catalogue) = self.metric_values(&targets, now).await?;
         let mut scopes = Vec::new();
         for (input, budget) in read.scopes.iter().zip(budgets) {
+            // `#278` phase 2: a `reported.*` id counts as evidence here
+            // only when its declaring scope is in *this* control's own
+            // evaluated scope's subtree -- phase 1's own coverage rule,
+            // applied per evaluated scope rather than per request.
+            let subtree =
+                metrics_service::subtree_names(&self.metrics.evidence.scopes, &input.scope.name)?;
+            let scoped_metrics = metrics_service::metrics_for_evaluated_scope(
+                &metric_values,
+                &reported_catalogue,
+                &subtree,
+                now,
+            );
             let evidence = self
                 .metrics
                 .evidence
@@ -108,7 +125,7 @@ impl<P: metrics_service::Ports + Send + Sync> Provide<CheckEvaluationFact> for P
                     &read.attestations,
                     &shared,
                     budget.as_ref(),
-                    &metric_values,
+                    &scoped_metrics,
                     now,
                 )
                 .await?;
@@ -163,7 +180,7 @@ impl<P: metrics_service::Ports + Send + Sync> Provide<factory_kernel::CheckCompa
             .collect();
         let mut metric_targets = targets.clone();
         metric_targets.extend(alternative_targets);
-        let metric_values = self.metric_values(&metric_targets, now).await?;
+        let (metric_values, reported_catalogue) = self.metric_values(&metric_targets, now).await?;
         let mut scopes = Vec::new();
         for ((input, alternative), budget) in
             primary.scopes.iter().zip(&read.alternative).zip(budgets)
@@ -173,6 +190,17 @@ impl<P: metrics_service::Ports + Send + Sync> Provide<factory_kernel::CheckCompa
                     "comparison scope does not match its primary selection".into(),
                 ));
             }
+            // `#278` phase 2: same per-evaluated-scope coverage rule as
+            // `Provide<CheckEvaluationFact>` -- both the primary and the
+            // overlay subjects for this scope read the same filtered view.
+            let subtree =
+                metrics_service::subtree_names(&self.metrics.evidence.scopes, &input.scope.name)?;
+            let scoped_metrics = metrics_service::metrics_for_evaluated_scope(
+                &metric_values,
+                &reported_catalogue,
+                &subtree,
+                now,
+            );
             let evidence = self
                 .metrics
                 .evidence
@@ -183,7 +211,7 @@ impl<P: metrics_service::Ports + Send + Sync> Provide<factory_kernel::CheckCompa
                     &primary.attestations,
                     &shared,
                     budget.as_ref(),
-                    &metric_values,
+                    &scoped_metrics,
                     now,
                 )
                 .await?;

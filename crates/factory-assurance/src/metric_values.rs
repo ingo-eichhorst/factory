@@ -53,7 +53,9 @@ impl<P: metrics_service::Ports + Send + Sync> Provide<MetricValuesFact> for Prov
             let policy = policy.as_ref().ok_or_else(|| {
                 FactoryError::BadRequest("policy metric declarations were not resolved".into())
             })?;
-            self.metrics.gather_policy(&mut gathered, policy).await?;
+            self.metrics
+                .gather_policy(&mut gathered, policy, &read.plan)
+                .await?;
             self.policy_gathered.store(true, Ordering::Release);
         }
         let computed = self
