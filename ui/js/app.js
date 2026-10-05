@@ -37,6 +37,7 @@ import { isEnvironmentsEvent } from "./environments-model.js";
 import { loadPolicy, reloadPolicy, wirePolicy } from "./policy.js";
 import { loadGoals, reloadGoals, wireGoals } from "./goals.js";
 import { loadQuality, reloadQuality, wireQuality } from "./quality.js";
+import { loadSuggestions, reloadSuggestions, wireSuggestions } from "./suggestions.js";
 import { loadScenarios, reloadScenarios, wireScenarios } from "./scenarios.js";
 import { loadBudget, reloadBudget, wireBudget } from "./budget.js";
 import { budgetEvent } from "./budget-model.js";
@@ -76,6 +77,10 @@ const VIEWS = {
   // and every value a scenario is judged on is already computed elsewhere.
   // What can change it arrives on the socket (`onEvent` below).
   quality: { onShow: loadQuality },
+  // `#275`: same reasoning as Quality -- a small read, recomputed fresh on
+  // every call, that changes only through an explicit action (file, task,
+  // dismiss, done, ask), each of which reloads it itself.
+  suggestions: { onShow: loadSuggestions },
   // Not poll-free the same way: `loadScenarios` itself makes a second fetch
   // (`GET /api/metrics?ids=…`, for the titles a signpost strip needs) and
   // seeds the driver panel with one `POST /api/scenarios/whatif` call, so
@@ -244,8 +249,9 @@ const LEVEL_VIEWS = {
   harn: ["occupancy", "roster", "agent-runtime", "roles"],
   env: ["sandboxes", "secrets", "dependencies"],
   // Quality closes the row: benchmarks and knowledge are how the work gets
-  // better, quality attributes whether it has got good enough.
-  imp: ["benchmarks", "knowledge", "quality"],
+  // better, quality attributes whether it has got good enough. Suggestions
+  // (`#275`) follows last: where the next round of "better" comes from.
+  imp: ["benchmarks", "knowledge", "quality", "suggestions"],
   infra: ["infrastructure", "doctor", "environments", "backup", "mac", "dates"],
 };
 
@@ -354,6 +360,9 @@ function rerender(route) {
   // Same reason again: which profiles bind a scope is its chain, folded by
   // the daemon (`GET /api/quality?scope=`).
   else if (state.tab === "quality") loadQuality();
+  // Same reason again: `GET /api/suggestions?scope=` narrows to that
+  // scope's own subtree (`#275`).
+  else if (state.tab === "suggestions") loadSuggestions();
   // Same reason again: `GET /api/scenarios?scope=` narrows the baseline and
   // every scenario's own policy delta to the asked subtree -- the one
   // exception is the driver panel's own `POST /api/scenarios/whatif`, which
@@ -646,6 +655,7 @@ async function boot() {
   wireGoals();
   wireBudget();
   wireQuality();
+  wireSuggestions();
   wireScenarios();
   $("environment-refresh").onclick = () => refreshEnvironment();
   $("secrets-refresh").onclick = () => refreshEnvironment();
@@ -884,6 +894,14 @@ function onEvent(ev) {
   if (touchesIntake(ev)) refreshIntake();
   if (state.tab === "dependencies" && (ev.type === "task_entry" || ev.type === "run_updated")) {
     loadDependencies();
+  }
+  // `#275`: a fresh filing from any run, anywhere -- `file_suggestion`
+  // journals it as a `task_entry` of kind `suggestion`. Dismiss/done/ask/
+  // task-creation redraw themselves from their own response, the same
+  // self-contained way Quality's "Create task" does, so they need no
+  // event of their own.
+  if (state.tab === "suggestions" && ev.type === "task_entry" && ev.entry && ev.entry.kind === "suggestion") {
+    reloadSuggestions();
   }
 }
 

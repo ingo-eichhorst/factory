@@ -417,7 +417,7 @@ pub fn group_by_target(suggestions: &[&Suggestion]) -> Vec<SuggestionGroup> {
     let mut groups: Vec<SuggestionGroup> = by_target
         .into_values()
         .map(|mut items| {
-            items.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
+            items.sort_by_key(|s| std::cmp::Reverse(s.filed_at));
             SuggestionGroup {
                 target: items[0].target.clone(),
                 kind: items[0].kind,
@@ -433,7 +433,7 @@ pub fn group_by_target(suggestions: &[&Suggestion]) -> Vec<SuggestionGroup> {
             }
         })
         .collect();
-    groups.sort_by(|a, b| b.newest_filed_at.cmp(&a.newest_filed_at));
+    groups.sort_by_key(|g| std::cmp::Reverse(g.newest_filed_at));
     groups
 }
 

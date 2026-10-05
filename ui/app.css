@@ -2542,3 +2542,13 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
 #secrets-changes { margin: 0; padding: 8px 14px 10px 30px; font-size: 12px; line-height: 1.5; }
 #secrets-catalogue td { vertical-align: top; }
 #secrets-catalogue .tag, #secrets-undeclared .tag { white-space: nowrap; display: inline-block; }
+
+/* ------------------------------------------- L5 Improvement Suggestions (#275) */
+.sug-group { border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 10px; }
+.sug-group-head { align-items: flex-start; }
+.sug-rows td { vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line-soft); }
+.sug-row-actions { white-space: nowrap; display: flex; gap: 6px; }
+.sug-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.sug-form input[type="text"] { flex: 1 1 220px; }
+.sug-err { color: var(--fault); flex-basis: 100%; }
+.sug-ask-answer { margin-top: 6px; }
