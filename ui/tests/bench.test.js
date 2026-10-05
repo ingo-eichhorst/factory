@@ -50,7 +50,7 @@ test("the datasets and bench-runs segments each carry their own error element, h
 });
 
 test("tab order is unchanged: Benchmarks still follows Secrets in LEVEL_VIEWS.imp", () => {
-  assert.match(app, /imp: \["benchmarks", "knowledge", "quality"\]/);
+  assert.match(app, /imp: \["benchmarks", "knowledge", "quality", "suggestions"\]/);
 });
 
 // ------------------------------------------------------------------- routing

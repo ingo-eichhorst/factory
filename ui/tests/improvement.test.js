@@ -36,25 +36,37 @@ test("L5 Improvement is live, with a Benchmarks tab and a Knowledge tab after Se
   assert.doesNotMatch(page, /id="lv-imp"[^>]*disabled/);
   assert.match(page, /id="tab-benchmarks"[^>]*>Benchmarks<\/button>/);
   assert.match(page, /id="tab-knowledge"[^>]*>Knowledge<\/button>/);
+  assert.match(page, /id="tab-suggestions"[^>]*>Suggestions<\/button>/);
   assert.match(page, /id="view-benchmarks"/);
   assert.match(page, /id="view-knowledge"/);
+  assert.match(page, /id="view-suggestions"/);
 
   // The tripwire: new tabs must come after `#tab-secrets`, and stay adjacent
   // to each other in the order `LEVEL_VIEWS.imp` names them.
   const secrets = page.indexOf('id="tab-secrets"');
   const benchmarks = page.indexOf('id="tab-benchmarks"');
   const knowledge = page.indexOf('id="tab-knowledge"');
+  const quality = page.indexOf('id="tab-quality"');
+  const suggestions = page.indexOf('id="tab-suggestions"');
   assert.ok(secrets < benchmarks, "Benchmarks tab must follow Secrets");
   assert.ok(benchmarks < knowledge, "Knowledge tab must follow Benchmarks");
+  assert.ok(knowledge < quality, "Quality tab must follow Knowledge");
+  assert.ok(quality < suggestions, "Suggestions tab (#275) must follow Quality");
 });
 
-test("LEVEL_VIEWS.imp names exactly benchmarks, knowledge and quality, invented spelling and all", () => {
-  assert.match(app, /imp: \["benchmarks", "knowledge", "quality"\]/);
+test("LEVEL_VIEWS.imp names exactly benchmarks, knowledge, quality and suggestions, invented spelling and all", () => {
+  assert.match(app, /imp: \["benchmarks", "knowledge", "quality", "suggestions"\]/);
 });
 
 test("both new views have their own error element, hidden by default", () => {
   assert.match(page, /id="benchmarks-error"[^>]*hidden/);
   assert.match(page, /id="knowledge-error"[^>]*hidden/);
+});
+
+test("the Suggestions view has its own error element, hidden by default, and an empty state naming the filing command", () => {
+  assert.match(page, /id="suggestions-error"[^>]*hidden/);
+  assert.match(page, /id="suggestions-empty"[^>]*hidden/);
+  assert.match(page, /factory task suggest/);
 });
 
 // -------------------------------------------------------------------- benchmarks

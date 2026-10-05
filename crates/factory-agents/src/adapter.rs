@@ -408,6 +408,18 @@ impl AgentContext {
              Dependency scans attach CycloneDX documents with `{bin} task attach{attach_to} --kind sbom|vulnerabilities <file>`. \
              Authored VEX is available with `{bin} dependencies vex {scope}`.\n\
              \n\
+             Friction that is not yours to fix, or an improvement idea -- a blocked web call, a \
+             missing grant, secret, tool or dependency; stale or misleading documentation; task \
+             instructions or a spec that sent you the wrong way; a workflow, gate or entity that made \
+             you do something pointless: `{bin} task suggest {id} --kind capability|docs|spec|process|entity|other \
+             --target \"<what should change>\" --summary \"<one line>\" [--detail \"<more>\"] \
+             [--wasted-tokens <n>]`. Usable any number of times, at any point in the run. Needs no grant. \
+             Never put a secret in it -- leave it out rather than redact it, there is nothing to \
+             redact. Not a substitute for reporting blocked when you genuinely cannot continue, and \
+             not yours to act on: filing one does not fix it, and nothing here fixes it on its own \
+             either -- it reaches a person, and if they act on it, a dedicated improvement agent, \
+             never you.\n\
+             \n\
              Report running first, then finish with exactly one of done, failed, or \
              blocked -- before your turn ends. When your harness says a turn ended \
              without one of them, and nothing is still running in the background to \
@@ -572,6 +584,21 @@ impl AgentContext {
              before you start on anything about a client, a product or a \
              process the company already has.\n\n",
         ));
+
+        if let Some(binding) = &self.task {
+            out.push_str(&format!(
+                "Something in your way is not yours to fix, or an idea worth recording: {bin} \
+                 task suggest {task_id} files it -- friction from a blocked capability, stale or \
+                 misleading docs, a spec that sent you the wrong way, a pointless process step, \
+                 or a confusing entity. It needs no grant; any agent may use it on its own run. \
+                 Factory records the run, task, scope, agent, harness and usage itself -- you \
+                 only say what changed. Never put a secret in it. It is not a substitute for \
+                 reporting blocked when you genuinely cannot continue, and it is not yours to \
+                 act on: a person decides whether it becomes work, and if so it goes to a \
+                 dedicated improvement agent, never back to you.\n\n",
+                task_id = binding.task.id,
+            ));
+        }
 
         if !self.policy_frameworks.is_empty() {
             out.push_str(&format!(
@@ -1393,6 +1420,45 @@ mod tests {
             contract.contains("Factory's to choose.\n- Gave up:"),
             "{contract}"
         );
+    }
+
+    #[test]
+    fn the_reporting_contract_names_task_suggest_with_no_grant_or_secret_mentioned() {
+        let ctx = with_task(base(Some(worker())));
+        let id = &ctx.task.as_ref().unwrap().task.id;
+        let contract = ctx.reporting_contract();
+        assert!(
+            contract.contains(&format!("task suggest {id} --kind capability|docs|spec|process|entity|other")),
+            "{contract}"
+        );
+        assert!(contract.contains("Never put a secret in it"), "{contract}");
+        assert!(contract.contains("Not a substitute for reporting blocked"), "{contract}");
+
+        // A standing agent (no task) has no `{id}` to suggest against, so
+        // the contract -- which is empty for one anyway -- names nothing.
+        let standing = base(Some(worker())).reporting_contract();
+        assert!(standing.is_empty());
+    }
+
+    #[test]
+    fn the_guide_explains_task_suggest_and_says_filing_one_is_not_fixing_it() {
+        let guide = with_task(base(Some(worker()))).factory_guide();
+        assert!(guide.contains("task suggest"), "{guide}");
+        assert!(guide.contains("needs no grant"), "{guide}");
+        assert!(guide.contains("Never put a secret in it"), "{guide}");
+        assert!(
+            guide.contains("not a substitute for reporting blocked when you genuinely cannot continue"),
+            "{guide}"
+        );
+        assert!(
+            guide.contains("not yours to act on"),
+            "a worker is told suggesting is not fixing it itself: {guide}"
+        );
+
+        // A standing agent (no task) is never told to suggest against a
+        // task id it does not have.
+        let standing = base(Some(worker())).factory_guide();
+        assert!(!standing.contains("task suggest"), "{standing}");
     }
 
     #[test]

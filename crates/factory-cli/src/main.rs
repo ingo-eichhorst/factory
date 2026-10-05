@@ -281,6 +281,14 @@ enum Command {
         #[command(subcommand)]
         command: Option<QualityCmd>,
     },
+    /// `#275`: the L5 Improvement Suggestions tab. What agents flagged as
+    /// friction or an improvement idea while they worked, newest first,
+    /// filterable and folded by target. With no subcommand, lists them --
+    /// the same thing `factory suggestion list` prints.
+    Suggestion {
+        #[command(subcommand)]
+        command: Option<SuggestionCmd>,
+    },
     /// The L4 Operations tab (`#106`, design §12.5's `factory stats`): what
     /// needs a human now, work in flight and how old it is, the process's
     /// health over the last 7 or 30 days against the window before it, and
@@ -488,6 +496,53 @@ enum QualityCmd {
         /// otherwise.
         #[arg(long)]
         agent: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SuggestionCmd {
+    /// Newest first, folded by target with a count and summed cost.
+    List {
+        /// Only this scope and its descendants (default: the whole instance).
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long, value_parser = parse_suggestion_kind)]
+        kind: Option<factory_core::protocol::SuggestionKind>,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long, value_parser = parse_suggestion_state)]
+        state: Option<factory_core::protocol::SuggestionState>,
+    },
+    /// One suggestion in full, history included.
+    Show { id: String },
+    /// Create the improvement task that answers one suggestion, or a whole
+    /// target group -- the only way a suggestion becomes work. Addressed to
+    /// the root scope's declared improvement agent; refused, naming it,
+    /// when none is configured. Needs `task.create` in the scope the
+    /// suggestion(s) were filed from.
+    Task {
+        /// One suggestion id, or every id in a group (repeat the flag).
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
+    },
+    /// Dismiss a suggestion with a reason. Refused once it is already
+    /// dismissed or done.
+    Dismiss {
+        id: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Mark a suggestion done. Refused once it is already dismissed or done.
+    Done { id: String },
+    /// Ask the agent that filed a suggestion a follow-up question: Factory
+    /// resumes its recorded session with a continuation run, the same way
+    /// `factory task run --continue` would, and the answer is recorded on
+    /// the suggestion once that run reports. Refused, rather than silently
+    /// starting a fresh session, when the task has a run in progress or the
+    /// harness cannot resume.
+    Ask {
+        id: String,
+        question: String,
     },
 }
 
@@ -1506,6 +1561,37 @@ enum TaskCmd {
         #[arg(long = "run-token", env = "FACTORY_TASK_TOKEN")]
         token: Option<String>,
     },
+    /// `#275`: file a suggestion -- friction or an improvement idea -- on
+    /// this task's active run. Usable any number of times during the run,
+    /// authenticated the same way `report` is, and needs no grant: every
+    /// role that can hold a run at all can use this on it. Never a
+    /// substitute for `--status blocked` when you genuinely cannot
+    /// continue, and never put a secret in it -- there is nothing here to
+    /// redact, so leave it out instead. Factory records the run, task,
+    /// scope, agent, harness, session and usage so far on its own; filing
+    /// one changes nothing about the run itself and does not act on it --
+    /// that happens, if at all, through a person pressing "create
+    /// improvement task", never automatically and never by you.
+    Suggest {
+        id: Option<String>,
+        /// capability, docs, spec, process, entity or other.
+        #[arg(long, value_parser = parse_suggestion_kind)]
+        kind: factory_core::protocol::SuggestionKind,
+        /// What should change, as precisely as you can: a level and entity
+        /// (`L2 sandbox <name>`, `L3 role <name>`, `L2 secret <name>`), a
+        /// file path, a workflow, or a task id.
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        detail: Option<String>,
+        /// Your own estimate of tokens burned on this, if you can tell.
+        #[arg(long = "wasted-tokens")]
+        wasted_tokens: Option<u64>,
+        #[arg(long = "run-token", env = "FACTORY_TASK_TOKEN")]
+        token: Option<String>,
+    },
     /// Attach an immutable CycloneDX scan document to this run.
     Attach {
         #[arg(long)]
@@ -2268,6 +2354,15 @@ async fn main() -> Result<()> {
                 Some(other) => other,
             };
             intake_cmd(cli.json, &client, cmd).await
+        }
+
+        Command::Suggestion { command } => {
+            suggestion_cmd(cli.json, &client, command.unwrap_or(SuggestionCmd::List {
+                scope: None,
+                kind: None,
+                target: None,
+                state: None,
+            })).await
         }
     }
 }
@@ -4290,6 +4385,127 @@ async fn quality_cmd(json: bool, client: &Client, cmd: QualityCmd) -> Result<()>
     }
 }
 
+async fn suggestion_cmd(json: bool, client: &Client, cmd: SuggestionCmd) -> Result<()> {
+    match cmd {
+        SuggestionCmd::List { scope, kind, target, state } => {
+            let payload = client.send(Request::Suggestions { scope, kind, target, state }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Suggestions { report } => Some(suggestions_text(report)),
+                _ => None,
+            })
+        }
+        SuggestionCmd::Show { id } => {
+            let payload = client.send(Request::SuggestionGet { id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Suggestion { suggestion } => Some(suggestion_detail_text(suggestion)),
+                _ => None,
+            })
+        }
+        SuggestionCmd::Task { ids } => {
+            let payload = client.send(Request::SuggestionTask { ids }).await?;
+            print(&payload, json, |p| match p {
+                Payload::SuggestionTask { task } => Some(format!("created {}  {}", task.id, task.title)),
+                _ => None,
+            })
+        }
+        SuggestionCmd::Dismiss { id, reason } => {
+            let payload = client.send(Request::SuggestionDismiss { id, reason }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Suggestion { suggestion } => Some(format!("{} is now dismissed", suggestion.id)),
+                _ => None,
+            })
+        }
+        SuggestionCmd::Done { id } => {
+            let payload = client.send(Request::SuggestionDone { id }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Suggestion { suggestion } => Some(format!("{} is now done", suggestion.id)),
+                _ => None,
+            })
+        }
+        SuggestionCmd::Ask { id, question } => {
+            let payload = client.send(Request::SuggestionAsk { id, question }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Suggestion { suggestion } => Some(format!(
+                    "asked; run {} resumed",
+                    suggestion.ask.as_ref().map(|a| a.run_id.as_str()).unwrap_or("?")
+                )),
+                _ => None,
+            })
+        }
+    }
+}
+
+fn suggestions_text(report: &factory_core::protocol::suggestion::Report) -> String {
+    if report.groups.is_empty() {
+        return "no suggestions\n".to_string();
+    }
+    let mut out = String::new();
+    for group in &report.groups {
+        out.push_str(&format!(
+            "[{}] {}  x{} (open {})  wasted ~{} tokens, ${:.2}\n",
+            group.kind, group.target, group.count, group.open_count, group.total_wasted_tokens, group.total_cost_usd
+        ));
+        for id in &group.ids {
+            if let Some(s) = report.suggestions.iter().find(|s| &s.id == id) {
+                out.push_str(&format!(
+                    "  {:<8} {:<10} {} ({}/{})\n",
+                    &s.id[..8.min(s.id.len())],
+                    s.state.as_str(),
+                    s.summary,
+                    s.scope,
+                    s.agent
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn suggestion_detail_text(s: &factory_core::protocol::Suggestion) -> String {
+    let mut out = format!(
+        "{}  [{}] {}\nstate: {}\nscope: {}  agent: {}  harness: {}\nrun: {}  task: {}\nfiled: {}\nsummary: {}\n",
+        s.id, s.kind, s.target, s.state.as_str(), s.scope, s.agent, s.harness, s.run_id, s.task_id,
+        s.filed_at.to_rfc3339(), s.summary,
+    );
+    if let Some(detail) = &s.detail {
+        out.push_str(&format!("detail: {detail}\n"));
+    }
+    if let Some(usage) = &s.usage {
+        out.push_str(&format!(
+            "usage at filing: {} tokens, ${:.2}\n",
+            usage.total_tokens.map_or("?".to_string(), |t| t.to_string()),
+            usage.cost_usd.unwrap_or(0.0),
+        ));
+    }
+    if let Some(wasted) = s.wasted_tokens {
+        out.push_str(&format!("wasted tokens (claimed): {wasted}\n"));
+    }
+    if let Some(task_id) = &s.improvement_task_id {
+        out.push_str(&format!("improvement task: {task_id}\n"));
+    }
+    if let Some(reason) = &s.dismiss_reason {
+        out.push_str(&format!("dismissed: {reason}\n"));
+    }
+    if let Some(ask) = &s.ask {
+        out.push_str(&format!("asked: {}\n", ask.question));
+        match &ask.answer {
+            Some(answer) => out.push_str(&format!("answered: {answer}\n")),
+            None => out.push_str("answered: (waiting on the resumed run)\n"),
+        }
+    }
+    out.push_str("history:\n");
+    for event in &s.history {
+        out.push_str(&format!(
+            "  {} {} {}{}\n",
+            event.at.to_rfc3339(),
+            event.by,
+            event.kind,
+            event.note.as_deref().map(|n| format!(" -- {n}")).unwrap_or_default(),
+        ));
+    }
+    out
+}
+
 /// `<attribute>/<scenario>` -> the two halves. Neither half can hold a `/`
 /// (an attribute id is `characteristic[.sub]`, a scenario id a slug), so
 /// the first one is the split.
@@ -5640,6 +5856,26 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             })
         }
 
+        TaskCmd::Suggest { id, kind, target, summary, detail, wasted_tokens, token } => {
+            let payload = client
+                .send(Request::TaskSuggest {
+                    id: need_id(id)?,
+                    suggestion: factory_core::protocol::SuggestionReport {
+                        kind,
+                        target,
+                        summary,
+                        detail,
+                        wasted_tokens,
+                        token,
+                    },
+                })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::Suggestion { suggestion } => Some(format!("filed as {}", suggestion.id)),
+                _ => None,
+            })
+        }
+
         TaskCmd::Attach { id, kind, file, token } => {
             let token = token.ok_or_else(|| anyhow!(
                 "task attach needs the run callback token in FACTORY_TASK_TOKEN or --run-token"
@@ -6069,6 +6305,24 @@ impl StatusFilter {
 
 fn parse_close_reason(text: &str) -> std::result::Result<CloseReason, String> {
     text.parse()
+}
+
+fn parse_suggestion_kind(text: &str) -> std::result::Result<factory_core::protocol::SuggestionKind, String> {
+    factory_core::protocol::SuggestionKind::parse(text).ok_or_else(|| {
+        format!(
+            "{text:?} is not a suggestion kind; use one of: {}",
+            factory_core::protocol::SuggestionKind::ALL
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
+}
+
+fn parse_suggestion_state(text: &str) -> std::result::Result<factory_core::protocol::SuggestionState, String> {
+    factory_core::protocol::SuggestionState::parse(text)
+        .ok_or_else(|| format!("{text:?} is not a suggestion state; use open, tasked, dismissed or done"))
 }
 
 /// Why a task is where it is, when its status alone does not say: the
@@ -7604,6 +7858,79 @@ mod tests {
         assert!(
             Cli::try_parse_from(["factory", "quality", "remediate", "reliability/x"]).is_err(),
             "--scope is required: a remediation task lands in one named scope"
+        );
+    }
+
+    #[test]
+    fn task_suggest_parses_its_flags_and_needs_kind_target_and_summary() {
+        let cli = Cli::try_parse_from([
+            "factory", "task", "suggest", "t1", "--kind", "capability", "--target", "L2 secret stripe_key",
+            "--summary", "blocked web call", "--detail", "needed outbound https", "--wasted-tokens", "500",
+        ])
+        .unwrap();
+        let Command::Task(TaskCmd::Suggest { id, kind, target, summary, detail, wasted_tokens, .. }) = cli.command else {
+            panic!("expected TaskCmd::Suggest");
+        };
+        assert_eq!(id, Some("t1".to_string()));
+        assert_eq!(kind, factory_core::protocol::SuggestionKind::Capability);
+        assert_eq!(target, "L2 secret stripe_key");
+        assert_eq!(summary, "blocked web call");
+        assert_eq!(detail, Some("needed outbound https".to_string()));
+        assert_eq!(wasted_tokens, Some(500));
+
+        assert!(
+            Cli::try_parse_from(["factory", "task", "suggest", "t1", "--target", "x", "--summary", "y"]).is_err(),
+            "--kind is required"
+        );
+        assert!(
+            Cli::try_parse_from(["factory", "task", "suggest", "t1", "--kind", "bogus", "--target", "x", "--summary", "y"])
+                .is_err(),
+            "an unknown kind is refused rather than silently accepted"
+        );
+    }
+
+    #[test]
+    fn suggestion_parses_its_subcommands_with_no_subcommand_defaulting_to_list() {
+        let cli = Cli::try_parse_from(["factory", "suggestion"]).unwrap();
+        assert!(matches!(cli.command, Command::Suggestion { command: None }));
+
+        let cli = Cli::try_parse_from(["factory", "suggestion", "list", "--scope", "demo", "--state", "open"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Suggestion { command: Some(SuggestionCmd::List {
+                scope: Some(_), state: Some(factory_core::protocol::SuggestionState::Open), ..
+            }) }
+        ));
+
+        let cli = Cli::try_parse_from(["factory", "suggestion", "show", "s1"]).unwrap();
+        assert!(matches!(cli.command, Command::Suggestion { command: Some(SuggestionCmd::Show { ref id }) } if id == "s1"));
+
+        let cli = Cli::try_parse_from(["factory", "suggestion", "task", "--id", "s1", "--id", "s2"]).unwrap();
+        let Command::Suggestion { command: Some(SuggestionCmd::Task { ids }) } = cli.command else {
+            panic!("expected SuggestionCmd::Task");
+        };
+        assert_eq!(ids, vec!["s1".to_string(), "s2".to_string()]);
+
+        let cli = Cli::try_parse_from(["factory", "suggestion", "dismiss", "s1", "--reason", "not worth it"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Suggestion { command: Some(SuggestionCmd::Dismiss { ref id, ref reason }) }
+                if id == "s1" && reason == "not worth it"
+        ));
+
+        let cli = Cli::try_parse_from(["factory", "suggestion", "done", "s1"]).unwrap();
+        assert!(matches!(cli.command, Command::Suggestion { command: Some(SuggestionCmd::Done { ref id }) } if id == "s1"));
+
+        let cli = Cli::try_parse_from(["factory", "suggestion", "ask", "s1", "why did this fail?"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Suggestion { command: Some(SuggestionCmd::Ask { ref id, ref question }) }
+                if id == "s1" && question == "why did this fail?"
+        ));
+
+        assert!(
+            Cli::try_parse_from(["factory", "suggestion", "task"]).is_err(),
+            "at least one --id is required"
         );
     }
 

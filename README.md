@@ -2128,6 +2128,92 @@ open tasks; the findings; the nine-characteristic catalogue (every column a
 heatmap draws); and the history of any metric a scenario reads, for a
 sparkline.
 
+## Suggestions
+
+L5 Improvement's fourth tab (`#275`): what an agent *suffers* on the way to
+done, failed or blocked -- a blocked web call, a missing grant, secret, tool
+or dependency; stale or misleading documentation; task instructions or a
+spec that sent it the wrong way; a workflow, gate or intake step that asked
+for the impossible or the pointless -- collected rather than lost in a
+transcript nobody reads.
+
+**Filing needs no grant.** `factory task suggest <task> --kind
+capability|docs|spec|process|entity|other --target "<what should change>"
+--summary "<one line>" [--detail "<more>"] [--wasted-tokens <n>]`, run any
+number of times during an active run, authenticated the same way `report`
+is -- by the run token, checked by `Engine::check_run_token` exactly as
+`report`'s own belt-and-suspenders check is. It is the one write in this
+whole area that needs no grant: triager (which never holds `task.report`
+either) can still use it, and so could a role an instance wrote with an
+empty `grants:` list. Factory fills in the run, task, scope, agent, harness,
+the harness's own session id and the run's usage so far itself; the agent
+states only `kind`, `target`, `summary`, `detail` and `wasted-tokens`. A
+suggestion never contains a secret -- the contract and the guide both say
+so, and Factory does not redact, because there is nothing here to redact.
+Filing is not a substitute for `--status blocked` when the agent genuinely
+cannot continue, and it is not the filing agent's to act on: see "The
+improvement agent" below.
+
+**L5 owns the store.** `factory_assurance::suggestion` is the domain model
+and state machine; `suggestion_store.rs` keeps one row per suggestion, its
+whole history (who, when, what) embedded and append-only -- nothing is ever
+deleted. A suggestion's state only ever moves forward: `open` to `tasked`,
+`dismissed` or `done`; `tasked` on to `dismissed` or `done` too; `dismissed`
+and `done` are both terminal.
+
+**Listing and grouping.** `factory suggestion list [--scope S] [--kind K]
+[--target T] [--state S]` and `GET /api/suggestions?scope=&kind=&target=&state=`
+answer the same report: every matching suggestion, newest first, folded by
+target with a count, how many are still open, and the summed claimed tokens
+and recorded cost -- "web access to X blocked" reported by ten runs reads as
+one line, not ten, which is the prioritisation signal. `factory suggestion
+show <id>` prints one in full, history included.
+
+**The improvement agent.** Nothing here ever becomes work on its own
+(`#275`'s "Factory never creates a task from a suggestion"). A person
+presses "Create improvement task" in the Suggestions tab, or runs `factory
+suggestion task --id <id> [--id <id> ...]` (one suggestion, or a whole
+group's ids) -- the only door. It creates one task through L5's existing
+adjacent L4 creation port (`factory_assurance::remediation::Service`, the
+same one `quality remediate` and `policy remediate` use), linked back to
+every named suggestion, and addressed to a dedicated, Business-Factory-wide
+improvement agent in the *root* scope -- never the project agent that
+complained, which cannot reach what the complaint is usually about (sandbox
+policy, roles, the secrets catalogue, docs, specs, workflows). An instance
+declares that agent the ordinary way, as a standing agent in the root
+scope's own `agents:`, and names it in the root config's `daemon:` block:
+
+```yaml
+daemon:
+  improvement_agent: improver   # must match a standing agent declared below
+agents:
+  - name: improver
+    harness: pi
+    lifetime: permanent
+    role: foreman                # needs whatever grants fixing the complaint takes
+```
+
+With no `daemon.improvement_agent` set, or one naming an agent the root
+scope does not declare, `suggestion task` refuses clearly, naming the
+field -- it never silently falls back to the complaining agent's own scope.
+
+**Dismiss and done.** `factory suggestion dismiss <id> --reason "..."` and
+`factory suggestion done <id>` (`POST /api/suggestions/{id}/dismiss` and
+`.../done`) move a suggestion to a terminal state; both are refused, saying
+so, once it has already reached one.
+
+**Ask the agent.** Because a suggestion records the agent and its harness
+session, `factory suggestion ask <id> "<question>"`
+(`POST /api/suggestions/{id}/ask`) lets a person ask a follow-up straight
+from it. Factory starts a continuation run of the originating task that
+resumes the recorded session with the question -- the same resumption
+`factory task run --continue` uses (`#178`), down to the same
+`resolve_continue` check -- and the answer is recorded on the suggestion
+once that run reports. Refused outright, never silently falling back to a
+fresh conversation, when the task has a run in progress or the harness
+cannot resume (no session recorded, the adapter declares no resume, the
+previous session is not confirmed gone).
+
 ## Intake
 
 L4 Process's second tab (`#119`), next to Tasks: the inbound quality gate

@@ -32,6 +32,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/service-observations-model.js                           Dependencies' partial enforcement evidence and endpoint joins (#157), pure
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
+    ui/js/{suggestions,suggestions-model}.js                     the L5 Improvement Suggestions tab and its pure shaping logic (#275)
     ui/js/{datasets,bench-runs}.js                               Benchmarks' Datasets and Runs segments
     ui/js/bench-model.js                                         pure helpers for the Benchmarks tab's three segments
     ui/js/{policy,policy-model}.js                               the L6 Policy tab and its pure shaping logic
