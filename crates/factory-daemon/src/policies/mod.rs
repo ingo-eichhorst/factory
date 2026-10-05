@@ -520,6 +520,136 @@ mod tests {
         statuses.iter().map(|s| (s.control.id.as_str(), s)).collect()
     }
 
+    /// `#278`: a policy control's `check: metric` on a scope's own
+    /// `reported.<source>.<metric>` id is judged by the real
+    /// `scope.metrics` -> `reported` -> `metrics_service` path -- met,
+    /// not_met, stale and no_data all the way through, not a synthetic
+    /// `Evidence`. A dedicated one-scope engine, not `test_engine()`'s
+    /// shared fixture, since this declares its own metrics source --
+    /// mirrors `quality::tests::a_reported_metric_measure_reads_met_not_met_stale_and_no_data_exactly_like_a_built_in_metric`,
+    /// for a policy control instead of a quality scenario. Every outcome
+    /// but `met` reads `open`: ADR 0004's status vocabulary has no bucket
+    /// of its own for "used to be current" or "found but wrong".
+    #[tokio::test]
+    async fn a_metric_check_reads_met_not_met_stale_and_no_data_through_the_real_reported_metrics_path()
+    {
+        let root = std::env::temp_dir()
+            .join(format!("factory-policy-reported-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/gobd.yaml"),
+            "framework: gobd\ntitle: GoBD\nkind: regulation\ncontrols:\n\
+             \x20\x20- id: belegprinzip\n\x20\x20\x20\x20title: Belegprinzip\n\x20\x20\x20\x20evidence:\n\
+             \x20\x20\x20\x20\x20\x20- check: metric\n\x20\x20\x20\x20\x20\x20\x20\x20metric: reported.finance.beleg_coverage\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20above: 0.98\n\x20\x20\x20\x20\x20\x20\x20\x20max_age: 35d\n",
+        )
+        .unwrap();
+
+        let mut finance = scope_at("finance-id", "finance", ".", "");
+        finance.metrics = Some(factory_core::config::ScopeMetricsDeclaration {
+            source: Some(factory_core::config::ScopeMetricsSource {
+                id: Some("finance".into()),
+                file: Some("metrics.json".into()),
+            }),
+            declare: vec![factory_core::config::ScopeMetricsDeclared {
+                id: Some("beleg_coverage".into()),
+                title: Some("Beleg coverage".into()),
+                unit: Some("ratio".into()),
+                better: Some("higher".into()),
+            }],
+        });
+        let config = Config {
+            version: 1,
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
+            daemon: DaemonConfig::default(),
+            scope: Some(finance.clone()),
+            scopes: vec![finance],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration {
+                frameworks: vec!["gobd".to_string()],
+                ..Default::default()
+            },
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            secrets: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(
+            Factory {
+                root: root.clone(),
+                config,
+            },
+            registry,
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
+
+        let write_fixture = |as_of: &str, value_json: &str| {
+            std::fs::write(
+                root.join("metrics.json"),
+                format!(r#"{{"as_of":"{as_of}","metrics":[{{"id":"beleg_coverage","value":{value_json}}}]}}"#),
+            )
+            .unwrap();
+        };
+        let control = ControlRef::new("gobd", "belegprinzip");
+        let status_of = |report: &factory_core::protocol::PolicyReport| {
+            report
+                .rows
+                .iter()
+                .find(|r| r.scope == "finance")
+                .unwrap()
+                .statuses
+                .iter()
+                .find(|s| s.control == control)
+                .unwrap()
+                .status
+                .kind()
+        };
+
+        // no_data: the scope's own tooling has not written the file yet.
+        let report = engine.policy_report(None).await.unwrap();
+        assert_eq!(
+            status_of(&report),
+            StatusKind::Open,
+            "no file yet reads open, never a pass"
+        );
+
+        // met: 0.99 is above the 0.98 bound, fresh -- satisfied, closing the control.
+        write_fixture(&Utc::now().to_rfc3339(), "0.99");
+        let report = engine.policy_report(None).await.unwrap();
+        assert_eq!(status_of(&report), StatusKind::Satisfied);
+
+        // not_met: 0.5 is below the bound.
+        write_fixture(&Utc::now().to_rfc3339(), "0.5");
+        let report = engine.policy_report(None).await.unwrap();
+        assert_eq!(
+            status_of(&report),
+            StatusKind::Open,
+            "not_met reads open -- there is no status of its own for it"
+        );
+
+        // stale: a met value older than the control's own 35d max_age.
+        let old = (Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+        write_fixture(&old, "0.99");
+        let report = engine.policy_report(None).await.unwrap();
+        assert_eq!(
+            status_of(&report),
+            StatusKind::Open,
+            "stale reads open too, never Status::Stale, for a metric check"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[tokio::test]
     async fn a_scope_query_covers_the_asked_scope_and_its_descendants_only() {
         let engine = test_engine();

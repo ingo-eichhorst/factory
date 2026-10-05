@@ -80,6 +80,30 @@ pub fn needs_budget_facts(applied: &[impl CheckSource]) -> bool {
         .any(|check| matches!(check, Check::BudgetWithin))
 }
 
+/// `#278`: every metric id a `Check::Metric` among `applied` names, minus
+/// the families refused as circular (`checks::is_circular_metric`) and
+/// anything this build cannot resolve at all -- the ids
+/// `metrics_service::Service::metric_values` computes once and shares
+/// across every scope and control in one evaluation. A circular or
+/// unresolvable id is never asked for here; `checks::direct_status` reads
+/// it `open` with its own reason instead, and `checks::check_vocabulary`
+/// already caught the same mistake as a finding when the catalogue loaded.
+pub fn metric_check_ids(applied: &[impl CheckSource]) -> Vec<crate::metrics::MetricId> {
+    applied
+        .iter()
+        .flat_map(|a| a.checks())
+        .filter_map(|check| match check {
+            Check::Metric { metric, .. }
+                if !crate::checks::is_circular_metric(metric)
+                    && crate::metrics::resolve(metric).is_ok() =>
+            {
+                Some(metric.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn attested_categories(
     applied: &[impl CheckSource],
 ) -> (BTreeSet<String>, Option<factory_kernel::Duration>) {
@@ -394,6 +418,7 @@ impl<'a, P: Ports> Service<'a, P> {
         attestations: &[Attestation],
         shared: &Shared,
         budget: Option<&BudgetIntent>,
+        metrics: &BTreeMap<crate::metrics::MetricId, crate::metrics::MetricValue>,
         now: DateTime<Utc>,
     ) -> Result<Evidence> {
         let ancestors: BTreeSet<&str> = self
@@ -457,6 +482,7 @@ impl<'a, P: Ports> Service<'a, P> {
             backup: shared.backup.clone(),
             attested,
             budget,
+            metrics: metrics.clone(),
         })
     }
 
@@ -500,6 +526,12 @@ impl<'a, P: Ports> Service<'a, P> {
                     &[],
                     &shared,
                     scope.budget.as_ref(),
+                    // Quality's own `Measure::Metric` reads `values`
+                    // directly (`quality::evaluate`'s own parameter), never
+                    // through `Evidence` -- a `Check::Metric` reached
+                    // through `Measure::Check` here is a documented gap,
+                    // never wired, so it always reads `open`.
+                    &BTreeMap::new(),
                     now,
                 )
                 .await?;
@@ -1400,6 +1432,7 @@ mod tests {
                 &[],
                 &shared,
                 None,
+                &BTreeMap::new(),
                 time(),
             )
             .await
@@ -1473,6 +1506,7 @@ mod tests {
                     &[],
                     &shared,
                     None,
+                    &BTreeMap::new(),
                     time(),
                 )
                 .await
@@ -1578,6 +1612,7 @@ mod tests {
                 &receipts,
                 &Shared::default(),
                 None,
+                &BTreeMap::new(),
                 time(),
             )
             .await
@@ -1821,7 +1856,11 @@ mod tests {
             budgets: Ok(vec![None, None]),
             now: Some(time()),
         };
-        let provider = Provider::new(owner);
+        let provider = Provider::new(
+            crate::metrics_service::Service::new(owner),
+            std::path::PathBuf::new(),
+            crate::reported::Configuration::default(),
+        );
         let facts = Facts::<L6>::new();
         let first = facts
             .get::<CheckEvaluationFact, _>(&provider, &read)
@@ -1886,7 +1925,11 @@ mod tests {
             )),
             now: None,
         };
-        let provider = Provider::new(owner);
+        let provider = Provider::new(
+            crate::metrics_service::Service::new(owner),
+            std::path::PathBuf::new(),
+            crate::reported::Configuration::default(),
+        );
         let facts = Facts::<L6>::new();
         *recorder.failing.lock().unwrap() = Some("daemon");
         assert_eq!(
@@ -1940,7 +1983,11 @@ mod tests {
         let host = subject(vec![Check::Daemon {
             fact: "foreman_enabled".into(),
         }]);
-        let provider = Provider::new(owner);
+        let provider = Provider::new(
+            crate::metrics_service::Service::new(owner),
+            std::path::PathBuf::new(),
+            crate::reported::Configuration::default(),
+        );
         let mut read = ComparisonRead {
             primary: Read {
                 scopes: vec![ScopeInput {

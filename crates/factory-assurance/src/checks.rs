@@ -1,6 +1,7 @@
 //! L5's sole live check evaluator. Inputs are command declarations and
 //! current L0 facts; no status table or persisted evidence log is introduced.
 use crate::conformance::{AttestedRun, ConformanceEvidence, StepEvidence};
+use crate::metrics::{self, MetricId, MetricValue};
 use chrono::{DateTime, Utc};
 use factory_kernel::BenchVerdict as Verdict;
 pub use factory_kernel::DaemonConfigFact as DaemonFact;
@@ -16,11 +17,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// One thing Factory already records that can stand as evidence for a
 /// control. Every kind the ADR names is parsed here and `evaluate` now
-/// understands all eleven -- v1 shipped `knowledge` and `attestation`
+/// understands all thirteen -- v1 shipped `knowledge` and `attestation`
 /// writable ahead of evaluation, and every ticket since (`#81`, `#82`,
-/// `#123`, `#158`) taught `evaluate` a few more kinds without ever having to
+/// `#123`, `#158`, `#278`) taught `evaluate` a few more kinds without ever having to
 /// change the file format underneath an author who already wrote one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "check", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Check {
     /// Satisfied when a page in the knowledge vault carries `tag` (default
@@ -112,6 +113,28 @@ pub enum Check {
         step: String,
         max_age: Duration,
     },
+    /// `#278`: a scope-reported or built-in metric held to inclusive
+    /// bounds and a freshness window, judged by the exact same arithmetic
+    /// as a Quality `MetricMeasure` ([`metrics::judge_metric`]), so the two
+    /// kinds of authored catalogue never drift apart on what "met" or
+    /// "stale" means. Unlike Quality's four-way status, nothing here ever
+    /// reads a value as satisfied except `met`: `not_met`, `stale` and no
+    /// value at all are all `open`, with the reason -- there is no draft
+    /// or stale bucket of its own for a control, only "evidence found" or
+    /// "none yet" (ADR 0004's "status is only what evidence says").
+    /// `compliance.*`, `open_controls.*` and `quality.*` are refused as
+    /// circular ([`is_circular_metric`]), at parse time
+    /// ([`check_vocabulary`]) and again here, in case a bad one survives
+    /// into evaluation anyway.
+    Metric {
+        metric: MetricId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        above: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        below: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_age: Option<Duration>,
+    },
 }
 
 /// The `daemon` check's fixed vocabulary -- everything else `DaemonConfig`
@@ -152,6 +175,7 @@ impl Check {
             Check::Daemon { .. } => "daemon",
             Check::BudgetWithin => "budget_within",
             Check::Attested { .. } => "attested",
+            Check::Metric { .. } => "metric",
         }
     }
 
@@ -163,7 +187,8 @@ impl Check {
         match self {
             Check::Task { max_age, .. }
             | Check::Workflow { max_age, .. }
-            | Check::Gate { max_age, .. } => *max_age,
+            | Check::Gate { max_age, .. }
+            | Check::Metric { max_age, .. } => *max_age,
             Check::Dependencies { sbom_max_age, .. } => *sbom_max_age,
             Check::Attested { max_age, .. } => Some(*max_age),
             _ => None,
@@ -251,14 +276,41 @@ impl Check {
             } => {
                 format!("attested: {category}/{step} (max_age {max_age})")
             }
+            Check::Metric {
+                metric,
+                above,
+                below,
+                max_age,
+            } => format!(
+                "metric: {}",
+                metrics::describe_bounds(
+                    metric,
+                    metrics::MetricBounds {
+                        above: *above,
+                        below: *below,
+                        max_age: *max_age,
+                    }
+                )
+            ),
         }
     }
+}
+
+/// Metric families this evaluator itself produces from a policy or quality
+/// result (`compliance.<framework>`, `open_controls.<framework>`,
+/// `quality.<characteristic>`) -- refused on a `Check::Metric` the same way
+/// `quality::is_quality_metric` already refuses `quality.*` for a Quality
+/// `MetricMeasure`: judging a control by a number this same evaluation
+/// produces would be circular, not a measurement (`#278`).
+pub fn is_circular_metric(metric: &MetricId) -> bool {
+    crate::metrics_service::is_policy_metric(metric.as_str())
+        || crate::metrics_service::is_quality_metric(metric.as_str())
 }
 
 /// Resolved command input. L6 alone interprets its classification K; L5
 /// only returns it unchanged. Remediation and execution requirements are not
 /// part of evaluation. The caller has already folded the effective max_age.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvaluationSubject<K = ()> {
     pub control: ControlRef,
     pub title: String,
@@ -294,6 +346,15 @@ pub enum VocabularyFinding {
     UnknownDaemonFact,
     UnknownSecretsLocation,
     BadCheckTarget,
+    /// `#278`: a `check: metric` names `compliance.*`, `open_controls.*` or
+    /// `quality.*` -- see [`is_circular_metric`].
+    CircularMetric,
+    /// `#278`: a `check: metric` names a metric id this build has never
+    /// heard of.
+    UnknownMetric,
+    /// `#278`: a `check: metric` names a metric id this build knows but
+    /// cannot compute yet.
+    UnavailableMetric,
 }
 
 pub use factory_kernel::EvidenceFinding;
@@ -332,6 +393,37 @@ pub fn check_vocabulary(check: &Check) -> Vec<(VocabularyFinding, String)> {
                 findings.push((
                     VocabularyFinding::BadCheckTarget,
                     format!("names attested step {step:?}, which is not a name: lowercase letters, digits, '-' and '_', starting with a letter or digit"),
+                ));
+            }
+            findings
+        }
+        Check::Metric { metric, above, below, .. } => {
+            let mut findings = Vec::new();
+            if is_circular_metric(metric) {
+                findings.push((
+                    VocabularyFinding::CircularMetric,
+                    format!(
+                        "names metric {metric}, which is computed from policy or quality \
+                         evaluation itself and would be circular"
+                    ),
+                ));
+            } else {
+                match metrics::resolve(metric) {
+                    Ok(_) => {}
+                    Err(metrics::MetricError::Unknown(_)) => findings.push((
+                        VocabularyFinding::UnknownMetric,
+                        format!("names unknown metric {metric}"),
+                    )),
+                    Err(metrics::MetricError::Unavailable { reason, .. }) => findings.push((
+                        VocabularyFinding::UnavailableMetric,
+                        format!("names metric {metric} which is not available yet: {reason}"),
+                    )),
+                }
+            }
+            if above.is_none() && below.is_none() {
+                findings.push((
+                    VocabularyFinding::BadCheckTarget,
+                    format!("names metric {metric} with neither `above` nor `below`"),
                 ));
             }
             findings
@@ -434,6 +526,15 @@ pub struct Evidence {
     /// Authored configuration goes down; raw spend stays an L4 fact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<crate::budget::PolicyInput>,
+    /// `#278`: every metric id some applicable `Check::Metric` across this
+    /// read actually asked for -- computed once, shared across every
+    /// scope and control the same read evaluates (`metrics_service::Service::metric_values`).
+    /// An id absent from this map was never asked for by anything
+    /// applicable here, not confirmed to have no value; `direct_status`'s
+    /// `Check::Metric` arm reports that `open`, by name, the same
+    /// restraint every other evidence field gets.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metrics: BTreeMap<MetricId, MetricValue>,
 }
 
 // =============================================================== evaluate
@@ -501,10 +602,10 @@ fn workflow_run_status_str(status: WorkflowRunStatus) -> &'static str {
 }
 
 /// This control's status from its own checks alone, and the refs those
-/// checks can point at -- every one of `Check`'s eleven kinds now evaluated
+/// checks can point at -- every one of `Check`'s thirteen kinds now evaluated
 /// for real (`knowledge`/`attestation` in v1, `task`/`workflow`/`gate` in
 /// `#81`, `roles`/`sandbox`/`secrets`/`daemon` in `#82`, `dependencies` in
-/// `#123`, `attested` in `#158`). None of `roles`/`sandbox`/`secrets`/`daemon`/
+/// `#123`, `attested` in `#158`, `metric` in `#278`). None of `roles`/`sandbox`/`secrets`/`daemon`/
 /// `dependencies` carries a ref: nothing behind them is an id a UI could
 /// link to (an agent name is not yet one of `EvidenceRefKind`'s kinds, and a
 /// daemon/secrets/dependencies fact is not tied to any one record at all).
@@ -1071,6 +1172,52 @@ fn direct_status<K>(
                             open.push(format!(
                                 "attested: {category}/{step} -- no run of this category ended done within {two_w}"
                             ));
+                        }
+                    }
+                }
+            }
+            Check::Metric {
+                metric,
+                above,
+                below,
+                ..
+            } => {
+                // Defence in depth: `check_vocabulary` already catches a
+                // circular family as a finding when the catalogue loads,
+                // but a bad one surviving into evaluation (nothing drops a
+                // check over a finding) must never read as evidence.
+                if is_circular_metric(metric) {
+                    open.push(format!(
+                        "metric: {metric} is computed from policy or quality evaluation \
+                         itself and would be circular"
+                    ));
+                } else {
+                    match evidence.metrics.get(metric) {
+                        None => {
+                            open.push(format!("metric: no value for {metric} yet"));
+                        }
+                        Some(mv) => {
+                            let bounds = metrics::MetricBounds {
+                                above: *above,
+                                below: *below,
+                                // `applied.max_age` is the control's own
+                                // *effective* window, after every layer's
+                                // `tighten` and every check's own `max_age`
+                                // are already folded in -- never this
+                                // variant's own field, the same rule
+                                // `within_max_age`'s doc comment states for
+                                // `task`/`workflow`/`gate`.
+                                max_age: applied.max_age,
+                            };
+                            let (judgement, reasons, _) =
+                                metrics::judge_metric(metric, bounds, mv, now);
+                            let reasons = reasons.into_iter().map(|r| format!("metric: {r}"));
+                            match judgement {
+                                metrics::MetricJudgement::Met => satisfied.extend(reasons),
+                                metrics::MetricJudgement::NotMet
+                                | metrics::MetricJudgement::Stale
+                                | metrics::MetricJudgement::NoData => open.extend(reasons),
+                            }
                         }
                     }
                 }

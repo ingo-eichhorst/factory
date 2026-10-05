@@ -1286,7 +1286,7 @@ empty one is a finding and the control stays applicable — and every `n/a`, at
 whichever scope declared it, is always listed rather than left silent: ISO
 27001 calls this a Statement of Applicability, and ADR 0004 keeps the name.
 
-**Checks and statuses.** Evidence is evaluated per check kind, and all eleven
+**Checks and statuses.** Evidence is evaluated per check kind, and all thirteen
 are evaluated for real: `knowledge` (a vault page tagged
 `control/<framework>/<id>`, or a check's own `tag`), `attestation` (an
 unexpired, unwithdrawn attestation recorded for the control), `task` and
@@ -1386,8 +1386,35 @@ controls actually name one:
   never judged twice; a review or approval step leaves no attestation in v1
   (`#118`), so a check on one reads `open` until that lands. `refs` names
   the task and run behind each reason, the same as `task`/`workflow`.
+- **`metric { metric, above, below, max_age }`** (`#278`) — a scope-reported
+  or built-in metric (the metrics the "Goals" section below lists, including
+  a scope's own `reported.<source>.<metric>`) held to the same inclusive
+  bounds and freshness window a Quality `measure: { metric, ... }` uses,
+  judged by the exact same arithmetic (`factory_assurance::metrics::judge_metric`
+  is the one function both call). A control has only two statuses here,
+  though: `met` is `satisfied`; `not_met`, `stale` and no value at all are
+  all `open`, with the reason — there is no bucket for "used to be current"
+  or "found but wrong" that `open` does not already cover. `compliance.<framework>`,
+  `open_controls.<framework>` and `quality.<characteristic>` are refused —
+  both as a finding when the catalogue loads, and again if one survives into
+  evaluation — since judging a control by a number this same evaluation
+  produces would be circular, the same reasoning a Quality measure already
+  applies to `quality.*`. An unknown metric id is a finding too, the same as
+  an unknown `daemon` fact or `secrets` location. Without this, a scope's own
+  reported metrics (`#278`, phase 1) could show progress on the L5 Improvement
+  tab but never close an L6 control:
 
-Neither `roles`/`sandbox`/`secrets`/`daemon`/`dependencies` carries a `refs` entry: nothing
+  ```yaml
+  - id: belegprinzip
+    title: Every booking references its source document (§146 AO, GoBD)
+    evidence:
+      - check: metric
+        metric: reported.finance.beleg_coverage
+        above: 0.98
+        max_age: 35d
+  ```
+
+Neither `roles`/`sandbox`/`secrets`/`daemon`/`dependencies`/`metric` carries a `refs` entry: nothing
 behind them is an id a UI could link to yet (an agent name is not one of
 `EvidenceRefKind`'s kinds, and a daemon/secrets fact is not tied to any one
 record at all) — the L6 Policy tab instead links a gap in one of these to

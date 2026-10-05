@@ -1243,19 +1243,14 @@ fn without_max_age(check: &Check) -> Check {
 /// check's own `policy::Check::describe`.
 pub fn describe_measure(measure: &Measure) -> String {
     match measure {
-        Measure::Metric(m) => {
-            let mut parts = vec![m.metric.to_string()];
-            if let Some(a) = m.above {
-                parts.push(format!(">= {a}"));
-            }
-            if let Some(b) = m.below {
-                parts.push(format!("<= {b}"));
-            }
-            if let Some(w) = m.max_age {
-                parts.push(format!("(max_age {w})"));
-            }
-            parts.join(" ")
-        }
+        Measure::Metric(m) => metrics::describe_bounds(
+            &m.metric,
+            metrics::MetricBounds {
+                above: m.above,
+                below: m.below,
+                max_age: m.max_age,
+            },
+        ),
         Measure::Check(c) => c.describe(),
     }
 }
@@ -1457,53 +1452,20 @@ fn evaluate_metric(
         return;
     };
     result.as_of = Some(mv.as_of);
-    let Some(v) = mv.value.filter(|v| v.is_finite()) else {
-        result.status = ScenarioStatus::NoData;
-        let why = match mv.value {
-            Some(v) => format!("{v} is not a finite number"),
-            None => mv
-                .reason
-                .clone()
-                .unwrap_or_else(|| "no reason given".to_string()),
-        };
-        result
-            .reasons
-            .push(format!("{} could not be computed: {why}", m.metric));
-        return;
+    let bounds = metrics::MetricBounds {
+        above: m.above,
+        below: m.below,
+        max_age: m.max_age,
     };
-    result.value = Some(v);
-    if let Some(max_age) = m.max_age {
-        if now - mv.as_of > max_age.as_time_delta() {
-            result.status = ScenarioStatus::Stale;
-            result.reasons.push(format!(
-                "{} = {v} as of {}, older than {max_age}",
-                m.metric, mv.as_of
-            ));
-            return;
-        }
-    }
-    let mut failed = Vec::new();
-    if let Some(a) = m.above {
-        if v < a {
-            failed.push(format!("{} = {v}, below the required {a}", m.metric));
-        }
-    }
-    if let Some(b) = m.below {
-        if v > b {
-            failed.push(format!("{} = {v}, above the allowed {b}", m.metric));
-        }
-    }
-    if failed.is_empty() {
-        result.status = ScenarioStatus::Met;
-        result.reasons.push(format!(
-            "{} = {v}, meets {}",
-            m.metric,
-            describe_measure(&Measure::Metric(m.clone()))
-        ));
-    } else {
-        result.status = ScenarioStatus::NotMet;
-        result.reasons = failed;
-    }
+    let (judgement, reasons, value) = metrics::judge_metric(&m.metric, bounds, mv, now);
+    result.value = value;
+    result.reasons = reasons;
+    result.status = match judgement {
+        metrics::MetricJudgement::Met => ScenarioStatus::Met,
+        metrics::MetricJudgement::NotMet => ScenarioStatus::NotMet,
+        metrics::MetricJudgement::Stale => ScenarioStatus::Stale,
+        metrics::MetricJudgement::NoData => ScenarioStatus::NoData,
+    };
 }
 
 /// The control a check measure is evaluated as: framework `quality`, id
@@ -1662,6 +1624,13 @@ pub fn gathered(check: &Check, evidence: &Evidence) -> bool {
         }),
         Check::Dependencies { .. } => evidence.dependencies.is_some(),
         Check::Attested { .. } => evidence.attested.is_some(),
+        // `#278`: as with `gate`, an entry in the map (even one that reads
+        // `no_data` on its own terms -- `null`, non-finite) is "something
+        // was read", so a `not_met` status here, not a `no_data` one, for
+        // a `measure: { check: metric, ... }` -- this module's own
+        // `Measure::Metric` is the native spelling and does not go
+        // through `Evidence` at all.
+        Check::Metric { metric, .. } => evidence.metrics.contains_key(metric),
     }
 }
 

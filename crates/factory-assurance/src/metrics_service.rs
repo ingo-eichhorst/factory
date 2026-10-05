@@ -218,7 +218,11 @@ struct PolicyFramework {
 }
 
 pub struct Service<'a, P> {
-    evidence: evidence::Service<'a, P>,
+    // `pub(crate)`, not private: `#278`'s `check_evaluation::Provider` holds
+    // one of these as its sole lower-evidence seam and reaches through it
+    // for `shared`/`for_scope`, rather than this crate's two L5 services
+    // each carrying their own separate `evidence::Service`.
+    pub(crate) evidence: evidence::Service<'a, P>,
 }
 impl<'a, P: Ports> Service<'a, P> {
     pub fn new(evidence: evidence::Service<'a, P>) -> Self {
@@ -383,6 +387,61 @@ impl<'a, P: Ports> Service<'a, P> {
         gathered.policy = Some(self.policy_measurements(inputs).await?);
         Ok(())
     }
+
+    /// `#278`: every metric id a `Check::Metric` among `per_scope`'s
+    /// subjects asks for, resolved and computed once, unscoped, and shared
+    /// across every scope and control in this evaluation -- the lazy,
+    /// shared batching the issue asks for, and the same simplification
+    /// `quality::evaluate`'s own shared `values` map already makes for a
+    /// Quality `MetricMeasure` (a `reported.*` id's scope coverage is not
+    /// enforced here, exactly as it is not for Quality today). Circular
+    /// (`checks::is_circular_metric`) and unresolvable ids are dropped
+    /// before any plan exists -- `checks::evaluate` then reads them `open`
+    /// with its own reason, and `checks::check_vocabulary` already caught
+    /// the same mistake as a finding when the catalogue loaded. Empty does
+    /// no work at all: no plan, no gather. `root`/`reported` are the
+    /// caller's own plain config projection, the same raw input
+    /// `Plan::prepare` always takes; validating it again here costs no
+    /// more than the handful of path checks `Plan::prepare` already does
+    /// unconditionally on every call.
+    pub async fn metric_values<S: checks::CheckSource>(
+        &self,
+        per_scope: &[(&str, &[S])],
+        root: PathBuf,
+        reported: &reported::Configuration,
+        now: DateTime<Utc>,
+    ) -> Result<BTreeMap<MetricId, MetricValue>> {
+        let mut ids = Vec::new();
+        for (_, subjects) in per_scope {
+            for id in evidence::metric_check_ids(subjects) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        if ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let plan = Plan::prepare(
+            &ids,
+            root,
+            &self.evidence.scopes,
+            &quality_inputs::Configuration::default(),
+            reported,
+            None,
+        )
+        .await?;
+        let gathered = self.gather_measurements(&plan, now, None).await?;
+        let computed = self
+            .finish(&plan, gathered, &Ok(BTreeMap::new()), now, None)
+            .await?;
+        Ok(computed
+            .values
+            .into_iter()
+            .map(|v| (v.id.clone(), v))
+            .collect())
+    }
+
     async fn policy_measurements(&self, inputs: &PolicyInputs) -> Result<PolicyMeasurements> {
         let tags = Provide::<KnowledgeTags>::get(&self.evidence.own, &())
             .await?
@@ -405,6 +464,15 @@ impl<'a, P: Ports> Service<'a, P> {
                     &inputs.attestations,
                     &shared,
                     scope.budget.as_ref(),
+                    // `#278`: a `Check::Metric` folded into this rollup
+                    // (`compliance.<framework>`/`open_controls.<framework>`)
+                    // reads `open` here -- known, documented in the PR,
+                    // not wired to `metric_values` to avoid threading a
+                    // `root`/`reported::Configuration` through `gather`/
+                    // `gather_policy`'s existing public signature and
+                    // every test that calls it. The Policy tab itself
+                    // (`check_evaluation::Provider`) reads the real value.
+                    &BTreeMap::new(),
                     now,
                 )
                 .await?;
@@ -983,11 +1051,15 @@ fn is_intake_metric(id: &str) -> bool {
     )
 }
 
-fn is_policy_metric(id: &str) -> bool {
+/// `pub(crate)`, not private: `#278`'s `checks::is_circular_metric` reuses
+/// this exact prefix test to refuse a policy `check: metric` on
+/// `compliance.*` as circular, rather than writing the same match a third
+/// time (`quality::is_quality_metric` is the second, over a `MetricId`).
+pub(crate) fn is_policy_metric(id: &str) -> bool {
     id.starts_with("compliance.") || id.starts_with("open_controls.")
 }
 
-fn is_quality_metric(id: &str) -> bool {
+pub(crate) fn is_quality_metric(id: &str) -> bool {
     id.starts_with("quality.")
 }
 

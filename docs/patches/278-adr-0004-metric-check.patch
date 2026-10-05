@@ -1,0 +1,55 @@
+# Patch for issue #278 phase 2 (Factory side): a tenth policy check kind,
+# `check: metric`, amending ADR 0004's check vocabulary.
+#
+# One file diff, path relative to the company root:
+#   .specs/adr/0004-policy-controls.md -- bumps the Status line and adds
+#     amendment 10, recording the new `check: metric` kind, its fields,
+#     its judgement (shared with Quality's own metric measure), the
+#     families it refuses as circular, and why: scope-reported metrics
+#     (#278, phase 1) needed a way to close an L6 control.
+#
+# This repository (`projects/factory`) does not own `.specs/`; the ADR
+# lives in the company root (`business-factory`). Apply from there with:
+#   patch -p1 < 278-adr-0004-metric-check.patch
+--- a/.specs/adr/0004-policy-controls.md	2026-10-05 23:38:57
++++ b/.specs/adr/0004-policy-controls.md	2026-10-05 23:39:19
+@@ -1,7 +1,7 @@
+ # ADR 0004: Policies as a control catalogue checked against evidence
+
+-- Status: Accepted, amended 2026-10-04 to name the evidence channel (see
+-  "Amendments" at the end)
++- Status: Accepted, amended 2026-10-04 to name the evidence channel and
++  2026-10-05 to add a `metric` check kind (see "Amendments" at the end)
+ - Date: 2026-09-24
+ - Decision owners: Business Factory
+ - Tracking: https://github.com/ingo-eichhorst/factory/issues/74
+@@ -266,3 +266,29 @@
+    are still being migrated in #193; accepting the rule does not assert
+    those steps are finished. Persisting the facts a decision acted on is
+    deferred to a separate ADR, without removing existing audit records.
++10. **A tenth check, `metric`,** was added on 2026-10-05
++    (https://github.com/ingo-eichhorst/factory/issues/278, phase 2) once a
++    scope could declare its own reported metrics (phase 1, same issue):
++    without it, that progress could show at L5 Improvement but never close
++    an L6 control. `{ check: metric, metric, above, below, max_age }` names
++    a metric -- a scope's own `reported.<source>.<metric>` or a built-in
++    one -- held to inclusive `above`/`below` bounds and a freshness
++    `max_age`, judged by the exact same arithmetic a Quality
++    `measure: { metric, above, below, max_age }` already uses (one shared
++    function, `factory_assurance::metrics::judge_metric`, so the two kinds
++    of authored catalogue can never drift apart on what "met" or "stale"
++    means). Unlike Quality's four-way status, a control only ever reads
++    `met` as `satisfied`: `not_met`, `stale` and no value at all are all
++    `open`, with the reason -- the status vocabulary above has no bucket of
++    its own for "used to be current" or "found but wrong", and this
++    amendment does not add one. `compliance.<framework>`,
++    `open_controls.<framework>` and `quality.<characteristic>` are refused
++    on this check as circular -- a control judged by a number this same
++    evaluation produces would never be a measurement -- the same reasoning
++    Quality already applies to its own `quality.*` measures; refused both
++    as a catalogue finding when the file loads and again, defensively, if
++    one survives into evaluation anyway. An unknown metric id is a finding
++    too, the same treatment an unknown `daemon` fact or `secrets` location
++    already gets. This is a new evidence kind, so it amends this ADR's
++    check vocabulary; it changes no existing check's meaning, freshness
++    rule, status or rollup.

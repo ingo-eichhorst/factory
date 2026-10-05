@@ -328,6 +328,12 @@ test("describeCheck matches the CLI's own describe_check, one line per check kin
     describeCheck({ check: "attested", category: "feature", step: "tests", max_age: "1w" }),
     "attested: feature/tests (max_age 1w)",
   );
+  // #278
+  assert.equal(
+    describeCheck({ check: "metric", metric: "reported.finance.beleg_coverage", above: 0.98, max_age: "35d" }),
+    "metric: reported.finance.beleg_coverage >= 0.98 (max_age 35d)",
+  );
+  assert.equal(describeCheck({ check: "metric", metric: "fail_rate", below: 0.05 }), "metric: fail_rate <= 0.05");
 });
 
 test("looksLikeExpiry accepts policy::Duration's grammar and the two absolute forms, softly", () => {

@@ -4,10 +4,15 @@ use crate::engine::Engine;
 pub(super) fn check_provider(
     engine: &Engine,
 ) -> factory_assurance::check_evaluation::Provider<'_, super::checks::Ports<'_>> {
-    factory_assurance::check_evaluation::Provider::new(super::checks::service(
-        engine,
-        engine.factory_snapshot().scope_tree(),
-    ))
+    let snapshot = engine.factory_snapshot();
+    factory_assurance::check_evaluation::Provider::new(
+        factory_assurance::metrics_service::Service::new(super::checks::service(
+            engine,
+            snapshot.scope_tree(),
+        )),
+        snapshot.root.clone(),
+        crate::metrics::reported_configuration(&snapshot),
+    )
 }
 
 pub(super) fn metric_provider(

@@ -1,12 +1,13 @@
 //! The live L5 check-result provider. Only authored subjects, receipts and
 //! limits enter; lower gathering and evaluation happen here on every read.
-use crate::{checks, evidence, metric_values::copy_input_error};
+use crate::{checks, evidence, metric_values::copy_input_error, metrics_service, reported};
 use chrono::{DateTime, Utc};
 use factory_kernel::{
     Attestation, CheckEvaluationFact, CheckObservation, FactProvider, FactoryError, Provide,
     Result, ScopeCheckEvaluation, ScopeNode, L5,
 };
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 pub struct ScopeInput {
     pub scope: ScopeNode,
@@ -24,7 +25,18 @@ pub struct Read {
     pub now: Option<DateTime<Utc>>,
 }
 pub struct Provider<'a, P> {
-    evidence: evidence::Service<'a, P>,
+    // `#278`: the one lower-evidence seam, shared with its own
+    // `metric_values` for a `Check::Metric` -- see the module doc comment
+    // on `metrics_service::Service::metric_values`.
+    metrics: metrics_service::Service<'a, P>,
+    /// `#278`: the instance root, handed to `Plan::prepare` fresh on every
+    /// read, same as every other metrics entry point.
+    root: PathBuf,
+    /// `#278`: the live `scope.metrics` declarations, projected down by
+    /// the outside router the same way `quality_configuration`/
+    /// `reported_configuration` already are for every other metrics entry
+    /// point -- never a computed value.
+    reported: reported::Configuration,
 }
 
 /// Gather only the primary declarations, then evaluate both authored sets
@@ -34,16 +46,38 @@ pub struct ComparisonRead {
     pub primary: Read,
     pub alternative: Vec<ScopeInput>,
 }
-impl<'a, P: evidence::Ports> Provider<'a, P> {
-    pub fn new(evidence: evidence::Service<'a, P>) -> Self {
-        Self { evidence }
+impl<'a, P: metrics_service::Ports> Provider<'a, P> {
+    pub fn new(
+        metrics: metrics_service::Service<'a, P>,
+        root: PathBuf,
+        reported: reported::Configuration,
+    ) -> Self {
+        Self {
+            metrics,
+            root,
+            reported,
+        }
+    }
+
+    /// `#278`: every metric id a `Check::Metric` among `per_scope` asks
+    /// for, computed once and shared across every scope and control in
+    /// this read -- see `metrics_service::Service::metric_values`.
+    async fn metric_values<S: checks::CheckSource>(
+        &self,
+        per_scope: &[(&str, &[S])],
+        now: DateTime<Utc>,
+    ) -> Result<std::collections::BTreeMap<crate::metrics::MetricId, crate::metrics::MetricValue>>
+    {
+        self.metrics
+            .metric_values(per_scope, self.root.clone(), &self.reported, now)
+            .await
     }
 }
 impl<P: Send + Sync> FactProvider for Provider<'_, P> {
     type Level = L5;
 }
 #[async_trait::async_trait]
-impl<P: evidence::Ports + Send + Sync> Provide<CheckEvaluationFact> for Provider<'_, P> {
+impl<P: metrics_service::Ports + Send + Sync> Provide<CheckEvaluationFact> for Provider<'_, P> {
     type Query = Read;
     type Value = CheckEvaluationFact;
     type Error = FactoryError;
@@ -53,7 +87,7 @@ impl<P: evidence::Ports + Send + Sync> Provide<CheckEvaluationFact> for Provider
             .iter()
             .map(|input| (input.scope.name.as_str(), input.subjects.as_slice()))
             .collect();
-        let shared = self.evidence.shared(&targets).await?;
+        let shared = self.metrics.evidence.shared(&targets).await?;
         let budgets = read.budgets.as_ref().map_err(copy_input_error)?;
         if budgets.len() != read.scopes.len() {
             return Err(FactoryError::BadRequest(
@@ -61,9 +95,11 @@ impl<P: evidence::Ports + Send + Sync> Provide<CheckEvaluationFact> for Provider
             ));
         }
         let now = read.now.unwrap_or_else(Utc::now);
+        let metric_values = self.metric_values(&targets, now).await?;
         let mut scopes = Vec::new();
         for (input, budget) in read.scopes.iter().zip(budgets) {
             let evidence = self
+                .metrics
                 .evidence
                 .for_scope(
                     &input.scope,
@@ -72,6 +108,7 @@ impl<P: evidence::Ports + Send + Sync> Provide<CheckEvaluationFact> for Provider
                     &read.attestations,
                     &shared,
                     budget.as_ref(),
+                    &metric_values,
                     now,
                 )
                 .await?;
@@ -96,7 +133,7 @@ impl<P: evidence::Ports + Send + Sync> Provide<CheckEvaluationFact> for Provider
 }
 
 #[async_trait::async_trait]
-impl<P: evidence::Ports + Send + Sync> Provide<factory_kernel::CheckComparisonFact>
+impl<P: metrics_service::Ports + Send + Sync> Provide<factory_kernel::CheckComparisonFact>
     for Provider<'_, P>
 {
     type Query = ComparisonRead;
@@ -109,7 +146,7 @@ impl<P: evidence::Ports + Send + Sync> Provide<factory_kernel::CheckComparisonFa
             .iter()
             .map(|input| (input.scope.name.as_str(), input.subjects.as_slice()))
             .collect();
-        let shared = self.evidence.shared(&targets).await?;
+        let shared = self.metrics.evidence.shared(&targets).await?;
         let budgets = primary.budgets.as_ref().map_err(copy_input_error)?;
         if budgets.len() != primary.scopes.len() || read.alternative.len() != primary.scopes.len() {
             return Err(FactoryError::BadRequest(
@@ -117,6 +154,16 @@ impl<P: evidence::Ports + Send + Sync> Provide<factory_kernel::CheckComparisonFa
             ));
         }
         let now = primary.now.unwrap_or_else(Utc::now);
+        // `#278`: every `Check::Metric` either side of the comparison
+        // names, so an overlay that only adds one still reads real values.
+        let alternative_targets: Vec<_> = read
+            .alternative
+            .iter()
+            .map(|input| (input.scope.name.as_str(), input.subjects.as_slice()))
+            .collect();
+        let mut metric_targets = targets.clone();
+        metric_targets.extend(alternative_targets);
+        let metric_values = self.metric_values(&metric_targets, now).await?;
         let mut scopes = Vec::new();
         for ((input, alternative), budget) in
             primary.scopes.iter().zip(&read.alternative).zip(budgets)
@@ -127,6 +174,7 @@ impl<P: evidence::Ports + Send + Sync> Provide<factory_kernel::CheckComparisonFa
                 ));
             }
             let evidence = self
+                .metrics
                 .evidence
                 .for_scope(
                     &input.scope,
@@ -135,6 +183,7 @@ impl<P: evidence::Ports + Send + Sync> Provide<factory_kernel::CheckComparisonFa
                     &primary.attestations,
                     &shared,
                     budget.as_ref(),
+                    &metric_values,
                     now,
                 )
                 .await?;

@@ -317,6 +317,13 @@ export function describeCheck(check) {
       return describeDependencies(check);
     case "attested":
       return `attested: ${check.category}/${check.step} (max_age ${check.max_age})`;
+    case "metric": {
+      const parts = [check.metric];
+      if (check.above !== null && check.above !== undefined) parts.push(`>= ${check.above}`);
+      if (check.below !== null && check.below !== undefined) parts.push(`<= ${check.below}`);
+      if (check.max_age) parts.push(`(max_age ${check.max_age})`);
+      return `metric: ${parts.join(" ")}`;
+    }
     default:
       return check.check;
   }
