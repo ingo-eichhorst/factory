@@ -406,10 +406,7 @@ impl<'a, P: Ports> Service<'a, P> {
         gathered: &mut Gathered,
         inputs: &PolicyInputs,
     ) -> Result<()> {
-        gathered.policy = Some(
-            self.policy_measurements(&plan.check_inputs, inputs)
-                .await?,
-        );
+        gathered.policy = Some(self.policy_measurements(&plan.check_inputs, inputs).await?);
         Ok(())
     }
 

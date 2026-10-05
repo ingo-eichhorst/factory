@@ -255,6 +255,8 @@ test("findingsByKind groups by the wire's snake_case kind, and findingLabel tran
   assert.equal(findingLabel("unknown_control"), "Names a control that is not applicable");
   assert.equal(findingLabel("unknown_daemon_fact"), "Names a daemon fact nothing recognizes");
   assert.equal(findingLabel("unknown_secrets_location"), "Names a secrets location nothing recognizes");
+  assert.equal(findingLabel("circular_metric"), "Names a metric computed from policy or quality verdicts");
+  assert.equal(findingLabel("wrong_direction"), "A metric threshold runs against the metric's direction");
   assert.equal(findingLabel("a_future_kind"), "a_future_kind", "an unknown kind falls back to the raw string");
 });
 

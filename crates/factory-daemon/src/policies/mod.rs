@@ -530,6 +530,102 @@ mod tests {
         statuses.iter().map(|s| (s.control.id.as_str(), s)).collect()
     }
 
+    /// `#278` phase 2, end to end through the daemon: `finance`
+    /// (`projects/finance`) declares a reported metrics source, and a root
+    /// `gobd` catalogue closes `belegprinzip` with `check: metric` on it.
+    /// The live config reaches both the evaluation (`l5::check_provider`)
+    /// and the catalogue read's direction check (`policy_intent_service`),
+    /// and `compliance.gobd` reads the same per-scope value.
+    #[tokio::test]
+    async fn a_reported_metric_closes_a_control_through_the_live_config() {
+        let root = std::env::temp_dir().join(format!("factory-policies-metric-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::create_dir_all(root.join("projects/finance")).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/gobd.yaml"),
+            "framework: gobd\ntitle: GoBD\nkind: regulation\ncontrols:\n\
+             \x20 - id: belegprinzip\n    title: B\n    max_age: 35d\n    evidence: [{check: metric, metric: reported.fin.coverage, above: 0.98}]\n\
+             \x20 - id: backwards\n    title: W\n    evidence: [{check: metric, metric: reported.fin.unresolved, above: 0}]\n",
+        )
+        .unwrap();
+        let as_of = (Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+        std::fs::write(
+            root.join("projects/finance/metrics.json"),
+            format!(r#"{{"as_of":"{as_of}","metrics":[{{"id":"coverage","value":0.99}},{{"id":"unresolved","value":0}}]}}"#),
+        )
+        .unwrap();
+        let mut finance = scope_at("finance-id", "finance", "projects/finance", "");
+        finance.metrics = serde_yaml_ng::from_str(
+            "source: { id: fin, file: metrics.json }\n\
+             declare:\n\
+             \x20 - { id: coverage, title: Coverage, unit: ratio, better: higher }\n\
+             \x20 - { id: unresolved, title: Unresolved, unit: count, better: lower }\n",
+        )
+        .unwrap();
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: None,
+            scopes: vec![
+                scope_at("company-id", "company", ".", ""),
+                finance,
+                scope_at("sibling-id", "sibling", "other", ""),
+            ],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration { frameworks: vec!["gobd".to_string()], ..Default::default() },
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            secrets: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(
+            Factory { root: root.clone(), config },
+            Registry::with_builtins(),
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
+
+        let report = engine.policy_report(None).await.unwrap();
+        let status = |scope: &str, id: &str| {
+            let row = report.rows.iter().find(|r| r.scope == scope).unwrap();
+            let status = &by_id(&row.statuses)[id].status;
+            (status.kind(), status.reasons().join("; "))
+        };
+        let (kind, reason) = status("finance", "belegprinzip");
+        assert_eq!(kind, StatusKind::Satisfied, "{reason}");
+        assert!(reason.starts_with("metric: reported.fin.coverage = 0.99"), "{reason}");
+        assert_eq!(status("company", "belegprinzip").0, StatusKind::Satisfied, "finance is in company's subtree");
+        let (kind, reason) = status("sibling", "belegprinzip");
+        assert_eq!(kind, StatusKind::Open);
+        assert!(reason.contains("outside the selected subtree"), "{reason}");
+        let (kind, reason) = status("finance", "backwards");
+        assert_eq!(kind, StatusKind::Open);
+        assert!(reason.contains("lower is better"), "{reason}");
+        let backwards: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind == factory_core::policy::FindingKind::WrongDirection)
+            .collect();
+        assert_eq!(backwards.len(), 1, "{:?}", report.findings);
+        assert!(backwards[0].detail.starts_with("gobd/backwards"), "{:?}", backwards[0]);
+
+        // `compliance.gobd`, scoped to finance: one of two regulation
+        // controls closed, read through the same per-scope metric path.
+        let compliance = factory_core::metrics::MetricId::new("compliance.gobd").unwrap();
+        let metrics = engine
+            .metrics_for(std::slice::from_ref(&compliance), Utc::now(), Some("finance"), None)
+            .await
+            .unwrap();
+        assert_eq!(metrics.values[0].value, Some(0.5));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[tokio::test]
     async fn a_scope_query_covers_the_asked_scope_and_its_descendants_only() {
         let engine = test_engine();

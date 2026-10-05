@@ -542,7 +542,9 @@ mod tests {
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].kind, policy::FindingKind::WrongDirection);
         assert_eq!(findings[0].subject, "cra.yaml");
-        assert!(findings[0].detail.starts_with("cra/backwards holds reported.finance.unresolved"));
+        assert!(findings[0]
+            .detail
+            .starts_with("cra/backwards holds reported.finance.unresolved"));
         // With no declaration in hand nothing is judged either way.
         let (_, findings) = Service::new(root.0.clone(), configuration(), &store)
             .catalogues()

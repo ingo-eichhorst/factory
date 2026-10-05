@@ -318,12 +318,12 @@ pub fn reported_direction_findings(
                     continue;
                 };
                 let wrong = match (declared.get(metric.as_str()), above, below) {
-                    (Some(Better::Lower), Some(a), None) => {
-                        Some(format!("`above: {a}`, but its scope declares lower is better -- use `below`"))
-                    }
-                    (Some(Better::Higher), None, Some(b)) => {
-                        Some(format!("`below: {b}`, but its scope declares higher is better -- use `above`"))
-                    }
+                    (Some(Better::Lower), Some(a), None) => Some(format!(
+                        "`above: {a}`, but its scope declares lower is better -- use `below`"
+                    )),
+                    (Some(Better::Higher), None, Some(b)) => Some(format!(
+                        "`below: {b}`, but its scope declares higher is better -- use `above`"
+                    )),
                     _ => None,
                 };
                 if let Some(wrong) = wrong {

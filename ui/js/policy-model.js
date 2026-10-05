@@ -157,6 +157,10 @@ const FINDING_LABELS = {
   empty_rationale: "n/a declared with no rationale",
   unknown_daemon_fact: "Names a daemon fact nothing recognizes",
   unknown_secrets_location: "Names a secrets location nothing recognizes",
+  circular_metric: "Names a metric computed from policy or quality verdicts",
+  unknown_metric: "Names a metric nothing recognizes",
+  bad_threshold: "A metric check needs exactly one finite above or below",
+  wrong_direction: "A metric threshold runs against the metric's direction",
 };
 export function findingLabel(kind) {
   return FINDING_LABELS[kind] || kind;

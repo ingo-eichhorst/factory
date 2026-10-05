@@ -1349,7 +1349,11 @@ fn metric_status(
     let as_of = found.value.as_of;
     let v = match found.value.value {
         Some(v) if v.is_finite() => v,
-        Some(v) => return open(format!("{metric} could not be computed: {v} is not a finite number")),
+        Some(v) => {
+            return open(format!(
+                "{metric} could not be computed: {v} is not a finite number"
+            ))
+        }
         None => {
             return open(format!(
                 "{metric} could not be computed: {}",
@@ -1367,8 +1371,12 @@ fn metric_status(
         );
     }
     match (above, below) {
-        (Some(a), _) if v < a.0 => open(format!("{metric} = {v} as of {as_of}, below the required {a}")),
-        (_, Some(b)) if v > b.0 => open(format!("{metric} = {v} as of {as_of}, above the allowed {b}")),
+        (Some(a), _) if v < a.0 => open(format!(
+            "{metric} = {v} as of {as_of}, below the required {a}"
+        )),
+        (_, Some(b)) if v > b.0 => open(format!(
+            "{metric} = {v} as of {as_of}, above the allowed {b}"
+        )),
         (Some(a), _) => (
             StatusKind::Satisfied,
             format!("metric: {metric} = {v} as of {as_of}, at or above {a}"),
@@ -1613,7 +1621,11 @@ mod tests {
         let kinds = |c: Check| -> Vec<VocabularyFinding> {
             check_vocabulary(&c).into_iter().map(|(k, _)| k).collect()
         };
-        for circular in ["compliance.cra", "open_controls.gobd", "quality.reliability"] {
+        for circular in [
+            "compliance.cra",
+            "open_controls.gobd",
+            "quality.reliability",
+        ] {
             assert_eq!(
                 kinds(check(circular, Some(0.5), None)),
                 vec![VocabularyFinding::CircularMetric],
@@ -1672,7 +1684,12 @@ mod tests {
             StatusKind::Stale
         );
         assert_eq!(
-            judge(check("fail_rate", None, Some(0.1)), Some("2d".parse().unwrap()), &lower).0,
+            judge(
+                check("fail_rate", None, Some(0.1)),
+                Some("2d".parse().unwrap()),
+                &lower
+            )
+            .0,
             StatusKind::Satisfied
         );
     }
@@ -1686,20 +1703,52 @@ mod tests {
             assert!(reason.contains(needle), "{needle:?} not in {reason:?}");
         };
         let none = Evidence::default();
-        open(check("fail_rate", None, Some(0.1)), &none, "not resolved for fail_rate");
+        open(
+            check("fail_rate", None, Some(0.1)),
+            &none,
+            "not resolved for fail_rate",
+        );
         let other = read("scrap_rate", Some(0.0), Some(Better::Lower), 0);
-        open(check("fail_rate", None, Some(0.1)), &other, "no value for fail_rate");
+        open(
+            check("fail_rate", None, Some(0.1)),
+            &other,
+            "no value for fail_rate",
+        );
         let missing = read("fail_rate", None, Some(Better::Lower), 0);
-        open(check("fail_rate", None, Some(0.1)), &missing, "nothing reported");
+        open(
+            check("fail_rate", None, Some(0.1)),
+            &missing,
+            "nothing reported",
+        );
         let infinite = read("fail_rate", Some(f64::INFINITY), Some(Better::Lower), 0);
-        open(check("fail_rate", None, Some(0.1)), &infinite, "not a finite number");
+        open(
+            check("fail_rate", None, Some(0.1)),
+            &infinite,
+            "not a finite number",
+        );
         let fine = read("fail_rate", Some(0.0), Some(Better::Lower), 0);
-        open(check("fail_rate", Some(0.0), Some(0.1)), &fine, "both `above` and `below`");
-        open(check("fail_rate", Some(0.0), None), &fine, "lower is better");
-        open(check("not_a_metric", None, Some(0.1)), &fine, "not a known metric");
+        open(
+            check("fail_rate", Some(0.0), Some(0.1)),
+            &fine,
+            "both `above` and `below`",
+        );
+        open(
+            check("fail_rate", Some(0.0), None),
+            &fine,
+            "lower is better",
+        );
+        open(
+            check("not_a_metric", None, Some(0.1)),
+            &fine,
+            "not a known metric",
+        );
         // A circular metric is refused even with a value in hand.
         let circular = read("compliance.cra", Some(1.0), Some(Better::Higher), 0);
-        open(check("compliance.cra", Some(0.5), None), &circular, "cannot be evidence");
+        open(
+            check("compliance.cra", Some(0.5), None),
+            &circular,
+            "cannot be evidence",
+        );
     }
 
     #[test]
