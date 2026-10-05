@@ -474,6 +474,10 @@ impl Engine {
         .await;
         self.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
         self.sweep_workspaces().await;
+        // `#274`: a closed task's sandboxed conversation, if it preserved
+        // one, is released the same way its worktree is -- no new sweeper,
+        // just the existing per-task release point.
+        self.remove_preserved_session(id);
         Ok(updated)
     }
 

@@ -711,6 +711,9 @@ mod tests {
                     "factory-aaaabbbb".into(),
                 ],
                 service_evidence: None,
+                task: String::new(),
+                workdir: String::new(),
+                preserve_download: None,
             };
             let context = CaptureContext {
                 root: root.clone(),

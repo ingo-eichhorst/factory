@@ -108,6 +108,12 @@ struct ResumePlan {
     /// `Some` only when the task uses a worktree of its own and the previous
     /// run's is still there to reuse.
     workspace: Option<(PathBuf, String)>,
+    /// `#274`: `Some` only for a sandboxed claude-code run whose preserved
+    /// conversation `resolve_continue` matched against this dispatch --
+    /// `preserved_dir` for the task, which `prepare_sandbox` uploads into
+    /// the new sandbox before launch. `None` for every other resume, and
+    /// for a sandboxed one that already fell back to fresh.
+    sandbox_restore: Option<PathBuf>,
 }
 
 /// Why a `schedule_skipped` entry's slots passed -- `data.reason` on the
@@ -1210,6 +1216,8 @@ impl Engine {
                         self.enqueue_capacity_release(&task.scope, &run.agent);
                     }
                 }
+                // `#274`: released with the task, not by a periodic sweep.
+                self.remove_preserved_session(&id);
                 let deleted = self.store.delete(&id).await?;
                 if deleted {
                     self.bus.publish(Event::TaskDeleted { id });
@@ -1274,17 +1282,27 @@ impl Engine {
                             prev.status.as_str()
                         )));
                     }
+                    // `#274`: a blocked-timeout reclaim is not one of
+                    // `FailKind::is_infrastructure`'s members -- that set
+                    // also excludes a run from L5 conformance's held-failure
+                    // category, which a blocked timeout should not join --
+                    // so it is accepted here by name instead of widening
+                    // that shared membership. Resuming after reclaim is the
+                    // whole point of preserving a blocked sandbox's
+                    // conversation: a person who was waiting to answer
+                    // should be able to pick the same session back up.
                     let infra = match prev.fail_kind {
                         Some(kind) if kind.is_infrastructure() => {
                             kind != FailKind::DispatchFailed || prev.last_session.is_some()
                         }
+                        Some(FailKind::BlockedTimeout) => true,
                         _ => false,
                     };
                     if !infra {
                         return Err(FactoryError::BadRequest(format!(
                             "attempt {} of this task ended {}, which is not an infrastructure failure; \
-                             --continue is only for an ack timeout, a run timeout, a session gone, or a \
-                             dispatch failure after a session had already come up",
+                             --continue is only for an ack timeout, a run timeout, a session gone, a \
+                             blocked timeout, or a dispatch failure after a session had already come up",
                             prev.attempt,
                             prev.fail_kind.map_or(prev.status.as_str(), FailKind::as_str),
                         )));
@@ -2807,10 +2825,6 @@ impl Engine {
             )));
         }
 
-        // `#178`: decided before the run row exists, since none of it needs
-        // one -- `resolve_continue` only ever reads the previous run and this
-        // dispatch's freshly resolved agent/runtime.
-        let sandboxed_agent = declaration.as_ref().is_some_and(|d| d.sandbox == Sandbox::Openshell);
         let role_name = self.effective_role(&task.scope, &agent_name).await;
         let role = self.roles_for(&task.scope).get(&role_name).cloned();
         let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.policy_chain(&task.scope));
@@ -2844,14 +2858,25 @@ impl Engine {
             Some(previous) if previous.resume_context.as_ref().is_none_or(|context| context.fingerprint != fingerprint) => Some(ContinueOutcome::Fresh {
                 reason: "the guide, role, agent declaration or harness version changed (or no compatibility checkpoint was recorded)".into(),
             }),
-            // `#218`: the conversation lived in the previous run's sandbox,
-            // which was deleted when that run ended.
-            Some(_) if sandboxed_agent => Some(ContinueOutcome::Fresh {
-                reason: "the previous run's conversation lived in its OpenShell sandbox, which was deleted when that run ended".into(),
-            }),
+            // `#274`: the conversation lived in the previous run's sandbox,
+            // deleted when that run ended -- except a sandboxed claude-code
+            // run now preserves it first, so this falls through to
+            // `resolve_continue` like everything else; it decides, from
+            // what was actually preserved, whether resuming is possible.
             Some(prev) => Some(
-                self.resolve_continue(&task, (&agent_name, &adapter_name), agent.as_ref(), runtime.as_ref(), prev, &scope_path)
-                    .await,
+                self.resolve_continue(
+                    &task,
+                    (&agent_name, &adapter_name),
+                    agent.as_ref(),
+                    runtime.as_ref(),
+                    prev,
+                    &scope_path,
+                    declaration
+                        .as_ref()
+                        .filter(|d| d.sandbox == Sandbox::Openshell)
+                        .and_then(|d| d.openshell.as_ref()),
+                )
+                .await,
             ),
             None => None,
         };
@@ -3160,6 +3185,12 @@ impl Engine {
                 result: Some("Feedback on the prior attempt is recorded as a new run of the same task.".into()),
             });
         }
+        // `#274`: what a sandboxed resume falls back to, if its preserved
+        // conversation does not actually upload -- the same upstream a
+        // fresh dispatch would have built, minus the one entry that only
+        // makes sense for a conversation that is truly continuing.
+        let upstream_fresh: Vec<UpstreamOutput> =
+            upstream.iter().filter(|u| u.node_id != "resume-context").cloned().collect();
         let agent_exits = self.agent_exit_context(&task).await;
         let knowledge = self.knowledge_hints(&task, &run.id).await;
         // Same chain the L6 tab and `policy attest` fold against
@@ -3228,12 +3259,24 @@ impl Engine {
         // `#178`: the resume args go first -- `codex resume <id>` is a
         // subcommand, which has to lead, and a flag like claude's
         // `--resume <id>` does not mind leading either.
+        let resume_args_len = match &continue_outcome {
+            Some(ContinueOutcome::Resume(plan)) => plan.resume_args.len(),
+            _ => 0,
+        };
         if let Some(ContinueOutcome::Resume(plan)) = &continue_outcome {
             let mut args = plan.resume_args.clone();
             args.append(&mut launch.args);
             launch.args = args;
         }
         append_declared_args(&mut launch, declaration.as_ref());
+        // `#274`: `Some` only for a sandboxed claude-code run whose
+        // preserved conversation matched this continuation -- the local
+        // directory `prepare_sandbox` tries to restore before trusting
+        // `launch`'s `--resume` for real.
+        let sandbox_restore = match &continue_outcome {
+            Some(ContinueOutcome::Resume(plan)) => plan.sandbox_restore.clone(),
+            _ => None,
+        };
         // A task's stored `scope` can still be a scope's legacy bare name --
         // canonicalize it the same way `start_agent` does, so a legacy-named
         // task's run lands in the same workspace as that scope's standing
@@ -3264,22 +3307,79 @@ impl Engine {
                     FactoryError::BadRequest(format!("{reason}. The run was not started on the host instead"))
                 })?;
                 let prompt = agent.prompt(&ctx).await?;
-                let (plan, teardown) = Box::pin(self.prepare_sandbox(
-                    &factory, &task, &run.id, &cwd, &launch, &prompt, config, callback, &resolved,
-                ))
-                .await?;
+                let (plan, teardown, restore_outcome) = match &sandbox_restore {
+                    // `#274`: a tentative resume plans the *fresh* pair as
+                    // the primary -- what the sandbox launches with unless
+                    // the preserved conversation actually uploads -- and
+                    // the already-built resumed `launch`/`prompt` as the
+                    // overlay `prepare` switches to only on that success.
+                    Some(local_dir) => {
+                        let mut ctx_fresh = ctx.clone();
+                        if let Some(binding) = ctx_fresh.task.as_mut() {
+                            binding.resumed_session = None;
+                            binding.upstream = upstream_fresh.clone();
+                        }
+                        let mut launch_fresh = launch.clone();
+                        launch_fresh.args.drain(0..resume_args_len);
+                        let prompt_fresh = agent.prompt(&ctx_fresh).await?;
+                        Box::pin(self.prepare_sandbox(
+                            &factory, &task, &run.id, &cwd, &launch_fresh, &prompt_fresh,
+                            Some((&launch, prompt.as_str(), local_dir.as_path())),
+                            config, callback, &resolved,
+                        ))
+                        .await?
+                    }
+                    None => Box::pin(self.prepare_sandbox(
+                        &factory, &task, &run.id, &cwd, &launch, &prompt, None, config, callback, &resolved,
+                    ))
+                    .await?,
+                };
                 launch = plan.launch.clone();
-                Some((teardown, plan))
+                Some((teardown, plan, restore_outcome))
             }
             None => None,
         };
+
+        // `#274`: the run row and the sandboxed prompt/upstream already
+        // tentatively claim a resume -- corrected here, the one place that
+        // knows for certain, when the preserved conversation did not
+        // actually make it into the new sandbox. `resumed_session` is
+        // otherwise set once at dispatch and never patched again; this is
+        // the one case that can discover, after the fact, that it was not
+        // really true.
+        if let Some((_, _, crate::openshell::RestoreOutcome::FellBack(reason))) = &sandboxed {
+            let reverted = factory_core::run::ResumeContext { resumes: 0, ..checkpoint.clone() };
+            self.store
+                .update_run(
+                    &run.id,
+                    &RunPatch {
+                        clear_resumed_session: true,
+                        resume_context: Some(reverted),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            self.entry(
+                task_id,
+                TaskEntry::new(
+                    "daemon",
+                    "continue_fallback",
+                    format!(
+                        "continuing attempt {}'s session was not possible: {reason}; dispatching fresh",
+                        run.attempt.saturating_sub(1)
+                    ),
+                )
+                .in_run(&run.id),
+            )
+            .await;
+        }
 
         // A close during a slow launch must not leave a new pane attached to
         // an already-ended run. Serialize just this run's launch/report close.
         let lifecycle = self.run_lifecycle_lock(&run.id);
         let _launching = lifecycle.lock().await;
         if self.require_run(&run.id).await?.status.is_terminal() {
-            if let Some((_, plan)) = &sandboxed { Box::pin(crate::openshell::discard(plan)).await; }
+            if let Some((_, plan, _)) = &sandboxed { Box::pin(crate::openshell::discard(plan)).await; }
             return Err(FactoryError::DispatchSuperseded("the run ended before its session was launched".into()));
         }
         let started = runtime
@@ -3298,14 +3398,21 @@ impl Engine {
         let mut session = match (started, &sandboxed) {
             (Ok(session), _) => session,
             // No session will ever carry this sandbox to `close_session`.
-            (Err(e), Some((_, plan))) => {
+            (Err(e), Some((_, plan, _))) => {
                 Box::pin(crate::openshell::discard(plan)).await;
                 return Err(e);
             }
             (Err(e), None) => return Err(e),
         };
-        if let Some((teardown, _)) = &sandboxed {
+        if let Some((teardown, _, _)) = &sandboxed {
             session.meta.insert(crate::openshell::META_KEY.to_string(), teardown.to_meta());
+        }
+        // `#274`: only now, with the session actually up, is the preserved
+        // copy's job done -- an earlier delete would lose the only copy to
+        // a failure between the restore upload and here (a failed `create`
+        // retry, the launch itself failing) that this function cannot see.
+        if let Some((_, _, crate::openshell::RestoreOutcome::Restored { local_dir })) = &sandboxed {
+            let _ = std::fs::remove_dir_all(local_dir);
         }
 
         let run = self
@@ -3355,6 +3462,7 @@ impl Engine {
     /// continue still dispatches, exactly as a plain `task run` would,
     /// journaled with the one reason it fell back rather than left to a
     /// person to guess from a session that just looks fresh.
+    #[allow(clippy::too_many_arguments)]
     async fn resolve_continue(
         &self,
         task: &Task,
@@ -3363,6 +3471,7 @@ impl Engine {
         runtime: &dyn AgentRuntime,
         prev: &Run,
         scope_path: &Path,
+        sandboxed: Option<&factory_core::openshell::OpenshellConfig>,
     ) -> ContinueOutcome {
         // Rule 5: the previous run's agent is not necessarily this
         // dispatch's -- the task may have been edited since. Resuming a
@@ -3427,7 +3536,60 @@ impl Engine {
             };
         }
 
-        ContinueOutcome::Resume(ResumePlan { session_id, resume_args: resume.args, workspace })
+        // `#274`: a sandboxed run's conversation does not live on this host
+        // at all -- it lived in the previous run's sandbox, deleted when
+        // that run ended -- so resuming needs a preserved copy that matches
+        // this exact continuation in every way a live, on-host conversation
+        // never has to prove: the right task, the right run, the same
+        // session id this function just resolved, and the same sandbox
+        // working directory the new dispatch would use. `prepare_sandbox`
+        // still has to actually upload it; this only says the attempt is
+        // worth making.
+        let sandbox_restore = if let Some(config) = sandboxed {
+            let sessions_root = self.factory_snapshot().factory_dir().join("openshell").join("sessions");
+            let Some(preserved) = crate::openshell::load_preserved(&sessions_root, &task.id) else {
+                return ContinueOutcome::Fresh {
+                    reason: "no preserved sandbox conversation was found for this task".into(),
+                };
+            };
+            if preserved.run != prev.id {
+                return ContinueOutcome::Fresh {
+                    reason: "the preserved sandbox conversation came from an earlier run, not the one being continued".into(),
+                };
+            }
+            if preserved.bytes > crate::openshell::PRESERVE_CAP_BYTES {
+                return ContinueOutcome::Fresh {
+                    reason: format!(
+                        "the preserved sandbox conversation was {} bytes, over the {}-byte cap, so only its size was kept",
+                        preserved.bytes, crate::openshell::PRESERVE_CAP_BYTES
+                    ),
+                };
+            }
+            if preserved.session_id.as_deref() != Some(session_id.as_str()) {
+                return ContinueOutcome::Fresh {
+                    reason: "the preserved sandbox conversation's session id does not match the previous run's resolved session id".into(),
+                };
+            }
+            let predicted_cwd = workspace.as_ref().map(|(path, _)| path.as_path()).unwrap_or(scope_path);
+            let expected_workdir = match factory_core::openshell::workdir_for(config, predicted_cwd) {
+                Ok(workdir) => workdir,
+                Err(e) => {
+                    return ContinueOutcome::Fresh {
+                        reason: format!("the sandbox working directory could not be resolved to check the preserved conversation: {e}"),
+                    };
+                }
+            };
+            if preserved.workdir != expected_workdir {
+                return ContinueOutcome::Fresh {
+                    reason: "the preserved sandbox conversation was captured from a different sandbox working directory".into(),
+                };
+            }
+            Some(crate::openshell::preserved_dir(&sessions_root, &task.id))
+        } else {
+            None
+        };
+
+        ContinueOutcome::Resume(ResumePlan { session_id, resume_args: resume.args, workspace, sandbox_restore })
     }
 
     /// Where a run actually works: its own worktree, or the scope directly.
@@ -4585,9 +4747,26 @@ impl Engine {
             .cloned()
     }
 
+    /// `#274`: a task's preserved sandbox conversation, when it has one,
+    /// is released the same moment its other per-task state is -- closing
+    /// or deleting the task, never a periodic sweep of its own.
+    pub(crate) fn remove_preserved_session(&self, task_id: &str) {
+        let sessions_root = self.factory_snapshot().factory_dir().join("openshell").join("sessions");
+        crate::openshell::remove_preserved(&sessions_root, task_id);
+    }
+
     /// `sandbox: openshell` at dispatch (`#218`): plan the run's sandbox,
     /// make it, and say so on the run. An `Err` fails the run with the
     /// reason; nothing here ever falls back to the host.
+    ///
+    /// `launch`/`prompt` are always what a *fresh* dispatch would use --
+    /// `resume` is `Some` only for a tentatively-resuming sandboxed run
+    /// (`#274`): the resumed launch/prompt and the preserved conversation's
+    /// local directory. The staged `launch.sh`/`prompt.md` default to the
+    /// fresh pair; `prepare` switches to the resumed pair only once the
+    /// preserved conversation actually uploads, so a failed upload can
+    /// never launch a sandbox with `--resume` pointing at a session that
+    /// is not there.
     #[allow(clippy::too_many_arguments)]
     async fn prepare_sandbox(
         &self,
@@ -4597,11 +4776,14 @@ impl Engine {
         cwd: &Path,
         launch: &LaunchSpec,
         prompt: &str,
+        resume: Option<(&LaunchSpec, &str, &Path)>,
         config: &factory_core::openshell::OpenshellConfig,
         callback: &factory_core::openshell::CallbackTarget,
         resolved: &crate::provision::Resolved,
-    ) -> Result<(factory_core::openshell::Plan, crate::openshell::Teardown)> {
+    ) -> Result<(factory_core::openshell::Plan, crate::openshell::Teardown, crate::openshell::RestoreOutcome)> {
         let cli = crate::openshell::resolve_cli(config.cli.as_deref())?;
+        let state_dir = factory.factory_dir().join("openshell").join(run_id);
+        let guides_dir = factory.guides_dir();
         let plan = factory_core::openshell::plan(&factory_core::openshell::PlanInput {
             config,
             cli: &cli,
@@ -4611,12 +4793,56 @@ impl Engine {
             run_id,
             task_id: &task.id,
             cwd,
-            guides_dir: &factory.guides_dir(),
-            state_dir: &factory.factory_dir().join("openshell").join(run_id),
+            guides_dir: &guides_dir,
+            state_dir: &state_dir,
             launch,
             prompt,
             callback,
         })?;
+        // The resumed variant is planned too -- identical in everything but
+        // `launch.sh`/`prompt.md`'s content, which is all `prepare` needs
+        // of it (`#274`).
+        let restore = match resume {
+            Some((resume_launch, resume_prompt, local_dir)) => {
+                let resume_plan = factory_core::openshell::plan(&factory_core::openshell::PlanInput {
+                    config,
+                    cli: &cli,
+                    image: &resolved.image,
+                    providers: &resolved.providers,
+                    instance_id: &factory.config.instance.id,
+                    run_id,
+                    task_id: &task.id,
+                    cwd,
+                    guides_dir: &guides_dir,
+                    state_dir: &state_dir,
+                    launch: resume_launch,
+                    prompt: resume_prompt,
+                    callback,
+                })?;
+                let override_files: Vec<_> = resume_plan
+                    .stage_files
+                    .into_iter()
+                    .filter(|(path, _, _)| {
+                        path.file_name().and_then(|n| n.to_str()) == Some("launch.sh")
+                            || path.file_name().and_then(|n| n.to_str()) == Some("prompt.md")
+                    })
+                    .collect();
+                // Never true today -- the claude branch `plan()` takes
+                // always stages both -- but an empty override would mean
+                // `prepare` reports `Restored` while the sandbox actually
+                // launches with the fresh (unresumed) files it already
+                // staged, and the run row would wrongly go on claiming a
+                // resume that never happened. Fail the dispatch outright
+                // rather than let that silently drift.
+                if override_files.is_empty() {
+                    return Err(FactoryError::Other(anyhow::anyhow!(
+                        "the resumed plan staged neither launch.sh nor prompt.md; refusing to claim a resume prepare cannot actually stage"
+                    )));
+                }
+                Some(crate::openshell::Restore { local_dir: local_dir.to_path_buf(), override_files })
+            }
+            None => None,
+        };
         self.entry(
             &task.id,
             TaskEntry::new(
@@ -4627,7 +4853,7 @@ impl Engine {
             .in_run(run_id),
         )
         .await;
-        let mut teardown = crate::openshell::Teardown::of(&plan, cwd, config.fast_forward);
+        let mut teardown = crate::openshell::Teardown::of(&plan, cwd, config.fast_forward, &task.id);
         teardown.service_evidence = Some(crate::service_observations::CaptureContext {
             root: factory.root.clone(), instance: factory.config.instance.id.clone(),
             scope: task.scope.clone(), agent: task.agent.clone(), task: task.id.clone(),
@@ -4640,7 +4866,15 @@ impl Engine {
             base: plan.base.clone(),
             teardown: teardown.clone(),
         }.save().map_err(|e| FactoryError::BadRequest(format!("could not persist OpenShell cleanup record: {e}")))?;
-        Box::pin(crate::openshell::prepare(&plan, &resolved.providers)).await?;
+        let restore_outcome = Box::pin(crate::openshell::prepare(&plan, &resolved.providers, restore.as_ref())).await?;
+        if let crate::openshell::RestoreOutcome::FellBack(reason) = &restore_outcome {
+            self.entry(
+                &task.id,
+                TaskEntry::new("daemon", "sandbox", format!("preserved conversation not restored: {reason}; launching fresh"))
+                    .in_run(run_id),
+            )
+            .await;
+        }
         self.entry(
             &task.id,
             TaskEntry::new(
@@ -4657,7 +4891,7 @@ impl Engine {
             })),
         )
         .await;
-        Ok((plan, teardown))
+        Ok((plan, teardown, restore_outcome))
     }
 
     /// On start: delete every OpenShell sandbox this instance made whose run
@@ -9281,6 +9515,30 @@ edges: [{id: next, from: implement, to: review}]
             std::fs::remove_dir_all(&scope_dir).ok();
         }
 
+        /// `#274`: resuming after a blocked-timeout reclaim is the whole
+        /// point of preserving a blocked sandbox's conversation, so the
+        /// `--continue` request gate (distinct from `resolve_continue`,
+        /// which separately decides whether a session can really resume)
+        /// must not refuse it outright the way it refuses every other
+        /// non-infrastructure ending.
+        #[tokio::test]
+        async fn continue_is_accepted_outright_for_a_run_that_ended_on_the_blocked_timeout() {
+            let scope_dir = temp_dir("continue-blocked-timeout-gate");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            dispatched_then_failed(&engine, &task, FailKind::BlockedTimeout).await;
+
+            let response = engine
+                .handle_request(Request::TaskRun { override_wait: false, id: task.id.clone(), reason: None, continue_run: true })
+                .await;
+            let refused_as_non_infra = matches!(
+                &response,
+                Response::Error { message, .. } if message.contains("not an infrastructure failure")
+            );
+            assert!(!refused_as_non_infra, "{response:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
         #[tokio::test]
         async fn continue_is_refused_outright_when_the_task_has_no_previous_run() {
             let scope_dir = temp_dir("continue-no-previous-run");
@@ -9359,6 +9617,7 @@ edges: [{id: next, from: implement, to: review}]
         use factory_core::adapter::agent::LaunchKind;
         use factory_core::adapter::runtime::RuntimeEventStream;
         use factory_core::task::{SessionRef, TaskReport};
+        use factory_core::usage::{SessionUsage, SnapshotPoint, UsageSnapshot};
         use std::os::unix::fs::PermissionsExt;
         use std::sync::Mutex;
 
@@ -9382,7 +9641,12 @@ edges: [{id: next, from: implement, to: review}]
                 Ok(())
             }
             async fn status(&self, _session: &SessionRef) -> Result<RuntimeStatus> {
-                Ok(RuntimeStatus::Working)
+                // `#274`: `resolve_continue`'s rule 1 ("never run two
+                // processes on one conversation") needs a session
+                // confirmed `Gone` before it will even consider resuming --
+                // true for every one of this module's own previous-run
+                // sessions, which by test time are long past their report.
+                Ok(RuntimeStatus::Gone)
             }
             async fn send_text(&self, _session: &SessionRef, _text: &str) -> Result<()> {
                 Ok(())
@@ -9401,14 +9665,49 @@ edges: [{id: next, from: implement, to: review}]
             }
         }
 
-        /// A stand-in `openshell` that logs every call and succeeds.
+        /// A stand-in `openshell` that logs every call and succeeds. A
+        /// `sandbox download` of the projects path (`#274`) writes one
+        /// fake `.jsonl`, named by `session_id`, so a preserve/resume test
+        /// can drive the whole thing without a real gateway.
         fn fake_cli(dir: &Path) -> PathBuf {
+            fake_cli_with_session(dir, "resumed-session")
+        }
+
+        fn fake_cli_with_session(dir: &Path, session_id: &str) -> PathBuf {
             let path = dir.join("openshell");
             std::fs::write(
                 &path,
                 format!(
-                    "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$1 $2\" in\n'status -o') echo '{{\"status\":\"connected\"}}' ;;\nesac\n",
-                    dir.join("calls").display()
+                    "#!/bin/sh\n\
+                     echo \"$*\" >> '{calls}'\n\
+                     case \"$1 $2\" in\n\
+                     'status -o') echo '{{\"status\":\"connected\"}}' ;;\n\
+                     'sandbox download') if [ \"$4\" = '/sandbox/.claude/projects' ]; then mkdir -p \"$5/cwd-dir\" && echo '{{}}' > \"$5/cwd-dir/{session_id}.jsonl\"; fi ;;\n\
+                     esac\n",
+                    calls = dir.join("calls").display(),
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+
+        /// A CLI whose `sandbox download` of the preserved conversation's
+        /// path always fails -- nothing ever gets preserved, the same
+        /// observable outcome (to `resolve_continue`) as there having never
+        /// been one.
+        fn fake_cli_with_failing_preserve_download(dir: &Path) -> PathBuf {
+            let path = dir.join("openshell");
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\n\
+                     echo \"$*\" >> '{calls}'\n\
+                     case \"$1 $2\" in\n\
+                     'status -o') echo '{{\"status\":\"connected\"}}' ;;\n\
+                     'sandbox download') if [ \"$4\" = '/sandbox/.claude/projects' ]; then echo 'gateway unreachable' >&2; exit 1; fi ;;\n\
+                     esac\n",
+                    calls = dir.join("calls").display(),
                 ),
             )
             .unwrap();
@@ -9417,7 +9716,10 @@ edges: [{id: next, from: implement, to: review}]
         }
 
         /// Launches as `claude` and says, in its prompt, the working
-        /// directory it was given -- what a harness tells its agent.
+        /// directory it was given -- what a harness tells its agent. Also
+        /// declares a `claude`-shaped `resume_spec`, and a prompt that
+        /// names the resumed session when `#274`'s tentative resume sets
+        /// one, so a preserve/resume test can tell the two variants apart.
         struct CwdAgent;
 
         #[async_trait]
@@ -9429,7 +9731,14 @@ edges: [{id: next, from: implement, to: review}]
                 Ok(LaunchSpec { kind: LaunchKind::Named("claude".into()), args: Vec::new(), env: ctx.env(), agent_kind: None })
             }
             async fn prompt(&self, ctx: &AgentContext) -> Result<String> {
+                let binding = ctx.binding()?;
+                if let Some(session_id) = &binding.resumed_session {
+                    return Ok(format!("Resumed session {session_id}. Working directory: {}\n", ctx.cwd.display()));
+                }
                 Ok(format!("Working directory: {}\n", ctx.cwd.display()))
+            }
+            fn resume_spec(&self, session_id: &str) -> Option<factory_core::adapter::agent::ResumeSpec> {
+                Some(factory_core::adapter::agent::ResumeSpec { args: vec!["--resume".into(), session_id.into()] })
             }
         }
 
@@ -9481,6 +9790,81 @@ edges: [{id: next, from: implement, to: review}]
                 })
                 .await
                 .unwrap()
+        }
+
+        /// The sandboxed claude-code probe (`#274`): `boxed-claude`, whose
+        /// `resume_spec` is real and whose conversation `finish` tries to
+        /// preserve.
+        async fn boxed_claude_task(engine: &Arc<Engine>) -> Task {
+            engine
+                .create(NewTask {
+                    title: "resume me".into(),
+                    instructions: "say".into(),
+                    scope: Some("demo".into()),
+                    agent: Some("boxed-claude".into()),
+                    runtime: Some("stub-os".into()),
+                    worktree: Some(false),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        }
+
+        /// A later usage snapshot naming `session_id` for the `cwd-probe`
+        /// adapter -- what `resolve_continue` reads to find a resumable
+        /// session, the same as a real `claude` run's `Stop` hook would
+        /// relay over `FACTORY_URL`.
+        async fn seed_session_id(engine: &Arc<Engine>, run: &Run, session_id: &str) {
+            engine
+                .store
+                .append_usage(&UsageSnapshot {
+                    run_id: run.id.clone(),
+                    task_id: run.task_id.clone(),
+                    point: SnapshotPoint::RunEnd,
+                    at: Utc::now(),
+                    runtime: "stub-os".into(),
+                    usage: Some(SessionUsage {
+                        schema: 1,
+                        handle: None,
+                        sampled_at: None,
+                        sessions: vec![serde_json::from_value(
+                            serde_json::json!({ "session_id": session_id, "adapter": "cwd-probe" }),
+                        )
+                        .unwrap()],
+                    }),
+                    unknown: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        /// Ends the run `status`ed as the agent would, closing its session
+        /// the same way a real report or cancel does -- `finish` runs in
+        /// the background after, so a test polls for its result.
+        async fn end_and_wait_for_teardown(engine: &Arc<Engine>, task_id: &str, run: &Run, tools: &Path, sandbox: &str) {
+            engine
+                .report(
+                    task_id,
+                    TaskReport {
+                        artifacts: Vec::new(),
+                        status: Some(RunStatus::Done),
+                        message: None,
+                        result: Some("ok".into()),
+                        send_to: None,
+                        error: None,
+                        token: run.token.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            for _ in 0..100 {
+                let calls = std::fs::read_to_string(tools.join("calls")).unwrap_or_default();
+                if calls.trim_end().ends_with(&format!("sandbox delete {sandbox}")) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("sandbox {sandbox} was never torn down");
         }
 
         /// The host path names nothing inside the sandbox; the agent is told
@@ -9539,6 +9923,9 @@ edges: [{id: next, from: implement, to: review}]
                 download_dir, fast_forward: false,
                 delete: vec![base[0].clone(), "sandbox".into(), "delete".into(), sandbox.clone()],
                 service_evidence: None,
+                task: task.id.clone(),
+                workdir: String::new(),
+                preserve_download: None,
             };
             crate::openshell::Pending { instance: factory.config.instance.id.clone(), run: run.clone(), task: task.id.clone(), base, teardown }.save().unwrap();
             let listed = serde_json::json!({"sandboxes":[{"name":sandbox,"labels":{"factory.instance":factory.config.instance.id,"factory.run":run}}]});
@@ -9746,6 +10133,272 @@ edges: [{id: next, from: implement, to: review}]
                 "{:?}",
                 entries.iter().map(|e| (&e.kind, &e.message)).collect::<Vec<_>>()
             );
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
+        }
+
+        // -- `#274`: preserving a sandboxed conversation and resuming it --
+
+        fn sessions_root(engine: &Arc<Engine>) -> PathBuf {
+            engine.factory_snapshot().factory_dir().join("openshell").join("sessions")
+        }
+
+        #[tokio::test]
+        async fn a_done_claude_runs_conversation_is_preserved_under_its_task_and_the_sandbox_still_deletes() {
+            let scope_dir = temp_dir("openshell-preserve");
+            let tools = temp_dir("openshell-preserve-cli");
+            let cli = fake_cli(&tools);
+            let (engine, _runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_claude_task(&engine).await;
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            seed_session_id(&engine, &run, "resumed-session").await;
+            let sandbox = format!("factory-{}", &run.id[..8]);
+            end_and_wait_for_teardown(&engine, &task.id, &run, &tools, &sandbox).await;
+
+            let record = crate::openshell::load_preserved(&sessions_root(&engine), &task.id)
+                .expect("a preserved record for this task");
+            assert_eq!(record.run, run.id);
+            assert_eq!(record.task, task.id);
+            assert_eq!(record.session_id.as_deref(), Some("resumed-session"));
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
+        }
+
+        #[tokio::test]
+        async fn a_blocked_timeout_reclaim_also_preserves_the_conversation() {
+            // Lifecycle decision 1: every teardown preserves first, blocked
+            // timeout included -- the same path `finish` always takes,
+            // whatever ended the run.
+            let scope_dir = temp_dir("openshell-preserve-blocked");
+            let tools = temp_dir("openshell-preserve-blocked-cli");
+            let cli = fake_cli(&tools);
+            let (engine, _runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_claude_task(&engine).await;
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            seed_session_id(&engine, &run, "resumed-session").await;
+            engine.fail_run(&run.id, FailKind::BlockedTimeout, "nobody answered").await;
+            let sandbox = format!("factory-{}", &run.id[..8]);
+            for _ in 0..100 {
+                let calls = std::fs::read_to_string(tools.join("calls")).unwrap_or_default();
+                if calls.trim_end().ends_with(&format!("sandbox delete {sandbox}")) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(crate::openshell::load_preserved(&sessions_root(&engine), &task.id).is_some());
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
+        }
+
+        #[tokio::test]
+        async fn continuing_restores_the_preserved_conversation_and_launches_with_resume() {
+            let scope_dir = temp_dir("openshell-resume");
+            let tools = temp_dir("openshell-resume-cli");
+            let cli = fake_cli(&tools);
+            let (engine, _runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_claude_task(&engine).await;
+            let first = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            seed_session_id(&engine, &first, "resumed-session").await;
+            let sandbox = format!("factory-{}", &first.id[..8]);
+            end_and_wait_for_teardown(&engine, &task.id, &first, &tools, &sandbox).await;
+            let preserved = crate::openshell::load_preserved(&sessions_root(&engine), &task.id).unwrap();
+            let first = engine.store.get_run(&first.id).await.unwrap().unwrap();
+
+            let second = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(first.clone())).await.unwrap();
+
+            assert_eq!(second.resumed_session.as_deref(), Some("resumed-session"));
+            assert!(
+                continue_fallback_reasons_openshell(&engine, &task.id).await.is_empty(),
+                "a matching preserved session resumes outright"
+            );
+            let teardown = crate::openshell::Teardown::from_meta(&second.session.as_ref().unwrap().meta).unwrap();
+            let launcher = std::fs::read_to_string(teardown.state_dir.join(".factory-run/launch.sh")).unwrap();
+            assert!(launcher.contains("--resume") && launcher.contains("resumed-session"), "{launcher}");
+            let calls = std::fs::read_to_string(tools.join("calls")).unwrap();
+            assert!(
+                calls.contains("sandbox upload") && calls.contains("/sandbox/.claude"),
+                "the preserved conversation was uploaded into the new sandbox: {calls}"
+            );
+            assert!(!preserved.workdir.is_empty(), "the record carries the workdir it was captured from");
+            assert!(
+                crate::openshell::load_preserved(&sessions_root(&engine), &task.id).is_none(),
+                "the preserved copy is gone once it is used"
+            );
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
+        }
+
+        async fn continue_fallback_reasons_openshell(engine: &Arc<Engine>, task_id: &str) -> Vec<String> {
+            engine
+                .store
+                .entries(task_id, 50)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.kind == "continue_fallback")
+                .map(|e| e.message)
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn continuing_falls_back_to_fresh_when_the_preserved_sessions_id_does_not_match() {
+            let scope_dir = temp_dir("openshell-resume-mismatch");
+            let tools = temp_dir("openshell-resume-mismatch-cli");
+            let cli = fake_cli(&tools);
+            let (engine, _runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_claude_task(&engine).await;
+            let first = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            // The preserved conversation is for "resumed-session" (the fake
+            // CLI's default), but the previous run's own resolved session
+            // id -- what a real Stop hook would have relayed -- differs.
+            seed_session_id(&engine, &first, "a-different-session").await;
+            let sandbox = format!("factory-{}", &first.id[..8]);
+            end_and_wait_for_teardown(&engine, &task.id, &first, &tools, &sandbox).await;
+            assert!(crate::openshell::load_preserved(&sessions_root(&engine), &task.id).is_some());
+            let first = engine.store.get_run(&first.id).await.unwrap().unwrap();
+
+            let second = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(first.clone())).await.unwrap();
+
+            assert!(second.resumed_session.is_none());
+            let reasons = continue_fallback_reasons_openshell(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("does not match")), "{reasons:?}");
+            let teardown = crate::openshell::Teardown::from_meta(&second.session.as_ref().unwrap().meta).unwrap();
+            let launcher = std::fs::read_to_string(teardown.state_dir.join(".factory-run/launch.sh")).unwrap();
+            assert!(!launcher.contains("--resume"), "{launcher}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
+        }
+
+        #[tokio::test]
+        async fn a_failed_preserve_download_leaves_nothing_and_continuing_falls_back_to_fresh() {
+            let scope_dir = temp_dir("openshell-resume-none");
+            let tools = temp_dir("openshell-resume-none-cli");
+            let cli = fake_cli_with_failing_preserve_download(&tools);
+            let (engine, _runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_claude_task(&engine).await;
+            let first = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            seed_session_id(&engine, &first, "resumed-session").await;
+            let sandbox = format!("factory-{}", &first.id[..8]);
+            end_and_wait_for_teardown(&engine, &task.id, &first, &tools, &sandbox).await;
+            // `calls` ending in `sandbox delete` only proves `finish`'s own
+            // work is done; its journal writes are a separate loop after
+            // that (same race the module's other end-to-end test notes).
+            let mut journaled = false;
+            for _ in 0..100 {
+                if engine.store.run_entries(&first.id, 50).await.unwrap().iter()
+                    .any(|e| e.kind == "sandbox" && e.message.contains("not preserved")) {
+                    journaled = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert!(journaled, "the failed download is journaled");
+            assert!(crate::openshell::load_preserved(&sessions_root(&engine), &task.id).is_none());
+            let first = engine.store.get_run(&first.id).await.unwrap().unwrap();
+
+            let second = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(first.clone())).await.unwrap();
+
+            assert!(second.resumed_session.is_none());
+            let reasons = continue_fallback_reasons_openshell(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("no preserved")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
+        }
+
+        #[tokio::test]
+        async fn a_failed_restore_upload_falls_back_to_fresh_and_corrects_the_run_row() {
+            let scope_dir = temp_dir("openshell-resume-upload-fails");
+            let tools = temp_dir("openshell-resume-upload-fails-cli");
+            let cli = fake_cli(&tools);
+            // Preserving still has to work for the first run's teardown;
+            // only the *second* dispatch's restore upload fails -- so make
+            // `sandbox upload` fail only once destination is `/sandbox/.claude`.
+            let script = std::fs::read_to_string(&cli).unwrap().replace(
+                "case \"$1 $2\" in\n",
+                "case \"$1 $2\" in\n'sandbox upload') if [ \"$5\" = '/sandbox/.claude' ]; then echo 'gateway unreachable' >&2; exit 1; fi ;;\n",
+            );
+            std::fs::write(&cli, script).unwrap();
+            let (engine, _runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_claude_task(&engine).await;
+            let first = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            seed_session_id(&engine, &first, "resumed-session").await;
+            let sandbox = format!("factory-{}", &first.id[..8]);
+            end_and_wait_for_teardown(&engine, &task.id, &first, &tools, &sandbox).await;
+            assert!(crate::openshell::load_preserved(&sessions_root(&engine), &task.id).is_some());
+            let first = engine.store.get_run(&first.id).await.unwrap().unwrap();
+
+            let second = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(first.clone())).await.unwrap();
+
+            // The run row's tentative claim is corrected once the upload's
+            // real failure is known -- `resumed_session` is set once, at
+            // dispatch, except for exactly this case (`#274`).
+            assert!(second.resumed_session.is_none(), "{second:?}");
+            assert_eq!(second.resume_context.as_ref().map(|c| c.resumes), Some(0));
+            let reasons = continue_fallback_reasons_openshell(&engine, &task.id).await;
+            assert!(reasons.iter().any(|r| r.contains("session was not possible")), "{reasons:?}");
+            let teardown = crate::openshell::Teardown::from_meta(&second.session.as_ref().unwrap().meta).unwrap();
+            let launcher = std::fs::read_to_string(teardown.state_dir.join(".factory-run/launch.sh")).unwrap();
+            assert!(!launcher.contains("--resume"), "a failed restore never launches with --resume: {launcher}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
+        }
+
+        #[tokio::test]
+        async fn closing_the_task_removes_its_preserved_session() {
+            let scope_dir = temp_dir("openshell-preserve-close");
+            let tools = temp_dir("openshell-preserve-close-cli");
+            let cli = fake_cli(&tools);
+            let (engine, _runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_claude_task(&engine).await;
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            seed_session_id(&engine, &run, "resumed-session").await;
+            // Failed, not done: a `done` task reads as already closed
+            // (`TaskStatus::Done` derives `CloseReason::Completed`), which
+            // `Request::TaskClose` refuses outright -- this test wants a
+            // still-open task to actually close.
+            engine.fail_run(&run.id, FailKind::AckTimeout, "outage").await;
+            let sandbox = format!("factory-{}", &run.id[..8]);
+            for _ in 0..100 {
+                let calls = std::fs::read_to_string(tools.join("calls")).unwrap_or_default();
+                if calls.trim_end().ends_with(&format!("sandbox delete {sandbox}")) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(crate::openshell::load_preserved(&sessions_root(&engine), &task.id).is_some());
+
+            let response = engine
+                .handle_request(Request::TaskClose {
+                    id: task.id.clone(),
+                    reason: factory_core::task::CloseReason::NotPlanned,
+                    duplicate_of: None,
+                    note: Some("done with this".into()),
+                })
+                .await;
+            assert!(!matches!(response, Response::Error { .. }), "{response:?}");
+
+            assert!(crate::openshell::load_preserved(&sessions_root(&engine), &task.id).is_none());
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
+        }
+
+        #[tokio::test]
+        async fn deleting_the_task_removes_its_preserved_session() {
+            let scope_dir = temp_dir("openshell-preserve-delete");
+            let tools = temp_dir("openshell-preserve-delete-cli");
+            let cli = fake_cli(&tools);
+            let (engine, _runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_claude_task(&engine).await;
+            let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            seed_session_id(&engine, &run, "resumed-session").await;
+            let sandbox = format!("factory-{}", &run.id[..8]);
+            end_and_wait_for_teardown(&engine, &task.id, &run, &tools, &sandbox).await;
+            assert!(crate::openshell::load_preserved(&sessions_root(&engine), &task.id).is_some());
+
+            let response = engine.handle_request(Request::TaskDelete { id: task.id.clone() }).await;
+            assert!(!matches!(response, Response::Error { .. }), "{response:?}");
+
+            assert!(crate::openshell::load_preserved(&sessions_root(&engine), &task.id).is_none());
             std::fs::remove_dir_all(&scope_dir).ok();
             std::fs::remove_dir_all(&tools).ok();
         }

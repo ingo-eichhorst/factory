@@ -50,6 +50,22 @@ pub const SANDBOX_WORK_PARENT: &str = "/sandbox/work";
 pub const SANDBOX_RUN_DIR: &str = "/sandbox/.factory-run";
 const RUN_DIR_NAME: &str = ".factory-run";
 
+/// The `sandbox` image user's home (`examples/openshell/Dockerfile`'s base
+/// image and its `/sandbox/.claude.json`) -- kept in one place rather than
+/// spelled out at each of its two call sites (`#274`).
+pub const SANDBOX_HOME: &str = "/sandbox";
+
+/// Where a claude-code run's conversation lives inside the sandbox: a
+/// per-sandbox directory, since the sandbox is per-run, so downloading it
+/// whole (`#274`) needs no awareness of Claude's own cwd-encoding rule for
+/// the project directory nested underneath.
+pub const SANDBOX_CLAUDE_PROJECTS: &str = "/sandbox/.claude/projects";
+
+/// Where a preserved conversation is uploaded back to: an upload keeps the
+/// basename of what it uploads, so a local `.../projects` directory lands at
+/// `SANDBOX_CLAUDE_PROJECTS` when uploaded here.
+pub const SANDBOX_CLAUDE_DIR: &str = "/sandbox/.claude";
+
 /// The network rule Factory adds so the run can report, unless the policy
 /// already has a rule by this name.
 pub const CALLBACK_RULE: &str = "factory_callback";
@@ -1524,7 +1540,7 @@ fn host_paths_under(text: &str, dir: &str) -> Vec<PathBuf> {
     out
 }
 
-fn path_str(path: &Path) -> Result<String> {
+pub(crate) fn path_str(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_string)
         .ok_or_else(|| FactoryError::BadRequest(format!("{} is not valid UTF-8", path.display())))
@@ -2575,5 +2591,34 @@ policy: {}
             m.expiring(chrono::NaiveDate::from_ymd_opt(2027, 2, 2).unwrap()),
             Some(-2)
         );
+    }
+
+    /// `#274`: a preserved session's recorded workdir has to compare equal
+    /// against what a *later* dispatch, with its own run id, would resolve
+    /// -- `workdir_for` depends only on the upload mode and the host cwd's
+    /// name, never on the run.
+    #[test]
+    fn workdir_for_is_deterministic_across_run_ids() {
+        let mut cfg: OpenshellConfig = serde_yaml_ng::from_str(
+            "image: img\nproviders: []\npolicy:\n  network_policies: {}\n",
+        )
+        .unwrap();
+        let cwd = Path::new("/scope/awesome-herdr");
+        cfg.upload = Transfer::Workdir;
+        assert_eq!(
+            workdir_for(&cfg, cwd).unwrap(),
+            workdir_for(&cfg, cwd).unwrap(),
+            "two calls over the same host cwd agree, whatever run asked"
+        );
+        assert_eq!(workdir_for(&cfg, cwd).unwrap(), "/sandbox/work/awesome-herdr");
+        // A fresh (non-reused) worktree's directory is named after its own
+        // run id, so a different run's cwd correctly yields a different
+        // workdir -- the mismatch `resolve_continue` is meant to catch.
+        let other_run_cwd = Path::new("/scope/.factory/worktrees/run-xyz");
+        assert_ne!(workdir_for(&cfg, cwd).unwrap(), workdir_for(&cfg, other_run_cwd).unwrap());
+        // `upload: none` never looks at the cwd at all: always the same
+        // sandbox working directory, deterministic trivially.
+        cfg.upload = Transfer::None;
+        assert_eq!(workdir_for(&cfg, cwd).unwrap(), workdir_for(&cfg, other_run_cwd).unwrap());
     }
 }

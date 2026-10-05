@@ -413,6 +413,13 @@ pub struct RunPatch {
     /// continuation actually resumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_session: Option<String>,
+    /// `#274`: a sandboxed resume is tentative until its preserved
+    /// conversation actually uploads into the new sandbox -- set together
+    /// with `resumed_session` at dispatch, and cleared in the one case that
+    /// upload fails, which `resumed_session` alone cannot undo once another
+    /// `Some` has no way to mean "no longer true".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_resumed_session: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_round: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
