@@ -1540,7 +1540,7 @@ fn host_paths_under(text: &str, dir: &str) -> Vec<PathBuf> {
     out
 }
 
-fn path_str(path: &Path) -> Result<String> {
+pub(crate) fn path_str(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_string)
         .ok_or_else(|| FactoryError::BadRequest(format!("{} is not valid UTF-8", path.display())))

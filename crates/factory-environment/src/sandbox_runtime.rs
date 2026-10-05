@@ -74,20 +74,25 @@ impl Teardown {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
-        let preserve_download = (plan.launch.agent_kind.as_deref() == Some("claude")).then(|| {
-            let sessions_root = sessions_root_of(&state_dir);
-            let mut argv = plan.base.clone();
-            argv.extend([
-                "sandbox".to_string(),
-                "download".to_string(),
-                plan.sandbox.clone(),
-                SANDBOX_CLAUDE_PROJECTS.to_string(),
-                incoming_projects_dir(&sessions_root, task)
-                    .display()
-                    .to_string(),
-            ]);
-            argv
-        });
+        // `path_str`, not `.display()`: a lossy path would make the exact
+        // argv-equality check in `Pending::valid_at` compare against a
+        // string a tampered record could never actually match, which turns
+        // that hardening into a check that trivially always passes.
+        let preserve_download = (plan.launch.agent_kind.as_deref() == Some("claude"))
+            .then(|| {
+                let sessions_root = sessions_root_of(&state_dir);
+                let dest = crate::openshell::path_str(&incoming_projects_dir(&sessions_root, task)).ok()?;
+                let mut argv = plan.base.clone();
+                argv.extend([
+                    "sandbox".to_string(),
+                    "download".to_string(),
+                    plan.sandbox.clone(),
+                    SANDBOX_CLAUDE_PROJECTS.to_string(),
+                    dest,
+                ]);
+                Some(argv)
+            })
+            .flatten();
         Self {
             sandbox: plan.sandbox.clone(),
             state_dir,
@@ -508,32 +513,38 @@ pub async fn prepare(plan: &Plan, providers: &[String], restore: Option<&Restore
     // into is not a thing to try.
     let outcome = match restore {
         None => RestoreOutcome::NotAttempted,
-        Some(restore) => {
-            let mut upload = plan.base.clone();
-            upload.extend([
-                "sandbox".to_string(),
-                "upload".to_string(),
-                plan.sandbox.clone(),
-                restore.local_dir.join("projects").display().to_string(),
-                crate::openshell::SANDBOX_CLAUDE_DIR.to_string(),
-                "--no-git-ignore".to_string(),
-            ]);
-            match run(
-                &upload,
-                TRANSFER,
-                &format!("restoring the preserved conversation into sandbox {}", plan.sandbox),
-            )
-            .await
-            {
-                Err(reason) => RestoreOutcome::FellBack(reason),
-                Ok(_) => match stage_resume_files(&restore.override_files) {
-                    Ok(()) => RestoreOutcome::Restored { local_dir: restore.local_dir.clone() },
-                    Err(e) => RestoreOutcome::FellBack(format!(
-                        "the preserved conversation uploaded, but its launcher could not be staged: {e}"
-                    )),
-                },
+        // `path_str`, not `.display()`: an argv built from a lossy path is
+        // never run against the gateway -- fall back instead of uploading
+        // from a path that is not actually the one on disk.
+        Some(restore) => match crate::openshell::path_str(&restore.local_dir.join("projects")) {
+            Err(e) => RestoreOutcome::FellBack(format!("the preserved conversation's path: {e}")),
+            Ok(source) => {
+                let mut upload = plan.base.clone();
+                upload.extend([
+                    "sandbox".to_string(),
+                    "upload".to_string(),
+                    plan.sandbox.clone(),
+                    source,
+                    crate::openshell::SANDBOX_CLAUDE_DIR.to_string(),
+                    "--no-git-ignore".to_string(),
+                ]);
+                match run(
+                    &upload,
+                    TRANSFER,
+                    &format!("restoring the preserved conversation into sandbox {}", plan.sandbox),
+                )
+                .await
+                {
+                    Err(reason) => RestoreOutcome::FellBack(reason),
+                    Ok(_) => match stage_resume_files(&restore.override_files) {
+                        Ok(()) => RestoreOutcome::Restored { local_dir: restore.local_dir.clone() },
+                        Err(e) => RestoreOutcome::FellBack(format!(
+                            "the preserved conversation uploaded, but its launcher could not be staged: {e}"
+                        )),
+                    },
+                }
             }
-        }
+        },
     };
 
     for upload in &plan.uploads {

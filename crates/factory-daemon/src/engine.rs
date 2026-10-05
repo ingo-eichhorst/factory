@@ -4827,6 +4827,18 @@ impl Engine {
                             || path.file_name().and_then(|n| n.to_str()) == Some("prompt.md")
                     })
                     .collect();
+                // Never true today -- the claude branch `plan()` takes
+                // always stages both -- but an empty override would mean
+                // `prepare` reports `Restored` while the sandbox actually
+                // launches with the fresh (unresumed) files it already
+                // staged, and the run row would wrongly go on claiming a
+                // resume that never happened. Fail the dispatch outright
+                // rather than let that silently drift.
+                if override_files.is_empty() {
+                    return Err(FactoryError::Other(anyhow::anyhow!(
+                        "the resumed plan staged neither launch.sh nor prompt.md; refusing to claim a resume prepare cannot actually stage"
+                    )));
+                }
                 Some(crate::openshell::Restore { local_dir: local_dir.to_path_buf(), override_files })
             }
             None => None,
@@ -9500,6 +9512,30 @@ edges: [{id: next, from: implement, to: review}]
                 other => panic!("expected a refusal, got {other:?}"),
             };
             assert!(message.contains("not an infrastructure failure"), "{message}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        /// `#274`: resuming after a blocked-timeout reclaim is the whole
+        /// point of preserving a blocked sandbox's conversation, so the
+        /// `--continue` request gate (distinct from `resolve_continue`,
+        /// which separately decides whether a session can really resume)
+        /// must not refuse it outright the way it refuses every other
+        /// non-infrastructure ending.
+        #[tokio::test]
+        async fn continue_is_accepted_outright_for_a_run_that_ended_on_the_blocked_timeout() {
+            let scope_dir = temp_dir("continue-blocked-timeout-gate");
+            let (engine, _runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, false).await;
+            dispatched_then_failed(&engine, &task, FailKind::BlockedTimeout).await;
+
+            let response = engine
+                .handle_request(Request::TaskRun { override_wait: false, id: task.id.clone(), reason: None, continue_run: true })
+                .await;
+            let refused_as_non_infra = matches!(
+                &response,
+                Response::Error { message, .. } if message.contains("not an infrastructure failure")
+            );
+            assert!(!refused_as_non_infra, "{response:?}");
             std::fs::remove_dir_all(&scope_dir).ok();
         }
 
