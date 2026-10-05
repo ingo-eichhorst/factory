@@ -151,11 +151,11 @@ function rowHtml(s) {
       ${actionAreaHtml(s, entry)}
     </td>
     <td class="sub">${[tokens, cost].filter(Boolean).join(" · ") || "—"}</td>
-    <td class="sug-row-actions">
+    <td><div class="sug-row-actions">
       ${canDismiss(s) ? `<button type="button" class="btn" data-sug-open-dismiss="${esc(s.id)}">Dismiss</button>` : ""}
       ${canDone(s) ? `<button type="button" class="btn" data-sug-done="${esc(s.id)}">Done</button>` : ""}
       ${canAsk(s) ? `<button type="button" class="btn" data-sug-open-ask="${esc(s.id)}">Ask the agent</button>` : ""}
-    </td>
+    </div></td>
   </tr>`;
 }
 

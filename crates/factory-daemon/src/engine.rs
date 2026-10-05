@@ -2818,7 +2818,7 @@ impl Engine {
     }
 
     pub(crate) async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) -> Result<Run> {
-        self.dispatch_with(task_id, trigger, due, continue_from, Vec::new()).await
+        Box::pin(self.dispatch_with(task_id, trigger, due, continue_from, Vec::new())).await
     }
 
     /// The same, with extra `UpstreamOutput` entries appended to whatever

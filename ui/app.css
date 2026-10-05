@@ -2546,8 +2546,15 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
 /* ------------------------------------------- L5 Improvement Suggestions (#275) */
 .sug-group { border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 10px; }
 .sug-group-head { align-items: flex-start; }
+/* One fixed column grid for every group's table, so groups line up. */
+.sug-rows { width: 100%; table-layout: fixed; border-collapse: collapse; }
 .sug-rows td { vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line-soft); }
-.sug-row-actions { white-space: nowrap; display: flex; gap: 6px; }
+.sug-rows td:nth-child(1) { width: 110px; }
+.sug-rows td:nth-child(3) { width: 150px; }
+.sug-rows td:nth-child(4) { width: 320px; }
+.sug-rows a { color: var(--signal-ink); text-decoration: none; }
+.sug-rows a:hover { color: var(--signal); text-decoration: underline; }
+.sug-row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .sug-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
 .sug-form input[type="text"] { flex: 1 1 220px; }
 .sug-err { color: var(--fault); flex-basis: 100%; }

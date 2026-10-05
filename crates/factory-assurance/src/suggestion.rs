@@ -424,10 +424,13 @@ pub fn group_by_target(suggestions: &[&Suggestion]) -> Vec<SuggestionGroup> {
                 count: items.len(),
                 open_count: items.iter().filter(|s| s.state == SuggestionState::Open).count(),
                 total_wasted_tokens: items.iter().filter_map(|s| s.wasted_tokens).sum(),
+                // A fold from +0.0, not `sum()`: an empty float sum is
+                // -0.0, which prints as "$-0.00" for a group with no
+                // recorded cost.
                 total_cost_usd: items
                     .iter()
                     .filter_map(|s| s.usage.as_ref().and_then(|u| u.cost_usd))
-                    .sum(),
+                    .fold(0.0, |total, cost| total + cost),
                 newest_filed_at: items[0].filed_at,
                 ids: items.iter().map(|s| s.id.clone()).collect(),
             }
@@ -475,6 +478,14 @@ mod tests {
 
     fn at(secs: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(secs, 0).unwrap()
+    }
+
+    #[test]
+    fn a_group_with_no_recorded_cost_totals_positive_zero() {
+        let mut s = filing("x").file("s1".into(), at(0));
+        s.usage = None;
+        let groups = group_by_target(&[&s]);
+        assert!(groups[0].total_cost_usd.is_sign_positive(), "an empty float sum is -0.0, which prints as $-0.00");
     }
 
     #[test]

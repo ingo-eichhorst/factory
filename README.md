@@ -2170,7 +2170,7 @@ one line, not ten, which is the prioritisation signal. `factory suggestion
 show <id>` prints one in full, history included.
 
 **The improvement agent.** Nothing here ever becomes work on its own
-(`#193`'s "Factory never creates a task from a suggestion"). A person
+(`#275`'s "Factory never creates a task from a suggestion"). A person
 presses "Create improvement task" in the Suggestions tab, or runs `factory
 suggestion task --id <id> [--id <id> ...]` (one suggestion, or a whole
 group's ids) -- the only door. It creates one task through L5's existing
