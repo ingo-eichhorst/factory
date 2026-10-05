@@ -209,9 +209,15 @@ export function scopeIncludeRows(report) {
   const rows = (report && report.scope_includes) || [];
   return rows.map(r => {
     const path = r.path || r.declared;
-    if (r.unavailable) {
-      const level = r.unavailable === "declared, but does not exist yet" ? "none" : "warn";
-      return { scope: r.scope, path, level, text: r.unavailable };
+    // `state` is the daemon's structured answer; `unavailable` is only
+    // ever the human reason to print next to it, never what `level`
+    // branches on -- a reworded reason must never silently fall back to
+    // the wrong colour.
+    if (r.state === "refused") {
+      return { scope: r.scope, path, level: "warn", text: r.unavailable || "refused" };
+    }
+    if (r.state === "missing") {
+      return { scope: r.scope, path, level: "none", text: r.unavailable || "declared, but does not exist yet" };
     }
     if (typeof r.files === "number") {
       return { scope: r.scope, path, level: "ok", text: `${r.files} file${r.files === 1 ? "" : "s"} · ${fmtBytes(r.bytes)}` };

@@ -118,6 +118,7 @@ const REPORT = {
       scope: "finance",
       declared: "../data/finance",
       path: "data/finance",
+      state: "ready",
       unavailable: null,
       files: 12,
       bytes: 34000,
@@ -126,6 +127,7 @@ const REPORT = {
       scope: "finance",
       declared: "../data/invoices",
       path: "data/invoices",
+      state: "missing",
       unavailable: "declared, but does not exist yet",
       files: null,
       bytes: null,
@@ -405,16 +407,36 @@ test("a scope's own declared backup.include is one row per declaration, resolved
 
 test("a refused declaration (escaping the root, under secrets, a symlink) reads as a warning, not grey", () => {
   const refused = scopeIncludeRows({
-    scope_includes: [{ scope: "finance", declared: "secrets/dump", path: null, unavailable: "a secret: never read, never copied", files: null, bytes: null }],
+    scope_includes: [{
+      scope: "finance", declared: "secrets/dump", path: null, state: "refused",
+      unavailable: "a secret: never read, never copied", files: null, bytes: null,
+    }],
   });
   assert.deepEqual(refused[0], { scope: "finance", path: "secrets/dump", level: "warn", text: "a secret: never read, never copied" });
 });
 
 test("declared and resolved but never yet backed up reads as a warning with an honest word, not a guess", () => {
   const pending = scopeIncludeRows({
-    scope_includes: [{ scope: "finance", declared: "../data/finance", path: "data/finance", unavailable: null, files: null, bytes: null }],
+    scope_includes: [{
+      scope: "finance", declared: "../data/finance", path: "data/finance", state: "ready",
+      unavailable: null, files: null, bytes: null,
+    }],
   });
   assert.deepEqual(pending[0], { scope: "finance", path: "data/finance", level: "warn", text: "not backed up yet" });
+});
+
+test("level is keyed off the structured state, never a match on the English reason", () => {
+  // The same reason text, paired with the opposite states, must read as
+  // the states say -- never guessed from the words, which a daemon could
+  // reword at any time without this breaking.
+  const asMissing = scopeIncludeRows({
+    scope_includes: [{ scope: "a", declared: "x", path: "x", state: "missing", unavailable: "a made-up reason", files: null, bytes: null }],
+  });
+  assert.equal(asMissing[0].level, "none");
+  const asRefused = scopeIncludeRows({
+    scope_includes: [{ scope: "a", declared: "x", path: "x", state: "refused", unavailable: "a made-up reason", files: null, bytes: null }],
+  });
+  assert.equal(asRefused[0].level, "warn");
 });
 
 test("no declared includes is an empty list, never a guess at a path nobody wrote", () => {

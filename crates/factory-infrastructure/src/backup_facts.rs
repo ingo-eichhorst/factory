@@ -205,7 +205,7 @@ pub fn resolve_scope_includes(
     root: &Path,
     declarations: &[(String, PathBuf, Vec<String>)],
 ) -> Vec<crate::backup::ScopeIncludeRow> {
-    use crate::backup::{resolve_scope_include, ScopeIncludeRow};
+    use crate::backup::{resolve_scope_include, ScopeIncludeRow, ScopeIncludeState};
     let mut out = Vec::new();
     for (scope, scope_path, raw) in declarations {
         for declared in raw {
@@ -214,18 +214,27 @@ pub fn resolve_scope_includes(
                     scope: scope.clone(),
                     declared: declared.clone(),
                     path: None,
+                    state: ScopeIncludeState::Refused,
                     unavailable: Some(reason.into()),
                     files: None,
                     bytes: None,
                 },
-                Ok(relative) => ScopeIncludeRow {
-                    scope: scope.clone(),
-                    declared: declared.clone(),
-                    path: Some(relative.to_string_lossy().replace('\\', "/")),
-                    unavailable: probe_include(root, &relative),
-                    files: None,
-                    bytes: None,
-                },
+                Ok(relative) => {
+                    let (state, unavailable) = match probe_include(root, &relative) {
+                        Probe::Ready => (ScopeIncludeState::Ready, None),
+                        Probe::Missing => (ScopeIncludeState::Missing, Some("declared, but does not exist yet".to_string())),
+                        Probe::Symlink => (ScopeIncludeState::Refused, Some("a symbolic link: not followed".to_string())),
+                    };
+                    ScopeIncludeRow {
+                        scope: scope.clone(),
+                        declared: declared.clone(),
+                        path: Some(relative.to_string_lossy().replace('\\', "/")),
+                        state,
+                        unavailable,
+                        files: None,
+                        bytes: None,
+                    }
+                }
             };
             out.push(row);
         }
@@ -233,27 +242,35 @@ pub fn resolve_scope_includes(
     out
 }
 
+/// What [`probe_include`] found on disk -- structured, so its caller
+/// branches on this, never on the English reason it turns into for
+/// [`crate::backup::ScopeIncludeRow::unavailable`].
+enum Probe {
+    Ready,
+    Missing,
+    Symlink,
+}
+
 /// Whether `relative` (already resolved, instance-root relative) is safe to
 /// archive right now. Every path component from the root down is checked
 /// for a symbolic link -- not only the final directory, so a link partway
 /// down (`data` itself a symlink elsewhere, declared `data/finance`) cannot
 /// smuggle an archive outside the root either. A component that does not
-/// exist yet is not refused -- `None` would claim more than is known, so
-/// this reads as a plain "not there", the fact [`resolve_scope_includes`]
-/// resolves fresh on every call rather than ever caching across a restart.
-fn probe_include(root: &Path, relative: &Path) -> Option<String> {
+/// exist yet is not refused -- `Probe::Missing` would claim more than is
+/// known as `Refused` would, so this reads as a plain "not there", the fact
+/// [`resolve_scope_includes`] resolves fresh on every call rather than ever
+/// caching across a restart.
+fn probe_include(root: &Path, relative: &Path) -> Probe {
     let mut current = root.to_path_buf();
     for component in relative.components() {
         current.push(component);
         match std::fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Some("a symbolic link: not followed".into());
-            }
+            Ok(meta) if meta.file_type().is_symlink() => return Probe::Symlink,
             Ok(_) => {}
-            Err(_) => return Some("declared, but does not exist yet".into()),
+            Err(_) => return Probe::Missing,
         }
     }
-    None
+    Probe::Ready
 }
 
 /// `(due_by, overdue_by)` for the newest backup: the schedule's next slot
@@ -396,6 +413,7 @@ mod scope_include_tests {
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path.as_deref(), Some("data/finance"));
+        assert_eq!(rows[0].state, crate::backup::ScopeIncludeState::Ready);
         assert_eq!(rows[0].unavailable, None);
     }
 
@@ -408,6 +426,7 @@ mod scope_include_tests {
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path.as_deref(), Some("data/finance"));
+        assert_eq!(rows[0].state, crate::backup::ScopeIncludeState::Missing);
         assert_eq!(rows[0].unavailable.as_deref(), Some("declared, but does not exist yet"));
 
         // Created later, with no restart: a fresh resolve (there is no
@@ -417,6 +436,7 @@ mod scope_include_tests {
             &s.0,
             &[("finance".into(), PathBuf::from("finance"), vec!["../data/finance".into()])],
         );
+        assert_eq!(rows[0].state, crate::backup::ScopeIncludeState::Ready);
         assert_eq!(rows[0].unavailable, None);
     }
 
@@ -429,6 +449,7 @@ mod scope_include_tests {
             &s.0,
             &[("finance".into(), PathBuf::from("finance"), vec!["../data".into()])],
         );
+        assert_eq!(rows[0].state, crate::backup::ScopeIncludeState::Refused);
         assert_eq!(rows[0].unavailable.as_deref(), Some("a symbolic link: not followed"));
     }
 
@@ -444,6 +465,7 @@ mod scope_include_tests {
             &s.0,
             &[("finance".into(), PathBuf::from("finance"), vec!["../data/finance".into()])],
         );
+        assert_eq!(rows[0].state, crate::backup::ScopeIncludeState::Refused);
         assert_eq!(rows[0].unavailable.as_deref(), Some("a symbolic link: not followed"));
     }
 
@@ -456,6 +478,7 @@ mod scope_include_tests {
             &[("finance".into(), PathBuf::from("finance"), vec!["../../etc".into()])],
         );
         assert_eq!(rows[0].path, None);
+        assert_eq!(rows[0].state, crate::backup::ScopeIncludeState::Refused);
         assert_eq!(rows[0].unavailable.as_deref(), Some("escapes the instance root"));
     }
 }

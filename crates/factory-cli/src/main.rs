@@ -7325,13 +7325,14 @@ mod tests {
     /// daemon did not already resolve and send.
     #[test]
     fn backup_status_prints_a_scope_data_section_per_declared_directory() {
-        use factory_core::backup::ScopeIncludeRow;
+        use factory_core::backup::{ScopeIncludeRow, ScopeIncludeState};
         let mut report = encrypted_report();
         report.scope_includes = vec![
             ScopeIncludeRow {
                 scope: "finance".into(),
                 declared: "../data/finance".into(),
                 path: Some("data/finance".into()),
+                state: ScopeIncludeState::Ready,
                 unavailable: None,
                 files: Some(12),
                 bytes: Some(34_000),
@@ -7340,6 +7341,7 @@ mod tests {
                 scope: "finance".into(),
                 declared: "../data/invoices".into(),
                 path: Some("data/invoices".into()),
+                state: ScopeIncludeState::Missing,
                 unavailable: Some("declared, but does not exist yet".into()),
                 files: None,
                 bytes: None,

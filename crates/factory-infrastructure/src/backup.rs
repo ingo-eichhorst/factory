@@ -321,6 +321,27 @@ pub fn resolve_scope_include(scope_path: &Path, declared: &str) -> std::result::
     Ok(relative)
 }
 
+/// The three-way answer a reader (the UI's grey/amber/green, say) should
+/// key off, never the English words in [`ScopeIncludeRow::unavailable`]:
+/// those are for a person, this is for code. `#[serde(default)]` on the
+/// field it sits on, additive -- a row from before this existed still
+/// deserializes, as [`ScopeIncludeState::Ready`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeIncludeState {
+    /// A directory, not a symlink, inside the instance root, outside any
+    /// `secrets/` component: safe to archive.
+    #[default]
+    Ready,
+    /// Declared and resolved, but nothing exists there (yet) -- routine,
+    /// not a problem: resolved fresh on every call, so a directory created
+    /// later needs no restart to read `Ready` on the very next call.
+    Missing,
+    /// Structurally unsafe, and so never opened at all -- see
+    /// [`ScopeIncludeRow::unavailable`] for which rule.
+    Refused,
+}
+
 /// One scope's declared `backup.include` entry, as the L1 Backup page and
 /// `factory backup status` show it -- resolved fresh from the live config
 /// on every report, never cached across a config reload, so a directory
@@ -335,10 +356,16 @@ pub struct ScopeIncludeRow {
     /// root, or is not a relative path at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// Why this entry would not be archived right now: it does not exist
-    /// yet, or [`resolve_scope_include`]'s own refusal, or a symbolic link
-    /// found when the live directory itself was probed. `None` means it is
-    /// safe to archive.
+    /// `Ready`, `Missing` or `Refused` -- what a reader should branch on.
+    /// `#[serde(default)]` so a row from before this field existed still
+    /// deserializes, as `Ready`. See [`ScopeIncludeState`].
+    #[serde(default)]
+    pub state: ScopeIncludeState,
+    /// Why this entry would not be archived right now, for a person: it
+    /// does not exist yet, or [`resolve_scope_include`]'s own refusal, or
+    /// a symbolic link found when the live directory itself was probed.
+    /// `None` means it is safe to archive. Never branch on this text --
+    /// that is `state` above's job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
     /// From the newest snapshot this daemon took, when there is one and it
