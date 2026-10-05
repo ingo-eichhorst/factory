@@ -1,0 +1,15 @@
+# Staged to /sandbox/.config/gh/config.yml by build-image.sh (#274).
+#
+# gh pings cafe.github.com on its own, for telemetry, and `GH_TELEMETRY`
+# doesn't reach every invocation: gh also runs as git's credential helper
+# (/etc/gitconfig), so a git subprocess started by Claude Code's own startup
+# (not Claude's Bash tool) spawns gh without necessarily carrying the env
+# managed-settings.json's `env` block sets for Claude Code's own sessions.
+# This file is read by gh itself, regardless of who spawns it, so it covers
+# every invocation. `GH_NO_UPDATE_NOTIFIER` (set in managed-settings.json's
+# env block) stops gh's separate update-notification check, which has no
+# config.yml key of its own.
+#
+#   gh help environment   -- GH_TELEMETRY, GH_NO_UPDATE_NOTIFIER
+#   gh help config        -- the `telemetry` key, enabled by default
+telemetry: disabled

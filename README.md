@@ -683,8 +683,10 @@ lifecycle follow-up, pending whether herdr can reattach `sandbox exec --tty`.
   to static aarch64 Linux with `rust-lld` and a temporary, digest-pinned Zig
   C cross-compiler (including the bundled SQLite dependency), herdr's and
   jq's Linux releases, Claude Code's managed settings with the allow rules an
-  unattended run needs (`git push`, `gh pr create`, `gh pr merge`), a git
-  config using `gh` for GitHub credentials, and a Claude Code home that has
+  unattended run needs (`git push`, `gh pr create`, `gh pr merge`) and its
+  outbound noise turned off (auto-update, the official plugin marketplace,
+  telemetry; `#274`), a git config using `gh` for GitHub credentials, a `gh`
+  config with its own telemetry off too, and a Claude Code home that has
   finished onboarding and trusts `/sandbox/work`. `docker` mode tags an image
   (`examples/openshell/Dockerfile`); `rootfs` mode needs no container engine
   -- `crane export` flattens the base and bsdtar lays the overlay on top --

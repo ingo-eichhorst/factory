@@ -99,6 +99,13 @@ for stage do :; done
 [ "$(cat "$stage/usr/local/bin/factory")" = factory ]
 [ -s "$stage/etc/claude-code/managed-settings.json" ]
 [ -s "$stage/sandbox/.claude.json" ]
+# #274: the official marketplace auto-install stays off, and gh's own
+# telemetry is off regardless of what spawns it (git's credential helper,
+# not only Claude Code's own subprocesses).
+grep -q CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL "$stage/etc/claude-code/managed-settings.json"
+grep -q GH_NO_UPDATE_NOTIFIER "$stage/etc/claude-code/managed-settings.json"
+[ -s "$stage/sandbox/.config/gh/config.yml" ]
+grep -q 'telemetry: disabled' "$stage/sandbox/.config/gh/config.yml"
 printf '%s\n' "$*" > "$FIXTURE_ROOT/docker.log"
 "#,
         );

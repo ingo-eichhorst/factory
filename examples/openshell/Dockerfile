@@ -16,6 +16,10 @@
 #   /etc/gitconfig           gh as git's GitHub credential helper, and the
 #                            commit identity
 #   /sandbox/.claude.json    onboarding done, /sandbox/work trusted
+#   /sandbox/.config/gh/config.yml   gh's own telemetry off (#274), so it's
+#                            off for every invocation of gh, including as
+#                            git's credential helper, not only ones that
+#                            inherit Claude Code's own `env` block
 #
 # The base image's own /etc/openshell/policy.yaml is removed: OpenShell 0.1.2
 # rejects it, and Factory always passes the scope's policy with --policy.
@@ -27,4 +31,5 @@ RUN rm -f /etc/openshell/policy.yaml
 COPY --chmod=0755 usr/local/bin/ /usr/local/bin/
 COPY etc/ /etc/
 COPY --chown=sandbox:sandbox sandbox/.claude.json /sandbox/.claude.json
+COPY --chown=sandbox:sandbox sandbox/.config/ /sandbox/.config/
 USER sandbox

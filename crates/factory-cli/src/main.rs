@@ -5660,6 +5660,12 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
     }
 }
 
+/// OpenShell's own `[reason:...]` text (#274) for a connection cut only
+/// because the sandbox's policy was mid-switch, not refused on its merits.
+/// An exact match on OpenShell's wording, not a prefix or substring: any
+/// other reason stays an ordinary, unlabeled denial.
+const STALE_POLICY_REASON: &str = "policy generation is stale";
+
 fn dependencies_text(report: &DependenciesReport) -> String {
     let mut out = format!("{} dependencies\n", report.scope);
     if report.documents.is_empty() { out.push_str("  no scans\n"); }
@@ -5722,8 +5728,16 @@ fn dependencies_text(report: &DependenciesReport) -> String {
                     capture.run_id, capture.task_id, capture.agent, capture.sandbox, capture.source, capture.captured_at));
                 if let Some(issue) = &capture.issue { out.push_str(&format!("    {issue}\n")); }
                 for access in &capture.accesses {
-                    out.push_str(&format!("    {} {:?} {} {:?} process {} policy {}\n", access.at,
-                        access.transport, access.target, access.disposition,
+                    // OpenShell cuts connections while a sandbox's policy is
+                    // mid-switch and the attempt is retried -- a transient
+                    // refusal, not a real one. Label it; never drop the row.
+                    let disposition = if access.reason.as_deref() == Some(STALE_POLICY_REASON) {
+                        format!("{:?} (transient: policy generation is stale, not a refusal)", access.disposition)
+                    } else {
+                        format!("{:?}", access.disposition)
+                    };
+                    out.push_str(&format!("    {} {:?} {} {} process {} policy {}\n", access.at,
+                        access.transport, access.target, disposition,
                         access.process.as_deref().unwrap_or("unknown"), access.policy.as_deref().unwrap_or("unknown")));
                 }
             }
@@ -7631,6 +7645,27 @@ mod tests {
         assert!(text.contains("api.github.com:443") && text.contains("Denied"));
         assert!(text.contains("run run task task agent curator") && text.contains("partial"));
         assert!(text.contains("not a verdict") && text.contains("Socket and file use are unknown"));
+    }
+
+    #[test]
+    fn a_stale_policy_denial_is_labeled_transient_but_an_ordinary_denial_is_not() {
+        let report: DependenciesReport = serde_json::from_value(serde_json::json!({
+            "scope": "demo", "documents": [], "findings": [], "services": [],
+            "service_evidence": {"scope": "demo", "captures": [{"id": "capture", "run_id": "run", "task_id": "task",
+                "agent": "curator", "sandbox": "factory-run", "source": "OpenShell supervisor/proxy OCSF", "partial": true,
+                "captured_at": "2026-10-04T12:00:00Z", "accesses": [
+                    {"at": "2026-10-04T07:20:18Z", "transport": "network", "target": "downloads.claude.ai:443", "disposition": "denied"},
+                    {"at": "2026-10-04T07:20:25Z", "transport": "network", "target": "api.anthropic.com:443", "disposition": "denied",
+                        "reason": "policy generation is stale"}
+                ]}]}
+        })).unwrap();
+        let text = dependencies_text(&report);
+        // The real denial stays an ordinary, unlabeled "Denied" on its own line.
+        let ordinary = text.lines().find(|line| line.contains("downloads.claude.ai")).unwrap();
+        assert!(ordinary.contains("Denied") && !ordinary.contains("transient"));
+        // The policy-switch refusal is never dropped, but is distinct from it.
+        let transient = text.lines().find(|line| line.contains("api.anthropic.com")).unwrap();
+        assert!(transient.contains("Denied") && transient.contains("transient: policy generation is stale"));
     }
 
     // -- --timezone ----------------------------------------------------------
