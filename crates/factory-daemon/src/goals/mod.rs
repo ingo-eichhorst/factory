@@ -37,6 +37,7 @@ impl Engine {
             snapshot.root.clone(),
             &snapshot.scope_tree(),
             &crate::quality::quality_configuration(&snapshot),
+            &crate::metrics::reported_configuration(&snapshot),
             None,
         )
         .await?;
@@ -214,6 +215,72 @@ mod tests {
         let root = engine.goals_report(Some("company"), Some("2026-q4")).await.unwrap();
         let ids: BTreeSet<&str> = root.report.as_ref().unwrap().objectives.iter().map(|o| o.objective.as_str()).collect();
         assert_eq!(ids, BTreeSet::from(["root-obj", "proj-obj", "demo-obj", "sib-obj"]), "the root scope's own query is everything");
+    }
+
+    /// `#278`: a committed key result's `metric:` can name a scope's own
+    /// `reported.<source>.<metric>` id the same way it names a built-in
+    /// one -- `goals_service` reads whatever `metrics::resolve` and
+    /// `metrics_service` hand back, with no special case for this family.
+    #[tokio::test]
+    async fn a_committed_key_result_can_read_a_reported_metric_the_same_as_a_built_in_one() {
+        let root = std::env::temp_dir()
+            .join(format!("factory-goals-reported-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut company = scope_at("company-id", "company", ".");
+        company.metrics = Some(factory_core::config::ScopeMetricsDeclaration {
+            source: Some(factory_core::config::ScopeMetricsSource {
+                id: "demo".into(),
+                file: "metrics.json".into(),
+            }),
+            declare: vec![factory_core::config::ScopeMetricsDeclared {
+                id: "x".into(),
+                title: "Demo X".into(),
+                unit: "ratio".into(),
+            }],
+        });
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            secrets: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(
+            Factory { root: root.clone(), config },
+            registry,
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
+
+        write(
+            &goals::goals_dir(&engine.factory_snapshot().root),
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives:\n\
+             \x20\x20- id: obj\n\x20\x20\x20\x20title: T\n\x20\x20\x20\x20key_results:\n\
+             \x20\x20\x20\x20\x20\x20- {id: kr, title: KR, kind: committed, metric: reported.demo.x, baseline: 0, target: 1}\n",
+        );
+        std::fs::write(
+            root.join("metrics.json"),
+            r#"{"as_of":"2026-10-05T09:00:00Z","metrics":[{"id":"x","value":0.75}]}"#,
+        )
+        .unwrap();
+
+        let report = engine.goals_report(None, Some("2026-q4")).await.unwrap();
+        let kr_result = &report.report.as_ref().unwrap().objectives[0].key_results[0];
+        assert_eq!(kr_result.value, Some(0.75));
     }
 
     #[tokio::test]

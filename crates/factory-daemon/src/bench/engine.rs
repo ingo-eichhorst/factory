@@ -864,6 +864,7 @@ mod tests {
                 dependencies: Default::default(),
                 environments: Vec::new(),
                 renewals: Vec::new(),
+                metrics: None,
             }],
             infrastructure: Default::default(),
             secrets: Vec::new(),

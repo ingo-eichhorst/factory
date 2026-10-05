@@ -552,6 +552,29 @@ fn blocked_hours_def() -> MetricDef {
     )
 }
 
+/// `reported.<source>.<metric>` (`#278`): a scope's own domain data, read
+/// from the file it declared through `scope.metrics.source`. The pure
+/// vocabulary binds any two segments, exactly like `compliance.<framework>`
+/// -- whether `source` is actually declared, and whether it declares
+/// `metric`, is answered at evaluation by `reported::value_for`, never
+/// here. `title`/`unit`/`description` are generic placeholders:
+/// `metrics_service::finish` overlays the scope's own declared `title` and
+/// `unit` once it has read the declaration, since this pure function has no
+/// access to it.
+fn reported_def(source: &str, metric: &str) -> MetricDef {
+    fixed(
+        &format!("reported.{source}.{metric}"),
+        &format!("Reported metric ({source}.{metric})"),
+        &format!(
+            "A metric scope {source:?} reports through its own declared source, under id \
+             {metric:?}. Its title and unit come from that scope's own declaration."
+        ),
+        Unit::Count,
+        Better::Higher,
+        "a scope-declared metrics source file, read through reported::value_for (#278)",
+    )
+}
+
 fn compliance_def(framework: &str) -> MetricDef {
     fixed(
         &format!("compliance.{framework}"),
@@ -714,6 +737,7 @@ pub fn registry() -> Vec<MetricDef> {
         backup_verified_age_days_def(),
         compliance_def("<framework>"),
         open_controls_def("<framework>"),
+        reported_def("<source>", "<metric>"),
         bench_resolve_rate_def("<dataset>"),
         goal_tasks_done_def("<objective>", "<kr>"),
         quality_def("<characteristic>"),
@@ -799,6 +823,7 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
         ["backup_verified_age_days"] => backup_verified_age_days_def(),
         ["compliance", framework] => compliance_def(framework),
         ["open_controls", framework] => open_controls_def(framework),
+        ["reported", source, metric] => reported_def(source, metric),
         ["bench", "resolve_rate", dataset] => bench_resolve_rate_def(dataset),
         ["goal_tasks_done", objective, kr] => goal_tasks_done_def(objective, kr),
         // Bound like `compliance.<framework>`: this module knows no quality
@@ -990,6 +1015,7 @@ mod tests {
             "scrap_rate",
             "compliance.<framework>",
             "open_controls.<framework>",
+            "reported.<source>.<metric>",
             "bench.resolve_rate.<dataset>",
             "goal_tasks_done.<objective>.<kr>",
             "quality.<characteristic>",
@@ -1158,6 +1184,30 @@ mod tests {
         assert_eq!((def.unit, def.better), (Unit::Ratio, Better::Higher));
         assert!(matches!(
             resolve(&MetricId::new("quality").unwrap()),
+            Err(MetricError::Unknown(_))
+        ));
+    }
+
+    /// `#278`: `reported.<source>.<metric>` binds like `compliance.<framework>`
+    /// -- the pure vocabulary never checks whether `source` or `metric` is
+    /// actually declared; that is `reported::value_for`'s job at evaluation.
+    #[test]
+    fn resolve_binds_reported_metrics_as_a_two_parameter_family() {
+        let def = resolve(&MetricId::new("reported.finance.beleg_coverage").unwrap()).unwrap();
+        assert_eq!(def.id, "reported.finance.beleg_coverage");
+        assert!(def.title.contains("finance.beleg_coverage"));
+        assert_eq!(def.coverage, MetricCoverage::ScopeAware);
+
+        assert!(matches!(
+            resolve(&MetricId::new("reported").unwrap()),
+            Err(MetricError::Unknown(_))
+        ));
+        assert!(matches!(
+            resolve(&MetricId::new("reported.finance").unwrap()),
+            Err(MetricError::Unknown(_))
+        ));
+        assert!(matches!(
+            resolve(&MetricId::new("reported.finance.x.extra").unwrap()),
             Err(MetricError::Unknown(_))
         ));
     }

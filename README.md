@@ -1623,6 +1623,7 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `bench.resolve_rate.<dataset>` | the newest settled bench run's resolve rate | `bench::aggregate` |
 | `goal_tasks_done.<objective>.<kr>` | count of tasks labelled `goal=<objective>/<kr>` whose status is `done` | task labels, through `TaskStore` |
 | `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met | the selected scope's quality subtree — see "Quality attributes" |
+| `reported.<source>.<metric>` | a scope's own domain data (Beleg coverage, unresolved transactions, booking lag, …), read from the JSON file the scope declared through `scope.metrics.source` | the declaring scope's own file, read on request — see "A scope's own reported metrics" below (#278) |
 | `unit_cost` | API-equivalent USD spent per run ended `done` (failed and cancelled runs' cost included), trailing 28 days | each run's measured usage (`Run.usage`, #117) |
 | `tokens_per_run` | mean tokens of every type per finished run, trailing 28 days | each run's measured usage (`Run.usage`, #117) |
 | `cost_week` | known API-equivalent USD spent over runs *started* (not ended) in the trailing 7 days; no value if any run in the window is unknown, cost-unknown or partial | L4 `CostReport` fact port, the same read `factory cost`, Budget and `GET /api/costs` answer from (#164) |
@@ -1690,6 +1691,72 @@ reached, no snapshot exists yet, none has ever been verified, or the newest
 verification failed — never a bare `0`. This is
 what lets a freshness window (a quality scenario's `max_age`) read a value
 as stale at all.
+
+**A scope's own reported metrics (`#278`).** The registry above only knows
+what Factory itself records. A scope's own domain — the business-factory
+`finance` scope's books, for instance — has progress no built-in metric can
+see: Beleg coverage, unresolved bank transactions, booking lag. A scope
+declares one *source* (a JSON file its own tooling writes) and the metrics
+it reports through it, beside `policies`/`quality` in its own
+`.factory/config.yaml`:
+
+```yaml
+scope:
+  name: finance
+  metrics:
+    source:
+      id: finance                       # a slug, unique across the instance
+      file: ../data/finance/metrics.json  # relative to this scope's own directory
+    declare:
+      - { id: beleg_coverage, title: Beleg coverage, unit: ratio }
+      - { id: unresolved_transactions, title: Unresolved transactions, unit: count }
+```
+
+Each declared metric reads as `reported.<source.id>.<declare[].id>` —
+`reported.finance.beleg_coverage` above. `factory metrics`/`GET
+/api/metrics` list every declared one with its own `title` and `unit`, not
+a generic placeholder. The declaration is validated when it is read, never
+at daemon startup: a bad slug, a source id already used by another scope,
+a `file` that normalizes outside the instance root or through a path
+component named `secrets`, or a path that is (or passes through) a
+symlink, is a *finding* — shown beside the response, never a reason the
+daemon fails to start or the whole call to refuse.
+
+`file`'s own JSON, written by the scope's tooling at the end of its own
+run (the first producer is `finance metrics --json`, in the
+business-factory repository, not this one):
+
+```json
+{
+  "as_of": "2026-10-05T09:00:00Z",
+  "metrics": [
+    { "id": "beleg_coverage", "value": 0.9 },
+    { "id": "unresolved_transactions", "value": 3 },
+    { "id": "booking_lag_p95_days", "value": null, "reason": "no booking date recorded before 2026-11" }
+  ]
+}
+```
+
+A per-metric `as_of` overrides the document's own; a value's `as_of` is
+always one of these two, never the moment it was read — the same freshness
+rule every other metric follows. `null` with a `reason` is a first-class
+answer, never a crash and never silently `0`. Reading is **computed on
+read**: the file is opened read-only, `O_NOFOLLOW` (a symlink swapped in
+after validation is refused too), bounded in size, at most once per
+`metrics`/`quality`/`goals` request — however many of its own ids that
+request asks for — and never cached, copied into a table, watched or
+pushed over the observer bus. `value` is `None`, with a reason, for each of:
+a source or metric id nobody declared, a missing file, a file that does
+not parse or is too large, an id the file does not report, a `null` value
+(the file's own `reason`, if it gave one), a non-finite number, and —
+scoped reads only — a source declared by a scope outside the selected
+subtree (an unscoped read sees every declaring scope). `reason` is the one
+piece of free text this family carries; it is bounded in length, shown
+verbatim (escaped by the renderer, the same as any other finding's text)
+in the CLI and UI, and never stored. A reported metric's own `coverage` is
+`scope_aware`, so `quality.<characteristic>` and a Goals key result read it
+exactly like a built-in one — see "Quality attributes" below for a worked
+`measure:`.
 
 **Scoring.** A key result is scored linearly from `baseline` to `target`,
 clamped to `0.0..=1.0`, whichever direction the metric actually improves —
@@ -2057,6 +2124,28 @@ H attribute hides behind three green L ones.
 - A measure naming a `quality.*` metric is a `self_referential_metric`
   finding and always `no_data`: it would be computed from the scenario
   being judged.
+
+**A reported metric as a measure (`#278`).** A scope's own
+`reported.<source>.<metric>` reads exactly like any other registry metric —
+there is no special case in `evaluate_metric` for it:
+
+```yaml
+# .factory/quality/finance-buecher.yaml, scope `finance`
+attributes:
+  - id: functional-suitability.functional-completeness
+    importance: H
+    difficulty: M
+    scenarios:
+      - id: beleg-coverage
+        measure: { metric: reported.finance.beleg_coverage, above: 0.98, max_age: 35d }
+```
+
+`met`/`not_met`/`stale`/`no_data` follow the same rule as a built-in
+metric: no value yet (the scope's own tooling has not written the file, or
+has not reported that id) is `no_data`; a value older than `max_age` is
+`stale`, never green; `0.98` is inclusive. A Goals key result reads the
+same id through the same metric read, with `metric:
+reported.<source>.<metric>` in place of a built-in name.
 
 **`quality.<characteristic>`.** The registry's own metric for a Goals key
 result or a Scenario signpost to target: of every declared scenario under

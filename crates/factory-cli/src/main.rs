@@ -2129,7 +2129,9 @@ async fn main() -> Result<()> {
             let ids = ids.map_err(|e| anyhow!(e))?;
             let payload = client.send(Request::Metrics { ids, scope, window }).await?;
             print(&payload, cli.json, |p| match p {
-                Payload::Metrics { values, series, registry } => Some(metrics_text(values, series, registry)),
+                Payload::Metrics { values, series, registry, findings } => {
+                    Some(metrics_text(values, series, registry, findings))
+                }
                 _ => None,
             })
         }
@@ -4010,9 +4012,15 @@ fn policy_clock_text(clock: &reporting_clock::ReportingClock) -> String {
 // ================================================================== metrics
 
 /// `factory metrics [ids…] [--json]`: one line per value, its trend if it
-/// has a series, and why it is `--` when it is `None`.
-fn metrics_text(values: &[factory_core::metrics::MetricValue], series: &[factory_core::metrics::MetricSeries], registry: &[factory_core::protocol::MetricDefView]) -> String {
-    if values.is_empty() {
+/// has a series, and why it is `--` when it is `None`, plus -- `#278` --
+/// one line per `scope.metrics` declaration this call found wrong.
+fn metrics_text(
+    values: &[factory_core::metrics::MetricValue],
+    series: &[factory_core::metrics::MetricSeries],
+    registry: &[factory_core::protocol::MetricDefView],
+    findings: &[factory_core::reported::Finding],
+) -> String {
+    if values.is_empty() && findings.is_empty() {
         return "no metrics computed".to_string();
     }
     let mut out = String::new();
@@ -4040,6 +4048,12 @@ fn metrics_text(values: &[factory_core::metrics::MetricValue], series: &[factory
             .unwrap_or_default();
         let reason = v.reason.as_deref().map(|r| format!("  ({r})")).unwrap_or_default();
         out.push_str(&format!("{:<40} {:<12} {value:>10}{trend}{reason}\n", v.id.as_str(), title));
+    }
+    if !findings.is_empty() {
+        out.push_str("\nscope.metrics declaration findings:\n");
+        for f in findings {
+            out.push_str(&format!("  {}: {}\n", f.subject, f.detail));
+        }
     }
     out.trim_end().to_string()
 }

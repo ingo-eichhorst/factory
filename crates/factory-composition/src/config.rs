@@ -1355,6 +1355,41 @@ pub struct Scope {
     /// This scope's authored important-date metadata, kept in its own config.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub renewals: Vec<factory_infrastructure::renewals::RenewalDecl>,
+    /// `#278`: this scope's own reported-metrics source -- a file the
+    /// scope's own tooling writes, and the metrics it declares through it
+    /// (`reported.<source.id>.<declare[].id>`). Own-scope data, not a
+    /// chained declaration like `policies`/`quality` above: nothing here
+    /// inherits down, and nothing is validated at parse time -- an id
+    /// shape, a duplicate source id or a path that escapes the instance is
+    /// a finding L5's `reported::validate` raises on read, never a reason
+    /// this config fails to load. See `reported.rs`'s own doc comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<ScopeMetricsDeclaration>,
+}
+
+/// `scope.metrics`, exactly as written -- plain strings, no validation.
+/// `source` is the one file this scope reports through; `declare` names
+/// every metric id that file may report, with the title and unit L5's
+/// registry listing shows for it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScopeMetricsDeclaration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ScopeMetricsSource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declare: Vec<ScopeMetricsDeclared>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScopeMetricsSource {
+    pub id: String,
+    pub file: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScopeMetricsDeclared {
+    pub id: String,
+    pub title: String,
+    pub unit: String,
 }
 
 
@@ -2882,6 +2917,44 @@ mod tests {
     fn a_scope_binding_no_intake_round_trips_with_no_intake_key() {
         let s: Scope = serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap();
         assert!(!serde_yaml_ng::to_string(&s).unwrap().contains("intake"));
+    }
+
+    /// `#278`: the exact `scope.metrics` shape the issue proposes -- plain
+    /// strings, no validation here (L5's `reported::validate` owns that on
+    /// read). Own-scope data like `dependencies`/`environments` above, not
+    /// a chained declaration like `policies`/`quality`: there is no
+    /// root-level `metrics:` this would collide with, so nothing refuses
+    /// it at the instance root either.
+    #[test]
+    fn a_metrics_source_declaration_round_trips_through_yaml_on_a_scope() {
+        let yaml = "id: finance-id\n\
+             name: finance\n\
+             metrics:\n\
+             \x20\x20source:\n\
+             \x20\x20\x20\x20id: finance\n\
+             \x20\x20\x20\x20file: ../data/finance/metrics.json\n\
+             \x20\x20declare:\n\
+             \x20\x20\x20\x20- { id: beleg_coverage, title: Beleg coverage, unit: ratio }\n\
+             \x20\x20\x20\x20- { id: unresolved_transactions, title: Unresolved transactions, unit: count }\n";
+        let s: Scope = serde_yaml_ng::from_str(yaml).unwrap();
+        let declaration = s.metrics.as_ref().unwrap();
+        let source = declaration.source.as_ref().unwrap();
+        assert_eq!(source.id, "finance");
+        assert_eq!(source.file, "../data/finance/metrics.json");
+        assert_eq!(declaration.declare.len(), 2);
+        assert_eq!(declaration.declare[0].id, "beleg_coverage");
+        assert_eq!(declaration.declare[0].title, "Beleg coverage");
+        assert_eq!(declaration.declare[0].unit, "ratio");
+
+        let reparsed: Scope =
+            serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&s).unwrap()).unwrap();
+        assert_eq!(reparsed.metrics, s.metrics);
+    }
+
+    #[test]
+    fn a_scope_declaring_no_metrics_source_round_trips_with_no_metrics_key() {
+        let s: Scope = serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap();
+        assert!(!serde_yaml_ng::to_string(&s).unwrap().contains("metrics"));
     }
 
     #[test]

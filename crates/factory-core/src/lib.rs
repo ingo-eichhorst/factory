@@ -35,6 +35,7 @@ pub mod protocol;
 pub mod provenance;
 pub mod quality;
 pub mod ready;
+pub mod reported;
 pub mod reporting_clock;
 pub mod recovery_journal;
 pub mod renewals;

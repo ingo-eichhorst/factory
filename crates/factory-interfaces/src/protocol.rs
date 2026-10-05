@@ -1374,6 +1374,11 @@ pub enum Payload {
         values: Vec<factory_assurance::metrics::MetricValue>,
         series: Vec<factory_assurance::metrics::MetricSeries>,
         registry: Vec<MetricDefView>,
+        /// `#278`: every `scope.metrics` declaration this call found
+        /// wrong -- see `metrics_service::Metrics::findings`. Empty on the
+        /// wire when there is nothing to report.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        findings: Vec<factory_assurance::reported::Finding>,
     },
     /// The answer to `Request::Dashboard`: the resolved tile list, or `null`
     /// on the wire for "no block anywhere in the chain names one -- use the

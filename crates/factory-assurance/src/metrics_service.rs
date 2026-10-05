@@ -10,7 +10,7 @@ use crate::{
         MetricsWindow,
     },
     quality::{self, ScenarioStatus},
-    quality_inputs,
+    quality_inputs, reported,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use factory_kernel::{
@@ -32,6 +32,13 @@ pub struct Metrics {
     pub values: Vec<MetricValue>,
     pub series: Vec<MetricSeries>,
     pub registry: Vec<MetricDefView>,
+    /// `#278`: every `scope.metrics` declaration this call's `Plan::prepare`
+    /// found wrong -- a bad slug, a duplicate source id, a path that
+    /// escapes the instance, a `secrets` component, or a symlink. Never a
+    /// reason this call itself failed; always set, even when no asked id
+    /// is a `reported.*` one, so a broken declaration surfaces without
+    /// anyone having to ask for it by name.
+    pub findings: Vec<reported::Finding>,
 }
 
 pub trait Ports: evidence::Ports {
@@ -75,19 +82,30 @@ pub struct Plan {
     resolved: Vec<(MetricId, std::result::Result<MetricDef, &'static str>)>,
     computing: Vec<(MetricId, std::result::Result<MetricDef, &'static str>)>,
     quality: Option<std::result::Result<quality_inputs::Inputs, String>>,
+    /// `#278`: every scope's `scope.metrics` declaration, already validated
+    /// -- computed fresh in [`Plan::prepare`] from the plain input handed
+    /// in, never cached across calls.
+    catalogue: reported::Catalogue,
     scope: Option<String>,
     members: BTreeSet<String>,
 }
 impl Plan {
     /// Scope and ids resolve before any IO. Quality's own authored read is
     /// used to expand its metric dependencies into this single lazy pass.
+    /// `reported` is the instance's plain `scope.metrics` declarations --
+    /// see `reported.rs`'s own doc comment -- validated here, unconditionally,
+    /// since that costs no more than a handful of path checks; the file
+    /// each source actually names is read later, only if some id in
+    /// `computing` needs it (`gather_measurements`).
     pub async fn prepare(
         ids: &[MetricId],
         root: PathBuf,
         scopes: &ScopeTree,
         quality: &quality_inputs::Configuration,
+        reported: &reported::Configuration,
         scope: Option<&str>,
     ) -> Result<Self> {
+        let catalogue = reported::validate(&root, reported);
         let (asked, targets) = scopes.subtree_scopes(scope)?;
         let canonical_scope = asked.map(|s| s.name.clone());
         let members = targets.iter().map(|s| s.name.clone()).collect();
@@ -145,6 +163,7 @@ impl Plan {
             resolved,
             computing,
             quality,
+            catalogue,
             scope: canonical_scope,
             members,
         })
@@ -156,6 +175,13 @@ impl Plan {
         self.computing
             .iter()
             .any(|(id, result)| result.is_ok() && is_policy_metric(id.as_str()))
+    }
+    /// Whether `scope_name` (the scope that declared a `reported.*`
+    /// source) is covered by this plan's own selected subtree -- always
+    /// true for an unscoped (instance-wide) request, the same rule
+    /// `compliance.<framework>`/`quality.<characteristic>` already follow.
+    fn includes_scope(&self, scope_name: &str) -> bool {
+        self.scope.is_none() || self.members.contains(scope_name)
     }
     pub fn quality_budget_ids(&self) -> Vec<&str> {
         match &self.quality {
@@ -178,6 +204,10 @@ pub struct Gathered {
     production: Option<ProductionFact>,
     process: BTreeMap<String, ProcessMetricFact>,
     policy: Option<PolicyMeasurements>,
+    /// `#278`: every needed source's file, read at most once per call and
+    /// shared across every `reported.*` id that names it -- keyed by
+    /// source id, empty when no asked id needs one.
+    reported: BTreeMap<String, std::result::Result<reported::Document, String>>,
 }
 struct PolicyMeasurements {
     rollup: Vec<PolicyFramework>,
@@ -300,11 +330,49 @@ impl<'a, P: Ports> Service<'a, P> {
                 )
                 .await?
         };
+        // `#278`: the distinct source ids some asked `reported.*` id
+        // actually needs -- a source declared but never asked for, or
+        // asked for but outside the selected subtree, is never read. Each
+        // needed source's file is read exactly once here, however many of
+        // its own ids `computing` names.
+        let needed_sources: BTreeSet<String> = computing
+            .iter()
+            .filter(|(id, result)| result.is_ok() && is_reported_metric(id.as_str()))
+            .filter_map(|(id, _)| reported_segments(id.as_str()))
+            .map(|(source_id, _)| source_id.to_string())
+            .filter(|source_id| {
+                plan.catalogue
+                    .sources
+                    .get(source_id)
+                    .is_some_and(|source| plan.includes_scope(&source.scope.name))
+            })
+            .collect();
+        let reported = if needed_sources.is_empty() {
+            BTreeMap::new()
+        } else {
+            let paths: Vec<(String, std::path::PathBuf)> = needed_sources
+                .into_iter()
+                .map(|source_id| {
+                    let path = plan.catalogue.sources[&source_id].path.clone();
+                    (source_id, path)
+                })
+                .collect();
+            tokio::task::spawn_blocking(move || {
+                paths
+                    .into_iter()
+                    .map(|(source_id, path)| (source_id, reported::read_source(&path)))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .await
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("reported metrics read: {e}")))?
+        };
+
         Ok(Gathered {
             spend,
             production,
             process,
             policy: None,
+            reported,
         })
     }
     pub async fn gather_policy(
@@ -375,6 +443,7 @@ impl<'a, P: Ports> Service<'a, P> {
             production,
             process,
             policy: policy_report,
+            reported: reported_docs,
         } = gathered;
         if plan.needs_policy() && policy_report.is_none() {
             return Err(FactoryError::BadRequest(
@@ -441,6 +510,11 @@ impl<'a, P: Ports> Service<'a, P> {
             None
         };
 
+        let reported_sources = ReportedSources {
+            catalogue: &plan.catalogue,
+            docs: &reported_docs,
+            members: canonical_scope.map(|_| &plan.members),
+        };
         let sources = ComputeSources {
             spend: spend.as_ref(),
             production: production.as_ref(),
@@ -449,6 +523,7 @@ impl<'a, P: Ports> Service<'a, P> {
             attested: attested.as_deref(),
             backup: backup_fact.as_ref(),
             environments: environments.as_ref(),
+            reported: reported_sources,
         };
         let mut computed: BTreeMap<MetricId, MetricValue> = BTreeMap::new();
         let mut computed_series: BTreeMap<MetricId, MetricSeries> = BTreeMap::new();
@@ -526,13 +601,30 @@ impl<'a, P: Ports> Service<'a, P> {
                     .expect("every available non-quality id was computed")
             };
             values.push(value);
-            registry.push(def.into());
+            let mut def_view: MetricDefView = def.into();
+            // `#278`: `resolve`'s own `reported_def` is a generic
+            // placeholder (it has no access to the declaration); overlay
+            // the scope's own declared title and unit here, the one place
+            // that declaration is actually in scope.
+            if let Some((source_id, metric_id)) = reported_segments(id.as_str()) {
+                if let Some(declared) = plan
+                    .catalogue
+                    .sources
+                    .get(source_id)
+                    .and_then(|source| source.declared.get(metric_id))
+                {
+                    def_view.title = declared.title.clone();
+                    def_view.unit = declared.unit;
+                }
+            }
+            registry.push(def_view);
         }
 
         Ok(Metrics {
             values,
             series,
             registry,
+            findings: plan.catalogue.findings.clone(),
         })
     }
     async fn judge_quality(
@@ -700,6 +792,28 @@ impl<'a, P: Ports> Service<'a, P> {
             (figure_to_value(id, &figure, now), None)
         } else if let Some(dataset) = id.as_str().strip_prefix("bench.resolve_rate.") {
             (self.bench_resolve_rate_value(id, dataset, now).await?, None)
+        } else if let Some((source_id, metric_id)) = reported_segments(id.as_str()) {
+            let in_subtree = match sources.reported.members {
+                None => true,
+                Some(members) => sources
+                    .reported
+                    .catalogue
+                    .sources
+                    .get(source_id)
+                    .is_some_and(|source| members.contains(&source.scope.name)),
+            };
+            (
+                reported::value_for(
+                    id,
+                    source_id,
+                    metric_id,
+                    sources.reported.catalogue,
+                    sources.reported.docs,
+                    in_subtree,
+                    now,
+                ),
+                None,
+            )
         } else {
             // Every family `metrics::resolve` returns `Ok` for today has
             // a branch above; a future metric added to the registry
@@ -870,6 +984,19 @@ fn is_policy_metric(id: &str) -> bool {
 
 fn is_quality_metric(id: &str) -> bool {
     id.starts_with("quality.")
+}
+
+/// `#278`: a scope-reported metric, `reported.<source>.<metric>`.
+fn is_reported_metric(id: &str) -> bool {
+    id.starts_with("reported.")
+}
+
+/// `reported.<source>.<metric>` split into its two bound segments --
+/// `None` only if `id` does not have the shape `MetricId`/`resolve` both
+/// already enforce, which cannot happen for an id this module itself put
+/// into `computing`.
+fn reported_segments(id: &str) -> Option<(&str, &str)> {
+    id.strip_prefix("reported.")?.split_once('.')
 }
 
 /// `availability.<env>` and its siblings (`#185`): the metric's name and
@@ -1091,6 +1218,18 @@ struct ComputeSources<'a> {
     /// `#158`: `attested_runs`'s finished runs, shared by
     /// `conformance_rate.<category>` and `gate_fail_rate`.
     attested: Option<&'a [crate::conformance::AttestedRun]>,
+    /// `#278`: the validated declarations and whatever sources were
+    /// actually read for this call, plus the selected subtree's own
+    /// members (`None` for an unscoped request, which includes every
+    /// scope).
+    reported: ReportedSources<'a>,
+}
+
+#[derive(Clone, Copy)]
+struct ReportedSources<'a> {
+    catalogue: &'a reported::Catalogue,
+    docs: &'a BTreeMap<String, std::result::Result<reported::Document, String>>,
+    members: Option<&'a BTreeSet<String>>,
 }
 
 /// One environment metric off the card the Operations tab draws, so the
@@ -1382,6 +1521,7 @@ mod tests {
                 PathBuf::from("/unneeded-no-io"),
                 &scopes(),
                 &quality_inputs::Configuration::default(),
+                &reported::Configuration::default(),
                 Some("missing"),
             )
             .await;
@@ -1392,6 +1532,7 @@ mod tests {
             PathBuf::from("/unneeded-no-io"),
             &scopes(),
             &quality_inputs::Configuration::default(),
+            &reported::Configuration::default(),
             None,
         )
         .await;
@@ -1407,6 +1548,7 @@ mod tests {
             PathBuf::from("/unneeded-no-io"),
             &scopes(),
             &quality_inputs::Configuration::default(),
+            &reported::Configuration::default(),
             Some("projects/work"),
         )
         .await

@@ -756,6 +756,7 @@ dependencies = [
  "csv",
  "factory-kernel",
  "factory-process",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

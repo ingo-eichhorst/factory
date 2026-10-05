@@ -52,6 +52,7 @@ impl Engine {
             snapshot.root.clone(),
             &snapshot.scope_tree(),
             &crate::quality::quality_configuration(snapshot),
+            &crate::metrics::reported_configuration(snapshot),
             scope,
         )
         .await?;

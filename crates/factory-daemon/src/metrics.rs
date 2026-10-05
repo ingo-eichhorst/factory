@@ -47,6 +47,7 @@ impl Engine {
             snapshot.root.clone(),
             &snapshot.scope_tree(),
             &crate::quality::quality_configuration(&snapshot),
+            &reported_configuration(&snapshot),
             scope,
         )
         .await?;
@@ -177,6 +178,19 @@ impl Engine {
                 ids.push(id);
             }
         }
+        // `#278`: every scope's own declared `reported.<source>.<metric>`
+        // id, for every source and metric that actually validated -- a bad
+        // declaration is a finding (`Request::Metrics`'s own response),
+        // never a reason to list a metric nothing can ever answer for.
+        let reported_catalogue =
+            factory_assurance::reported::validate(&snapshot.root, &reported_configuration(&snapshot));
+        for source in reported_catalogue.sources.values() {
+            for metric_id in source.declared.keys() {
+                if let Ok(id) = MetricId::new(format!("reported.{}.{metric_id}", source.id)) {
+                    ids.push(id);
+                }
+            }
+        }
 
         let mut seen = BTreeSet::new();
         ids.retain(|id| seen.insert(id.clone()));
@@ -184,6 +198,46 @@ impl Engine {
     }
 }
 pub(crate) use factory_direction::goals_service::metric_ids as goals_metric_ids;
+
+/// `#278`: outside-stack projection of every scope's current plain
+/// `scope.metrics` declaration -- the `quality_configuration` shape for
+/// this family. L5's `reported::validate` owns turning these plain strings
+/// into a catalogue (or a finding); this function only reshapes the live
+/// config snapshot into `reported`'s own input types, fresh on every call.
+pub(crate) fn reported_configuration(
+    snapshot: &factory_core::config::Factory,
+) -> factory_assurance::reported::Configuration {
+    factory_assurance::reported::Configuration {
+        scopes: snapshot
+            .config
+            .scopes
+            .iter()
+            .map(|scope| factory_assurance::reported::ScopeDeclaration {
+                scope: factory_kernel::ScopeNode {
+                    name: scope.name.clone(),
+                    path: scope.path.clone(),
+                },
+                source: scope.metrics.as_ref().and_then(|declaration| {
+                    declaration.source.as_ref().map(|source| {
+                        factory_assurance::reported::RawSource {
+                            id: source.id.clone(),
+                            file: source.file.clone(),
+                            declare: declaration
+                                .declare
+                                .iter()
+                                .map(|declared| factory_assurance::reported::RawDeclared {
+                                    id: declared.id.clone(),
+                                    title: declared.title.clone(),
+                                    unit: declared.unit.clone(),
+                                })
+                                .collect(),
+                        }
+                    })
+                }),
+            })
+            .collect(),
+    }
+}
 
 
 
@@ -265,7 +319,8 @@ mod tests {
         let mut root_scope: Scope = serde_yaml_ng::from_str("id: root-id\nname: company\n").unwrap();
         root_scope.path = PathBuf::from(".");
         let mut work: Scope = serde_yaml_ng::from_str(
-            "id: work-id\nname: work\nagents:\n  - { name: worker, harness: shell, sandbox: docker }\npolicies:\n  not_applicable:\n    - { control: cra/a, rationale: test }\n",
+            "id: work-id\nname: work\nagents:\n  - { name: worker, harness: shell, sandbox: docker }\npolicies:\n  not_applicable:\n    - { control: cra/a, rationale: test }\n\
+             metrics:\n  source: { id: demo, file: ../../data/demo/metrics.json }\n  declare:\n    - { id: x, title: Demo X, unit: ratio }\n",
         )
         .unwrap();
         work.path = PathBuf::from("projects/work");
@@ -1290,6 +1345,157 @@ mod tests {
         let computed = engine.metrics(&[MetricId::new("compliance.nope").unwrap()], now).await.unwrap();
         assert_eq!(computed.values[0].value, None);
         assert!(computed.values[0].reason.as_deref().unwrap().contains("nope"));
+    }
+
+    // ------------------------------------------------------- reported metrics (#278)
+
+    /// `scoped_engine`'s `work` scope declares source `demo` (file
+    /// `data/demo/metrics.json`, under the instance root, outside `work`'s
+    /// own directory) with one metric, `x` (title "Demo X", unit ratio).
+    fn write_reported_fixture(root: &std::path::Path, body: &str) {
+        let path = root.join("data/demo/metrics.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_reported_metric_reads_the_scopes_own_file_and_respects_scope_coverage() {
+        let (engine, _database) = scoped_engine();
+        let root = engine.factory_snapshot().root.clone();
+        write_reported_fixture(
+            &root,
+            r#"{"as_of":"2026-10-05T09:00:00Z","metrics":[{"id":"x","value":0.9}]}"#,
+        );
+        let ids = vec![MetricId::new("reported.demo.x").unwrap()];
+        let now = Utc::now();
+
+        let in_work = engine.metrics_for(&ids, now, Some("work"), None).await.unwrap();
+        assert_eq!(in_work.values[0].value, Some(0.9));
+        assert_eq!(in_work.values[0].as_of.to_rfc3339(), "2026-10-05T09:00:00+00:00");
+        let def = in_work.registry.iter().find(|d| d.id == "reported.demo.x").unwrap();
+        assert_eq!(def.title, "Demo X");
+        assert_eq!(def.unit, factory_assurance::metrics::Unit::Ratio);
+
+        let unscoped = engine.metrics_for(&ids, now, None, None).await.unwrap();
+        assert_eq!(unscoped.values[0].value, Some(0.9), "an unscoped read sees every declaring scope");
+
+        let in_side = engine.metrics_for(&ids, now, Some("side"), None).await.unwrap();
+        assert_eq!(in_side.values[0].value, None);
+        assert!(
+            in_side.values[0].reason.as_deref().unwrap().contains("outside the selected subtree"),
+            "{:?}",
+            in_side.values[0].reason
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reported_metric_is_none_with_a_reason_for_a_missing_file_an_unparsable_one_and_an_undeclared_id()
+    {
+        let (engine, _database) = scoped_engine();
+        let now = Utc::now();
+
+        // No file written yet at all -- `#278`'s "computed on read" rule:
+        // the declaration itself is not a crash, nor a validation finding.
+        let missing = engine
+            .metrics_for(&[MetricId::new("reported.demo.x").unwrap()], now, Some("work"), None)
+            .await
+            .unwrap();
+        assert_eq!(missing.values[0].value, None);
+        assert!(missing.values[0].reason.as_deref().unwrap().contains("does not exist yet"));
+
+        let root = engine.factory_snapshot().root.clone();
+        write_reported_fixture(&root, "not json");
+        let unparsable = engine
+            .metrics_for(&[MetricId::new("reported.demo.x").unwrap()], now, Some("work"), None)
+            .await
+            .unwrap();
+        assert_eq!(unparsable.values[0].value, None);
+        assert!(unparsable.values[0].reason.as_deref().unwrap().contains("does not parse"));
+
+        write_reported_fixture(
+            &root,
+            r#"{"as_of":"2026-10-05T09:00:00Z","metrics":[{"id":"x","value":0.9}]}"#,
+        );
+        let undeclared = engine
+            .metrics_for(&[MetricId::new("reported.demo.y").unwrap()], now, Some("work"), None)
+            .await
+            .unwrap();
+        assert_eq!(undeclared.values[0].value, None);
+        assert!(undeclared.values[0].reason.as_deref().unwrap().contains("does not declare"));
+    }
+
+    #[tokio::test]
+    async fn default_metric_ids_include_every_scopes_declared_reported_metric() {
+        let (engine, _database) = scoped_engine();
+        let ids = engine.default_metric_ids().await;
+        assert!(
+            ids.iter().any(|id| id.as_str() == "reported.demo.x"),
+            "{ids:?}"
+        );
+    }
+
+    /// `#278`'s acceptance criterion in full, end to end: two scopes
+    /// declaring the same source id is an authoring mistake L5's
+    /// `reported::validate` catches, and it comes back as a `Finding` on
+    /// `Request::Metrics`'s own response (`Metrics::findings` /
+    /// `Payload::Metrics.findings`) -- never a reason the daemon fails to
+    /// start, or this call to refuse.
+    #[tokio::test]
+    async fn an_invalid_scope_metrics_declaration_is_a_finding_not_a_crash() {
+        let root = std::env::temp_dir()
+            .join(format!("factory-reported-findings-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let declare_dup = |id: &str, file: &str| {
+            Some(factory_core::config::ScopeMetricsDeclaration {
+                source: Some(factory_core::config::ScopeMetricsSource {
+                    id: id.to_string(),
+                    file: file.to_string(),
+                }),
+                declare: Vec::new(),
+            })
+        };
+        let mut a = scope_at("a-id", "a", "a");
+        a.metrics = declare_dup("dup", "metrics-a.json");
+        let mut b = scope_at("b-id", "b", "b");
+        b.metrics = declare_dup("dup", "metrics-b.json");
+        let root_scope = scope_at("root-id", "root", ".");
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(root_scope.clone()),
+            scopes: vec![root_scope, a, b],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            secrets: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(
+            Factory { root, config },
+            Registry::with_builtins(),
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
+
+        let computed = engine
+            .metrics(&[MetricId::new("throughput_week").unwrap()], Utc::now())
+            .await
+            .unwrap();
+        assert!(
+            computed
+                .findings
+                .iter()
+                .any(|f| f.kind == factory_assurance::reported::FindingKind::DuplicateSourceId),
+            "{:?}",
+            computed.findings
+        );
     }
 
     // ------------------------------------------------------- bench.resolve_rate
@@ -2628,6 +2834,7 @@ mod tests {
             snapshot.root.clone(),
             &snapshot.scope_tree(),
             &crate::quality::quality_configuration(&snapshot),
+            &reported_configuration(&snapshot),
             Some("work"),
         )
         .await
@@ -2715,6 +2922,7 @@ mod tests {
             snapshot.root.clone(),
             &snapshot.scope_tree(),
             &crate::quality::quality_configuration(&snapshot),
+            &reported_configuration(&snapshot),
             Some("work"),
         )
         .await
@@ -2758,6 +2966,7 @@ mod tests {
             snapshot.root.clone(),
             &snapshot.scope_tree(),
             &crate::quality::quality_configuration(&snapshot),
+            &reported_configuration(&snapshot),
             None,
         )
         .await
