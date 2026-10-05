@@ -14,7 +14,9 @@ use axum::{Json, Router};
 use factory_core::adapter::interface::{Interface, InterfaceContext};
 use factory_core::config::ScopeAgent;
 use factory_core::error::{FactoryError, Result};
-use factory_core::protocol::{Envelope, Payload, ProductionBin, Request, Response};
+use factory_core::protocol::{
+    Envelope, Payload, ProductionBin, Request, Response, SuggestionKind, SuggestionReport, SuggestionState,
+};
 use factory_core::role::RoleSpec;
 use factory_core::task::{NewTask, TaskFilter, TaskPatch, TaskReport};
 use factory_core::workflow::WorkflowDraft;
@@ -176,6 +178,13 @@ fn router(engine: Arc<Engine>) -> Router {
         // The L6 Quality attributes tab (`#107`).
         .route("/api/quality", get(quality))
         .route("/api/quality/remediate", post(quality_remediate))
+        // The L5 Improvement Suggestions tab (`#275`).
+        .route("/api/suggestions", get(suggestions))
+        .route("/api/suggestions/{id}", get(suggestion_get))
+        .route("/api/suggestions/task", post(suggestion_task))
+        .route("/api/suggestions/{id}/dismiss", post(suggestion_dismiss))
+        .route("/api/suggestions/{id}/done", post(suggestion_done))
+        .route("/api/suggestions/{id}/ask", post(suggestion_ask))
         .route("/api/operations", get(operations))
         .route("/api/intake", get(intake_board).post(intake_add))
         .route("/api/intake/security-reports", get(intake_security_reports))
@@ -225,6 +234,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/tasks/{id}/reopen", post(reopen_task))
         .route("/api/tasks/{id}/skip-next", post(skip_next_task))
         .route("/api/tasks/{id}/report", post(report_task))
+        .route("/api/tasks/{id}/suggest", post(suggest_task))
         .route("/api/tasks/{id}/entries", get(task_entries))
         .route("/api/tasks/{id}/output", get(task_output))
         .route("/api/tasks/{id}/runs", get(task_runs))
@@ -1428,6 +1438,104 @@ async fn quality_remediate(State(engine): State<Arc<Engine>>, Json(body): Json<Q
         },
     )
     .await
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestionsQuery {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+/// `GET /api/suggestions?scope=&kind=&target=&state=` (`#275`) -- the L5
+/// Improvement Suggestions tab's whole answer, shared with `factory
+/// suggestion list`: every filed suggestion matching the filters, newest
+/// first, folded by target. Read-only, computed fresh.
+async fn suggestions(State(engine): State<Arc<Engine>>, Query(q): Query<SuggestionsQuery>) -> AxumResponse {
+    let kind = match q.kind.as_deref().filter(|s| !s.trim().is_empty()).map(SuggestionKind::parse) {
+        Some(Some(k)) => Some(k),
+        Some(None) => return refused(format!("{:?} is not a suggestion kind", q.kind)),
+        None => None,
+    };
+    let state = match q.state.as_deref().filter(|s| !s.trim().is_empty()).map(SuggestionState::parse) {
+        Some(Some(s)) => Some(s),
+        Some(None) => return refused(format!("{:?} is not a suggestion state", q.state)),
+        None => None,
+    };
+    run(
+        &engine,
+        Request::Suggestions {
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+            kind,
+            target: q.target.filter(|s| !s.trim().is_empty()),
+            state,
+        },
+    )
+    .await
+}
+
+async fn suggestion_get(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::SuggestionGet { id }).await
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestionTaskBody {
+    ids: Vec<String>,
+}
+
+/// `POST /api/suggestions/task` -- "create improvement task" (`#275`): the
+/// only way a suggestion becomes work. One id or a whole group's.
+async fn suggestion_task(State(engine): State<Arc<Engine>>, Json(body): Json<SuggestionTaskBody>) -> AxumResponse {
+    run(&engine, Request::SuggestionTask { ids: body.ids }).await
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestionDismissBody {
+    reason: String,
+}
+
+async fn suggestion_dismiss(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<SuggestionDismissBody>,
+) -> AxumResponse {
+    run(&engine, Request::SuggestionDismiss { id, reason: body.reason }).await
+}
+
+async fn suggestion_done(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::SuggestionDone { id }).await
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestionAskBody {
+    question: String,
+}
+
+/// `POST /api/suggestions/{id}/ask` -- "ask the agent" (`#275`): resumes the
+/// originating run's session with a continuation run, if the harness can.
+async fn suggestion_ask(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<SuggestionAskBody>,
+) -> AxumResponse {
+    run(&engine, Request::SuggestionAsk { id, question: body.question }).await
+}
+
+/// `POST /api/tasks/{id}/suggest` -- the sandboxed path's way to file a
+/// suggestion, mirroring `report_task`: no envelope token, so
+/// `suggestion.token` (checked by `Engine::check_run_token` inside
+/// `file_suggestion`) is the only thing standing guard.
+async fn suggest_task(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(suggestion): Json<SuggestionReport>,
+) -> AxumResponse {
+    run(&engine, Request::TaskSuggest { id, suggestion }).await
 }
 
 async fn benchmarks(State(engine): State<Arc<Engine>>) -> AxumResponse {
@@ -2728,6 +2836,104 @@ mod tests {
 
         let (status, _) = request(engine, "GET", "/api/quality?scope=nope", None).await;
         assert_eq!(status, 404);
+    }
+
+    async fn task_and_run(engine: &Arc<Engine>, scope: &str, token: &str) -> (factory_core::task::Task, factory_core::run::Run) {
+        let task = engine
+            .create(factory_core::task::NewTask {
+                title: "friction".into(),
+                instructions: "true".into(),
+                scope: Some(scope.into()),
+                agent: Some("shell".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let run = engine
+            .store
+            .create_run(&factory_core::run::NewRun {
+                task_id: task.id.clone(),
+                trigger: factory_core::run::Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "herdr".into(),
+                token: token.into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        (task, run)
+    }
+
+    /// `#275`: `POST /api/tasks/{id}/suggest` carries no envelope token (the
+    /// sandboxed path), so the embedded `token` field is the only guard --
+    /// the same belt-and-suspenders check `/api/tasks/{id}/report` relies on.
+    #[tokio::test]
+    async fn post_api_tasks_suggest_checks_the_embedded_token_with_no_envelope_auth() {
+        let engine = engine_with_quality();
+        let (task, _run) = task_and_run(&engine, "company", "the-real-token").await;
+        let path = format!("/api/tasks/{}/suggest", task.id);
+        let body = serde_json::json!({
+            "kind": "capability", "target": "L2 secret x", "summary": "blocked", "token": "wrong"
+        });
+        let (status, _) = request(engine.clone(), "POST", &path, Some(&body.to_string())).await;
+        assert_eq!(status, 403);
+
+        let body = serde_json::json!({
+            "kind": "capability", "target": "L2 secret x", "summary": "blocked", "token": "the-real-token"
+        });
+        let (status, json) = request(engine.clone(), "POST", &path, Some(&body.to_string())).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["suggestion"]["state"], "open");
+    }
+
+    #[tokio::test]
+    async fn get_api_suggestions_filters_by_scope_and_kind_and_folds_by_target() {
+        let engine = engine_with_quality();
+        let (task, _run) = task_and_run(&engine, "company", "tok-1").await;
+        let body = serde_json::json!({
+            "kind": "docs", "target": "the onboarding guide", "summary": "stale", "token": "tok-1"
+        });
+        let (status, _) = request(engine.clone(), "POST", &format!("/api/tasks/{}/suggest", task.id), Some(&body.to_string())).await;
+        assert_eq!(status, 200);
+
+        let (status, json) = request(engine.clone(), "GET", "/api/suggestions?scope=company", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["report"]["suggestions"].as_array().unwrap().len(), 1);
+        assert_eq!(json["data"]["report"]["groups"][0]["target"], "the onboarding guide");
+
+        let (status, json) = request(engine.clone(), "GET", "/api/suggestions?kind=capability", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["report"]["suggestions"].as_array().unwrap().len(), 0, "the filed one is docs, not capability");
+
+        let (status, _) = request(engine, "GET", "/api/suggestions?kind=bogus", None).await;
+        assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
+    async fn post_api_suggestions_dismiss_round_trips_through_a_get() {
+        let engine = engine_with_quality();
+        let (task, _run) = task_and_run(&engine, "company", "tok-1").await;
+        let body = serde_json::json!({
+            "kind": "process", "target": "the release gate", "summary": "pointless", "token": "tok-1"
+        });
+        let (_, filed) = request(engine.clone(), "POST", &format!("/api/tasks/{}/suggest", task.id), Some(&body.to_string())).await;
+        let id = filed["data"]["suggestion"]["id"].as_str().unwrap().to_string();
+
+        let (status, json) = request(
+            engine.clone(),
+            "POST",
+            &format!("/api/suggestions/{id}/dismiss"),
+            Some(&serde_json::json!({ "reason": "not worth it" }).to_string()),
+        )
+        .await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["suggestion"]["state"], "dismissed");
+
+        let (status, json) = request(engine, "GET", &format!("/api/suggestions/{id}"), None).await;
+        assert_eq!(status, 200, "{json}");
+        assert_eq!(json["data"]["suggestion"]["dismiss_reason"], "not worth it");
     }
 
     #[tokio::test]
