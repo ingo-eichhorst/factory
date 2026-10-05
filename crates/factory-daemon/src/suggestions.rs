@@ -10,6 +10,7 @@ use crate::engine::{ContinueOutcome, Due, Engine};
 use chrono::Utc;
 use factory_assurance::remediation::{Intent, RemediationCommands};
 use factory_assurance::suggestion::{self, Filing, Suggestion, SuggestionKind, SuggestionReport, SuggestionState, UsageSnapshot};
+use factory_core::adapter::agent::UpstreamOutput;
 use factory_core::config::Sandbox;
 use factory_core::run::{FailKind, Run, Trigger};
 use factory_core::task::{Task, TaskEntry};
@@ -121,24 +122,21 @@ impl Engine {
     /// (`factory_assurance::remediation::Service::remediate`, the same door
     /// `Request::QualityRemediate`/`Request::PolicyRemediate` open),
     /// addressed to the root scope's declared improvement agent, and links
-    /// it back to every named suggestion. Every id must exist, share one
-    /// scope (the scope the task is escalated *from*, which `access.rs`
-    /// checks reach against) and be open or already tasked -- never a
-    /// suggestion already dismissed or done.
-    pub(crate) async fn suggestion_task(&self, ids: Vec<String>) -> Result<Task> {
+    /// it back to every named suggestion. Every id must exist and be open
+    /// or already tasked -- never a suggestion already dismissed or done.
+    /// A group is keyed by target alone, so its suggestions routinely span
+    /// more than one scope (the same blocked domain reported from two
+    /// projects) -- there is no "must share a scope" restriction: the task
+    /// always lands in the root regardless, `access.rs` already checks
+    /// reach against each named suggestion's own scope individually, and
+    /// every source scope is named in the task body instead.
+    pub(crate) async fn suggestion_task(&self, caller: &Caller, ids: Vec<String>) -> Result<Task> {
         if ids.is_empty() {
             return Err(FactoryError::BadRequest("suggestion.task needs at least one suggestion id".into()));
         }
         let mut suggestions = Vec::with_capacity(ids.len());
         for id in &ids {
             suggestions.push(self.suggestion_get(id).await?);
-        }
-        let scope = &suggestions[0].scope;
-        if let Some(other) = suggestions.iter().find(|s| &s.scope != scope) {
-            return Err(FactoryError::BadRequest(format!(
-                "suggestions in one improvement task must share a scope; {} is in {:?}, {} is in {:?}",
-                suggestions[0].id, scope, other.id, other.scope
-            )));
         }
         if let Some(terminal) = suggestions.iter().find(|s| s.state.is_terminal()) {
             return Err(FactoryError::BadRequest(format!(
@@ -169,18 +167,25 @@ impl Engine {
             )));
         }
 
+        let mut scopes: BTreeSet<&str> = BTreeSet::new();
+        for s in &suggestions {
+            scopes.insert(s.scope.as_str());
+        }
+        let scopes: Vec<&str> = scopes.into_iter().collect();
+
         let title = format!("Improve: {}", suggestions[0].target);
         let mut body = format!(
-            "{} run(s) flagged this as friction, escalated from {scope}. You are the \
+            "{} run(s) flagged this as friction, escalated from {}. You are the \
              company-wide improvement agent -- this is not the complaining agent's to fix, \
              and it is yours to reach what it could not: sandbox policy, roles, the secrets \
              catalogue, docs, specs or workflows.\n",
-            suggestions.len()
+            suggestions.len(),
+            scopes.join(", "),
         );
         for s in &suggestions {
             body.push_str(&format!(
-                "\n- [{}] target: {}\n  summary: {}\n",
-                s.kind, s.target, s.summary
+                "\n- [{}] target: {}\n  summary: {}\n  from: {}\n",
+                s.kind, s.target, s.summary, s.scope,
             ));
             if let Some(detail) = &s.detail {
                 body.push_str(&format!("  detail: {detail}\n"));
@@ -201,7 +206,7 @@ impl Engine {
             .await?;
 
         let now = Utc::now();
-        let by = "owner".to_string(); // SuggestionTask is checked in access.rs against `task.create`; the caller's name is not threaded through RemediationCommands, so the suggestion's own history names the improvement task instead (see `Suggestion::task`'s note).
+        let by = crate::policies::caller_name(caller);
         for mut s in suggestions {
             if let Err(e) = s.task(&receipt.id, &by, now) {
                 tracing::warn!(suggestion = s.id, "{e}");
@@ -292,7 +297,23 @@ impl Engine {
             )));
         }
 
-        let run = Box::pin(self.dispatch(&task_id, Trigger::Manual, Due::now(), Some(prev))).await?;
+        // The question has nowhere else to reach the resumed prompt: it
+        // rides in as an extra `UpstreamOutput`, the same channel a
+        // workflow's upstream results and `#178`'s "what changed since
+        // your previous run" note already use (`Engine::dispatch_with`).
+        let ask_note = UpstreamOutput {
+            node_id: "ask".into(),
+            task_id: task.id.clone(),
+            title: "A person is asking about a suggestion you filed".into(),
+            result: Some(format!(
+                "You filed this suggestion: [{}] {} -- {}\n\n\
+                 A person is now asking you a follow-up question about it:\n\n{question}\n\n\
+                 This run exists only to answer that question. Change nothing and do not \
+                 continue the task's ordinary work. Report done with your answer as --result.",
+                suggestion.kind, suggestion.target, suggestion.summary,
+            )),
+        };
+        let run = Box::pin(self.dispatch_with(&task_id, Trigger::Manual, Due::now(), Some(prev), vec![ask_note])).await?;
         if run.resumed_session.is_none() {
             // `dispatch` applies a few guards of its own beyond
             // `resolve_continue` (guide/role fingerprint drift, an unknown
@@ -612,7 +633,7 @@ mod tests {
         active_run(&engine, &task.id, "plain-worker", "tok-1").await;
         let s = engine.file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
 
-        let err = engine.suggestion_task(vec![s.id]).await.unwrap_err().to_string();
+        let err = engine.suggestion_task(&Caller::Owner, vec![s.id]).await.unwrap_err().to_string();
         assert!(err.contains("improvement_agent"), "{err}");
     }
 
@@ -623,7 +644,7 @@ mod tests {
         active_run(&engine, &task.id, "plain-worker", "tok-1").await;
         let s = engine.file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
 
-        let err = engine.suggestion_task(vec![s.id]).await.unwrap_err().to_string();
+        let err = engine.suggestion_task(&Caller::Owner, vec![s.id]).await.unwrap_err().to_string();
         assert!(err.contains("improver"), "{err}");
     }
 
@@ -634,7 +655,10 @@ mod tests {
         active_run(&engine, &task.id, "plain-worker", "tok-1").await;
         let s = engine.file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
 
-        let created = engine.suggestion_task(vec![s.id.clone()]).await.unwrap();
+        // A non-owner caller, to prove the history names whoever actually
+        // pressed the button (`#275` QA) rather than a hardcoded "owner".
+        let foreman = Caller::Agent { scope: "demo".into(), name: "boss".into(), role: Role::foreman(), run_id: None };
+        let created = engine.suggestion_task(&foreman, vec![s.id.clone()]).await.unwrap();
         assert_eq!(created.scope, "root", "the task lands in the root scope, not demo");
         assert_eq!(created.agent, "improver", "addressed to the improver, never the complaining project agent");
         assert_eq!(created.labels.get("suggestion").map(String::as_str), Some(s.id.as_str()));
@@ -642,6 +666,35 @@ mod tests {
         let updated = engine.suggestion_get(&s.id).await.unwrap();
         assert_eq!(updated.state, SuggestionState::Tasked);
         assert_eq!(updated.improvement_task_id.as_deref(), Some(created.id.as_str()));
+        assert_eq!(updated.history.last().unwrap().by, "boss", "names whoever pressed the button, not a hardcoded owner");
+    }
+
+    #[tokio::test]
+    async fn suggestion_task_accepts_a_group_spanning_more_than_one_scope_and_names_every_source() {
+        let engine = test_engine(Some("improver"), true);
+        let demo_task = task_in(&engine, "demo", "plain-worker").await;
+        active_run(&engine, &demo_task.id, "plain-worker", "tok-demo").await;
+        let mut from_demo = report(Some("tok-demo"));
+        from_demo.target = "shared target".into();
+        let a = engine.file_suggestion(&demo_task.id, from_demo).await.unwrap();
+
+        let root_task = task_in(&engine, "root", "improver").await;
+        active_run(&engine, &root_task.id, "improver", "tok-root").await;
+        let mut from_root = report(Some("tok-root"));
+        from_root.target = "shared target".into();
+        let b = engine.file_suggestion(&root_task.id, from_root).await.unwrap();
+
+        // No "must share a scope" refusal: a group keyed by target alone
+        // routinely spans more than one scope, and the task always lands in
+        // the root regardless of where its suggestions came from.
+        let created = engine.suggestion_task(&Caller::Owner, vec![a.id.clone(), b.id.clone()]).await.unwrap();
+        assert_eq!(created.scope, "root");
+        assert!(created.instructions.contains("demo"), "{}", created.instructions);
+        assert!(created.instructions.contains("root"), "{}", created.instructions);
+        assert_eq!(created.labels.get("suggestion").map(String::as_str), Some(format!("{},{}", a.id, b.id).as_str()));
+
+        assert_eq!(engine.suggestion_get(&a.id).await.unwrap().state, SuggestionState::Tasked);
+        assert_eq!(engine.suggestion_get(&b.id).await.unwrap().state, SuggestionState::Tasked);
     }
 
     #[tokio::test]

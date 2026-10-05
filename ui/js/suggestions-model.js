@@ -124,6 +124,17 @@ export function groupSuggestions(report, group) {
   return group.ids.map((id) => suggestionById(report, id)).filter(Boolean);
 }
 
+/// The ids out of a group that "Create improvement task" may actually send
+/// -- `canTask`'s own rule, applied per suggestion rather than to the group
+/// as a whole. A group mixes scopes and states freely (it is keyed by
+/// target alone), so sending every id in it is routinely refused: one
+/// already dismissed or done sinks the whole request, and `suggestion_task`
+/// itself no longer requires a single scope (`#275` QA) -- each named
+/// suggestion's own scope is checked for reach instead.
+export function taskableIds(report, group) {
+  return groupSuggestions(report, group).filter(canTask).map((s) => s.id);
+}
+
 /// A short, stable id for display -- the same eight-character convention
 /// this app already uses for a task/attestation id elsewhere.
 export function shortId(id) {

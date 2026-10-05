@@ -19,6 +19,7 @@ import {
   visibleGroups,
   suggestionById,
   groupSuggestions,
+  taskableIds,
   shortId,
   dismissBody,
   taskBody,
@@ -159,6 +160,31 @@ test("suggestionById and groupSuggestions look a suggestion up by id and preserv
   assert.equal(suggestionById(null, "a"), null);
   const found = groupSuggestions(report, { ids: ["b", "a", "missing"] });
   assert.deepEqual(found.map((s) => s.id), ["b", "a"]);
+});
+
+test("taskableIds drops a dismissed or done suggestion from the group, QA #275", () => {
+  const open1 = { id: "a", state: "open", scope: "demo" };
+  const dismissed = { id: "b", state: "dismissed", scope: "demo" };
+  const done = { id: "c", state: "done", scope: "demo" };
+  const open2 = { id: "d", state: "tasked", scope: "demo" };
+  const report = { suggestions: [open1, dismissed, done, open2], groups: [] };
+
+  // Sending every id in a group that mixes a dismissed/done suggestion in
+  // with open ones is exactly what made "Create improvement task" fail in
+  // normal use -- `suggestion_task` refuses the whole request over the one
+  // terminal id. `taskableIds` is what the button now sends instead.
+  const ids = taskableIds(report, { ids: ["a", "b", "c", "d"] });
+  assert.deepEqual(ids, ["a", "d"]);
+});
+
+test("taskableIds keeps every taskable id across more than one scope -- groups are keyed by target alone", () => {
+  // The other half of the same bug: a group commonly spans scopes (the
+  // same blocked domain reported from two projects). `suggestion_task` no
+  // longer requires a single scope, so the UI model must not either.
+  const fromDemo = { id: "a", state: "open", scope: "demo" };
+  const fromOther = { id: "b", state: "open", scope: "other-project" };
+  const report = { suggestions: [fromDemo, fromOther], groups: [] };
+  assert.deepEqual(taskableIds(report, { ids: ["a", "b"] }), ["a", "b"]);
 });
 
 // --------------------------------------------------------------------- misc

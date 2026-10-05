@@ -1137,7 +1137,7 @@ impl Engine {
             // `Event::TaskCreated` inside `Engine::create`, the same rule
             // `PolicyRemediate`/`QualityRemediate` follow.
             Request::SuggestionTask { ids } => Ok(Payload::SuggestionTask {
-                task: self.suggestion_task(ids).await?,
+                task: self.suggestion_task(caller, ids).await?,
             }),
             Request::SuggestionDismiss { id, reason } => Ok(Payload::Suggestion {
                 suggestion: self.suggestion_dismiss(caller, &id, reason).await?,
@@ -2818,6 +2818,23 @@ impl Engine {
     }
 
     pub(crate) async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) -> Result<Run> {
+        self.dispatch_with(task_id, trigger, due, continue_from, Vec::new()).await
+    }
+
+    /// The same, with extra `UpstreamOutput` entries appended to whatever
+    /// this dispatch would otherwise show -- `suggestions.rs`'s `ask_agent`
+    /// (`#275`) is the one caller that needs this: the question it is
+    /// asking has nowhere else to reach the resumed prompt. Every ordinary
+    /// caller goes through `dispatch` above, which passes none.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn dispatch_with(
+        self: &Arc<Self>,
+        task_id: &str,
+        trigger: Trigger,
+        due: Due,
+        continue_from: Option<Run>,
+        extra_upstream: Vec<UpstreamOutput>,
+    ) -> Result<Run> {
         let task = self.require(task_id).await?;
         let workflow_node = if let Some(origin) = &task.workflow_origin {
             self.workflows.get_run(&origin.workflow_run_id).await?.and_then(|workflow| {
@@ -3208,6 +3225,7 @@ impl Engine {
         // pass, which dispatches through this same function, needs no
         // change of its own to pick this up.
         let mut upstream = self.upstream_outputs(&task).await;
+        upstream.extend(extra_upstream);
         if run.resumed_session.is_some() {
             if let Some(previous) = continue_from.as_ref().and_then(|previous| previous.resume_context.as_ref()) {
                 upstream.push(UpstreamOutput {
@@ -8871,6 +8889,19 @@ mod tests {
         /// directly in one test below -- `shell`).
         struct RecordingAgent {
             resumable: bool,
+            /// What `TaskBinding.upstream` looked like on the most recent
+            /// `launch_spec` call -- `#275`'s `ask_agent` has nowhere else
+            /// to put its question, so this is what proves it actually
+            /// reached the binding a real harness's `prompt()` renders from
+            /// (`upstream_section`, tested on its own in
+            /// `factory-plugins/src/builtin/agents.rs`).
+            captured_upstream: Mutex<Option<Vec<UpstreamOutput>>>,
+        }
+
+        impl RecordingAgent {
+            fn new(resumable: bool) -> Self {
+                Self { resumable, captured_upstream: Mutex::new(None) }
+            }
         }
 
         #[async_trait]
@@ -8878,7 +8909,8 @@ mod tests {
             fn name(&self) -> &str {
                 "recording"
             }
-            async fn launch_spec(&self, _ctx: &AgentContext) -> Result<LaunchSpec> {
+            async fn launch_spec(&self, ctx: &AgentContext) -> Result<LaunchSpec> {
+                *self.captured_upstream.lock().unwrap() = ctx.task.as_ref().map(|t| t.upstream.clone());
                 Ok(LaunchSpec { kind: LaunchKind::Command(vec!["true".into()]), args: Vec::new(), env: Default::default(), agent_kind: None })
             }
             async fn prompt(&self, _ctx: &AgentContext) -> Result<String> {
@@ -8982,12 +9014,67 @@ mod tests {
                 config,
             };
             let mut registry = Registry::with_builtins();
-            registry.add_agent(Arc::new(RecordingAgent { resumable }), "test");
+            registry.add_agent(Arc::new(RecordingAgent::new(resumable)), "test");
             let runtime = Arc::new(RecordingRuntime::new(runtime_status));
             registry.add_runtime(runtime.clone(), "test");
             let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
             let engine = Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()));
             (engine, runtime)
+        }
+
+        /// The same as `continue_engine`, resumable with the previous
+        /// session already confirmed gone -- what every successful-resume
+        /// test above already sets up -- except this one hands back the
+        /// `RecordingAgent` itself rather than the runtime, so a test can
+        /// read `captured_upstream` after dispatching. A separate function
+        /// rather than widening `continue_engine`'s own return type, which
+        /// every other test in this module already destructures as a pair.
+        fn continue_engine_recording_upstream(scope_path: PathBuf) -> (Arc<Engine>, Arc<RecordingAgent>) {
+            let config = Config {
+                version: 1,
+                instance: Instance { id: "test".into(), name: "test".into() },
+                daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+                roles: Default::default(),
+                dashboard: None,
+                policies: Default::default(),
+                quality: Default::default(),
+                scope: None,
+                scopes: vec![Scope {
+                    id: "scope-id".into(),
+                    name: "demo".into(),
+                    path: scope_path,
+                    agent: None,
+                    agents: Vec::new(),
+                    runtime: None,
+                    git: None,
+                    task_store: None,
+                    max_sessions: None,
+                    roles: Default::default(),
+                    dashboard: None,
+                    policies: Default::default(),
+                    quality: Default::default(),
+                    intake: Default::default(),
+                    dependencies: Default::default(),
+                    environments: Vec::new(),
+                    renewals: Vec::new(),
+                }],
+                infrastructure: Default::default(),
+                secrets: Vec::new(),
+                plugins_dir: None,
+                renewals: Vec::new(),
+                renewals_notify: None,
+            };
+            let factory = Factory {
+                root: std::env::temp_dir().join(format!("factory-continue-test-{}", uuid::Uuid::new_v4())),
+                config,
+            };
+            let mut registry = Registry::with_builtins();
+            let agent = Arc::new(RecordingAgent::new(true));
+            registry.add_agent(agent.clone(), "test");
+            registry.add_runtime(Arc::new(RecordingRuntime::new(RuntimeStatus::Gone)), "test");
+            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+            let engine = Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()));
+            (engine, agent)
         }
 
         async fn task_for(engine: &Arc<Engine>, worktree: bool) -> Task {
@@ -9096,6 +9183,77 @@ mod tests {
             assert_eq!(start.launch.args.first().map(String::as_str), Some("--resume"), "{:?}", start.launch.args);
             assert_eq!(start.launch.args.get(1).map(String::as_str), Some("sess-123"), "{:?}", start.launch.args);
             assert_eq!(start.cwd, PathBuf::from(prev.worktree_path.clone().unwrap()));
+
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        // ==============================================================
+        // #275: "ask the agent" actually delivers the question
+        // ==============================================================
+
+        #[tokio::test]
+        async fn asking_a_suggestion_delivers_the_question_in_the_resumed_binding_and_settles_the_answer() {
+            let scope_dir = git_scope_dir("ask-delivers-question").await;
+            let (engine, agent) = continue_engine_recording_upstream(scope_dir.clone());
+            let task = task_for(&engine, true).await;
+
+            // A real dispatch, so the previous run's worktree/session shape
+            // is exactly what `dispatch` itself would have left -- then file
+            // a suggestion against it *before* it ends, while its token is
+            // still live, the way an agent filing one mid-run actually would.
+            let prev = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            let suggestion = engine
+                .file_suggestion(
+                    &task.id,
+                    factory_core::protocol::SuggestionReport {
+                        kind: factory_core::protocol::SuggestionKind::Capability,
+                        target: "L2 secret stripe_key".into(),
+                        summary: "a blocked outbound call".into(),
+                        detail: None,
+                        wasted_tokens: Some(1200),
+                        token: prev.token.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            engine.fail_run(&prev.id, FailKind::AckTimeout, "infra hiccup").await;
+            seed_session_id(&engine, &prev, "sess-ask").await;
+
+            let answered = engine
+                .suggestion_ask(&crate::access::Caller::Owner, &suggestion.id, "why did this fail?".into())
+                .await
+                .unwrap();
+            let ask_run_id = answered.ask.as_ref().unwrap().run_id.clone();
+            let ask_run = engine.store.get_run(&ask_run_id).await.unwrap().unwrap();
+            assert_eq!(ask_run.resumed_session.as_deref(), Some("sess-ask"), "the ask run actually resumed, not a fresh one");
+
+            // The question reached `TaskBinding.upstream` -- what a real
+            // harness's `prompt()` renders from (`upstream_section`,
+            // `factory-plugins/src/builtin/agents.rs`) -- not just the
+            // suggestion record.
+            let captured = agent.captured_upstream.lock().unwrap().clone().expect("launch_spec was called");
+            let ask_entry = captured.iter().find(|u| u.node_id == "ask").expect("an ask upstream entry");
+            let text = ask_entry.result.as_deref().unwrap_or("");
+            assert!(text.contains("why did this fail?"), "{text}");
+            assert!(text.contains("blocked outbound call"), "{text}");
+            assert!(text.contains("Report done"), "{text}");
+
+            // And once that resumed run reports, the answer settles onto
+            // the suggestion (`Engine::finish_run` -> `settle_suggestion_ask`).
+            engine
+                .report(&task.id, TaskReport {
+                    artifacts: Vec::new(),
+                    status: Some(RunStatus::Done),
+                    message: None,
+                    result: Some("it needed a different grant".into()),
+                    send_to: None,
+                    error: None,
+                    token: ask_run.token.clone(),
+                })
+                .await
+                .unwrap();
+            let settled = engine.suggestion_get(&suggestion.id).await.unwrap();
+            assert_eq!(settled.ask.as_ref().unwrap().answer.as_deref(), Some("it needed a different grant"));
 
             std::fs::remove_dir_all(&scope_dir).ok();
         }

@@ -19,7 +19,6 @@ import {
   canAsk,
   canDismiss,
   canDone,
-  canTask,
   dismissBody,
   formatCost,
   formatTokens,
@@ -31,6 +30,7 @@ import {
   stateLabel,
   suggestionRunHref,
   suggestionTaskHref,
+  taskableIds,
   taskBody,
   validDismissReason,
   validQuestion,
@@ -113,7 +113,11 @@ export function renderSuggestions() {
 
 function groupHtml(group) {
   const rows = groupSuggestions(report, group);
-  const taskable = rows.some(canTask);
+  // Only the ids `suggestion_task` would actually accept: one already
+  // dismissed or done in the same group must not sink the whole request
+  // (`#275` QA) -- the button sends exactly `taskableIds`, never the
+  // group's full (possibly multi-scope) `ids`.
+  const ids = taskableIds(report, group);
   return `<section class="sug-group">
     <div class="bar sug-group-head">
       <div>
@@ -121,7 +125,7 @@ function groupHtml(group) {
         <span class="sub">${esc(groupSummaryLine(group))}</span>
       </div>
       <span class="sp"></span>
-      ${taskable ? `<button type="button" class="btn primary" data-sug-group-task="${esc(group.ids.join(","))}">Create improvement task</button>` : ""}
+      ${ids.length ? `<button type="button" class="btn primary" data-sug-group-task="${esc(ids.join(","))}">Create improvement task</button>` : ""}
     </div>
     <table class="sug-rows">
       <tbody>${rows.map((s) => rowHtml(s)).join("")}</tbody>
