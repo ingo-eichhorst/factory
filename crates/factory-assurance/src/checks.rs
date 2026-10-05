@@ -1508,3 +1508,210 @@ pub fn evidence_findings(evidence: &Evidence, scope: &str) -> Vec<EvidenceFindin
     findings.sort_by(|a, b| a.subject.cmp(&b.subject).then(a.detail.cmp(&b.detail)));
     findings
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn now() -> DateTime<Utc> {
+        "2026-10-16T12:00:00Z".parse().unwrap()
+    }
+
+    fn id(metric: &str) -> MetricId {
+        MetricId::new(metric).unwrap()
+    }
+
+    fn check(metric: &str, above: Option<f64>, below: Option<f64>) -> Check {
+        Check::Metric {
+            metric: id(metric),
+            above: above.map(Threshold),
+            below: below.map(Threshold),
+            max_age: None,
+        }
+    }
+
+    fn subject(check: Check, max_age: Option<Duration>) -> EvaluationSubject {
+        EvaluationSubject {
+            control: "test/metric".parse().unwrap(),
+            title: "a metric".into(),
+            kind: (),
+            maps_to: Vec::new(),
+            evidence: vec![check],
+            max_age,
+            not_applicable: None,
+        }
+    }
+
+    fn read(metric: &str, value: Option<f64>, better: Option<Better>, age_days: i64) -> Evidence {
+        Evidence {
+            metrics: Some(BTreeMap::from([(
+                id(metric),
+                MetricEvidence {
+                    value: MetricValue {
+                        id: id(metric),
+                        value,
+                        as_of: now() - chrono::Duration::days(age_days),
+                        reason: value.is_none().then(|| "nothing reported".to_string()),
+                    },
+                    better,
+                },
+            )])),
+            ..Evidence::default()
+        }
+    }
+
+    fn judge(check: Check, max_age: Option<Duration>, evidence: &Evidence) -> (StatusKind, String) {
+        let status = evaluate(&[subject(check, max_age)], evidence, now())
+            .pop()
+            .unwrap()
+            .status;
+        (status.kind(), status.reasons().join("; "))
+    }
+
+    #[test]
+    fn a_metric_check_parses_with_its_own_spelling_and_refuses_unknown_keys() {
+        let parsed: Check = serde_yaml_ng::from_str(
+            "{ check: metric, metric: reported.finance.beleg_coverage, above: 0.98, max_age: 35d }",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            Check::Metric {
+                metric: id("reported.finance.beleg_coverage"),
+                above: Some(Threshold(0.98)),
+                below: None,
+                max_age: Some("35d".parse().unwrap()),
+            }
+        );
+        assert_eq!(parsed.kind_name(), "metric");
+        assert_eq!(parsed.own_max_age(), Some("35d".parse().unwrap()));
+        assert_eq!(
+            parsed.describe(),
+            "metric reported.finance.beleg_coverage >= 0.98 (max_age 5w)"
+        );
+        let integer: Check =
+            serde_yaml_ng::from_str("{ check: metric, metric: fail_rate, below: 0 }").unwrap();
+        assert_eq!(integer, check("fail_rate", None, Some(0.0)));
+        assert!(serde_yaml_ng::from_str::<Check>(
+            "{ check: metric, metric: fail_rate, below: 0.1, window: 7d }"
+        )
+        .is_err());
+        assert!(
+            serde_yaml_ng::from_str::<Check>("{ check: metric, metric: Not-An-Id, below: 1 }")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_threshold_is_equal_to_itself_even_when_it_is_not_a_number() {
+        assert_eq!(Threshold(f64::NAN), Threshold(f64::NAN));
+        assert_ne!(Threshold(0.1), Threshold(0.2));
+    }
+
+    #[test]
+    fn check_vocabulary_refuses_circular_unknown_shapeless_and_backwards_metric_checks() {
+        let kinds = |c: Check| -> Vec<VocabularyFinding> {
+            check_vocabulary(&c).into_iter().map(|(k, _)| k).collect()
+        };
+        for circular in ["compliance.cra", "open_controls.gobd", "quality.reliability"] {
+            assert_eq!(
+                kinds(check(circular, Some(0.5), None)),
+                vec![VocabularyFinding::CircularMetric],
+                "{circular}"
+            );
+        }
+        assert_eq!(
+            kinds(check("not_a_metric", None, Some(1.0))),
+            vec![VocabularyFinding::UnknownMetric]
+        );
+        assert_eq!(
+            kinds(check("fail_rate", None, None)),
+            vec![VocabularyFinding::BadThreshold]
+        );
+        assert_eq!(
+            kinds(check("fail_rate", Some(0.0), Some(0.1))),
+            vec![VocabularyFinding::BadThreshold]
+        );
+        assert_eq!(
+            kinds(check("fail_rate", None, Some(f64::NAN))),
+            vec![VocabularyFinding::BadThreshold]
+        );
+        // `fail_rate` is lower-is-better, `first_pass_yield` higher.
+        assert_eq!(
+            kinds(check("fail_rate", Some(0.1), None)),
+            vec![VocabularyFinding::WrongDirection]
+        );
+        assert_eq!(
+            kinds(check("first_pass_yield", None, Some(0.8))),
+            vec![VocabularyFinding::WrongDirection]
+        );
+        assert!(kinds(check("fail_rate", None, Some(0.1))).is_empty());
+        assert!(kinds(check("first_pass_yield", Some(0.8), None)).is_empty());
+        // A reported metric's direction is its scope's to declare, never
+        // `resolve`'s placeholder: nothing is judged at this layer.
+        assert!(kinds(check("reported.finance.unresolved", None, Some(0.0))).is_empty());
+        assert!(kinds(check("reported.finance.coverage", Some(0.9), None)).is_empty());
+    }
+
+    #[test]
+    fn a_metric_check_reads_inclusive_bounds_and_stale_before_the_bound() {
+        let lower = read("fail_rate", Some(0.1), Some(Better::Lower), 2);
+        assert_eq!(
+            judge(check("fail_rate", None, Some(0.1)), None, &lower).0,
+            StatusKind::Satisfied
+        );
+        let (kind, reason) = judge(check("fail_rate", None, Some(0.05)), None, &lower);
+        assert_eq!(kind, StatusKind::Open);
+        assert!(reason.starts_with("metric: fail_rate = 0.1"), "{reason}");
+        assert!(reason.contains("above the allowed 0.05"), "{reason}");
+        // Older than the control's effective window: stale, even though it
+        // would not meet the bound either -- quality's own order.
+        let day = Some("1d".parse().unwrap());
+        assert_eq!(
+            judge(check("fail_rate", None, Some(0.05)), day, &lower).0,
+            StatusKind::Stale
+        );
+        assert_eq!(
+            judge(check("fail_rate", None, Some(0.1)), Some("2d".parse().unwrap()), &lower).0,
+            StatusKind::Satisfied
+        );
+    }
+
+    #[test]
+    fn a_metric_check_is_open_with_a_reason_whenever_it_cannot_judge() {
+        let open = |c: Check, evidence: &Evidence, needle: &str| {
+            let (kind, reason) = judge(c, None, evidence);
+            assert_eq!(kind, StatusKind::Open, "{reason}");
+            assert!(reason.starts_with("metric: "), "{reason}");
+            assert!(reason.contains(needle), "{needle:?} not in {reason:?}");
+        };
+        let none = Evidence::default();
+        open(check("fail_rate", None, Some(0.1)), &none, "not resolved for fail_rate");
+        let other = read("scrap_rate", Some(0.0), Some(Better::Lower), 0);
+        open(check("fail_rate", None, Some(0.1)), &other, "no value for fail_rate");
+        let missing = read("fail_rate", None, Some(Better::Lower), 0);
+        open(check("fail_rate", None, Some(0.1)), &missing, "nothing reported");
+        let infinite = read("fail_rate", Some(f64::INFINITY), Some(Better::Lower), 0);
+        open(check("fail_rate", None, Some(0.1)), &infinite, "not a finite number");
+        let fine = read("fail_rate", Some(0.0), Some(Better::Lower), 0);
+        open(check("fail_rate", Some(0.0), Some(0.1)), &fine, "both `above` and `below`");
+        open(check("fail_rate", Some(0.0), None), &fine, "lower is better");
+        open(check("not_a_metric", None, Some(0.1)), &fine, "not a known metric");
+        // A circular metric is refused even with a value in hand.
+        let circular = read("compliance.cra", Some(1.0), Some(Better::Higher), 0);
+        open(check("compliance.cra", Some(0.5), None), &circular, "cannot be evidence");
+    }
+
+    #[test]
+    fn a_metric_with_no_declared_direction_is_never_judged_backwards() {
+        let undeclared = read("reported.demo.x", Some(3.0), None, 0);
+        assert_eq!(
+            judge(check("reported.demo.x", Some(1.0), None), None, &undeclared).0,
+            StatusKind::Satisfied
+        );
+        assert_eq!(
+            judge(check("reported.demo.x", None, Some(5.0)), None, &undeclared).0,
+            StatusKind::Satisfied
+        );
+    }
+}

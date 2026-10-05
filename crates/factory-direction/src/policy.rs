@@ -1352,6 +1352,41 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// `#278` phase 2: a `metric` check is checked when its file loads --
+    /// a circular, unknown, bound-less or backwards (built-in direction)
+    /// one is a finding naming the control -- and the control still loads.
+    #[test]
+    fn a_metric_check_that_cannot_judge_is_a_finding_at_parse_time() {
+        let dir = tempdir("metric-checks");
+        write(
+            &dir,
+            "gobd.yaml",
+            "framework: gobd\ntitle: GoBD\nkind: regulation\ncontrols:\n\
+             \x20 - id: circular\n    title: C\n    evidence: [{check: metric, metric: open_controls.gobd, below: 0}]\n\
+             \x20 - id: unknown\n    title: U\n    evidence: [{check: metric, metric: not_a_metric, below: 1}]\n\
+             \x20 - id: shapeless\n    title: S\n    evidence: [{check: metric, metric: fail_rate}]\n\
+             \x20 - id: backwards\n    title: B\n    evidence: [{check: metric, metric: fail_rate, above: 0.1}]\n\
+             \x20 - id: fine\n    title: F\n    max_age: 35d\n    evidence: [{check: metric, metric: reported.finance.beleg_coverage, above: 0.98}]\n",
+        );
+        let (catalogues, findings) = load_all(&dir);
+        assert_eq!(catalogues[0].controls.len(), 5, "every control still loads");
+        let found: Vec<(FindingKind, &str)> = findings
+            .iter()
+            .map(|f| (f.kind, f.detail.split(' ').next().unwrap()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (FindingKind::CircularMetric, "gobd/circular"),
+                (FindingKind::UnknownMetric, "gobd/unknown"),
+                (FindingKind::BadThreshold, "gobd/shapeless"),
+                (FindingKind::WrongDirection, "gobd/backwards"),
+            ]
+        );
+        assert!(findings.iter().all(|f| f.subject == "gobd.yaml"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_secrets_check_naming_an_unknown_location_is_a_finding_at_parse_time() {
         let dir = tempdir("unknown-secrets-location");

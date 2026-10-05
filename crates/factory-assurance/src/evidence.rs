@@ -2033,4 +2033,235 @@ mod tests {
             StatusKind::Satisfied
         );
     }
+
+    /// A `reported.demo.*` source declared by `parent`, its file written
+    /// under a fresh root -- `coverage` (higher is better), `unresolved`
+    /// (lower is better) and `pending` (`null`, with the file's own reason).
+    /// `coverage` is reported 10 days before [`time`].
+    fn reported_metric_fixture() -> (std::path::PathBuf, crate::metrics_service::CheckMetricInputs) {
+        let root = std::env::temp_dir()
+            .join(format!("factory-metric-check-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("projects/work")).unwrap();
+        std::fs::write(
+            root.join("metrics.json"),
+            r#"{"as_of":"2026-10-16T09:00:00Z","metrics":[
+                {"id":"coverage","value":0.9,"as_of":"2026-10-06T12:00:00Z"},
+                {"id":"unresolved","value":0},
+                {"id":"pending","value":null,"reason":"no close yet"}]}"#,
+        )
+        .unwrap();
+        let declared = |id: &str, unit: &str, better: &str| crate::reported::RawDeclared {
+            id: Some(id.into()),
+            title: Some(id.into()),
+            unit: Some(unit.into()),
+            better: Some(better.into()),
+        };
+        let reported = crate::reported::Configuration {
+            scopes: vec![crate::reported::ScopeDeclaration {
+                scope: ScopeNode {
+                    name: "parent".into(),
+                    path: "projects/work".into(),
+                },
+                source: Some(crate::reported::RawSource {
+                    id: Some("demo".into()),
+                    file: Some("../../metrics.json".into()),
+                    declare: vec![
+                        declared("coverage", "ratio", "higher"),
+                        declared("unresolved", "count", "lower"),
+                        declared("pending", "count", "lower"),
+                    ],
+                }),
+            }],
+        };
+        (
+            root.clone(),
+            crate::metrics_service::CheckMetricInputs { root, reported },
+        )
+    }
+
+    fn metric_check(id: &str, above: Option<f64>, below: Option<f64>) -> Check {
+        Check::Metric {
+            metric: metrics::MetricId::new(id).unwrap(),
+            above: above.map(crate::checks::Threshold),
+            below: below.map(crate::checks::Threshold),
+            max_age: None,
+        }
+    }
+
+    fn control(id: &str, check: Check) -> EvaluationSubject {
+        EvaluationSubject {
+            control: format!("test/{id}").parse().unwrap(),
+            ..subject(vec![check])
+        }
+    }
+
+    /// `#278` phase 2: a `check: metric` judged through the real
+    /// check-evaluation provider -- inclusive bounds, the declared direction
+    /// of a reported metric, `null` with the file's own reason, a stale
+    /// value, a circular metric refused before any read, and a built-in
+    /// metric read for the evaluated scope's own subtree. A sibling scope
+    /// outside the declaring scope's subtree reads `open` with the reason.
+    #[tokio::test]
+    async fn a_metric_check_is_judged_per_scope_against_its_declared_direction() {
+        use crate::check_evaluation::{Provider, Read, ScopeInput};
+        use factory_kernel::{CheckEvaluationFact, StatusKind, L6};
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let owner = service(&recorder, &bench);
+        let (_root, inputs) = reported_metric_fixture();
+        let mut stale = control("stale", metric_check("reported.demo.coverage", Some(0.5), None));
+        stale.max_age = Some("9d".parse().unwrap());
+        let subjects = vec![
+            control("on-bound", metric_check("reported.demo.coverage", Some(0.9), None)),
+            control("under", metric_check("reported.demo.coverage", Some(0.95), None)),
+            control("ceiling", metric_check("reported.demo.unresolved", None, Some(0.0))),
+            control("wrong-way", metric_check("reported.demo.unresolved", Some(0.0), None)),
+            control("pending", metric_check("reported.demo.pending", None, Some(0.0))),
+            stale,
+            control("circular", metric_check("compliance.test", Some(0.5), None)),
+            control("built-in", metric_check("fail_rate", None, Some(0.1))),
+        ];
+        let read = Read {
+            scopes: vec![
+                ScopeInput {
+                    scope: owner.scopes.scopes[0].clone(),
+                    subjects: subjects.clone(),
+                },
+                ScopeInput {
+                    scope: owner.scopes.scopes[2].clone(),
+                    subjects: vec![control(
+                        "on-bound",
+                        metric_check("reported.demo.coverage", Some(0.9), None),
+                    )],
+                },
+            ],
+            tags: BTreeSet::new(),
+            attestations: Vec::new(),
+            budgets: Ok(vec![None, None]),
+            now: Some(time()),
+        };
+        let provider = Provider::new(crate::metrics_service::Service::new(owner), inputs);
+        let fact = Facts::<L6>::new()
+            .get::<CheckEvaluationFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        let status = |scope: usize, id: &str| {
+            let found = fact.scopes[scope]
+                .statuses
+                .iter()
+                .find(|s| s.control.id == id)
+                .unwrap();
+            (found.status.kind(), found.status.reasons().join("; "))
+        };
+
+        let (kind, reason) = status(0, "on-bound");
+        assert_eq!(kind, StatusKind::Satisfied, "{reason}");
+        assert!(reason.starts_with("metric: reported.demo.coverage = 0.9"), "{reason}");
+        let (kind, reason) = status(0, "under");
+        assert_eq!(kind, StatusKind::Open);
+        assert!(reason.contains("below the required 0.95"), "{reason}");
+        assert_eq!(status(0, "ceiling").0, StatusKind::Satisfied);
+        let (kind, reason) = status(0, "wrong-way");
+        assert_eq!(kind, StatusKind::Open);
+        assert!(reason.contains("lower is better"), "{reason}");
+        let (kind, reason) = status(0, "pending");
+        assert_eq!(kind, StatusKind::Open);
+        assert!(reason.contains("no close yet"), "{reason}");
+        let (kind, reason) = status(0, "stale");
+        assert_eq!(kind, StatusKind::Stale, "{reason}");
+        assert!(reason.contains("older than 9d"), "{reason}");
+        let (kind, reason) = status(0, "circular");
+        assert_eq!(kind, StatusKind::Open);
+        assert!(reason.contains("cannot be evidence"), "{reason}");
+        assert_eq!(status(0, "built-in").0, StatusKind::Satisfied);
+        let (kind, reason) = status(1, "on-bound");
+        assert_eq!(kind, StatusKind::Open);
+        assert!(reason.contains("outside the selected subtree"), "{reason}");
+
+        // The built-in metric was read for the evaluated scope's own
+        // subtree, once; nothing circular was ever asked for.
+        assert_eq!(
+            recorder.calls("process"),
+            vec![vec!["parent".to_string(), "fail_rate".to_string()]]
+        );
+        assert!(recorder.calls("daemon").is_empty());
+    }
+
+    /// A scope none of whose controls names a metric never gathers one --
+    /// `Evidence::metrics` stays `None`, "never gathered", and no lower
+    /// owner is asked anything for it.
+    #[tokio::test]
+    async fn no_metric_check_means_no_metric_read() {
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let owner = service(&recorder, &bench);
+        let scope = owner.scopes.scopes[0].clone();
+        let metrics = crate::metrics_service::Service::new(owner);
+        let read = metrics
+            .check_metrics(
+                &Default::default(),
+                &scope,
+                &[subject(vec![Check::Knowledge { tag: None }])],
+                time(),
+            )
+            .await
+            .unwrap();
+        assert!(read.is_none());
+        assert!(recorder.calls("process").is_empty() && recorder.calls("production").is_empty());
+    }
+
+    /// `compliance.<framework>` counts a control a `check: metric` closes,
+    /// reading the metric through the same per-scope path -- and never
+    /// recurses, since a circular id is never asked for.
+    #[tokio::test]
+    async fn a_compliance_rollup_counts_a_control_a_metric_check_closes() {
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let (root, inputs) = reported_metric_fixture();
+        let ids = [metrics::MetricId::new("compliance.test").unwrap()];
+        let plan = crate::metrics_service::Plan::prepare(
+            &ids,
+            root,
+            &evidence.scopes,
+            &crate::quality_inputs::Configuration::default(),
+            &inputs.reported,
+            None,
+        )
+        .await
+        .unwrap();
+        let scope = evidence.scopes.scopes[0].clone();
+        let metrics = crate::metrics_service::Service::new(evidence);
+        let policy = |check: Check| crate::metrics_service::PolicyInputs {
+            scopes: vec![crate::metrics_service::PolicyScope {
+                scope: scope.clone(),
+                subjects: vec![EvaluationSubject {
+                    control: "test/coverage".parse().unwrap(),
+                    title: "coverage".into(),
+                    kind: true,
+                    maps_to: Vec::new(),
+                    evidence: vec![check],
+                    max_age: None,
+                    not_applicable: None,
+                }],
+                budget: None,
+            }],
+            attestations: Vec::new(),
+        };
+        for (check, compliant) in [
+            (metric_check("reported.demo.coverage", Some(0.9), None), Some(1.0)),
+            (metric_check("reported.demo.coverage", Some(0.95), None), Some(0.0)),
+            (metric_check("compliance.test", Some(0.5), None), Some(0.0)),
+        ] {
+            let gathered = metrics
+                .gather(&plan, Some(&policy(check)), time(), None)
+                .await
+                .unwrap();
+            let output = metrics
+                .finish(&plan, gathered, &Ok(BTreeMap::new()), time(), None)
+                .await
+                .unwrap();
+            assert_eq!(output.values[0].value, compliant);
+        }
+    }
 }

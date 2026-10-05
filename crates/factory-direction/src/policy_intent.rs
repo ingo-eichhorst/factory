@@ -515,6 +515,42 @@ mod tests {
         );
     }
 
+    /// `#278` phase 2: the catalogue read judges a `check: metric` on a
+    /// reported metric against the direction its scope declared -- the
+    /// one place L6 holds that live declaration -- alongside every finding
+    /// `load_all` already makes.
+    #[tokio::test]
+    async fn catalogues_judge_a_reported_metric_check_against_its_declared_direction() {
+        let root = Root::new();
+        root.catalogue(
+            "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n\
+             \x20 - id: backwards\n    title: B\n    evidence: [{check: metric, metric: reported.finance.unresolved, above: 0}]\n\
+             \x20 - id: forwards\n    title: F\n    evidence: [{check: metric, metric: reported.finance.unresolved, below: 0}]\n\
+             \x20 - id: undeclared\n    title: U\n    evidence: [{check: metric, metric: reported.other.x, above: 1}]\n",
+        );
+        let store = PolicyStore::in_memory().unwrap();
+        let mut config = configuration();
+        config.reported_directions = BTreeMap::from([(
+            "reported.finance.unresolved".to_string(),
+            factory_assurance::metrics::Better::Lower,
+        )]);
+        let (catalogues, findings) = Service::new(root.0.clone(), config, &store)
+            .catalogues()
+            .await
+            .unwrap();
+        assert_eq!(catalogues[0].controls.len(), 3, "every control still loads");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].kind, policy::FindingKind::WrongDirection);
+        assert_eq!(findings[0].subject, "cra.yaml");
+        assert!(findings[0].detail.starts_with("cra/backwards holds reported.finance.unresolved"));
+        // With no declaration in hand nothing is judged either way.
+        let (_, findings) = Service::new(root.0.clone(), configuration(), &store)
+            .catalogues()
+            .await
+            .unwrap();
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
     #[tokio::test]
     async fn budget_intent_is_lazy_live_independent_and_never_a_spend_assessment() {
         let root = Root::new();

@@ -1874,6 +1874,18 @@ mod tests {
         let typo =
             serde_yaml_ng::from_str::<Measure>("{ metric: scrap_rate, bellow: 0.05 }").unwrap_err();
         assert!(typo.to_string().contains("bellow"), "{typo}");
+        // `#278`: a policy control's `check: metric` is not a second way to
+        // write a quality metric measure, with or without its `metric:` key.
+        for policy_spelling in [
+            "{ check: metric, metric: scrap_rate, below: 0.05 }",
+            "{ check: metric }",
+        ] {
+            let refused = serde_yaml_ng::from_str::<Measure>(policy_spelling).unwrap_err();
+            assert!(
+                refused.to_string().contains("names the metric itself"),
+                "{refused}"
+            );
+        }
     }
 
     // -- load ------------------------------------------------------------------
