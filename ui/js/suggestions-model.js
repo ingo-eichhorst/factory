@@ -108,7 +108,7 @@ export function filterByQuery(suggestions, query) {
 /// an unchanged set of them. Never mutates `report`.
 export function visibleGroups(report, query) {
   if (!report) return [];
-  if (!query || !query.trim()) return report.groups;
+  if (!query?.trim()) return report.groups;
   const keep = new Set(filterByQuery(report.suggestions, query).map((s) => s.id));
   return report.groups
     .map((g) => ({ ...g, ids: g.ids.filter((id) => keep.has(id)) }))
@@ -116,7 +116,7 @@ export function visibleGroups(report, query) {
 }
 
 export function suggestionById(report, id) {
-  return ((report && report.suggestions) || []).find((s) => s.id === id) || null;
+  return (report?.suggestions || []).find((s) => s.id === id) || null;
 }
 
 /// The suggestions a group's own ids name, in the group's order.
@@ -155,10 +155,10 @@ export function askBody(question) {
 /// the request goes out, rather than only after the daemon refuses an
 /// empty one.
 export function validDismissReason(reason) {
-  return !!(reason && reason.trim());
+  return !!reason?.trim();
 }
 export function validQuestion(question) {
-  return !!(question && question.trim());
+  return !!question?.trim();
 }
 
 /// A task-modal link for the task a suggestion was filed against, and

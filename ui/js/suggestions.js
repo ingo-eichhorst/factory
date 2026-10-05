@@ -58,8 +58,9 @@ export async function loadSuggestions() {
   if (state.scope !== null) params.set("scope", state.scope);
   if (kindFilter) params.set("kind", kindFilter);
   if (stateFilter) params.set("state", stateFilter);
+  const search = params.toString();
   try {
-    const answer = await api(`/api/suggestions${params.toString() ? `?${params}` : ""}`);
+    const answer = await api(search ? `/api/suggestions?${search}` : "/api/suggestions");
     if (mine !== asked) return;
     report = answer.report;
     failure = null;
@@ -72,16 +73,16 @@ export async function loadSuggestions() {
 }
 
 export function reloadSuggestions() {
-  loadSuggestions();
+  void loadSuggestions();
 }
 
 export function wireSuggestions() {
   const refresh = $("suggestions-refresh");
-  if (refresh) refresh.onclick = () => loadSuggestions();
+  if (refresh) refresh.onclick = () => void loadSuggestions();
   const kind = $("suggestions-kind");
-  if (kind) kind.onchange = () => { kindFilter = kind.value; loadSuggestions(); };
+  if (kind) kind.onchange = () => { kindFilter = kind.value; void loadSuggestions(); };
   const st = $("suggestions-state");
-  if (st) st.onchange = () => { stateFilter = st.value; loadSuggestions(); };
+  if (st) st.onchange = () => { stateFilter = st.value; void loadSuggestions(); };
   const q = $("suggestions-query");
   if (q) q.oninput = () => { query = q.value; renderSuggestions(); };
 }
@@ -100,7 +101,11 @@ export function renderSuggestions() {
   const groupsEl = $("suggestions-groups");
   const count = $("suggestions-count");
   const groups = visibleGroups(report, query);
-  if (count) count.textContent = report ? `${report.suggestions.length} suggestion${report.suggestions.length === 1 ? "" : "s"}` : "";
+  if (count) {
+    const n = report ? report.suggestions.length : 0;
+    const plural = n === 1 ? "" : "s";
+    count.textContent = report ? `${n} suggestion${plural}` : "";
+  }
   if (!report || groups.length === 0) {
     if (empty) empty.hidden = !report && !!failure;
     if (groupsEl) groupsEl.innerHTML = "";
@@ -135,19 +140,19 @@ function groupHtml(group) {
 
 function rowHtml(s) {
   const key = (action) => `${action}:${s.id}`;
-  const entry = pending.get(key("dismiss")) || pending.get(key("ask")) || pending.get(key("task"));
+  const entry = pending.get(key("dismiss")) || pending.get(key("ask")) || pending.get(key("task")) || pending.get(key("done"));
   const taskLink = s.improvement_task_id
     ? `<a href="${esc(suggestionTaskHref(s.scope, s.improvement_task_id))}">task →</a>`
     : "";
   const runLink = `<a href="${esc(suggestionRunHref(s.scope, s.task_id, s.run_id))}">${esc(s.scope)}/${esc(s.agent)} →</a>`;
-  const cost = formatCost(s.usage && s.usage.cost_usd);
+  const cost = formatCost(s.usage?.cost_usd);
   const tokens = s.wasted_tokens ? `~${esc(formatTokens(s.wasted_tokens))} tokens` : "";
   return `<tr class="sug-row" data-sug-id="${esc(s.id)}">
     <td>${statusChip(s.state)}</td>
     <td>
       <div class="title">${esc(s.summary)}</div>
       ${s.detail ? `<div class="sub">${esc(s.detail)}</div>` : ""}
-      <div class="sub">${runLink} · <code class="id">${esc(shortId(s.id))}</code>${taskLink ? ` · ${taskLink}` : ""}</div>
+      <div class="sub">${[runLink, `<code class="id">${esc(shortId(s.id))}</code>`, taskLink].filter(Boolean).join(" · ")}</div>
       ${actionAreaHtml(s, entry)}
     </td>
     <td class="sub">${[tokens, cost].filter(Boolean).join(" · ") || "—"}</td>
@@ -160,34 +165,50 @@ function rowHtml(s) {
 }
 
 function actionAreaHtml(s, entry) {
-  const error = entry && entry.phase === "error" ? `<div class="sub sug-err">${esc(entry.message)}</div>` : "";
-  if (s.ask && openForm !== `ask:${s.id}`) {
-    return `<div class="sug-ask-answer"><div class="sub">asked: ${esc(s.ask.question)}</div>
-      <div class="sub">${s.ask.answer ? `answered: ${esc(s.ask.answer)}` : "waiting on the resumed run…"}</div></div>${error}`;
-  }
-  if (openForm === `dismiss:${s.id}`) {
-    const busy = entry && entry.phase === "pending";
-    return `<div class="sug-form" data-sug-dismiss-form="${esc(s.id)}">
-      <input type="text" placeholder="Why?" data-sug-reason${busy ? " disabled" : ""}>
-      <button type="button" class="btn primary" data-sug-confirm-dismiss="${esc(s.id)}"${busy ? " disabled" : ""}>${busy ? "Dismissing…" : "Dismiss"}</button>
-      <button type="button" class="btn" data-sug-cancel-form>Cancel</button>
-    </div>${error}`;
-  }
-  if (openForm === `ask:${s.id}`) {
-    const busy = entry && entry.phase === "pending";
-    return `<div class="sug-form" data-sug-ask-form="${esc(s.id)}">
-      <input type="text" placeholder="Ask a follow-up question…" data-sug-question${busy ? " disabled" : ""}>
-      <button type="button" class="btn primary" data-sug-confirm-ask="${esc(s.id)}"${busy ? " disabled" : ""}>${busy ? "Asking…" : "Ask"}</button>
-      <button type="button" class="btn" data-sug-cancel-form>Cancel</button>
-    </div>${error}`;
-  }
+  const error = entry?.phase === "error" ? `<div class="sub sug-err">${esc(entry.message)}</div>` : "";
+  const busy = entry?.phase === "pending";
+  if (openForm === `dismiss:${s.id}`) return dismissFormHtml(s, busy) + error;
+  if (openForm === `ask:${s.id}`) return askFormHtml(s, busy) + error;
+  if (s.ask) return askExchangeHtml(s.ask) + error;
   return error;
+}
+
+function askExchangeHtml(ask) {
+  const answer = ask.answer ? `answered: ${esc(ask.answer)}` : "waiting on the resumed run…";
+  return `<div class="sug-ask-answer"><div class="sub">asked: ${esc(ask.question)}</div>
+      <div class="sub">${answer}</div></div>`;
+}
+
+/// One inline form: a text input, a confirm button and Cancel. `busy`
+/// disables both while the request is out.
+function inlineFormHtml({ formAttr, inputAttr, confirmAttr, id, placeholder, idle, working, busy }) {
+  const disabled = busy ? " disabled" : "";
+  const label = busy ? working : idle;
+  return `<div class="sug-form" ${formAttr}="${esc(id)}">
+      <input type="text" placeholder="${placeholder}" ${inputAttr}${disabled}>
+      <button type="button" class="btn primary" ${confirmAttr}="${esc(id)}"${disabled}>${label}</button>
+      <button type="button" class="btn" data-sug-cancel-form>Cancel</button>
+    </div>`;
+}
+
+function dismissFormHtml(s, busy) {
+  return inlineFormHtml({
+    formAttr: "data-sug-dismiss-form", inputAttr: "data-sug-reason", confirmAttr: "data-sug-confirm-dismiss",
+    id: s.id, placeholder: "Why?", idle: "Dismiss", working: "Dismissing…", busy,
+  });
+}
+
+function askFormHtml(s, busy) {
+  return inlineFormHtml({
+    formAttr: "data-sug-ask-form", inputAttr: "data-sug-question", confirmAttr: "data-sug-confirm-ask",
+    id: s.id, placeholder: "Ask a follow-up question…", idle: "Ask", working: "Asking…", busy,
+  });
 }
 
 function wireActions(root) {
   if (!root) return;
   for (const b of root.querySelectorAll("[data-sug-group-task]")) {
-    b.onclick = () => createImprovementTask(b.dataset.sugGroupTask.split(","));
+    b.onclick = () => void createImprovementTask(b.dataset.sugGroupTask.split(","));
   }
   for (const b of root.querySelectorAll("[data-sug-open-dismiss]")) {
     b.onclick = () => { openForm = `dismiss:${b.dataset.sugOpenDismiss}`; renderSuggestions(); };
@@ -199,20 +220,20 @@ function wireActions(root) {
     b.onclick = () => { openForm = null; renderSuggestions(); };
   }
   for (const b of root.querySelectorAll("[data-sug-done]")) {
-    b.onclick = () => markDone(b.dataset.sugDone);
+    b.onclick = () => void markDone(b.dataset.sugDone);
   }
   for (const b of root.querySelectorAll("[data-sug-confirm-dismiss]")) {
     b.onclick = () => {
       const id = b.dataset.sugConfirmDismiss;
       const input = root.querySelector(`[data-sug-dismiss-form="${id}"] [data-sug-reason]`);
-      confirmDismiss(id, input ? input.value : "");
+      void confirmDismiss(id, input ? input.value : "");
     };
   }
   for (const b of root.querySelectorAll("[data-sug-confirm-ask]")) {
     b.onclick = () => {
       const id = b.dataset.sugConfirmAsk;
       const input = root.querySelector(`[data-sug-ask-form="${id}"] [data-sug-question]`);
-      confirmAsk(id, input ? input.value : "");
+      void confirmAsk(id, input ? input.value : "");
     };
   }
 }

@@ -362,7 +362,7 @@ function rerender(route) {
   else if (state.tab === "quality") loadQuality();
   // Same reason again: `GET /api/suggestions?scope=` narrows to that
   // scope's own subtree (`#275`).
-  else if (state.tab === "suggestions") loadSuggestions();
+  else if (state.tab === "suggestions") void loadSuggestions();
   // Same reason again: `GET /api/scenarios?scope=` narrows the baseline and
   // every scenario's own policy delta to the asked subtree -- the one
   // exception is the driver panel's own `POST /api/scenarios/whatif`, which
@@ -900,7 +900,7 @@ function onEvent(ev) {
   // task-creation redraw themselves from their own response, the same
   // self-contained way Quality's "Create task" does, so they need no
   // event of their own.
-  if (state.tab === "suggestions" && ev.type === "task_entry" && ev.entry && ev.entry.kind === "suggestion") {
+  if (state.tab === "suggestions" && ev.type === "task_entry" && ev.entry?.kind === "suggestion") {
     reloadSuggestions();
   }
 }
