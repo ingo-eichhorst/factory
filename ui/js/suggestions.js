@@ -91,6 +91,12 @@ function statusChip(s) {
   return `<span class="badge s-${esc(s)}">${esc(stateLabel(s))}</span>`;
 }
 
+function countLine(report) {
+  if (!report) return "";
+  const n = report.suggestions.length;
+  return n === 1 ? "1 suggestion" : `${n} suggestions`;
+}
+
 export function renderSuggestions() {
   const failed = $("suggestions-error");
   if (failed) {
@@ -101,11 +107,7 @@ export function renderSuggestions() {
   const groupsEl = $("suggestions-groups");
   const count = $("suggestions-count");
   const groups = visibleGroups(report, query);
-  if (count) {
-    const n = report ? report.suggestions.length : 0;
-    const plural = n === 1 ? "" : "s";
-    count.textContent = report ? `${n} suggestion${plural}` : "";
-  }
+  if (count) count.textContent = countLine(report);
   if (!report || groups.length === 0) {
     if (empty) empty.hidden = !report && !!failure;
     if (groupsEl) groupsEl.innerHTML = "";
