@@ -907,6 +907,15 @@ pub struct DaemonConfig {
     /// Check a harness starts before handing it a task (`#131`).
     #[serde(default)]
     pub harness_health: HarnessHealthConfig,
+    /// `#275`: the name of the standing, Business-Factory-wide improvement
+    /// agent that "create improvement task" addresses -- declared in the
+    /// root scope's own `agents:`, the same way any other agent is, and
+    /// named here so the daemon knows which one that is. `None` (the
+    /// default) means the instance has not set one up yet: `suggestion
+    /// task` then refuses clearly, naming this field, rather than falling
+    /// back to whichever project agent's suggestion is being acted on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub improvement_agent: Option<String>,
 }
 
 /// How the daemon checks that a harness starts before dispatching to it.
@@ -1038,6 +1047,7 @@ impl Default for DaemonConfig {
             foreman: ForemanConfig::default(),
             power_assertion: default_power_assertion(),
             harness_health: HarnessHealthConfig::default(),
+            improvement_agent: None,
         }
     }
 }

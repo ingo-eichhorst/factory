@@ -95,12 +95,14 @@ enum Workspace {
 /// What `resolve_continue` decided about a `--continue` request: resume, with
 /// everything `dispatch` needs to launch into the same conversation, or fall
 /// back to a fresh session with the exact reason to journal (`#178`).
-enum ContinueOutcome {
+/// `pub(crate)`: `suggestions.rs`'s `ask_agent` (`#275`) asks the same
+/// question before deciding whether asking at all is honest.
+pub(crate) enum ContinueOutcome {
     Resume(ResumePlan),
     Fresh { reason: String },
 }
 
-struct ResumePlan {
+pub(crate) struct ResumePlan {
     /// The harness's own session id being picked back up.
     session_id: String,
     /// `Agent::resume_spec`'s args, prepended to the launch.
@@ -223,6 +225,9 @@ pub struct Engine {
     /// off disk on every call, like `.factory/knowledge/` and
     /// `.factory/datasets/`.
     pub(crate) policies: crate::policies::PolicyStore,
+    /// `#275`: filed suggestions, append-only -- see
+    /// `crate::suggestions`/`factory_assurance::suggestion_store`.
+    pub(crate) suggestions: crate::suggestions::SuggestionStore,
     /// The check-ins audit trail -- see `goals::GoalsStore`. Nothing else in
     /// a goals request is stateful: the direction and cycle catalogues are
     /// read fresh off disk on every call, like the policy catalogues.
@@ -437,6 +442,8 @@ impl Engine {
                 .expect("an in-memory bench store should open"),
             policies: crate::policies::PolicyStore::in_memory()
                 .expect("an in-memory policy store should open"),
+            suggestions: crate::suggestions::SuggestionStore::in_memory()
+                .expect("an in-memory suggestion store should open"),
             run_evidence: factory_process::evidence_store::RunEvidenceStore::in_memory()
                 .expect("an in-memory run evidence store should open"),
             goals: crate::goals::GoalsStore::in_memory()
@@ -505,6 +512,12 @@ impl Engine {
     /// The same, for policy attestations.
     pub fn with_policy_store(mut self, policies: crate::policies::PolicyStore) -> Self {
         self.policies = policies;
+        self
+    }
+
+    /// The same, for suggestions (`#275`).
+    pub fn with_suggestion_store(mut self, suggestions: crate::suggestions::SuggestionStore) -> Self {
+        self.suggestions = suggestions;
         self
     }
 
@@ -1107,6 +1120,33 @@ impl Engine {
             // already-open one changes nothing -- `PolicyRemediate`'s rule.
             Request::QualityRemediate { scope, attribute, scenario, agent } => Ok(Payload::QualityRemediate {
                 result: self.quality_remediate(scope, attribute, scenario, agent).await?,
+            }),
+            // `#275`. No event of its own: filing publishes through
+            // `Event::TaskEntry` (`Engine::entry`, inside `file_suggestion`)
+            // like any other journaled report.
+            Request::TaskSuggest { id, suggestion } => Ok(Payload::Suggestion {
+                suggestion: self.file_suggestion(&id, suggestion).await?,
+            }),
+            Request::Suggestions { scope, kind, target, state } => Ok(Payload::Suggestions {
+                report: self.suggestions_report(scope.as_deref(), kind, target, state).await?,
+            }),
+            Request::SuggestionGet { id } => Ok(Payload::Suggestion {
+                suggestion: self.suggestion_get(&id).await?,
+            }),
+            // No event of its own: the created task already fired
+            // `Event::TaskCreated` inside `Engine::create`, the same rule
+            // `PolicyRemediate`/`QualityRemediate` follow.
+            Request::SuggestionTask { ids } => Ok(Payload::SuggestionTask {
+                task: self.suggestion_task(ids).await?,
+            }),
+            Request::SuggestionDismiss { id, reason } => Ok(Payload::Suggestion {
+                suggestion: self.suggestion_dismiss(caller, &id, reason).await?,
+            }),
+            Request::SuggestionDone { id } => Ok(Payload::Suggestion {
+                suggestion: self.suggestion_done(caller, &id).await?,
+            }),
+            Request::SuggestionAsk { id, question } => Ok(Payload::Suggestion {
+                suggestion: Box::pin(self.suggestion_ask(caller, &id, question)).await?,
             }),
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
                 agent: self.start_agent(&scope, &name).await?.redacted(),
@@ -3462,8 +3502,10 @@ impl Engine {
     /// continue still dispatches, exactly as a plain `task run` would,
     /// journaled with the one reason it fell back rather than left to a
     /// person to guess from a session that just looks fresh.
+    /// `pub(crate)`: `suggestions.rs`'s `ask_agent` (`#275`) asks this
+    /// directly, before deciding whether to dispatch at all.
     #[allow(clippy::too_many_arguments)]
-    async fn resolve_continue(
+    pub(crate) async fn resolve_continue(
         &self,
         task: &Task,
         (agent_name, adapter_name): (&str, &str),
@@ -4219,6 +4261,7 @@ impl Engine {
         self.mirror_to_task(&run).await;
         self.settle_retry(&run).await;
         self.settle_run_deployments(&run).await;
+        self.settle_suggestion_ask(&run).await;
         self.sweep_workspaces().await;
         if status != RunStatus::Done {
             if let Ok(Some(task)) = self.store.get(&run.task_id).await {
