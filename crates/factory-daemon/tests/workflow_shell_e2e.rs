@@ -2369,3 +2369,173 @@ fn policy_clock_owner_reads_confirmed_intake_and_keeps_receipts_through_real_res
         2
     );
 }
+
+#[test]
+fn scenarios_owner_reads_live_files_metrics_and_promotes_id_only_work_through_two_restarts() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let config_path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["policies"] = serde_yaml_ng::from_str("frameworks: [house]").unwrap();
+    std::fs::write(config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    let policies = daemon.root.join(".factory/policies");
+    std::fs::create_dir_all(policies.join("drafts")).unwrap();
+    std::fs::write(policies.join("house.yaml"), "framework: house\ntitle: House\nkind: regulation\ncontrols:\n  - {id: base, title: Base, evidence: [{check: attestation}]}\n").unwrap();
+    std::fs::write(policies.join("drafts/next.yaml"), "framework: next\ntitle: Next\nkind: regulation\ncontrols:\n  - {id: new, title: New, evidence: [{check: attestation}]}\n").unwrap();
+    let scenarios = daemon.root.join(".factory/scenarios");
+    std::fs::create_dir_all(&scenarios).unwrap();
+    let scenario_path = scenarios.join("future.yaml");
+    std::fs::write(&scenario_path, "name: future\ntitle: Future\npolicy: {add_frameworks: [next]}\ndrivers: {capacity_factor: '=2'}\nsignposts: [{metric: throughput_week, below: 99}]\n").unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let report_url = format!("{base}/api/scenarios?scope=demo");
+    let read = || expect_ok(&report_url, &get(&report_url))["report"].clone();
+    let throughput = |report: &Value| {
+        report["baseline"]["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|metric| metric["id"] == "throughput_week")
+            .unwrap()["value"]
+            .clone()
+    };
+    assert_eq!(throughput(&read()), json!(0.0));
+    let workflows = format!("{base}/api/workflows");
+    let created = expect_ok(
+        &workflows,
+        &post(
+            &workflows,
+            &json!({"name":"scenarios-owner-proof", "scope":"demo", "nodes":[task_node("scenario-proof", "printf 'scenario owner proof\\n'")], "edges":[]}),
+        ),
+    );
+    let start = format!(
+        "{workflows}/{}/run",
+        created["workflow"]["id"].as_str().unwrap()
+    );
+    let started = expect_ok(&start, &post(&start, &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let done = wait_for("reported scenario proof", Duration::from_secs(30), || {
+        let run = run_status(&base, run_id);
+        matches!(
+            run["status"].as_str(),
+            Some("done" | "failed" | "cancelled")
+        )
+        .then_some(run)
+    });
+    assert_eq!(done["status"], "done", "{done}");
+    let measured = read();
+    assert_eq!(throughput(&measured), json!(1.0));
+    assert_eq!(
+        measured["scenarios"][0]["policy_subtree"]["newly_open"],
+        json!(["next/new"])
+    );
+    assert_eq!(measured["triggered"][0]["scenario"], "future");
+    assert_eq!(
+        measured["scenarios"][0]["drivers"]["overridden"]["capacity_factor"],
+        2.0
+    );
+    let whatif = format!("{base}/api/scenarios/whatif");
+    let answer = expect_ok(
+        &whatif,
+        &post(
+            &whatif,
+            &json!({"scenario":"future", "scope":"demo", "drivers":{"capacity_factor":"=3"}}),
+        ),
+    );
+    assert_eq!(
+        answer["result"]["drivers"]["overridden"]["capacity_factor"],
+        3.0
+    );
+    let (_, invalid) = raw_request(
+        "POST",
+        &whatif,
+        Some(&json!({"scenario":"future", "scope":"demo", "drivers":{"capacity_factor":"banana"}})),
+    )
+    .unwrap();
+    assert!(invalid.contains("capacity_factor"), "{invalid}");
+    let promote = format!("{base}/api/scenarios/promote");
+    let request = json!({"scenario":"future", "scope":"demo", "agent":"shell"});
+    let receipt = expect_ok(&promote, &post(&promote, &request))["result"].clone();
+    assert_eq!(receipt["created"].as_array().unwrap().len(), 1);
+    let task = &receipt["created"][0]["task"];
+    let id = task["id"].as_str().unwrap().to_owned();
+    assert_eq!(task["scope"], "demo");
+    assert_eq!(task["labels"]["policy"], "next/new");
+    assert_eq!(task["labels"]["scenario"], "future");
+    assert_eq!(task["status"], "pending");
+    assert_eq!(
+        task["runs"], 0,
+        "promotion creates manual work, not a fake completed run"
+    );
+    let duplicate = expect_ok(&promote, &post(&promote, &request))["result"].clone();
+    assert!(duplicate["created"].as_array().unwrap().is_empty());
+    assert_eq!(duplicate["skipped"][0]["existing_task"], id);
+    daemon.sigterm();
+    daemon.spawn();
+    let restored = read();
+    assert_eq!(throughput(&restored), json!(1.0));
+    assert_eq!(
+        restored["scenarios"][0]["policy_subtree"],
+        measured["scenarios"][0]["policy_subtree"]
+    );
+    assert_eq!(
+        expect_ok(&promote, &post(&promote, &request))["result"]["skipped"][0]["existing_task"],
+        id
+    );
+    assert_eq!(
+        tasks(&base).into_iter().find(|t| t["id"] == id).unwrap()["runs"],
+        0
+    );
+    std::fs::write(&scenario_path, "name: future\ntitle: Revised future\npolicy: {add_frameworks: [next]}\ndrivers: {capacity_factor: '=4'}\nsignposts: [{metric: throughput_week, below: 99}]\n").unwrap();
+    std::fs::write(policies.join("drafts/next.yaml"), "framework: next\ntitle: Next\nkind: regulation\ncontrols:\n  - {id: new, title: New, evidence: [{check: knowledge}]}\n").unwrap();
+    let knowledge = daemon.root.join(".factory/knowledge");
+    std::fs::create_dir_all(&knowledge).unwrap();
+    std::fs::write(
+        knowledge.join("next.md"),
+        "---\ntags: [control/next/new]\n---\n# New evidence\n",
+    )
+    .unwrap();
+    let revised = read();
+    assert_eq!(
+        revised["scenarios"][0]["scenario"]["title"],
+        "Revised future"
+    );
+    assert_eq!(
+        revised["scenarios"][0]["drivers"]["overridden"]["capacity_factor"],
+        4.0
+    );
+    assert!(revised["scenarios"][0]["policy_subtree"]["newly_open"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(
+        expect_ok(&promote, &post(&promote, &request))["result"]["created"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    daemon.sigterm();
+    daemon.spawn();
+    let final_report = read();
+    assert_eq!(
+        final_report["scenarios"][0]["drivers"],
+        revised["scenarios"][0]["drivers"]
+    );
+    assert_eq!(
+        final_report["scenarios"][0]["policy_subtree"],
+        revised["scenarios"][0]["policy_subtree"]
+    );
+    assert_eq!(
+        final_report["scenarios"][0]["forecast"],
+        revised["scenarios"][0]["forecast"]
+    );
+    assert_eq!(run_status(&base, run_id)["status"], "done");
+    assert_eq!(
+        tasks(&base).into_iter().find(|t| t["id"] == id).unwrap()["labels"],
+        task["labels"]
+    );
+}

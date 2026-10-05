@@ -273,7 +273,7 @@ impl<'a> Service<'a> {
     }
 }
 
-fn inputs(
+pub(crate) fn inputs(
     applied: &[(&policy_intent::Scope, Vec<policy::Applied>)],
 ) -> Vec<check_evaluation::ScopeInput> {
     applied
@@ -302,7 +302,7 @@ fn inputs(
         .collect()
 }
 
-fn classified(
+pub(crate) fn classified(
     statuses: Vec<CheckObservation>,
     applied: &[policy::Applied],
 ) -> Result<Vec<policy::ControlStatus>> {

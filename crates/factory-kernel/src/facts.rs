@@ -3,7 +3,7 @@
 //! and behavior. Provide defines live ports; Below enforces reader direction.
 
 use crate::fact_vocabulary::*;
-use crate::{ArtifactProvenance, CostReport, ProductionFact, ProcessMetricFact, BenchResolutionFact, MetricValuesFact, CheckEvaluationFact, SandboxServiceEvidenceFact};
+use crate::{ArtifactProvenance, CostReport, ProductionFact, ProcessMetricFact, BenchResolutionFact, MetricValuesFact, CheckEvaluationFact, CheckComparisonFact, SandboxServiceEvidenceFact};
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,10 @@ impl Fact for MetricValuesFact {
 }
 
 impl Fact for CheckEvaluationFact {
+    type Producer = L5;
+}
+
+impl Fact for CheckComparisonFact {
     type Producer = L5;
 }
 
@@ -703,11 +707,15 @@ pub struct FactCatalogueEntry {
 /// and their nested vocabulary now live in L0.
 pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
     FactCatalogueEntry {
-        fact: "CheckEvaluationFact", producer: "L5", readers: &["L6 Policy"],
+        fact: "CheckEvaluationFact", producer: "L5", readers: &["L6 Policy", "L6 Scenarios"],
         lives_in_kernel: true, note: "live kindless check judgments and findings from the sole L5 evaluator",
     },
     FactCatalogueEntry {
-        fact: "MetricValuesFact", producer: "L5", readers: &["L6 Goals"],
+        fact: "CheckComparisonFact", producer: "L5", readers: &["L6 Scenarios promotion"],
+        lives_in_kernel: true, note: "kindless dual judgments against one primary-set live evidence gather",
+    },
+    FactCatalogueEntry {
+        fact: "MetricValuesFact", producer: "L5", readers: &["L6 Goals", "L6 Scenarios"],
         lives_in_kernel: true, note: "current registry values computed by the live L5 metric service",
     },
     FactCatalogueEntry {
@@ -715,7 +723,7 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         lives_in_kernel: true, note: "live metric-backed scenario observations, with no automatic consequences",
     },
     FactCatalogueEntry {
-        fact: "ProductionFact", producer: "L4", readers: &["L6 metrics and Scenarios", "People production"],
+        fact: "ProductionFact", producer: "L4", readers: &["L5 metrics", "L6 Scenarios", "People production"],
         lives_in_kernel: true, note: "live production buckets with the producer's rework and scope rules",
     },
     FactCatalogueEntry {
@@ -759,7 +767,7 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
     FactCatalogueEntry {
         fact: "KnowledgeTags",
         producer: "L5",
-        readers: &["L6 policy"],
+        readers: &["L6 policy intent (Policy, Metrics, Goals, Signposts and Scenarios)"],
         lives_in_kernel: true,
         note: "live vault index port, phase 3",
     },

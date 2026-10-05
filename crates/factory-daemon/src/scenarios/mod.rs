@@ -1,754 +1,172 @@
-//! Where scenario requests are served (`#100`, the L6 Scenarios tab). Like
-//! `policies/mod.rs` and `goals/mod.rs`: the authored files under
-//! `<root>/.factory/scenarios/` are the source of truth for *what* a
-//! scenario says (`factory_core::scenario`, pure and tested on its own),
-//! re-read on every request; this module assembles the evidence, metrics
-//! and task history that already live elsewhere in the daemon and folds
-//! them against it.
-//!
-//! ## Reuse, not reimplementation
-//!
-//! The exact policy delta reuses `policies::Engine::dataset_level_facts`/
-//! `evidence_for_scope` -- the same two functions `policy_report` itself
-//! calls, extracted from it for exactly this (see their own doc comments in
-//! `policies/mod.rs`). A scenario's overlay chain can ask a check kind the
-//! real chain never did (an `add_frameworks` draft, say); calling those two
-//! functions again for the scenario's own, larger `Applied` set is what
-//! picks up the extra fact lazily, without this module inventing a second
-//! evidence-gathering path that could quietly drift from the real one.
-//! `Engine::metrics` supplies every driver, signpost and goal-KR value, the
-//! same registry `#99`'s Goals tab reads.
-//!
-//! ## Throughput history: non-overlapping weeks, not the rolling series
-//!
-//! [`weekly_throughput_history`] sums `production.rs`'s own daily grid into
-//! [`THROUGHPUT_HISTORY_WEEKS`] non-overlapping 7-day buckets, ending today.
-//! Deliberately *not* a bootstrap sample of `throughput_week`'s own
-//! registry series: that series is a rolling 7-day sum taken once per day,
-//! so any two points within six days of each other share up to six of
-//! their seven days -- resampling that with replacement (Magennis's own
-//! method, `scenario::forecast_completion`) draws heavily autocorrelated
-//! "weeks" and understates real week-to-week variance, producing bands that
-//! read falsely tight. Independent, non-overlapping weeks are what the
-//! method assumes.
-//!
-//! ## Never writes config
-//!
-//! [`Engine::scenarios_report`] and [`Engine::scenario_whatif`] are fully
-//! read-only. [`Engine::scenario_promote`] writes ordinary tasks, through
-//! the L6 → L5 → L4 command chain and the same L4-owned creation service as
-//! `Request::TaskCreate` -- never a scope's own `.factory/config.yaml`, never a
-//! scenario file, never a real policy catalogue. A scenario is data a
-//! person authored and Factory only ever reads; turning one into real work
-//! is always this one explicit, owner/agent-driven action (design §8).
-//!
-//! ## Signposts outside the tab
-//!
-//! `#100` asks that a triggered signpost be visible outside the Scenarios
-//! tab -- on the dashboard, in the inbox -- as an observation, never an
-//! automatic consequence. The Inbox (`ui/js/dashboard.js`'s `inboxItems`)
-//! is built entirely client-side, from the task list alone; there is no
-//! daemon-side inbox aggregate to add to. This module instead surfaces
-//! [`ScenariosReport::triggered`], every currently-`Triggered` signpost
-//! across every scenario, flattened out of `scenarios[].signposts` so a
-//! dashboard/inbox reader does not have to walk every card itself. The L6
-//! Scenarios UI slice (`ui/js/{scenarios,scenarios-model}.js`, not part of
-//! this slice) is expected to read this field and render it on the
-//! dashboard; see the README's "Scenarios" section.
-
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-
+//! Outside request wiring for the live L6 Scenarios owner. Only fresh raw
+//! declarations, physical providers, legacy metric error preflights and
+//! final task payload hydration remain beside the ladder.
+use crate::{engine::Engine, facts::Port};
 use chrono::{DateTime, Utc};
-use factory_core::config::{Factory, Scope};
-use factory_core::error::{FactoryError, Result};
-use factory_core::goals::{self, KrRef};
-use factory_core::metrics::{MetricId, MetricValue};
-use factory_core::policy::{self, Attestation};
-use factory_core::protocol::{
-    PromotedControl, ScenarioBacklog, ScenarioBaseline, ScenarioDrivers, ScenarioGoalProbability,
-    ScenarioPromoteResult, ScenarioResult, ScenarioScopeDelta, ScenarioWhatIfResult, ScenariosReport,
-    SkippedControl, TriggeredSignpost,
-};
-use factory_core::scenario::{self, DriverId, Scenario};
 #[cfg(test)]
-use factory_core::task::NewTask;
-use factory_kernel::{L6, TaskInventoryFact};
-use crate::facts::{Facts, TaskInventoryQuery};
-
-use crate::engine::Engine;
-use factory_core::config::subtree_scopes;
-
-/// How many weeks of production history [`weekly_throughput_history`]
-/// draws from -- `scenario::Horizon::default()`'s own 26 weeks, so a
-/// scenario with no explicit `horizon:` bootstrap-samples from a history
-/// exactly as long as what it projects forward.
-const THROUGHPUT_HISTORY_WEEKS: usize = 26;
-
-/// How many Monte Carlo samples every forecast/goal-probability call in
-/// this module draws. `factory_core::scenario`'s own tests run in the
-/// hundreds; 1000 is still cheap (a splitmix64 draw and a few float
-/// comparisons per sample) and gives smoother percentiles for a report a
-/// person actually reads.
-const SAMPLES: u32 = 1000;
-
-/// The one-at-a-time swing [`scenario::tornado`] varies each driver by --
-/// the same ±20% `factory_core::scenario`'s own tests use.
-const TORNADO_SWING: f64 = 0.2;
-
-/// v1's only computed outcome (`scenario::evaluate_outcomes`'s own
-/// `effective_throughput`) -- what "the scenario's key outcome" (`#100`)
-/// names until a second outcome exists to choose between.
-const KEY_OUTCOME: &str = "effective_throughput";
-
-/// The triggered ones among one scenario's evaluated signposts, flattened
-/// for `ScenariosReport::triggered` and the Operations attention queue.
-fn triggered_of(s: &Scenario, statuses: &[scenario::SignpostStatus]) -> Vec<TriggeredSignpost> {
-    statuses
-        .iter()
-        .filter(|status| status.state == scenario::SignpostState::Triggered)
-        .map(|status| TriggeredSignpost {
-            scenario: s.name.clone(),
-            metric: status.metric.clone(),
-            reason: status.reason.clone(),
-        })
-        .collect()
-}
-
-/// Sum `daily` (`production.rs`'s own 53-week grid, oldest first) into
-/// `weeks` non-overlapping 7-day buckets ending on the grid's own last day,
-/// oldest bucket first -- see the module doc comment for why this, not the
-/// `throughput_week` registry series. `daily` is always a fixed 371-entry
-/// grid (`production.rs`), so this only ever returns fewer than `weeks`
-/// buckets when `weeks` itself asks for more than 53.
-fn weekly_throughput_history(daily: &[factory_core::protocol::ProductionBucket], weeks: usize) -> Vec<f64> {
-    let mut out = Vec::with_capacity(weeks);
-    let mut end = daily.len();
-    for _ in 0..weeks {
-        if end == 0 {
-            break;
-        }
-        let start = end.saturating_sub(7);
-        let sum: u32 = daily[start..end].iter().map(|b| b.finished).sum();
-        out.push(f64::from(sum));
-        end = start;
-    }
-    out.reverse();
-    out
-}
-
-/// Every driver's baseline value: a registry-backed driver's current metric
-/// value, when `values` carries one; `capacity_factor`'s neutral `1.0` (no
-/// adjustment -- the same default `scenario::evaluate_outcomes` itself
-/// falls back to when a driver is absent from a map at all). That one is
-/// this module's own choice, not registry-derived -- see
-/// `ScenarioBaseline::drivers`'s own doc comment. A registry-backed driver
-/// with no current value (metric unavailable, or no data yet) is simply
-/// absent from the result, the same "nothing to be relative to" rule
-/// `scenario::apply_overrides` already holds for a driver `baseline` does
-/// not carry.
-fn driver_baseline(values: &BTreeMap<MetricId, MetricValue>) -> BTreeMap<DriverId, f64> {
-    let mut out = BTreeMap::new();
-    for def in scenario::driver_defs() {
-        if let Some(name) = def.metric {
-            if let Ok(id) = MetricId::new(name) {
-                if let Some(value) = values.get(&id)
-                    .filter(|v| !matches!(def.id, "unit_cost" | "tokens_per_run") || v.reason.is_none())
-                    .and_then(|v| v.value).filter(|v| v.is_finite() && *v >= 0.0) {
-                    out.insert(def.id.to_string(), value);
-                }
-            }
-        }
-    }
-    out.insert("capacity_factor".to_string(), 1.0);
-    out
-}
-
-fn measured_overrides(baseline: &BTreeMap<DriverId, f64>, overrides: &BTreeMap<DriverId, scenario::Override>) -> BTreeMap<DriverId, f64> {
-    let mut values = scenario::apply_overrides(baseline, overrides);
-    for driver in ["unit_cost", "tokens_per_run"] {
-        if !baseline.contains_key(driver) { values.remove(driver); }
-    }
-    values
-}
-
-fn driver_result(baseline: &BTreeMap<DriverId, f64>, overridden: BTreeMap<DriverId, f64>, metrics: &BTreeMap<MetricId, MetricValue>) -> ScenarioDrivers {
-    let outcomes_before = scenario::evaluate_outcomes(baseline);
-    let outcomes_after = scenario::evaluate_outcomes(&overridden);
-    let reasons = |values: &BTreeMap<DriverId, f64>| {
-        let mut reasons = scenario::outcome_reasons(values);
-        for (outcome, driver) in [("weekly_cost", "unit_cost"), ("weekly_tokens", "tokens_per_run")] {
-            if let Some(reason) = MetricId::new(driver).ok().and_then(|id| metrics.get(&id)).and_then(|v| v.reason.as_ref()) {
-                if reasons.contains_key(outcome) { reasons.insert(outcome.into(), reason.clone()); }
-            }
-        }
-        reasons
-    };
-    let outcome_reasons_before = reasons(baseline);
-    let outcome_reasons_after = reasons(&overridden);
-    let tornados = outcomes_after.keys().map(|id| (id.clone(), scenario::tornado(&overridden, id, TORNADO_SWING))).collect();
-    let tornado = scenario::tornado(&overridden, KEY_OUTCOME, TORNADO_SWING);
-    ScenarioDrivers { overridden, outcomes_before, outcomes_after, outcome_reasons_before, outcome_reasons_after, tornado, tornados }
-}
-
-/// The multiplier driver overrides put on top of `weekly_throughput_history`
-/// before it feeds a forecast: the ratio of `effective_throughput` after
-/// `overridden` to before `baseline`, or `1.0` (no change) when the
-/// baseline's own effective throughput is zero -- there is nothing to scale
-/// proportionally from. Applied to every point in the history rather than
-/// only to a single "current" throughput number, so the forecast's bands
-/// keep the real history's own week-to-week shape and variance, just scaled
-/// -- "effective throughput scaled per `evaluate_outcomes`" (`#100`).
-fn throughput_scale_factor(baseline: &BTreeMap<DriverId, f64>, overridden: &BTreeMap<DriverId, f64>) -> f64 {
-    let before = scenario::evaluate_outcomes(baseline).get(KEY_OUTCOME).copied().unwrap_or(0.0);
-    let after = scenario::evaluate_outcomes(overridden).get(KEY_OUTCOME).copied().unwrap_or(0.0);
-    if before > 0.0 {
-        after / before
-    } else {
-        1.0
-    }
-}
-
-fn scale_history(history: &[f64], factor: f64) -> Vec<f64> {
-    history.iter().map(|w| (w * factor).max(0.0)).collect()
-}
-
-/// One key result's place in the loaded goals catalogue -- its cycle (for
-/// the cycle's own end date, a `GoalChange`'s deadline fallback) and its
-/// objective (for `KeyResult::bound_metric`, which needs the objective's own
-/// id). `None` when no loaded cycle defines it.
-fn find_kr<'a>(catalogue: &'a goals::GoalsCatalogue, kr: &KrRef) -> Option<(&'a goals::Cycle, &'a goals::Objective, &'a goals::KeyResult)> {
-    for cycle in &catalogue.cycles {
-        for objective in &cycle.objectives {
-            if objective.id == kr.objective {
-                if let Some(kd) = objective.key_results.iter().find(|k| k.id == kr.kr) {
-                    return Some((cycle, objective, kd));
-                }
-            }
-        }
-    }
-    None
-}
-
-/// A key result's current value: the latest check-in for a manual one (by
-/// `at`, `goals::evaluate`'s own tie-break), or `values`' own entry for a
-/// computed one's `bound_metric`. `None` when neither has anything yet --
-/// "unscored", never a manufactured `0.0` (the same rule `goals::evaluate`
-/// itself holds).
-fn kr_current_value(
-    kd: &goals::KeyResult,
-    objective_id: &str,
-    kr_ref: &KrRef,
-    values: &BTreeMap<MetricId, MetricValue>,
-    checkins: &[goals::CheckIn],
-) -> Option<f64> {
-    if kd.manual {
-        checkins.iter().filter(|c| &c.kr == kr_ref).max_by_key(|c| c.at).map(|c| c.value)
-    } else {
-        kd.bound_metric(objective_id).and_then(|m| values.get(&m)).and_then(|v| v.value)
-    }
-}
-
-/// Re-score one `GoalChange` -- see [`Engine::scenarios_report`]'s own doc
-/// comment for `target`/`by` defaulting and the manual-KR shape deviation.
-#[allow(clippy::too_many_arguments)]
-fn build_goal_probability(
-    change: &scenario::GoalChange,
-    catalogue: &goals::GoalsCatalogue,
-    values: &BTreeMap<MetricId, MetricValue>,
-    checkins: &[goals::CheckIn],
-    now: DateTime<Utc>,
-    weekly_history: &[f64],
-    seed: u64,
-) -> ScenarioGoalProbability {
-    let Some((cycle, objective, kd)) = find_kr(catalogue, &change.kr) else {
-        return ScenarioGoalProbability {
-            kr: change.kr.clone(),
-            target: change.target,
-            by: change.by,
-            probability: scenario::GoalProbability {
-                probability: None,
-                reason: Some(format!("{} names no key result in any loaded cycle", change.kr)),
-            },
-        };
-    };
-
-    let effective_target = change.target.unwrap_or(kd.target);
-    let effective_by = change.by.unwrap_or_else(|| cycle.ends_on());
-
-    let Some(current_value) = kr_current_value(kd, &objective.id, &change.kr, values, checkins) else {
-        return ScenarioGoalProbability {
-            kr: change.kr.clone(),
-            target: Some(effective_target),
-            by: Some(effective_by),
-            probability: scenario::GoalProbability {
-                probability: None,
-                reason: Some("no current value to project from yet -- no metric value or check-in".to_string()),
-            },
-        };
-    };
-
-    // A manual key result has no metric id to look a `KrShape` up from --
-    // conservatively `Ratio` (never a fabricated probability), the same
-    // deviation `KrShape::for_metric`'s own doc comment documents for a
-    // metric `metrics::resolve` refuses outright.
-    let shape = match kd.bound_metric(&objective.id) {
-        Some(m) if !kd.manual => scenario::KrShape::for_metric(&m, current_value, effective_target),
-        _ => scenario::KrShape::Ratio,
-    };
-
-    let probability = scenario::goal_probability(shape, current_value, effective_target, effective_by, now, weekly_history, SAMPLES, seed);
-    ScenarioGoalProbability {
-        kr: change.kr.clone(),
-        target: Some(effective_target),
-        by: Some(effective_by),
-        probability,
-    }
-}
-
-/// Every control status `catalogues` folds into, over every scope in
-/// `target_scopes`, evaluated against the real chain (`Engine::policy_chain`)
-/// alone -- the baseline side. Shares its evidence-gathering with the
-/// scenario side and with `policy_report` through
-/// `policies::Engine::dataset_level_facts`/`evidence_for_scope`.
-async fn evaluate_baseline_over_scopes(
-    engine: &Engine,
-    snapshot: &Factory,
-    target_scopes: &[Scope],
-    catalogues: &[policy::Catalogue],
-    tags: &BTreeSet<String>,
-    all_attestations: &[Attestation],
-    now: DateTime<Utc>,
-) -> Result<(BTreeMap<String, Vec<policy::ControlStatus>>, Vec<policy::Finding>)> {
-    let mut findings = Vec::new();
-    let mut per_scope_applied: Vec<(&Scope, Vec<policy::Applied>)> = Vec::new();
-    for t in target_scopes {
-        let chain = engine.policy_chain(&t.name);
-        let (applied, chain_findings) = policy::applicable(catalogues, &chain);
-        findings.extend(chain_findings);
-        per_scope_applied.push((t, applied));
-    }
-
-    let (gates, daemon_fact, credential_rows, backup_fact, budget_config) = engine.dataset_level_facts(&per_scope_applied).await?;
-    let mut statuses_by_scope = BTreeMap::new();
-    for (t, applied) in &per_scope_applied {
-        let evidence = engine
-            .evidence_for_scope(
-                snapshot,
-                t,
-                applied,
-                tags,
-                all_attestations,
-                &gates,
-                daemon_fact,
-                &credential_rows,
-                backup_fact.clone(),
-                budget_config.as_ref(),
-                now,
-            )
-            .await?;
-        findings.extend(policy::evidence_findings(&evidence, &t.name));
-        let statuses = policy::evaluate(applied, &evidence, now);
-        statuses_by_scope.insert(t.name.clone(), statuses);
-    }
-    Ok((statuses_by_scope, findings))
-}
-
-/// The scenario side of the same evaluation -- `scenario_obj`'s own overlay
-/// (`scenario::overlay_chain`), built fresh from each scope's own real
-/// chain, evaluated against `catalogues_with_drafts` (the real catalogues
-/// plus whatever `.factory/policies/drafts/` resolved, `scenario::merge_catalogues`).
-/// Returns the overlay's own `scenario::Finding`s (e.g.
-/// `DropNotApplicableHasNoEffect`) alongside the `policy::Finding`s
-/// `evaluate_baseline_over_scopes` also produces, since the two are
-/// different types naming different things.
-#[allow(clippy::too_many_arguments)]
-async fn evaluate_scenario_over_scopes(
-    engine: &Engine,
-    snapshot: &Factory,
-    target_scopes: &[Scope],
-    scenario_obj: &Scenario,
-    catalogues_with_drafts: &[policy::Catalogue],
-    tags: &BTreeSet<String>,
-    all_attestations: &[Attestation],
-    now: DateTime<Utc>,
-) -> Result<(BTreeMap<String, Vec<policy::ControlStatus>>, Vec<policy::Finding>, Vec<scenario::Finding>)> {
-    let mut policy_findings = Vec::new();
-    let mut scenario_findings = Vec::new();
-    let mut per_scope_applied: Vec<(&Scope, Vec<policy::Applied>)> = Vec::new();
-    for t in target_scopes {
-        let base_chain = engine.policy_chain(&t.name);
-        let (overlaid_chain, overlay_findings) = scenario::overlay_chain(&base_chain, scenario_obj);
-        scenario_findings.extend(overlay_findings);
-        let (applied, chain_findings) = policy::applicable(catalogues_with_drafts, &overlaid_chain);
-        policy_findings.extend(chain_findings);
-        per_scope_applied.push((t, applied));
-    }
-
-    let (gates, daemon_fact, credential_rows, backup_fact, budget_config) = engine.dataset_level_facts(&per_scope_applied).await?;
-    let mut statuses_by_scope = BTreeMap::new();
-    for (t, applied) in &per_scope_applied {
-        let evidence = engine
-            .evidence_for_scope(
-                snapshot,
-                t,
-                applied,
-                tags,
-                all_attestations,
-                &gates,
-                daemon_fact,
-                &credential_rows,
-                backup_fact.clone(),
-                budget_config.as_ref(),
-                now,
-            )
-            .await?;
-        policy_findings.extend(policy::evidence_findings(&evidence, &t.name));
-        let statuses = policy::evaluate(applied, &evidence, now);
-        statuses_by_scope.insert(t.name.clone(), statuses);
-    }
-    Ok((statuses_by_scope, policy_findings, scenario_findings))
-}
-
-/// Turn matching per-scope status maps into a scenario's own delta: one
-/// `ScenarioScopeDelta` per scope where either side has anything applicable
-/// at all (omitted otherwise, the same "nothing to show" rule
-/// `PolicyReport::rows` follows), and the subtree-wide delta built the same
-/// way `PolicyReport::rollup` aggregates -- `policy::worst_across_scopes` on
-/// each side, then `scenario::policy_delta` over the two rollups. Pure: no
-/// I/O, callers already hold both status maps.
-fn deltas_from_statuses(
-    target_scopes: &[Scope],
-    baseline: &BTreeMap<String, Vec<policy::ControlStatus>>,
-    scenario_statuses: &BTreeMap<String, Vec<policy::ControlStatus>>,
-) -> (Vec<ScenarioScopeDelta>, scenario::PolicyDelta) {
-    let mut per_scope = Vec::new();
-    let mut baseline_all = Vec::new();
-    let mut scenario_all = Vec::new();
-    for t in target_scopes {
-        let empty = Vec::new();
-        let base = baseline.get(&t.name).unwrap_or(&empty);
-        let scen = scenario_statuses.get(&t.name).unwrap_or(&empty);
-        if !base.is_empty() || !scen.is_empty() {
-            per_scope.push(ScenarioScopeDelta {
-                scope: t.name.clone(),
-                delta: scenario::policy_delta(base, scen),
-            });
-        }
-        baseline_all.push(base.clone());
-        scenario_all.push(scen.clone());
-    }
-    let subtree = scenario::policy_delta(&policy::worst_across_scopes(&baseline_all), &policy::worst_across_scopes(&scenario_all));
-    (per_scope, subtree)
-}
-
-/// Non-terminal tasks labelled `goal=<objective>/<kr>` for any of
-/// `goals`'s own entries, summed -- unscoped, the same convention
-/// `crate::metrics`'s own `goal_tasks_done` reads tasks under: a key
-/// result's own scope (if any) is not the scope its serving tasks run in.
-fn open_goal_task_count(tasks: &[TaskInventoryFact], goal_changes: &[scenario::GoalChange]) -> usize {
-    let labels: BTreeSet<String> = goal_changes.iter().map(|c| c.kr.to_string()).collect();
-    tasks
-        .iter()
-        .filter(|t| t.open && t.labels.get("goal").is_some_and(|l| labels.contains(l)))
-        .count()
-}
-
-/// Open tasks in the target scopes: the backlog a forecast burns down. A
-/// task blocked by a failure is open work (`#122`); a closed one is not.
-fn open_backlog(tasks: &[TaskInventoryFact], target_names: &BTreeSet<&str>) -> f64 {
-    tasks
-        .iter()
-        .filter(|t| t.open && target_names.contains(t.scope.as_str()))
-        .count() as f64
-}
+use factory_core::protocol::ScenarioResult;
+use factory_core::{
+    config::Factory,
+    error::Result,
+    metrics::MetricId,
+    protocol::{
+        PromotedControl, ScenarioPromoteResult, ScenarioWhatIfResult, ScenariosReport,
+        SkippedControl,
+    },
+    scenario::DriverId,
+};
+#[cfg(test)]
+use factory_core::{config::Scope, metrics::MetricValue, scenario, task::NewTask};
+#[cfg(test)]
+use factory_direction::scenarios_service::{
+    driver_baseline, driver_result, measured_overrides, open_backlog, open_goal_task_count,
+};
+#[cfg(test)]
+use factory_kernel::TaskInventoryFact;
+#[cfg(test)]
+use std::collections::BTreeSet;
+use std::{collections::BTreeMap, sync::Arc};
 
 impl Engine {
-    /// The L4-owned subtree production grid, read at this report's clock.
-    /// Scope containment, rework classification and aligned bucket merging
-    /// stay in the producing service, shared with registry metrics.
-    async fn subtree_daily(&self, asked: Option<&str>, now: DateTime<Utc>) -> Result<Vec<factory_core::protocol::ProductionBucket>> {
-        let fact = crate::facts::Facts::<factory_kernel::L6>::new(self)
-            .get::<factory_kernel::ProductionFact>(&crate::facts::ProductionQuery {
-                scope: asked.map(str::to_string), now, minutes: None,
-                bin: factory_kernel::ProductionBin::Day,
-                subtree: true,
-            }).await?;
-        Ok(fact.daily)
+    fn scenarios_service<'a>(
+        &'a self,
+        snapshot: &Factory,
+    ) -> factory_direction::scenarios_service::Service<'a> {
+        factory_direction::scenarios_service::Service::new(
+            self.policy_intent_service(snapshot),
+            &self.goals,
+        )
     }
 
-    /// The L6 Scenarios tab: `Request::Scenarios`.
-    ///
-    /// ## Deviations, documented like `factory_core::scenario`'s own
-    ///
-    /// 1. **Baseline forecast** (`ScenarioBaseline::forecast`) is
-    ///    `forecast_completion` over the asked subtree's own weekly
-    ///    throughput history, backlog = every non-terminal task in the
-    ///    subtree right now, `Horizon::default()`'s 26 weeks -- chosen over
-    ///    a bare metric trend (`forecast_metric`) so it is the *same*
-    ///    `Forecast` shape every `ScenarioResult::forecast` carries, and a
-    ///    fan chart can draw the baseline band and a scenario's band on one
-    ///    axis rather than two different ones.
-    /// 2. **A scenario's own backlog** is `newly_open` controls from its
-    ///    subtree-wide policy delta (one remediation item each) plus every
-    ///    non-terminal task labelled for one of its own `goals:` key
-    ///    results -- `newly_stale` is deliberately excluded: stale evidence
-    ///    needs refreshing, which is real work, but a different kind from a
-    ///    from-scratch remediation, and folding it into the same count
-    ///    would make "backlog" mean two different sizes of thing at once.
-    ///    `newly_stale` is still visible in the delta itself.
-    /// 3. **Tornado is always against `effective_throughput`** -- v1's only
-    ///    computed outcome (`scenario::evaluate_outcomes`); "the scenario's
-    ///    key outcome" has nothing else to name yet.
-    /// 4. **A `goals:` entry's effective `target`/`by`** default to the key
-    ///    result's own authored `target` and its cycle's own `ends_on()`
-    ///    when the change leaves either unset -- surfaced on
-    ///    `ScenarioGoalProbability` so a card never has to re-resolve what
-    ///    "unwritten" defaulted to.
-    /// 5. **A manual key result is always `KrShape::Ratio`** -- it has no
-    ///    metric id for `KrShape::for_metric` to read a direction from, and
-    ///    `Ratio` is the conservative default that never fabricates a
-    ///    probability (see `KrShape`'s own doc comment).
-    pub(crate) async fn scenarios_report(self: &Arc<Self>, scope: Option<&str>) -> Result<ScenariosReport> {
-        let now = Utc::now();
-        let snapshot = self.factory_snapshot();
-
-        let scenarios_dir = scenario::scenarios_dir(&snapshot.root);
-        let (scenarios, mut scenario_findings) = {
-            let dir = scenarios_dir.clone();
-            tokio::task::spawn_blocking(move || scenario::load(&dir))
+    /// Raw authored query preparation beside the request. L6 never receives
+    /// computed metric values; its own plan reads the actual L5 fact port.
+    async fn scenario_metric_query(
+        &self,
+        snapshot: &Factory,
+        ids: &[MetricId],
+        now: DateTime<Utc>,
+        scope: Option<&str>,
+    ) -> Result<(factory_assurance::metric_values::Read, bool)> {
+        let plan = factory_assurance::metrics_service::Plan::prepare(
+            ids,
+            snapshot.root.clone(),
+            &snapshot.scope_tree(),
+            &crate::quality::quality_configuration(snapshot),
+            scope,
+        )
+        .await?;
+        let policy = if plan.needs_policy() {
+            self.metric_policy_inputs(snapshot, plan.scope())
                 .await
-                .map_err(|e| FactoryError::Other(anyhow::anyhow!("scenario directory walk: {e}")))?
+                .map(Some)
+        } else {
+            Ok(None)
         };
-        scenario_findings.extend(scenario::stale_findings(&scenarios, now));
-
-        let (real_catalogues, mut policy_findings, tags) = self.load_catalogues_and_tags().await?;
-        let (draft_catalogues, draft_findings) = {
-            let dir = scenario::drafts_dir(&snapshot.root);
-            tokio::task::spawn_blocking(move || scenario::load_drafts(&dir))
-                .await
-                .map_err(|e| FactoryError::Other(anyhow::anyhow!("draft policy directory walk: {e}")))?
-        };
-        policy_findings.extend(draft_findings);
-        let (catalogues_with_drafts, merge_findings) = scenario::merge_catalogues(&real_catalogues, draft_catalogues);
-        scenario_findings.extend(merge_findings);
-
-        let goals_catalogue = {
-            let dir = goals::goals_dir(&snapshot.root);
-            tokio::task::spawn_blocking(move || goals::load(&dir))
-                .await
-                .map_err(|e| FactoryError::Other(anyhow::anyhow!("goals directory walk: {e}")))?
-        };
-        let checkins = self.goals.all().await?;
-
-        let (asked, target_scopes) = subtree_scopes(&snapshot, scope)?;
-        let all_attestations = self.policies.all().await?;
-        let tasks = Facts::<L6>::new(self).get::<TaskInventoryFact>(
-            &TaskInventoryQuery::Members(target_scopes.iter().map(|s| s.name.clone()).collect())
-        ).await?;
-
-        // Every metric any loaded scenario's drivers, signposts or goal
-        // changes reference, computed once and shared by every scenario --
-        // the same "compute once, project many ways" shape
-        // `dataset_level_facts` already follows for policy facts.
-        let mut metric_ids: Vec<MetricId> = Vec::new();
-        for def in scenario::driver_defs() {
-            if let Some(name) = def.metric {
-                if let Ok(id) = MetricId::new(name) {
-                    metric_ids.push(id);
-                }
-            }
-        }
-        for s in &scenarios {
-            for sp in &s.signposts {
-                // `crate::metrics::push_if_known` -- the same filter
-                // `goals_metric_ids` applies to a goals catalogue's own
-                // metric references, reused here so a scenario author's
-                // typo in a `signposts:`/`goals:` metric name is a finding
-                // (`scenario::load`'s own `UnknownMetric`), never a
-                // `BadRequest` that refuses the whole report -- unlike
-                // `Engine::metrics` itself, which refuses a call naming even
-                // one truly unknown id.
-                crate::metrics::push_if_known(&mut metric_ids, &sp.metric);
-            }
-            for change in &s.goals {
-                if let Some((_, objective, kd)) = find_kr(&goals_catalogue, &change.kr) {
-                    if !kd.manual {
-                        if let Some(m) = kd.bound_metric(&objective.id) {
-                            crate::metrics::push_if_known(&mut metric_ids, &m);
-                        }
-                    }
-                }
-            }
-        }
-        let computed = self.metrics_for(&metric_ids, now, asked.as_ref().map(|s| s.name.as_str()), None).await?;
-        let values: BTreeMap<MetricId, MetricValue> = computed.values.iter().map(|v| (v.id.clone(), v.clone())).collect();
-
-        let baseline_drivers = driver_baseline(&values);
-
-        // The plain baseline -- no scenario, no overlay -- once, shared by
-        // `ScenarioBaseline::policy` and by every scenario's own delta.
-        let (baseline_statuses, baseline_policy_findings) =
-            evaluate_baseline_over_scopes(self, &snapshot, &target_scopes, &real_catalogues, &tags, &all_attestations, now).await?;
-        policy_findings.extend(baseline_policy_findings);
-        let baseline_rollup = policy::rollup(&policy::worst_across_scopes(&baseline_statuses.values().cloned().collect::<Vec<_>>()));
-
-        let target_names: BTreeSet<&str> = target_scopes.iter().map(|s| s.name.as_str()).collect();
-        let baseline_backlog = open_backlog(&tasks, &target_names);
-        let daily = self.subtree_daily(asked.as_ref().map(|s| s.name.as_str()), now).await?;
-        let history = weekly_throughput_history(&daily, THROUGHPUT_HISTORY_WEEKS);
-        let baseline_forecast = scenario::forecast_completion(
-            &history,
-            baseline_backlog,
-            scenario::Horizon::default().weeks(),
-            SAMPLES,
-            scenario::seed_from(&["baseline", asked.as_ref().map(|s| s.name.as_str()).unwrap_or("instance")]),
-        );
-
-        let mut results = Vec::with_capacity(scenarios.len());
-        let mut triggered = Vec::new();
-        for s in &scenarios {
-            let (scenario_statuses, s_policy_findings, s_scenario_findings) =
-                evaluate_scenario_over_scopes(self, &snapshot, &target_scopes, s, &catalogues_with_drafts, &tags, &all_attestations, now).await?;
-            policy_findings.extend(s_policy_findings);
-            scenario_findings.extend(s_scenario_findings);
-
-            let (per_scope_deltas, subtree_delta) = deltas_from_statuses(&target_scopes, &baseline_statuses, &scenario_statuses);
-
-            let overrides = s.driver_overrides();
-            let overridden_drivers = measured_overrides(&baseline_drivers, &overrides);
-
-            let newly_open_controls = subtree_delta.newly_open.len();
-            let open_goal_tasks = open_goal_task_count(&tasks, &s.goals);
-            let backlog = ScenarioBacklog {
-                total: (newly_open_controls + open_goal_tasks) as f64,
-                newly_open_controls,
-                open_goal_tasks,
-            };
-
-            let factor = throughput_scale_factor(&baseline_drivers, &overridden_drivers);
-            let scaled_history = scale_history(&history, factor);
-            let forecast = scenario::forecast_completion(
-                &scaled_history,
-                backlog.total,
-                s.horizon.weeks(),
-                SAMPLES,
-                scenario::seed_from(&[s.name.as_str(), "forecast"]),
-            );
-
-            let goal_results: Vec<ScenarioGoalProbability> = s
-                .goals
-                .iter()
-                .map(|change| build_goal_probability(change, &goals_catalogue, &values, &checkins, now, &scaled_history, scenario::seed_from(&[s.name.as_str(), "goal", &change.kr.to_string()])))
-                .collect();
-
-            let signposts = scenario::evaluate_signposts(&s.signposts, &values, now);
-            triggered.extend(triggered_of(s, &signposts));
-
-            let subject = format!("{}.yaml", s.name);
-            let own_findings: Vec<scenario::Finding> = scenario_findings.iter().filter(|f| f.subject == subject).cloned().collect();
-
-            results.push(ScenarioResult {
-                scenario: s.clone(),
-                findings: own_findings,
-                policy: per_scope_deltas,
-                policy_subtree: subtree_delta,
-                drivers: driver_result(&baseline_drivers, overridden_drivers, &values),
-                backlog,
-                forecast,
-                goals: goal_results,
-                signposts,
-            });
-        }
-
-        scenario_findings.sort_by(|a, b| a.subject.cmp(&b.subject).then(a.kind.cmp(&b.kind)).then(a.detail.cmp(&b.detail)));
-        scenario_findings.dedup();
-        policy_findings.sort_by(|a, b| a.subject.cmp(&b.subject).then(a.kind.cmp(&b.kind)).then(a.detail.cmp(&b.detail)));
-        policy_findings.dedup();
-
-        Ok(ScenariosReport {
-            scope: asked.as_ref().map(|s| s.name.clone()),
-            baseline: ScenarioBaseline {
-                metrics: computed.values,
-                drivers: baseline_drivers,
-                policy: baseline_rollup,
-                forecast: baseline_forecast,
+        let has_rows = policy
+            .as_ref()
+            .ok()
+            .and_then(|p| p.as_ref())
+            .is_some_and(|p| !p.scopes.is_empty());
+        let budgets = self.metric_quality_budgets(snapshot, &plan).await;
+        Ok((
+            factory_assurance::metric_values::Read {
+                plan,
+                policy,
+                budgets,
+                now,
+                window: None,
             },
-            scenarios: results,
-            findings: scenario_findings,
-            policy_findings,
-            triggered,
-        })
+            has_rows,
+        ))
     }
 
-
-    /// Turn a scenario into real work: `Request::ScenarioPromote`. One task
-    /// per newly-open control in `scope`'s own slice of `scenario`'s policy
-    /// delta, skipping a control that already has a non-terminal task
-    /// labelled `policy=<framework>/<id>` in `scope` -- the same rule
-    /// `policy_remediate` refuses a second call under, except promote
-    /// silently skips rather than refusing outright, since a promote is
-    /// asking about many controls at once and one of them already having an
-    /// open task is the ordinary case, not a mistake to stop the whole
-    /// action over. `access.rs` checks `task.create` in `scope` before this
-    /// ever runs, the same reach rule `Request::TaskCreate` itself is
-    /// checked against.
-    pub(crate) async fn scenario_promote(&self, scenario_name: String, scope: String, agent: Option<String>) -> Result<ScenarioPromoteResult> {
+    pub(crate) async fn scenarios_report(
+        self: &Arc<Self>,
+        scope: Option<&str>,
+    ) -> Result<ScenariosReport> {
         let now = Utc::now();
         let snapshot = self.factory_snapshot();
-        let scope_obj = snapshot.scope(&scope)?.clone();
+        let service = self.scenarios_service(&snapshot);
+        let knowledge = factory_kernel::KnowledgeTags::provider(self);
+        let inventory = factory_kernel::TaskInventoryFact::provider(self);
+        let plan = service
+            .prepare_report(scope, &knowledge, &inventory, now)
+            .await?;
+        let selected_scope = plan.scope().map(str::to_string);
+        let (query, has_rows) = self
+            .scenario_metric_query(&snapshot, plan.metric_ids(), now, plan.scope())
+            .await?;
+        let provider = factory_kernel::MetricValuesFact::provider(self);
+        let measured = plan.read_metrics(&provider, &query).await;
+        if provider.policy_was_gathered() {
+            self.metric_policy_preflight(&snapshot, selected_scope.as_deref(), has_rows)
+                .await?;
+        }
+        let checks = factory_kernel::CheckEvaluationFact::provider(self);
+        let production = factory_kernel::ProductionFact::provider(self);
+        service.finish_report(measured?, &checks, &production).await
+    }
 
-        let (scenarios, _findings) = {
-            let dir = scenario::scenarios_dir(&snapshot.root);
-            tokio::task::spawn_blocking(move || scenario::load(&dir))
-                .await
-                .map_err(|e| FactoryError::Other(anyhow::anyhow!("scenario directory walk: {e}")))?
-        };
-        let s = scenarios
-            .into_iter()
-            .find(|s| s.name == scenario_name)
-            .ok_or_else(|| FactoryError::BadRequest(format!("no such scenario: {scenario_name:?}")))?;
-
-        let (real_catalogues, _pf, tags) = self.load_catalogues_and_tags().await?;
-        let (draft_catalogues, _df) = {
-            let dir = scenario::drafts_dir(&snapshot.root);
-            tokio::task::spawn_blocking(move || scenario::load_drafts(&dir))
-                .await
-                .map_err(|e| FactoryError::Other(anyhow::anyhow!("draft policy directory walk: {e}")))?
-        };
-        let (catalogues_with_drafts, _mf) = scenario::merge_catalogues(&real_catalogues, draft_catalogues);
-
-        let base_chain = self.policy_chain(&scope_obj.name);
-        let (baseline_applied, _cf1) = policy::applicable(&real_catalogues, &base_chain);
-        let (overlaid_chain, _of) = scenario::overlay_chain(&base_chain, &s);
-        let (scenario_applied, _cf2) = policy::applicable(&catalogues_with_drafts, &overlaid_chain);
-
-        let all_attestations = self.policies.all().await?;
-        let per_scope_applied = vec![(&scope_obj, scenario_applied.clone())];
-        let (gates, daemon_fact, credential_rows, backup_fact, budget_config) = self.dataset_level_facts(&per_scope_applied).await?;
-        let evidence = self
-            .evidence_for_scope(
-                &snapshot,
-                &scope_obj,
-                &scenario_applied,
-                &tags,
-                &all_attestations,
-                &gates,
-                daemon_fact,
-                &credential_rows,
-                backup_fact,
-                budget_config.as_ref(),
+    pub(crate) async fn scenario_whatif(
+        self: &Arc<Self>,
+        scenario_name: Option<String>,
+        raw_drivers: BTreeMap<DriverId, String>,
+        scope: Option<&str>,
+    ) -> Result<ScenarioWhatIfResult> {
+        let now = Utc::now();
+        let snapshot = self.factory_snapshot();
+        let service = self.scenarios_service(&snapshot);
+        let knowledge = factory_kernel::KnowledgeTags::provider(self);
+        let checks = factory_kernel::CheckEvaluationFact::provider(self);
+        let inventory = factory_kernel::TaskInventoryFact::provider(self);
+        let plan = service
+            .prepare_whatif(
+                scenario_name,
+                raw_drivers,
+                scope,
+                &knowledge,
+                &checks,
+                &inventory,
                 now,
             )
             .await?;
+        let selected_scope = plan.scope().map(str::to_string);
+        let (query, has_rows) = self
+            .scenario_metric_query(&snapshot, plan.metric_ids(), now, plan.scope())
+            .await?;
+        let provider = factory_kernel::MetricValuesFact::provider(self);
+        let measured = plan.read_metrics(&provider, &query).await;
+        if provider.policy_was_gathered() {
+            self.metric_policy_preflight(&snapshot, selected_scope.as_deref(), has_rows)
+                .await?;
+        }
+        let production = factory_kernel::ProductionFact::provider(self);
+        service.finish_whatif(measured?, &production).await
+    }
 
-        let baseline_statuses = policy::evaluate(&baseline_applied, &evidence, now);
-        let scenario_statuses = policy::evaluate(&scenario_applied, &evidence, now);
-        let delta = scenario::policy_delta(&baseline_statuses, &scenario_statuses);
-
+    pub(crate) async fn scenario_promote(
+        &self,
+        scenario_name: String,
+        scope: String,
+        agent: Option<String>,
+    ) -> Result<ScenarioPromoteResult> {
+        let now = Utc::now();
+        let snapshot = self.factory_snapshot();
+        let knowledge = factory_kernel::KnowledgeTags::provider(self);
+        let comparisons = factory_kernel::CheckComparisonFact::provider(self);
         let observer = crate::commands::CreationObserver(self.bus.clone());
-        let receipt = crate::commands::direction(self, &observer)
-            .promote(&s.name, &scope_obj.name, agent, &scenario_applied, &scenario_statuses, &delta)
+        let commands = crate::commands::direction(self, &observer);
+        let receipt = self
+            .scenarios_service(&snapshot)
+            .promote(
+                scenario_name,
+                scope,
+                agent,
+                &knowledge,
+                &comparisons,
+                &commands,
+                now,
+            )
             .await?;
         let mut created = Vec::new();
         for entry in receipt.created {
@@ -761,124 +179,30 @@ impl Engine {
             scenario: receipt.scenario,
             scope: receipt.scope,
             created,
-            skipped: receipt.skipped.into_iter().map(|entry| SkippedControl {
-                control: entry.control,
-                existing_task: entry.existing_task,
-            }).collect(),
+            skipped: receipt
+                .skipped
+                .into_iter()
+                .map(|entry| SkippedControl {
+                    control: entry.control,
+                    existing_task: entry.existing_task,
+                })
+                .collect(),
         })
     }
 
-    /// Recompute driver outcomes, tornado and forecast with slider
-    /// overrides applied: `Request::ScenarioWhatIf`. Pure and read-only
-    /// (`Needs::Nothing`, `access.rs`) -- nothing here is written, whatever
-    /// `scenario` and `drivers` say.
-    ///
-    /// Layering: the named scenario's own `drivers:` overrides (none, with
-    /// `scenario: None`), then `drivers` on top, request wins driver by
-    /// driver -- so a UI slider can override one driver a scenario itself
-    /// also names without having to resend the scenario's other overrides.
-    /// Each entry in `drivers` is parsed with `scenario::parse_override`,
-    /// the same authored syntax (`×2`, `+20%`, `+5`, `=0.9`); a value that
-    /// does not parse is a `BadRequest` naming the driver, not a finding --
-    /// this is typed input from a live request, not an authored file
-    /// `load` can leave partly wrong and still serve the rest of.
-    ///
-    /// Backlog: with `scenario: Some`, the same subtree-wide policy-delta
-    /// and goal-task backlog `scenarios_report` computes for that scenario
-    /// (over the selected scope and descendants, or the whole instance); with
-    /// `scenario: None`, `0.0`, so the forecast is honestly a bare
-    /// throughput projection with nothing to clear, not a guessed number.
-    /// Recomputing the policy delta here costs the same real work
-    /// `scenarios_report` does even though only the driver sliders moved --
-    /// backlog genuinely does not depend on drivers, so this is more work
-    /// than a slider tick strictly needs, but it is the honest number the
-    /// issue's own data shape asks for; the UI is expected to debounce
-    /// calls rather than this endpoint pretending backlog is free.
-    pub(crate) async fn scenario_whatif(self: &Arc<Self>, scenario_name: Option<String>, raw_drivers: BTreeMap<DriverId, String>, scope: Option<&str>) -> Result<ScenarioWhatIfResult> {
-        let now = Utc::now();
+    #[cfg(test)]
+    async fn subtree_daily(
+        &self,
+        asked: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<factory_core::protocol::ProductionBucket>> {
         let snapshot = self.factory_snapshot();
-        let (asked, target_scopes) = subtree_scopes(&snapshot, scope)?;
-
-        let mut overrides: BTreeMap<DriverId, scenario::Override> = BTreeMap::new();
-        let mut horizon_weeks = scenario::Horizon::default().weeks();
-        let mut backlog_total = 0.0f64;
-
-        if let Some(name) = &scenario_name {
-            let (scenarios, _findings) = {
-                let dir = scenario::scenarios_dir(&snapshot.root);
-                tokio::task::spawn_blocking(move || scenario::load(&dir))
-                    .await
-                    .map_err(|e| FactoryError::Other(anyhow::anyhow!("scenario directory walk: {e}")))?
-            };
-            let s = scenarios
-                .into_iter()
-                .find(|s| &s.name == name)
-                .ok_or_else(|| FactoryError::BadRequest(format!("no such scenario: {name:?}")))?;
-            overrides = s.driver_overrides();
-            horizon_weeks = s.horizon.weeks();
-
-            let (real_catalogues, _pf, tags) = self.load_catalogues_and_tags().await?;
-            let (draft_catalogues, _df) = {
-                let dir = scenario::drafts_dir(&snapshot.root);
-                tokio::task::spawn_blocking(move || scenario::load_drafts(&dir))
-                    .await
-                    .map_err(|e| FactoryError::Other(anyhow::anyhow!("draft policy directory walk: {e}")))?
-            };
-            let (catalogues_with_drafts, _mf) = scenario::merge_catalogues(&real_catalogues, draft_catalogues);
-            let all_attestations = self.policies.all().await?;
-            let all_scopes = &target_scopes;
-
-            let (baseline_statuses, _bf) =
-                evaluate_baseline_over_scopes(self, &snapshot, &all_scopes, &real_catalogues, &tags, &all_attestations, now).await?;
-            let (scenario_statuses, _sf, _svf) =
-                evaluate_scenario_over_scopes(self, &snapshot, &all_scopes, &s, &catalogues_with_drafts, &tags, &all_attestations, now).await?;
-            let (_per_scope, subtree_delta) = deltas_from_statuses(&all_scopes, &baseline_statuses, &scenario_statuses);
-
-            let tasks = Facts::<L6>::new(self).get::<TaskInventoryFact>(
-                &TaskInventoryQuery::Members(target_scopes.iter().map(|s| s.name.clone()).collect())
-            ).await?;
-            let open_goal_tasks = open_goal_task_count(&tasks, &s.goals);
-            backlog_total = (subtree_delta.newly_open.len() + open_goal_tasks) as f64;
-        }
-
-        for (id, raw) in &raw_drivers {
-            if !scenario::driver_defs().iter().any(|def| def.id == id) {
-                return Err(FactoryError::BadRequest(format!("unknown scenario driver: {id}")));
-            }
-            let ov = scenario::parse_override(raw).map_err(|e| FactoryError::BadRequest(format!("driver {id:?}: {e}")))?;
-            overrides.insert(id.clone(), ov);
-        }
-
-        let mut metric_ids: Vec<MetricId> = Vec::new();
-        for def in scenario::driver_defs() {
-            if let Some(name) = def.metric {
-                if let Ok(id) = MetricId::new(name) {
-                    metric_ids.push(id);
-                }
-            }
-        }
-        let computed = self.metrics_for(&metric_ids, now, asked.as_ref().map(|s| s.name.as_str()), None).await?;
-        let values: BTreeMap<MetricId, MetricValue> = computed.values.into_iter().map(|v| (v.id.clone(), v)).collect();
-        let baseline_drivers = driver_baseline(&values);
-
-        let overridden_drivers = measured_overrides(&baseline_drivers, &overrides);
-
-        let daily = self.subtree_daily(asked.as_ref().map(|s| s.name.as_str()), now).await?;
-        let history = weekly_throughput_history(&daily, THROUGHPUT_HISTORY_WEEKS);
-        let factor = throughput_scale_factor(&baseline_drivers, &overridden_drivers);
-        let scaled_history = scale_history(&history, factor);
-
-        let seed_name = scenario_name.as_deref().unwrap_or("whatif");
-        let forecast = scenario::forecast_completion(&scaled_history, backlog_total, horizon_weeks, SAMPLES, scenario::seed_from(&[seed_name, "whatif"]));
-
-        Ok(ScenarioWhatIfResult {
-            scenario: scenario_name,
-            drivers: driver_result(&baseline_drivers, overridden_drivers, &values),
-            forecast,
-        })
+        let production = factory_kernel::ProductionFact::provider(self);
+        self.scenarios_service(&snapshot)
+            .subtree_daily(&production, asked, now)
+            .await
     }
 }
-
 #[cfg(test)]
 mod tests {
     //! Engine-level scenario reports and writes, on a temporary instance --

@@ -5363,8 +5363,21 @@ to its existing append-only store too, preserving error priority, exact item
 scope, corrective anchors and submission deduplication. The router supplies
 only raw caller/request inputs and physical providers; it retains its one
 authorization check and existing receipt-change events. Workflow preview
-decorations remain outside; Scenarios and other service/command isolation
-remain unfinished. These paths do not complete the six-service split.
+decorations remain outside. These paths do not complete the six-service split.
+
+The live Scenarios service now belongs to L6 too: authored real/draft
+catalogues, overlays, goal changes, backlog, forecasts and promotion deltas
+are selected and folded there. It reads live metrics, process inventory,
+production and L5 check observations through `Facts<L6>`, not supplied
+results or an Engine callback. Report and what-if phases let outside wiring
+preserve request-only metric error priority without handing metrics back in.
+Promotion uses L5's plain `CheckComparisonFact`: both declaration sets are
+evaluated against one overlay-selected evidence gather, preserving the
+original lazy reads. L6 submits the selected work through its same-level
+remediation service and the L6→L5→L4 command chain; only ids return, with
+legacy task payload hydration outside. Scenarios response data is canonical
+L6 vocabulary with unchanged wire re-exports. Workflow preview, remaining
+command paths and complete six-service isolation are still unfinished.
 
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),

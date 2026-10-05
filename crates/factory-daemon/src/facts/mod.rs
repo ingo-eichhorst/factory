@@ -152,6 +152,13 @@ port!(
     l5::check_provider
 );
 port!(
+    CheckComparisonFact,
+    factory_assurance::check_evaluation::Provider<'a, checks::Ports<'a>>,
+    factory_assurance::check_evaluation::ComparisonRead,
+    CheckComparisonFact,
+    l5::check_provider
+);
+port!(
     BackupFact,
     factory_infrastructure::backup_facts::Provider<'a>,
     DateTime<Utc>,
@@ -602,6 +609,7 @@ mod tests {
         registered::<SignpostFact>();
         registered::<MetricValuesFact>();
         registered::<CheckEvaluationFact>();
+        registered::<CheckComparisonFact>();
         registered::<DaemonConfigFact>();
         registered::<BackupFact>();
         registered::<ScopeCapacityFact>();
@@ -1141,7 +1149,7 @@ mod tests {
     fn upper_level_task_inventory_reads_cannot_bypass_the_l4_port() {
         for file in [
             include_str!("../policies/mod.rs"),
-            include_str!("../scenarios/mod.rs"),
+            include_str!("../../../factory-direction/src/scenarios_service.rs"),
         ] {
             let production = file.split("#[cfg(test)]\nmod tests").next().unwrap();
             let compact: String = production.chars().filter(|c| !c.is_whitespace()).collect();
@@ -1149,7 +1157,8 @@ mod tests {
                 !compact.contains("self.store"),
                 "upper-level task read bypasses L4"
             );
-            assert!(production.contains("get::<TaskInventoryFact>"));
+            assert!(production.contains("get::<TaskInventoryFact>")
+                || compact.contains("get::<TaskInventoryFact,_>"));
         }
         // Quality report and remediation both read L4 through facts. A
         // command acknowledgement cannot supply inventory or a task record.
@@ -1175,6 +1184,104 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scenarios_have_actual_l6_reads_folds_and_adjacent_promotion_not_engine_callbacks() {
+        let owner = include_str!("../../../factory-direction/src/scenarios_service.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let compact: String = owner.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("Facts::<L6>::new()"));
+        for fact in [
+            "MetricValuesFact",
+            "TaskInventoryFact",
+            "CheckEvaluationFact",
+            "CheckComparisonFact",
+            "ProductionFact",
+        ] {
+            assert!(
+                compact.contains(&format!("get::<{fact},_>")),
+                "missing actual Scenarios read: {fact}"
+            );
+        }
+        for operation in [
+            "scenario::load(&dir)",
+            "scenario::overlay_chain(",
+            "scenario::policy_delta(",
+            "scenario::forecast_completion(",
+            "scenario::goal_probability(",
+            "commands.promote(",
+        ] {
+            assert!(
+                compact.contains(operation),
+                "Scenarios behaviour missing from owner: {operation}"
+            );
+        }
+        for forbidden in [
+            "factory_core",
+            "factory_process",
+            "factory_interfaces",
+            "Engine",
+            "TaskStore",
+            "dyn Fn",
+            "BoxFuture",
+            "TaskSnapshotFact",
+        ] {
+            assert!(
+                !owner.contains(forbidden),
+                "Scenarios owner acquired a backedge: {forbidden}"
+            );
+        }
+        let wiring = include_str!("../scenarios/mod.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let compact_wiring: String = wiring.chars().filter(|c| !c.is_whitespace()).collect();
+        for call in [
+            "service.prepare_report(",
+            "plan.read_metrics(",
+            "service.finish_report(",
+            "service.prepare_whatif(",
+            "service.finish_whatif(",
+            ".promote(scenario_name,scope,agent,",
+        ] {
+            assert!(
+                compact_wiring.contains(call),
+                "request bypasses actual Scenarios owner: {call}"
+            );
+        }
+        for forbidden in [
+            "self.store",
+            "self.metrics(",
+            "scenario::load(",
+            "scenario::policy_delta(",
+            "scenario::forecast_completion(",
+            "evidence_for_scope(",
+            "checks::evaluate(",
+        ] {
+            assert!(
+                !compact_wiring.contains(forbidden),
+                "Scenarios logic remains outside: {forbidden}"
+            );
+        }
+        assert!(compact_wiring.contains("crate::commands::task_snapshot(self,entry.task.id)"));
+        assert!(compact_wiring.contains("ifprovider.policy_was_gathered()"));
+        let provider = include_str!("../../../factory-assurance/src/check_evaluation.rs");
+        let _: fn(
+            <CheckComparisonFact as Port>::Provider<'static>,
+        ) -> factory_assurance::check_evaluation::Provider<'static, checks::Ports<'static>> =
+            |provider| provider;
+        assert!(provider.contains("Provide<factory_kernel::CheckComparisonFact>"));
+        assert!(provider.contains("primary: observations(&input.subjects)"));
+        assert!(provider.contains("alternative: observations(&alternative.subjects)"));
+        assert!(provider.contains(".for_scope("));
+        let schema = FACT_CATALOGUE
+            .iter()
+            .find(|f| f.fact == "CheckComparisonFact")
+            .unwrap();
+        assert_eq!(schema.producer, "L5");
+        assert_eq!(schema.readers, ["L6 Scenarios promotion"]);
+    }
     #[test]
     fn signposts_are_computed_in_l5_and_read_directly_by_people_not_operations() {
         let owner = include_str!("../../../factory-assurance/src/signposts.rs")

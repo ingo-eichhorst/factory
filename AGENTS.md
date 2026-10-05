@@ -335,7 +335,16 @@ something impossible.
   Attestation and withdrawal validation/writes stay with its own append-only
   store. Preserve failure order, exact item scope, corrective anchors and
   deadline deduplication; a withdrawal is a new row, never a status update.
-  Outside workflow preview decorations and Scenarios still need migration.
+  L6's live Scenarios service owns authored real/draft catalogue selection,
+  overlays, goals, backlogs, forecasts and promotion deltas. It reads metrics,
+  inventory, production and kindless L5 check facts through Facts<L6>, never
+  supplied values or a callback. Request phases preserve outside-only metric
+  compatibility error priority. Promotion compares both subject sets against
+  one overlay-selected gather via the L5 CheckComparisonFact, then calls its
+  same-level remediation service and adjacent command chain. Legacy task
+  hydration remains outside; Scenarios response data canonically belongs to
+  L6 with unchanged wire re-exports. Outside workflow preview decorations
+  and remaining command paths still need migration.
   The complete six-service split still remains.
   L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.

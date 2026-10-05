@@ -1850,4 +1850,100 @@ mod tests {
             .unwrap();
         assert!(recovered.at >= before && recovered.at <= Utc::now());
     }
+
+    #[tokio::test]
+    async fn comparison_fact_gathers_only_primary_evidence_once_and_retries_live() {
+        use crate::check_evaluation::{ComparisonRead, Provider, Read, ScopeInput};
+        use factory_kernel::{CheckComparisonFact, StatusKind, L6};
+        let recorder = Arc::new(Recorder::default());
+        recorder.generation.store(1, Ordering::SeqCst);
+        let bench = BenchStore::in_memory().unwrap();
+        let owner = service(&recorder, &bench);
+        let scope = owner.scopes.scopes[0].clone();
+        let knowledge = subject(vec![Check::Knowledge {
+            tag: Some("owned".into()),
+        }]);
+        let host = subject(vec![Check::Daemon {
+            fact: "foreman_enabled".into(),
+        }]);
+        let provider = Provider::new(owner);
+        let mut read = ComparisonRead {
+            primary: Read {
+                scopes: vec![ScopeInput {
+                    scope: scope.clone(),
+                    subjects: vec![knowledge.clone()],
+                }],
+                tags: BTreeSet::from(["owned".into()]),
+                attestations: vec![],
+                budgets: Ok(vec![None]),
+                now: Some(time()),
+            },
+            alternative: vec![ScopeInput {
+                scope: scope.clone(),
+                subjects: vec![host.clone()],
+            }],
+        };
+        let facts = Facts::<L6>::new();
+        let first = facts
+            .get::<CheckComparisonFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(first.at, time());
+        assert_eq!(
+            first.scopes[0].primary[0].status.kind(),
+            StatusKind::Satisfied
+        );
+        assert_eq!(
+            first.scopes[0].alternative[0].status.kind(),
+            StatusKind::Open
+        );
+        assert!(
+            recorder.calls("daemon").is_empty(),
+            "the alternative cannot enlarge the primary's gather"
+        );
+        read.primary.scopes[0].subjects = vec![host];
+        read.alternative[0].subjects = vec![knowledge];
+        read.primary.budgets = Err(FactoryError::BadRequest(
+            "authored budget unavailable".into(),
+        ));
+        *recorder.failing.lock().unwrap() = Some("daemon");
+        assert!(facts
+            .get::<CheckComparisonFact, _>(&provider, &read)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("daemon unavailable"));
+        *recorder.failing.lock().unwrap() = None;
+        assert!(facts
+            .get::<CheckComparisonFact, _>(&provider, &read)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("authored budget unavailable"));
+        read.primary.budgets = Ok(vec![None]);
+        let before = recorder.calls("daemon").len();
+        let next = facts
+            .get::<CheckComparisonFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(recorder.calls("daemon").len(), before + 1);
+        assert_eq!(
+            next.scopes[0].primary[0].status.kind(),
+            StatusKind::Satisfied
+        );
+        assert_eq!(
+            next.scopes[0].alternative[0].status.kind(),
+            StatusKind::Satisfied
+        );
+        recorder.generation.store(0, Ordering::SeqCst);
+        let next = facts
+            .get::<CheckComparisonFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(next.scopes[0].primary[0].status.kind(), StatusKind::Open);
+        assert_eq!(
+            next.scopes[0].alternative[0].status.kind(),
+            StatusKind::Satisfied
+        );
+    }
 }

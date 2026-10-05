@@ -14,7 +14,7 @@ pub use factory_assurance::metrics_service::Metrics;
 use factory_core::{
     error::Result,
     goals::GoalsCatalogue,
-    metrics::{self, MetricError, MetricId, MetricsWindow},
+    metrics::{self, MetricId, MetricsWindow},
 };
 #[cfg(test)]
 use factory_kernel::L6;
@@ -185,11 +185,6 @@ impl Engine {
 }
 pub(crate) use factory_direction::goals_service::metric_ids as goals_metric_ids;
 
-pub(crate) fn push_if_known(ids: &mut Vec<MetricId>, id: &MetricId) {
-    if !matches!(metrics::resolve(id), Err(MetricError::Unknown(_))) {
-        ids.push(id.clone());
-    }
-}
 
 
 #[cfg(test)]

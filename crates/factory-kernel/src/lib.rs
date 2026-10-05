@@ -29,7 +29,7 @@ mod duration;
 mod check_results;
 pub use check_results::{
     CheckEvaluationFact, CheckObservation, EvidenceFinding, EvidenceRef, EvidenceRefKind, EvaluationResult,
-    ScopeCheckEvaluation, Status, StatusKind,
+    ScopeCheckEvaluation, CheckComparisonFact, ScopeCheckComparison, Status, StatusKind,
 };
 mod evaluation_receipts;
 pub use evaluation_receipts::{
@@ -59,7 +59,7 @@ mod process_metrics;
 mod metric_values;
 pub use metric_values::{is_metric_segment, MetricId, MetricValue, MetricValuesFact};
 pub use process_metrics::{
-    BenchResolutionFact, ProcessMetricFact, ProductionBin, ProductionBucket, ProductionFact,
+    BenchResolutionFact, ProcessMetricFact, ProductionBin, ProductionBucket, ProductionFact, ProductionQuery,
 };
 mod fact_vocabulary;
 pub mod facts;

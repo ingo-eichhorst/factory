@@ -192,3 +192,18 @@ pub struct CheckEvaluationFact {
     pub at: chrono::DateTime<chrono::Utc>,
     pub scopes: Vec<ScopeCheckEvaluation>,
 }
+
+/// Two authored subject sets evaluated by L5 against one primary-set
+/// evidence gather. Neither this schema nor L6 evaluates lower evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckComparisonFact {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub scopes: Vec<ScopeCheckComparison>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeCheckComparison {
+    pub scope: String,
+    pub primary: Vec<CheckObservation>,
+    pub alternative: Vec<CheckObservation>,
+}

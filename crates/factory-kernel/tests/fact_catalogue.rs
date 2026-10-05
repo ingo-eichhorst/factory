@@ -19,6 +19,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<SignpostFact, L5>("SignpostFact", "L5");
     assert_producer::<MetricValuesFact, L5>("MetricValuesFact", "L5");
     assert_producer::<CheckEvaluationFact, L5>("CheckEvaluationFact", "L5");
+    assert_producer::<CheckComparisonFact, L5>("CheckComparisonFact", "L5");
     assert_producer::<InfrastructureExpiryFact, L1>("InfrastructureExpiryFact", "L1");
     assert_producer::<RenewalDeclarationsFact, L1>("RenewalDeclarationsFact", "L1");
     assert_producer::<CredentialExpiryFact, L2>("CredentialExpiryFact", "L2");
@@ -48,6 +49,22 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<CostReport, L4>("CostReport", "L4");
     assert_producer::<GateFact, L5>("GateFact", "L5");
     assert_producer::<KnowledgeTags, L5>("KnowledgeTags", "L5");
+}
+
+#[test]
+fn check_comparison_is_plain_kindless_l0_data_with_two_distinct_results() {
+    let wire = serde_json::json!({
+        "at": "2026-10-05T12:00:00Z",
+        "scopes": [{
+            "scope": "demo",
+            "primary": [{"control": "house/check", "title": "Check", "status": "satisfied", "reasons": []}],
+            "alternative": [{"control": "house/check", "title": "Check", "status": "open", "reasons": ["not gathered"]}]
+        }]
+    });
+    let fact: CheckComparisonFact = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&fact).unwrap(), wire);
+    assert_eq!(fact.scopes[0].primary[0].status.kind(), StatusKind::Satisfied);
+    assert_eq!(fact.scopes[0].alternative[0].status.kind(), StatusKind::Open);
 }
 
 #[test]
@@ -171,6 +188,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "SignpostFact",
         "MetricValuesFact",
         "CheckEvaluationFact",
+        "CheckComparisonFact",
         "InfrastructureExpiryFact", "CredentialExpiryFact", "ScheduledRunDatesFact",
         "RenewalDeclarationsFact",
         "DaemonConfigFact",

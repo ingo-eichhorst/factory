@@ -18,7 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::Utc;
 use factory_core::config::{Factory, Scope};
 use factory_core::error::{FactoryError, Result};
-use factory_core::policy::{self, Attestation, ControlRef};
+use factory_core::policy::{Attestation, ControlRef};
+#[cfg(test)]
+use factory_core::policy;
 use factory_core::policy_export;
 use factory_core::checks::CheckSource;
 use factory_core::protocol::{PolicyControlDetail, PolicyReport, WorkflowEnforcement, WorkflowEnforcementFinding};
@@ -26,6 +28,7 @@ use factory_core::reporting_clock::{self, ClockMark};
 #[cfg(test)]
 use factory_core::reporting_clock::ClockDeadlineState;
 use factory_core::task::Task;
+#[cfg(test)]
 use factory_kernel::SecretsPresence;
 #[cfg(test)]
 use factory_kernel::L6;
@@ -78,6 +81,7 @@ impl Engine {
     }
     /// Own catalogue read plus the L5 knowledge-tag port. Both filesystem
     /// walks stay off the async executor; providers own their fact reads.
+    #[cfg(test)]
     pub(crate) async fn load_catalogues_and_tags(
         &self,
     ) -> Result<(
@@ -142,6 +146,7 @@ impl Engine {
 
     /// Compatibility composition: L5 owns all live check-evidence gathering;
     /// L6 supplies only authored budget configuration.
+    #[cfg(test)]
     pub(crate) async fn dataset_level_facts<S: CheckSource>(
         &self,
         per_scope_applied: &[(&Scope, Vec<S>)],
@@ -156,30 +161,6 @@ impl Engine {
         let shared = crate::facts::checks::service(self, self.factory_snapshot().scope_tree()).shared(&targets).await?;
         let budget = self.check_budget_config(per_scope_applied).await?;
         Ok((shared.gates, shared.daemon, shared.credentials, shared.backup, budget))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn evidence_for_scope(
-        &self,
-        snapshot: &Factory,
-        scope: &Scope,
-        applied: &[impl CheckSource],
-        tags: &BTreeSet<String>,
-        attestations: &[Attestation],
-        gates: &BTreeMap<String, policy::GateFact>,
-        daemon: Option<policy::DaemonFact>,
-        credentials: &BTreeMap<String, SecretsPresence>,
-        backup: Option<factory_core::backup::BackupFact>,
-        budget: Option<&factory_core::budget::PolicyConfig>,
-        now: chrono::DateTime<Utc>,
-    ) -> Result<policy::Evidence> {
-        let intent = budget.map(|config| crate::budgets::check_budget_intent(snapshot, scope, config));
-        crate::facts::checks::service(self, snapshot.scope_tree()).for_scope(
-            &factory_kernel::ScopeNode { name: scope.name.clone(), path: scope.path.clone() },
-            applied, tags, attestations,
-            &factory_assurance::evidence::Shared { gates: gates.clone(), daemon, credentials: credentials.clone(), backup },
-            intent.as_ref(), now,
-        ).await
     }
 
     async fn policy_workflow_enforcement(
