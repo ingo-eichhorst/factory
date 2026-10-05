@@ -34,6 +34,7 @@ export const KIND_LABELS = {
   triggered_signpost: "signpost triggered",
   harness_unhealthy: "harness does not start",
   sandbox_not_ready: "sandbox not ready",
+  sandbox_image_stale: "sandbox image stale",
   credential_expiring: "credential expiring",
 };
 

@@ -340,6 +340,7 @@ impl Engine {
             // `drivers` say (`#100`).
             | Request::ScenarioWhatIf { .. }
             | Request::Scenarios { .. }
+            | Request::Signposts
             // A projection over what the reads below already return (`#106`).
             | Request::Operations { .. }
             // A projection over the task list, like `Operations` (`#119`).

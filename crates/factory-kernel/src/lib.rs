@@ -26,6 +26,19 @@
 //!   identifies page/API composition outside the six-level ladder.
 
 mod duration;
+mod image_build;
+pub use image_build::{ImageBuildFailure, SandboxImageFailure};
+mod check_results;
+mod execution_plan;
+mod workflow_preview;
+pub use workflow_preview::{WorkflowTargetsFact, WorkflowPreviewFact, WorkflowEnforcement, WorkflowEnforcementFinding};
+pub mod workflow_blueprint;
+pub use workflow_blueprint::{WorkflowBlueprintFact, WorkflowBlueprintQuery};
+pub use execution_plan::{CompiledPlanFact, ControlPlan, PlanStep, Waiver, DEFAULT_CATEGORY, ANY_CATEGORY, effective_category, is_name, check_category};
+pub use check_results::{
+    CheckEvaluationFact, CheckObservation, EvidenceFinding, EvidenceRef, EvidenceRefKind, EvaluationResult,
+    ScopeCheckEvaluation, CheckComparisonFact, ScopeCheckComparison, Status, StatusKind,
+};
 mod evaluation_receipts;
 pub use evaluation_receipts::{
     Attestation, ClockDeadlineKind, ClockItemRef, ClockMark, ControlRef, CorrectiveMeasureMark,
@@ -51,8 +64,10 @@ pub use workflow_identity::{WorkflowOrigin, WorkflowWorkspace};
 mod knowledge_hints;
 pub use knowledge_hints::{KnowledgeHints, KnowledgeHit};
 mod process_metrics;
+mod metric_values;
+pub use metric_values::{is_metric_segment, MetricId, MetricValue, MetricValuesFact};
 pub use process_metrics::{
-    BenchResolutionFact, ProcessMetricFact, ProductionBin, ProductionBucket, ProductionFact,
+    BenchResolutionFact, ProcessMetricFact, ProductionBin, ProductionBucket, ProductionFact, ProductionQuery,
 };
 mod fact_vocabulary;
 pub mod facts;
@@ -68,7 +83,7 @@ mod stats;
 mod workspace;
 pub use facts::DeploymentPublicationFact;
 pub use facts::{DeploymentMirrorFact, DeploymentMirrorPhase, DeploymentMirrorPlan};
-pub use facts::{EnvironmentMetricFact, KnowledgeTags, ScopeCapacityFact};
+pub use facts::{EnvironmentMetricFact, FunctionaryRosterFact, KnowledgeTags, ScopeCapacityFact};
 pub use facts::{
     EnvironmentRecoveryFact, RECOVERY_COMMIT_LABEL, RECOVERY_ENVIRONMENT_LABEL,
     RECOVERY_REASON_LABEL,
@@ -76,7 +91,8 @@ pub use facts::{
 pub use facts::{RecoveryJournalFact, ScriptRecoveryAction, ScriptRecoveryFinish};
 pub use facts::{ReleaseBuildFact, ReleaseSbomFact};
 pub use spend::{
-    CostGroupBy, CostReport, CostRow, DailySpend, FinishedSpend, SpendBasis, SpendFigure, TokenSums,
+    CostGroupBy, CostReport, CostRow, DailySpend, FinishedSpend, SpendBasis, SpendFigure, SpendQuery,
+    TokenSums,
 };
 pub use workspace::{WorkspaceLifetime, WorkspaceSpec};
 pub mod renewals;
@@ -91,6 +107,7 @@ pub use facts::{
     GateFact, RunFact, TaskFact, TaskInventoryFact, WorkflowFact, WorkflowRunFact,
 };
 pub use facts::TaskSnapshotFact;
+pub use facts::{SignpostFact, SignpostObservation};
 pub use facts::{
     BackupFact, DaemonConfigFact, Fact, FactCatalogueEntry, Level, SecretsPresence, VerifySummary,
     FACT_CATALOGUE, KNOWN_DAEMON_FACTS, KNOWN_SECRETS_LOCATIONS, L1, L2, L3, L4, L5, L6,

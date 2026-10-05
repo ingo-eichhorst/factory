@@ -143,9 +143,9 @@ Those internal merges are coordination, not permission to merge the final PR.
 Whoever writes a task says so too, and never writes "do not push".
 `.agents/skills/implement-github-issue` is the whole procedure for an issue.
 
-**The hook is the enforcement, and it is weaker than it looks.** GitHub cannot
-do this for us: the repository is private on a free plan, where rulesets and
-branch protection are both paid. So `.githooks/pre-push` refuses the push, and
+**The hook is the enforcement, and it is weaker than it looks.** GitHub does
+not do this for us today: the repository is public, and its `protect main`
+ruleset exists but is disabled. So `.githooks/pre-push` refuses the push, and
 it only runs if `core.hooksPath` was set, to an absolute path -- a fresh clone,
 a machine nobody configured, or a relative path read from a worktree all leave
 no guard at all, and none of them say so. Set it first; do not assume it is
@@ -283,7 +283,84 @@ something impossible.
   Engine callback. L6 projects only applicable authored budget caps/errors
   down; L5 reads their live spend. Preserve exact scope, path ancestry,
   shared subtree reads, twice-window stale coverage and unknown evidence.
-  Metric gathering and the complete six-service split still remain.
+  L5's live metric service owns selective lower reads, same-level benchmark
+  calls, arithmetic, compliance and Quality figures. Its authored Quality
+  load/fingerprint/dependency expansion is canonical too. L6 supplies raw
+  applicable subjects, counting instructions, receipts and caps, never a
+  Policy report/rollup. Request-only page failure preflights stay outside.
+  Signposts use an actual L5 provider and canonical evaluator, computing
+  their own metrics from raw authored thresholds, subjects, receipts and
+  caps. L0 holds only plain observations. Dashboard and Inbox read the
+  people-side fact directly; Operations never gathers it or counts it as
+  attention. Cache only successful snapshots for a minute, invalidating on
+  scenario metadata changes; never cache failed reads or invent task actions.
+  L6 retains authored scenario intent and canonical compatibility exports.
+  L6's live Budget service owns authored catalogue loading, month windows,
+  scope selection and independent-cap assessment. It receives only fresh
+  plain scope identities and the actual L4 spend fact capability, reading it
+  through `Facts<L6>` with the canonical L0 `SpendQuery`. Never pass Engine
+  callbacks, precomputed spend or a budget verdict into the service. The exact
+  first instant of a month is known empty and does not read the provider.
+  L6's live Goals service owns catalogue reads, cycle selection, path filtering,
+  scoring, label context and manual check-in validation/history. It reads
+  `MetricValuesFact` through `Facts<L6>`; the physical L5 provider gathers and
+  computes values from raw authored inputs using its own live metric service.
+  MetricId/MetricValue are plain canonical L0 vocabulary; the registry and
+  arithmetic stay L5. Goals response structs are canonical L6 data with wire
+  re-exports. Never pass a metric result into Goals from the outside router.
+  Keep request-only compatibility failure checks outside both services; a
+  request-local provider read-phase diagnostic may sequence those errors but
+  is never metric evidence/status or a level reader's channel. Goal label
+  execution still needs its adjacent command migration.
+  L6's live policy-intent service owns authored catalogue and receipt reads,
+  applicability, lazy raw budget resolution and Quality's selected budget
+  inputs. It reads the actual KnowledgeTags port through Facts<L6> and never
+  accepts computed tags or an Engine callback. PolicyDeclaration and the
+  additive path-chain algorithm are canonical L6, re-exported/called by the
+  outside configuration owner. Constructors capture fresh raw declarations,
+  not resolved chains or flat caches; preserve aliases, first-match precedence,
+  vanished-scope root fallback and independent ancestor caps. Invalid limits
+  stay raw error inputs, not absent defaults or L6 compliance verdicts.
+  L6's physical Policy report/detail service reads CheckEvaluationFact and
+  process inventory through Facts<L6>, owning its declarations, receipt
+  history, classification, rollups, findings and remediation links. The
+  physical L5 producer owns live gathering and the sole evaluator, returning
+  kindless plain L0 observations/status/reference/finding data, never an
+  upper report or classification. Precedence and result construction stay
+  private L5 behaviour; canonical legacy status/result re-exports keep JSON.
+  Preserve shared-gather failure priority over deferred raw budget errors,
+  distinct report/detail clock timing and full maps_to subject sets.
+  The same L6 service owns live reporting-clock subtree selection, typed
+  L2 exploited-finding/L4 confirmed-report reads and receipt-history folds.
+  Attestation and withdrawal validation/writes stay with its own append-only
+  store. Preserve failure order, exact item scope, corrective anchors and
+  deadline deduplication; a withdrawal is a new row, never a status update.
+  L6's live Scenarios service owns authored real/draft catalogue selection,
+  overlays, goals, backlogs, forecasts and promotion deltas. It reads metrics,
+  inventory, production and kindless L5 check facts through Facts<L6>, never
+  supplied values or a callback. Request phases preserve outside-only metric
+  compatibility error priority. Promotion compares both subject sets against
+  one overlay-selected gather via the L5 CheckComparisonFact, then calls its
+  same-level remediation service and adjacent command chain. Legacy task
+  hydration remains outside; Scenarios response data canonically belongs to
+  L6 with unchanged wire re-exports. Remaining command paths still need migration.
+  L6's own authored plan inputs feed the actual L5 plan provider, which loads
+  fresh Quality profiles and invokes the sole compiler. L0 holds plain generic
+  plan data; enforcement and evaluation methods remain outside it. L4's live
+  blueprint provider exposes strongly typed authored fields, normalizing legacy
+  rows without exposing task/run lifecycle. Preserve every authored field in
+  both directions; the schema and projection tests guard against silent drops.
+  L5's preview service reads those blueprints and L3's declaration-order roster
+  through Facts<L5>, owning validation, part preview, injection, binding and gap
+  judgement with the canonical process algorithms. The roster contains only
+  raw default/name metadata, never arguments, resolved actors or role verdicts.
+  L6 Policy selects workflows and folds typed L5 targets/preview observations;
+  whole-store errors are fatal, individual refusals are findings. Preserve
+  category overrides, original author labels and deferred failure order.
+  Dispatch binds through that same L5 owner, but still compiles plans fresh;
+  an advisory preview never becomes execution evidence. No Engine callback,
+  precompiled plan or upper report enters the preview service.
+  The complete six-service split still remains.
   L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.
   L6 still owns authored policy and budget intent. Policy remediation and
@@ -295,7 +372,7 @@ something impossible.
   The router hydrates legacy task payloads through People's live L4
   TaskSnapshotFact, never a level service. The sealed Commands relation allows
   exactly five adjacent edges; no callback into Engine supplies creation.
-  Signposts, the other command paths and full live service isolation remain
+  The other command paths and full live service isolation remain
   separate #193 requirements.
 - Benchmark/dataset/knowledge behavior and the KnowledgeProvider seam belong
   to L5. Core's configuration adapter projects resolved agents into L5's
@@ -319,7 +396,7 @@ something impossible.
   tables, indexes, append-only records and JSON. Never make L6 store or read
   process evidence directly; upward live reads still use its fact ports.
   Splitting storage does not finish service/provider isolation. The
-  signpost reader move and live adjacent command ports still remain in #193.
+  remaining live adjacent command ports still remain in #193.
 - L1 owns backup history, deployment/health history and infrastructure expiry
   cache stores. L2 owns the credential expiry cache; L6 owns renewal push
   attempt receipts. Each opens only its own existing tables on the instance
@@ -353,8 +430,8 @@ something impossible.
   dev/target table. They are not extra level services or a fact channel.
   Keep the lossy observer bus and run-token redaction unchanged. Actual mounts,
   `Engine::handle(Envelope)` and the single `access.rs` authorization check
-  remain in the daemon; six-service/command-port isolation and the Operations
-  signpost reader move are still unfinished #193 work.
+  remain in the daemon; complete six-service/command-port isolation is still
+  unfinished #193 work.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's
   `scope.roles` down to that scope -- from the live snapshot, and `authorize`,

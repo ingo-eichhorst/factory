@@ -4,6 +4,36 @@ use factory_kernel::{LaunchKind, LaunchSpec, Schedule, Span};
 use serde_json::json;
 
 #[test]
+fn metric_registry_wire_view_and_counts_are_identical_l5_owner_types() {
+    let definition = factory_assurance::metrics::resolve(
+        &factory_assurance::metrics::MetricId::new("fail_rate").unwrap(),
+    )
+    .unwrap();
+    let old: factory_core::protocol::MetricDefView = definition.into();
+    let canonical: factory_assurance::metrics::MetricDefView = old;
+    let wire = serde_json::to_value(&canonical).unwrap();
+    assert_eq!(wire["id"], "fail_rate");
+    assert_eq!(wire["unit"], "ratio");
+    assert_eq!(wire["better"], "lower");
+    assert!(wire["description"].as_str().unwrap().contains("failed"));
+    let old: factory_core::policy::StatusCounts =
+        factory_assurance::evaluation_rollup::StatusCounts {
+            satisfied: 2,
+            attested: 1,
+            stale: 3,
+            open: 4,
+            not_applicable: 5,
+        };
+    let canonical: factory_assurance::evaluation_rollup::StatusCounts = old;
+    assert_eq!(
+        serde_json::to_value(canonical).unwrap(),
+        json!({
+            "satisfied":2,"attested":1,"stale":3,"open":4,"not_applicable":5,
+        })
+    );
+}
+
+#[test]
 fn roster_declarations_and_sandbox_are_canonical_owners_with_unchanged_wire_forms() {
     let legacy: config::AgentRef = serde_yaml_ng::from_str(
         "harness: pi\nname: worker\nargs: [--fixture]\nmax_sessions: 2"
@@ -419,4 +449,94 @@ fn benchmark_knowledge_and_provider_paths_are_the_canonical_l5_owners() {
     );
     let store: Option<factory_core::bench_store::BenchStore> = None;
     let _: Option<factory_assurance::bench_store::BenchStore> = store;
+}
+
+#[test]
+fn spend_query_is_canonical_plain_kernel_vocabulary_with_unchanged_legacy_json() {
+    let query = factory_kernel::SpendQuery {
+        scope: Some("work".into()),
+        group_by: factory_kernel::CostGroupBy::Scope,
+        ..Default::default()
+    };
+    let old: factory_core::usage::SpendQuery = query.clone();
+    let process: factory_process::usage::SpendQuery = old.clone();
+    assert_eq!(process, query);
+    assert_eq!(
+        serde_json::to_value(old).unwrap(),
+        json!({"basis":"started", "scope":"work", "group_by":"scope"})
+    );
+    let empty: factory_kernel::SpendQuery = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(empty.basis, factory_kernel::SpendBasis::Started);
+    assert_eq!(empty.group_by, factory_kernel::CostGroupBy::Task);
+    assert!(empty.scope.is_none() && empty.from.is_none() && empty.to.is_none());
+}
+
+#[test]
+fn metric_identity_values_and_goals_views_are_canonical_with_the_original_wire_shape() {
+    let id = factory_kernel::MetricId::new("compliance.cra").unwrap();
+    let legacy: factory_core::metrics::MetricId = id.clone();
+    let owned: factory_assurance::metrics::MetricId = legacy;
+    assert_eq!(owned, id);
+    let value = factory_kernel::MetricValue {
+        id,
+        value: None,
+        as_of: "2026-10-16T12:00:00Z".parse().unwrap(),
+        reason: Some("no catalogue".into()),
+    };
+    let legacy: factory_core::metrics::MetricValue = value.clone();
+    assert_eq!(
+        serde_json::to_value(legacy).unwrap(),
+        json!({"id": "compliance.cra", "value": null, "as_of": "2026-10-16T12:00:00Z", "reason": "no catalogue"})
+    );
+    let report: Option<factory_direction::goals_view::GoalsReport> = None;
+    let report: Option<factory_core::protocol::GoalsReport> = report;
+    let _: Option<factory_interfaces::protocol::GoalsReport> = report;
+    assert!(factory_kernel::MetricId::new("invalid..id").is_err());
+}
+
+#[test]
+fn policy_declaration_is_canonical_l6_data_with_the_original_config_json() {
+    let owned: factory_direction::policy_intent::PolicyDeclaration =
+        serde_json::from_value(json!({
+            "frameworks": ["cra"], "tighten": {"cra/a": {"max_age": "7d"}},
+            "not_applicable": [{"control": "cra/b", "rationale": "not used"}]
+        }))
+        .unwrap();
+    let legacy: factory_core::config::PolicyDeclaration = owned.clone();
+    let outside: factory_composition::config::PolicyDeclaration = legacy;
+    assert_eq!(outside, owned);
+    assert_eq!(
+        serde_json::to_value(outside).unwrap(),
+        json!({
+            "frameworks": ["cra"], "tighten": {"cra/a": {"max_age": "1w"}},
+            "not_applicable": [{"control": "cra/b", "rationale": "not used"}]
+        })
+    );
+    assert!(
+        serde_json::from_value::<factory_core::config::PolicyDeclaration>(
+            json!({"framework": ["cra"]})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn check_results_are_canonical_kernel_data_with_unchanged_policy_wire_fields() {
+    let wire = json!({"control": "cra/a", "title": "A", "kind": "regulation",
+        "status": "stale", "reasons": ["expired"], "refs": [{"kind": "attestation", "id": "receipt"}]});
+    let owned: factory_kernel::EvaluationResult<factory_direction::policy::Kind> =
+        serde_json::from_value(wire.clone()).unwrap();
+    let assurance: factory_assurance::checks::EvaluationResult<factory_direction::policy::Kind> =
+        owned;
+    let legacy: factory_core::policy::ControlStatus = assurance;
+    assert_eq!(serde_json::to_value(&legacy).unwrap(), wire);
+    let status: factory_kernel::Status = legacy.status;
+    let _: factory_core::policy::Status = status;
+    let reference: factory_kernel::EvidenceRef = legacy.refs[0].clone();
+    let _: factory_assurance::checks::EvidenceRef = reference;
+    let finding: factory_assurance::checks::EvidenceFinding = factory_kernel::EvidenceFinding {
+        subject: "demo".into(),
+        detail: "ambiguous".into(),
+    };
+    assert_eq!(finding.detail, "ambiguous");
 }

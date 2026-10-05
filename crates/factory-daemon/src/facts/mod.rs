@@ -131,6 +131,69 @@ port!(
     l5::provider
 );
 port!(
+    SignpostFact,
+    factory_assurance::signposts::Provider<'a, checks::Ports<'a>>,
+    factory_assurance::signposts::Read,
+    SignpostFact,
+    l5::signpost_provider
+);
+port!(
+    MetricValuesFact,
+    factory_assurance::metric_values::Provider<'a, checks::Ports<'a>>,
+    factory_assurance::metric_values::Read,
+    MetricValuesFact,
+    l5::metric_provider
+);
+port!(
+    CheckEvaluationFact,
+    factory_assurance::check_evaluation::Provider<'a, checks::Ports<'a>>,
+    factory_assurance::check_evaluation::Read,
+    CheckEvaluationFact,
+    l5::check_provider
+);
+port!(
+    CheckComparisonFact,
+    factory_assurance::check_evaluation::Provider<'a, checks::Ports<'a>>,
+    factory_assurance::check_evaluation::ComparisonRead,
+    CheckComparisonFact,
+    l5::check_provider
+);
+port!(
+    CompiledPlanFact,
+    factory_assurance::plan_service::Provider,
+    factory_assurance::plan_service::Read,
+    CompiledPlanFact,
+    l5::plan_provider
+);
+port!(
+    WorkflowBlueprintFact,
+    factory_process::workflow_blueprints::Provider<'a>,
+    factory_kernel::WorkflowBlueprintQuery,
+    Vec<WorkflowBlueprintFact>,
+    l4::blueprint_provider
+);
+port!(
+    FunctionaryRosterFact,
+    factory_agents::roster::Provider,
+    String,
+    FunctionaryRosterFact,
+    l3::provider
+);
+port!(
+    WorkflowTargetsFact,
+    factory_assurance::workflow_preview::Provider<factory_agents::roster::Provider>,
+    WorkflowBlueprintFact,
+    WorkflowTargetsFact,
+    l5::preview_provider
+);
+port!(
+    WorkflowPreviewFact,
+    factory_assurance::workflow_preview::Provider<factory_agents::roster::Provider>,
+    factory_assurance::workflow_preview::Read,
+    WorkflowPreviewFact,
+    l5::preview_provider
+);
+port!(
     BackupFact,
     factory_infrastructure::backup_facts::Provider<'a>,
     DateTime<Utc>,
@@ -578,6 +641,15 @@ mod tests {
         registered::<ProductionFact>();
         registered::<ProcessMetricFact>();
         registered::<BenchResolutionFact>();
+        registered::<SignpostFact>();
+        registered::<MetricValuesFact>();
+        registered::<CheckEvaluationFact>();
+        registered::<CheckComparisonFact>();
+        registered::<CompiledPlanFact>();
+        registered::<WorkflowBlueprintFact>();
+        registered::<FunctionaryRosterFact>();
+        registered::<WorkflowTargetsFact>();
+        registered::<WorkflowPreviewFact>();
         registered::<DaemonConfigFact>();
         registered::<BackupFact>();
         registered::<ScopeCapacityFact>();
@@ -613,6 +685,307 @@ mod tests {
         wired.sort_unstable();
         catalogue.sort_unstable();
         assert_eq!(wired, catalogue);
+    }
+
+    #[test]
+    fn physical_policy_service_reads_live_check_facts_and_classifies_only_its_own_declarations() {
+        let owner = include_str!("../../../factory-direction/src/policy_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let compact: String = owner.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("Facts::<L6>::new().get::<CheckEvaluationFact,_>"));
+        assert!(compact.contains("Facts::<L6>::new().get::<TaskInventoryFact,_>"));
+        assert!(owner.contains("kind: declaration.kind"));
+        for forbidden in [
+            "Engine",
+            "factory_core",
+            "factory_composition",
+            "factory_interfaces",
+            "factory_daemon",
+            "TaskStore",
+            "dyn Fn",
+            "BoxFuture",
+            "policy::evaluate(",
+        ] {
+            assert!(
+                !owner.contains(forbidden),
+                "Policy service gained backedge/evaluator {forbidden}"
+            );
+        }
+        let producer = include_str!("../../../factory-assurance/src/check_evaluation.rs");
+        for required in [
+            "Provide<CheckEvaluationFact>",
+            "self.evidence.shared",
+            ".for_scope(",
+            "checks::evaluate",
+            "checks::evidence_findings",
+        ] {
+            assert!(producer.contains(required), "provider lost {required}");
+        }
+        for forbidden in [
+            "Engine",
+            "factory_core",
+            "factory_direction",
+            "factory_composition",
+            "factory_interfaces",
+            "TaskStore",
+            "dyn Fn",
+            "PolicyReport",
+        ] {
+            assert!(
+                !producer.contains(forbidden),
+                "check provider gained {forbidden}"
+            );
+        }
+        let schema = include_str!("../../../factory-kernel/src/check_results.rs");
+        assert!(
+            !schema.contains("fn rank(")
+                && !schema.contains("fn from_kind(")
+                && !schema.contains("fn evaluate(")
+        );
+        let evaluator = include_str!("../../../factory-assurance/src/checks.rs");
+        assert!(evaluator.contains("impl StatusOrder for StatusKind"));
+        assert!(evaluator.contains("impl BuildStatus for Status"));
+        let wiring = include_str!("../policies/mod.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let endpoint = wiring
+            .split("pub(crate) async fn policy_report(")
+            .nth(1)
+            .unwrap()
+            .split("/// Record an attestation:")
+            .next()
+            .unwrap();
+        assert!(endpoint.contains("policy_service(&snapshot)"));
+        assert!(
+            !endpoint.contains("policy::evaluate(")
+                && !endpoint.contains("evidence_for_scope(")
+                && !endpoint.contains("policy::applicable(")
+        );
+    }
+
+    #[test]
+    fn policy_clock_and_receipts_have_actual_direction_owners_not_router_callbacks() {
+        let owner = include_str!("../../../factory-direction/src/policy_service/receipts.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let compact: String = owner.chars().filter(|c| !c.is_whitespace()).collect();
+        for required in [
+            "Facts::<L6>::new()",
+            ".get::<ExploitedFinding,_>",
+            ".get::<ConfirmedSecurityReport,_>",
+            "reporting_clock::compute(",
+            ".receipts.append_attestation(",
+            ".receipts.append_withdrawal(",
+            "self.intent.catalogues_with_tags(knowledge)",
+        ] {
+            assert!(
+                compact.contains(required),
+                "L6 clock/receipt service lost {required}"
+            );
+        }
+        for forbidden in [
+            "Engine",
+            "factory_core",
+            "factory_process",
+            "factory_environment",
+            "factory_interfaces",
+            "TaskStore",
+            "dyn Fn",
+            "BoxFuture",
+            "self.policy_clock(",
+        ] {
+            assert!(
+                !owner.contains(forbidden),
+                "L6 clock service gained callback/backedge {forbidden}"
+            );
+        }
+        let clock_wire = include_str!("../policies/clock.rs");
+        assert!(clock_wire.contains("policy_service(&snapshot)"));
+        assert!(
+            !clock_wire.contains("reporting_clock::compute(")
+                && !clock_wire.contains(".get::<")
+                && !clock_wire.contains("self.policies")
+        );
+        let wiring = include_str!("../policies/mod.rs");
+        let endpoints = wiring
+            .split("pub(crate) async fn policy_attest(")
+            .nth(1)
+            .unwrap()
+            .split("/// Close a gap:")
+            .next()
+            .unwrap();
+        assert!(endpoints.contains(".attest(") && endpoints.contains(".withdraw("));
+        for forbidden in [
+            "append_attestation",
+            "append_withdrawal",
+            "policy::applicable",
+            "self.policy_clock(",
+            "self.policies",
+        ] {
+            assert!(
+                !endpoints.contains(forbidden),
+                "router kept receipt behaviour {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn goals_own_live_reads_and_checkins_and_the_metric_fact_owns_its_computation() {
+        let goals = include_str!("../../../factory-direction/src/goals_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let compact: String = goals.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("Facts::<L6>::new().get::<MetricValuesFact,_>"));
+        for required in [
+            "goals::load",
+            "goals::evaluate",
+            "self.store.all()",
+            "self.store.append",
+            "goals::current_cycle",
+            "ancestors_of",
+        ] {
+            assert!(goals.contains(required), "Goals owner lost {required}");
+        }
+        let metric = include_str!("../../../factory-assurance/src/metric_values.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(metric.contains("Provide<MetricValuesFact>"));
+        assert!(
+            metric.contains(".gather_measurements(")
+                && metric.contains(".gather_policy(")
+                && metric.contains(".finish(")
+        );
+        for owner in [goals, metric] {
+            for forbidden in [
+                "factory_core",
+                "factory_composition",
+                "factory_interfaces",
+                "factory_daemon",
+                "Engine",
+                "TaskStore",
+                "dyn Fn",
+                "BoxFuture",
+            ] {
+                assert!(
+                    !owner.contains(forbidden),
+                    "Owner gained backedge/callback {forbidden}"
+                );
+            }
+        }
+        let query = metric
+            .split("pub struct Read")
+            .nth(1)
+            .unwrap()
+            .split("pub struct Provider")
+            .next()
+            .unwrap();
+        assert!(
+            !query.contains("MetricValue")
+                && !query.contains("Gathered")
+                && !query.contains("Metrics>")
+        );
+        let wiring = include_str!("../goals/mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        // Test-only imports occur before the runtime. Inspect the complete
+        // prefix through the actual test module instead of stopping there.
+        let runtime = include_str!("../goals/mod.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert!(runtime.contains("goals_service::Service::new"));
+        for forbidden in [
+            "goals::load",
+            "goals::evaluate",
+            "self.goals.all",
+            "self.goals.append",
+            "self.metrics(",
+        ] {
+            assert!(
+                !runtime.contains(forbidden),
+                "Router retained Goals behavior {forbidden}"
+            );
+        }
+        assert!(wiring.contains("Outside-stack"));
+    }
+
+    #[test]
+    fn policy_intent_owns_catalogues_receipts_budget_inputs_and_the_single_declaration_chain() {
+        let owner = include_str!("../../../factory-direction/src/policy_intent.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let compact: String = owner.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("Facts::<L6>::new().get::<KnowledgeTags,_>"));
+        for required in [
+            "policy::load_all",
+            "self.receipts.all()",
+            "budget::load",
+            "policy::applicable",
+            "policy::metric_subject",
+            "scope_ancestors",
+            "scope_subtree",
+        ] {
+            assert!(
+                owner.contains(required),
+                "Policy intent owner lost {required}"
+            );
+        }
+        for forbidden in [
+            "factory_core",
+            "factory_composition",
+            "factory_interfaces",
+            "factory_daemon",
+            "Engine",
+            "TaskStore",
+            "dyn Fn",
+            "BoxFuture",
+            "PolicyReport",
+            "CostReport",
+        ] {
+            assert!(
+                !owner.contains(forbidden),
+                "Policy intent gained backedge/result {forbidden}"
+            );
+        }
+        let config = include_str!("../../../factory-composition/src/config.rs");
+        assert!(config.contains("pub use factory_direction::policy_intent::PolicyDeclaration"));
+        assert!(config.contains("factory_direction::policy_intent::chain_for_scope("));
+        assert!(!config.contains("pub struct PolicyDeclaration"));
+        let wiring = include_str!("../policies/mod.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let metric_input = wiring
+            .split("pub(crate) async fn metric_policy_inputs(")
+            .nth(1)
+            .unwrap()
+            .split("/// Historical request failure")
+            .next()
+            .unwrap();
+        let compact_input: String = metric_input
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(compact_input.contains("policy_intent_service(snapshot).metric_inputs(scope)"));
+        for forbidden in [
+            "policy::load_all",
+            "policy::applicable",
+            "self.policies.all",
+            "check_budget_intent",
+        ] {
+            assert!(
+                !metric_input.contains(forbidden),
+                "Router retained policy input behavior {forbidden}"
+            );
+        }
     }
 
     #[test]
@@ -654,15 +1027,45 @@ mod tests {
     #[test]
     fn spend_consumers_have_no_second_aggregation_or_upward_l6_helper() {
         let budget = include_str!("../budgets.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert!(budget.contains("check_budget_intent"));
+        assert!(budget.contains("factory_direction::budget_service::Service::new"));
+        assert!(!budget.contains("get::<CostReport>") && !budget.contains("month_spend"));
+        let direction = include_str!("../../../factory-direction/src/budget_service.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
-        assert!(budget.contains("get::<CostReport>"));
-        assert!(budget.contains("check_budget_intent") && budget.contains("month_spend"));
+        let compact: String = direction.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("Facts::<L6>::new().get::<CostReport,_>"));
+        assert!(direction.contains("budget::load") && direction.contains("budget::assess"));
+        assert!(direction.contains("scope_ancestors") && direction.contains("resolve_scope"));
+        for forbidden in [
+            "factory_core",
+            "factory_process",
+            "factory_composition",
+            "factory_daemon",
+            "TaskStore",
+            "Engine",
+            "dyn Fn",
+            "BoxFuture",
+        ] {
+            assert!(
+                !direction.contains(forbidden),
+                "Budget owner gained a backedge/callback: {forbidden}"
+            );
+        }
+        assert!(!direction.contains("runs_between") && !direction.contains("CostRowExt"));
         assert!(!budget.contains("async fn budget_policy_input"));
         let evidence = include_str!("../../../factory-assurance/src/evidence.rs")
-            .split("\nmod tests").next().unwrap();
-        assert!(evidence.contains("pub async fn budget(") && evidence.contains("pub async fn month_spend("));
+            .split("\nmod tests")
+            .next()
+            .unwrap();
+        assert!(
+            evidence.contains("pub async fn budget(")
+                && evidence.contains("pub async fn month_spend(")
+        );
         assert!(evidence.contains("get::<CostReport, _>") && !evidence.contains("runs_between"));
         assert!(!budget.contains("runs_between") && !budget.contains("crate::costs"));
         let costs = include_str!("../costs.rs")
@@ -676,12 +1079,12 @@ mod tests {
         let owner = include_str!("../../../factory-process/src/measurements.rs");
         assert!(owner.contains("impl Provide<CostReport> for MeasurementProvider"));
         assert!(!owner.contains("factory_core") && !owner.contains("Engine"));
-        let metrics = include_str!("../metrics.rs")
+        let metrics = include_str!("../../../factory-assurance/src/metrics_service.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
         assert!(
-            metrics.contains("get::<factory_kernel::CostReport>")
+            metrics.contains("get::<factory_kernel::CostReport, _>")
                 && metrics.contains("SpendBasis::Finished")
         );
         let branch = metrics
@@ -691,12 +1094,13 @@ mod tests {
             .split("} else if is_usage_metric")
             .next()
             .unwrap();
+        let branch: String = branch.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(branch.contains("sources.spend") && !branch.contains("usage_value"));
     }
 
     #[test]
     fn registry_process_and_benchmark_reads_are_producer_owned() {
-        let metrics = include_str!("../metrics.rs")
+        let metrics = include_str!("../../../factory-assurance/src/metrics_service.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
@@ -711,8 +1115,53 @@ mod tests {
                 "metrics bypasses a fact port: {forbidden}"
             );
         }
-        for fact in ["ProductionFact", "ProcessMetricFact", "BenchResolutionFact"] {
-            assert!(metrics.contains(&format!("get::<factory_kernel::{fact}>")));
+        for fact in ["ProductionFact", "ProcessMetricFact"] {
+            assert!(metrics.contains(&format!("get::<{fact}, _>")));
+        }
+        let compact: String = metrics.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact
+            .contains("Provide::<factory_kernel::BenchResolutionFact>::get(&self.evidence.own"));
+        assert!(metrics.contains("Facts::<L5>::new()"));
+        for forbidden in [
+            "factory_core",
+            "factory_direction",
+            "factory_interfaces",
+            "Engine",
+            "Facts::<L6>",
+            "self.policy_report(",
+        ] {
+            assert!(
+                !metrics.contains(forbidden),
+                "L5 metric owner back-edge: {forbidden}"
+            );
+        }
+        let service = metrics.split("/// Sum `finished`").next().unwrap();
+        for forbidden in ["Fn(", "FnMut(", "FnOnce("] {
+            assert!(
+                !service.contains(forbidden),
+                "L5 metric owner callback: {forbidden}"
+            );
+        }
+        let request = include_str!("../metrics.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert!(
+            request.contains("service.gather_measurements(")
+                && request.contains("service.gather_policy(")
+                && request.contains("service.finish(")
+        );
+        for forbidden in [
+            "fn compute_one",
+            "fn compliance_value",
+            "fn rolling_series",
+            ".policy_report(",
+            "Facts::<L6>::",
+        ] {
+            assert!(
+                !request.contains(forbidden),
+                "metric computation left in router: {forbidden}"
+            );
         }
         let process = include_str!("../../../factory-process/src/process_metrics.rs")
             .split("#[cfg(test)]")
@@ -740,7 +1189,7 @@ mod tests {
     fn upper_level_task_inventory_reads_cannot_bypass_the_l4_port() {
         for file in [
             include_str!("../policies/mod.rs"),
-            include_str!("../scenarios/mod.rs"),
+            include_str!("../../../factory-direction/src/scenarios_service.rs"),
         ] {
             let production = file.split("#[cfg(test)]\nmod tests").next().unwrap();
             let compact: String = production.chars().filter(|c| !c.is_whitespace()).collect();
@@ -748,7 +1197,8 @@ mod tests {
                 !compact.contains("self.store"),
                 "upper-level task read bypasses L4"
             );
-            assert!(production.contains("get::<TaskInventoryFact>"));
+            assert!(production.contains("get::<TaskInventoryFact>")
+                || compact.contains("get::<TaskInventoryFact,_>"));
         }
         // Quality report and remediation both read L4 through facts. A
         // command acknowledgement cannot supply inventory or a task record.
@@ -772,6 +1222,173 @@ mod tests {
             assert!(compact.contains("get::<TaskInventoryFact,_>"));
             assert!(!compact.contains("TaskStore") && !compact.contains("Engine"));
         }
+    }
+
+    #[test]
+    fn scenarios_have_actual_l6_reads_folds_and_adjacent_promotion_not_engine_callbacks() {
+        let owner = include_str!("../../../factory-direction/src/scenarios_service.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let compact: String = owner.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("Facts::<L6>::new()"));
+        for fact in [
+            "MetricValuesFact",
+            "TaskInventoryFact",
+            "CheckEvaluationFact",
+            "CheckComparisonFact",
+            "ProductionFact",
+        ] {
+            assert!(
+                compact.contains(&format!("get::<{fact},_>")),
+                "missing actual Scenarios read: {fact}"
+            );
+        }
+        for operation in [
+            "scenario::load(&dir)",
+            "scenario::overlay_chain(",
+            "scenario::policy_delta(",
+            "scenario::forecast_completion(",
+            "scenario::goal_probability(",
+            "commands.promote(",
+        ] {
+            assert!(
+                compact.contains(operation),
+                "Scenarios behaviour missing from owner: {operation}"
+            );
+        }
+        for forbidden in [
+            "factory_core",
+            "factory_process",
+            "factory_interfaces",
+            "Engine",
+            "TaskStore",
+            "dyn Fn",
+            "BoxFuture",
+            "TaskSnapshotFact",
+        ] {
+            assert!(
+                !owner.contains(forbidden),
+                "Scenarios owner acquired a backedge: {forbidden}"
+            );
+        }
+        let wiring = include_str!("../scenarios/mod.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        let compact_wiring: String = wiring.chars().filter(|c| !c.is_whitespace()).collect();
+        for call in [
+            "service.prepare_report(",
+            "plan.read_metrics(",
+            "service.finish_report(",
+            "service.prepare_whatif(",
+            "service.finish_whatif(",
+            ".promote(scenario_name,scope,agent,",
+        ] {
+            assert!(
+                compact_wiring.contains(call),
+                "request bypasses actual Scenarios owner: {call}"
+            );
+        }
+        for forbidden in [
+            "self.store",
+            "self.metrics(",
+            "scenario::load(",
+            "scenario::policy_delta(",
+            "scenario::forecast_completion(",
+            "evidence_for_scope(",
+            "checks::evaluate(",
+        ] {
+            assert!(
+                !compact_wiring.contains(forbidden),
+                "Scenarios logic remains outside: {forbidden}"
+            );
+        }
+        assert!(compact_wiring.contains("crate::commands::task_snapshot(self,entry.task.id)"));
+        assert!(compact_wiring.contains("ifprovider.policy_was_gathered()"));
+        let provider = include_str!("../../../factory-assurance/src/check_evaluation.rs");
+        let _: fn(
+            <CheckComparisonFact as Port>::Provider<'static>,
+        ) -> factory_assurance::check_evaluation::Provider<'static, checks::Ports<'static>> =
+            |provider| provider;
+        assert!(provider.contains("Provide<factory_kernel::CheckComparisonFact>"));
+        assert!(provider.contains("primary: observations(&input.subjects)"));
+        assert!(provider.contains("alternative: observations(&alternative.subjects)"));
+        assert!(provider.contains(".for_scope("));
+        let schema = FACT_CATALOGUE
+            .iter()
+            .find(|f| f.fact == "CheckComparisonFact")
+            .unwrap();
+        assert_eq!(schema.producer, "L5");
+        assert_eq!(schema.readers, ["L6 Scenarios promotion"]);
+    }
+    #[test]
+    fn signposts_are_computed_in_l5_and_read_directly_by_people_not_operations() {
+        let owner = include_str!("../../../factory-assurance/src/signposts.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let compact: String = owner.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("typeLevel=L5"));
+        assert!(compact.contains("Provide<SignpostFact>"));
+        assert!(
+            compact.contains("self.metrics.gather(") && compact.contains("self.metrics.finish(")
+        );
+        assert!(compact.contains("evaluate_signposts(&scenario.signposts"));
+        for forbidden in [
+            "factory_core",
+            "factory_direction",
+            "factory_interfaces",
+            "Engine",
+            "dyn Fn",
+            "BoxFuture",
+        ] {
+            assert!(
+                !owner.contains(forbidden),
+                "upper/outside backedge in signpost producer: {forbidden}"
+            );
+        }
+        let query = owner
+            .split("pub struct Read")
+            .nth(1)
+            .unwrap()
+            .split("pub fn metric_ids")
+            .next()
+            .unwrap();
+        assert!(
+            !query.contains("MetricValue")
+                && !query.contains("SignpostStatus")
+                && !query.contains("SignpostFact")
+        );
+        let wiring = include_str!("../signposts.rs")
+            .split("#[cfg(test)]\n    pub(crate)")
+            .next()
+            .unwrap();
+        let compact_wiring: String = wiring.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact_wiring.contains("Facts::<People>::new(self).get::<SignpostFact>"));
+        assert!(!wiring.contains("self.metrics("));
+        let operations = include_str!("../operations.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(operations.contains("signposts: Vec::new()"));
+        assert!(
+            !operations.contains("triggered_signposts") && !operations.contains("signpost_cache")
+        );
+        let direction = include_str!("../../../factory-direction/src/scenario.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert!(!direction.contains("fn evaluate_signpost("));
+        assert!(direction.contains("factory_assurance::signposts::Signpost"));
+        let dashboard = include_str!("../../../../ui/js/dashboard.js");
+        assert!(dashboard.contains("api(\"/api/signposts\")"));
+        let schema = FACT_CATALOGUE
+            .iter()
+            .find(|entry| entry.fact == "SignpostFact")
+            .unwrap();
+        assert_eq!(schema.producer, "L5");
+        assert_eq!(schema.readers, ["People Dashboard"]);
     }
 
     #[test]

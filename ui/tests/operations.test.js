@@ -166,7 +166,7 @@ test("the Inbox lists the attention queue, every scope, with the reason inline",
   // attention queue now -- `answering` hands both the same operations-
   // shaped body, so the clock side contributes nothing (`.clock` is
   // `undefined` on it), same as a daemon that predates the endpoint.
-  assert.deepEqual([...requested].sort(), ["/api/important-dates", "/api/operations", "/api/policy/clock"]);
+  assert.deepEqual([...requested].sort(), ["/api/important-dates", "/api/operations", "/api/policy/clock", "/api/signposts"]);
   const html = el.inbox.innerHTML;
   assert.equal((html.match(/class="inbox-item"/g) || []).length, REPORT.attention.length);
   assert.match(html, /summarise support inbox<\/b> — blocked/);
@@ -253,6 +253,39 @@ test("the Inbox also lists the reporting clock's overdue and due-soon deadlines 
   assert.match(html, /data-action="reject"/);
   assert.match(html, /data-action="accept_rework"/);
   state.tasks = new Map();
+});
+
+
+test("the Dashboard and Inbox show escaped read-only signposts separately from waiting work", async () => {
+  const el = stubPage(["inbox", "dash-signposts", "inbox-signposts"]);
+  const requested = [];
+  const ops = answering({ ...REPORT, attention: [] }, requested);
+  globalThis.fetch = async (path) => {
+    if (path === "/api/signposts") {
+      requested.push(path);
+      return { status: 200, statusText: "OK", json: async () => ({ status: "ok", data: { kind: "signposts", fact: {
+        at: "2026-10-05T12:00:00Z", triggered: [{ scenario: "<slow>", metric: "throughput_week", reason: "<script>0 is below 999</script>", actions: ["approve"], task_id: "must-not-open" }],
+      } } }) };
+    }
+    return ops(path);
+  };
+  await loadInbox();
+  assert.equal(requested.filter((path) => path === "/api/signposts").length, 1);
+  assert.match(el.inbox.innerHTML, /Nothing waiting on a person right now/);
+  for (const id of ["dash-signposts", "inbox-signposts"]) {
+    assert.equal(el[id].hidden, false);
+    assert.match(el[id].innerHTML, /Scenario observations/);
+    assert.match(el[id].innerHTML, /&lt;slow&gt;/);
+    assert.match(el[id].innerHTML, /&lt;script&gt;/);
+    assert.doesNotMatch(el[id].innerHTML, /data-action|data-task|<script>/);
+  }
+  globalThis.fetch = async (path) => {
+    if (path === "/api/signposts") throw new Error("fact unavailable");
+    return ops(path);
+  };
+  await loadInbox();
+  assert.match(el["dash-signposts"].innerHTML, /observations are unavailable/);
+  assert.match(el.inbox.innerHTML, /Nothing waiting on a person right now/);
 });
 
 // --------------------------------------------------------------- dialogs

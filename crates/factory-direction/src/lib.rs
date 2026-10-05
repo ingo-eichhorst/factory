@@ -12,13 +12,20 @@
 //! ```
 
 pub mod budget;
+pub mod budget_service;
 pub mod goals;
+pub mod goals_service;
+pub mod goals_view;
 pub mod goals_store;
 pub mod policy;
 pub mod policy_export;
+pub mod policy_intent;
+pub mod policy_service;
 pub mod policy_report;
 pub mod policy_store;
 pub mod reporting_clock;
 pub mod renewal_store;
 pub mod scenario;
+pub mod scenarios_view;
+pub mod scenarios_service;
 pub mod remediation;

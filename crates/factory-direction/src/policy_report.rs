@@ -78,27 +78,7 @@ pub struct PolicyReport {
     pub catalogues: Vec<CatalogueSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowEnforcement {
-    pub workflow: String,
-    pub name: String,
-    pub scope: String,
-    pub node: String,
-    pub step: String,
-    pub kind: factory_kernel::StepKind,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_by: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actor: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowEnforcementFinding {
-    pub workflow: String,
-    pub name: String,
-    pub scope: String,
-    pub detail: String,
-}
+pub use factory_kernel::{WorkflowEnforcement, WorkflowEnforcementFinding};
 
 /// One control's full detail: its catalogue data as it applies at the scope
 /// asked about, its status there, and its whole attestation history --

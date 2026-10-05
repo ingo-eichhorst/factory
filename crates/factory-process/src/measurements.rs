@@ -27,14 +27,7 @@ pub struct AttestedQuery {
     pub window: Window,
 }
 
-pub struct ProductionQuery {
-    pub scope: Option<String>,
-    pub now: chrono::DateTime<Utc>,
-    pub minutes: Option<u32>,
-    pub bin: factory_kernel::ProductionBin,
-    /// The people production endpoint remains exact; metrics ask for a subtree.
-    pub subtree: bool,
-}
+pub use factory_kernel::ProductionQuery;
 pub struct ProcessMetricsQuery {
     pub scope: Option<String>,
     pub now: chrono::DateTime<Utc>,

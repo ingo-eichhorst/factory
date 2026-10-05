@@ -9,6 +9,7 @@ import {
   findingSummary,
   gatewaySummary,
   identityText,
+  imageFailureSummary,
   scanAge,
   statusSummary,
 } from "./doctor-model.js";
@@ -61,6 +62,19 @@ function gatewaySection(rows) {
   return `<section class="doctor-evidence-grid">${cards}</section>`;
 }
 
+function imageFailureSection(rows) {
+  if (!rows?.length) return "";
+  return `<section class="doctor-evidence-grid">${rows.map((row) => {
+    const failure = imageFailureSummary(row);
+    return `<article class="infra-card doctor-evidence">
+      <header class="infra-card-head"><h3>OpenShell image ${esc(failure.name)}</h3><span class="tag bk-badge" data-level="warn">stale image</span></header>
+      <p class="infra-hint">Current image ${esc(failure.key)} failed to build: ${esc(failure.reason)}</p>
+      <div class="sub">Failed at ${esc(failure.since)} · selected older image <code>${esc(failure.image)}</code></div>
+      ${failure.command ? `<p class="infra-hint">Rebuild with <code>${esc(failure.command)}</code></p>` : ""}
+    </article>`;
+  }).join("")}</section>`;
+}
+
 export function renderDoctor() {
   const unavailable = $("doctor-unavailable");
   if (unavailable) unavailable.hidden = !state.doctorUnavailable;
@@ -89,6 +103,7 @@ export function renderDoctor() {
       ${evidenceCard("Installed binaries", report.running, report.now)}
     </section>
     ${gatewaySection(report.openshell)}
+    ${imageFailureSection(report.openshell_image_failures)}
     <section class="doctor-findings">
       <h3>Running findings <span class="sub">${counts.open} open · ${counts.assessed} assessed · ${counts.total} total</span></h3>
       ${findings.length ? `<div class="doctor-finding-list">${findings.map(findingCard).join("")}</div>`

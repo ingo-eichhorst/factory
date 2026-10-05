@@ -16,6 +16,15 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<ProductionFact, L4>("ProductionFact", "L4");
     assert_producer::<ProcessMetricFact, L4>("ProcessMetricFact", "L4");
     assert_producer::<BenchResolutionFact, L5>("BenchResolutionFact", "L5");
+    assert_producer::<SignpostFact, L5>("SignpostFact", "L5");
+    assert_producer::<MetricValuesFact, L5>("MetricValuesFact", "L5");
+    assert_producer::<CheckEvaluationFact, L5>("CheckEvaluationFact", "L5");
+    assert_producer::<CheckComparisonFact, L5>("CheckComparisonFact", "L5");
+    assert_producer::<CompiledPlanFact, L5>("CompiledPlanFact", "L5");
+    assert_producer::<WorkflowBlueprintFact, L4>("WorkflowBlueprintFact", "L4");
+    assert_producer::<FunctionaryRosterFact, L3>("FunctionaryRosterFact", "L3");
+    assert_producer::<WorkflowTargetsFact, L5>("WorkflowTargetsFact", "L5");
+    assert_producer::<WorkflowPreviewFact, L5>("WorkflowPreviewFact", "L5");
     assert_producer::<InfrastructureExpiryFact, L1>("InfrastructureExpiryFact", "L1");
     assert_producer::<RenewalDeclarationsFact, L1>("RenewalDeclarationsFact", "L1");
     assert_producer::<CredentialExpiryFact, L2>("CredentialExpiryFact", "L2");
@@ -48,6 +57,81 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
 }
 
 #[test]
+fn compiled_plan_and_preview_observations_are_plain_kernel_json() {
+    let wire = serde_json::json!({"plan":{"scope":"demo","category":"feature","steps":[{
+        "id":"tests","step":"tests","kind":"gate","command":"true","timeout_seconds":5,
+        "required_by":["house/tested","quality/reliability"],"enforced":true
+    }]}});
+    let fact: CompiledPlanFact = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&fact).unwrap(), wire);
+    let preview = serde_json::json!({"enforcement":[{"workflow":"w","name":"Name","scope":"demo",
+        "node":"work","step":"review","kind":"review","required_by":["house/review"],"actor":"critic"}],
+        "findings":[{"workflow":"w","name":"Name","scope":"demo","detail":"ordering gap"}]});
+    let fact: WorkflowPreviewFact = serde_json::from_value(preview.clone()).unwrap();
+    assert_eq!(serde_json::to_value(fact).unwrap(), preview);
+}
+
+#[test]
+fn check_comparison_is_plain_kindless_l0_data_with_two_distinct_results() {
+    let wire = serde_json::json!({
+        "at": "2026-10-05T12:00:00Z",
+        "scopes": [{
+            "scope": "demo",
+            "primary": [{"control": "house/check", "title": "Check", "status": "satisfied", "reasons": []}],
+            "alternative": [{"control": "house/check", "title": "Check", "status": "open", "reasons": ["not gathered"]}]
+        }]
+    });
+    let fact: CheckComparisonFact = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&fact).unwrap(), wire);
+    assert_eq!(fact.scopes[0].primary[0].status.kind(), StatusKind::Satisfied);
+    assert_eq!(fact.scopes[0].alternative[0].status.kind(), StatusKind::Open);
+}
+
+#[test]
+fn metric_values_are_plain_validated_identity_data_without_registry_resolution() {
+    let fact: MetricValuesFact = serde_json::from_value(serde_json::json!({"values": [
+        {"id": "unregistered.family", "value": null, "as_of": "2026-10-16T12:00:00Z"}
+    ]}))
+    .unwrap();
+    assert_eq!(fact.values[0].id.as_str(), "unregistered.family");
+    assert_eq!(
+        serde_json::from_value::<MetricValuesFact>(serde_json::to_value(&fact).unwrap()).unwrap(),
+        fact
+    );
+    assert!(
+        serde_json::from_value::<MetricValuesFact>(serde_json::json!({"values": [
+            {"id": "invalid..id", "value": null, "as_of": "2026-10-16T12:00:00Z"}
+        ]}))
+        .is_err()
+    );
+}
+
+#[test]
+fn check_evaluation_is_plain_kindless_data_with_canonical_status_and_reference_json() {
+    let wire = serde_json::json!({
+        "at": "2026-10-16T12:00:00Z", "scopes": [{"scope": "demo", "statuses": [{
+            "control": "cra/a", "title": "A", "status": "satisfied", "reasons": ["live run"],
+            "refs": [{"kind": "run", "id": "run-1"}]
+        }], "findings": [{"subject": "demo", "detail": "ambiguous title"}]}]
+    });
+    let fact: CheckEvaluationFact = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&fact).unwrap(), wire);
+    assert_eq!(
+        fact.scopes[0].statuses[0].status.kind(),
+        StatusKind::Satisfied
+    );
+    assert_eq!(fact.scopes[0].statuses[0].status.reasons(), ["live run"]);
+    assert_eq!(
+        fact.scopes[0].statuses[0].refs[0].kind,
+        EvidenceRefKind::Run
+    );
+    assert!(serde_json::to_value(&fact.scopes[0].statuses[0])
+        .unwrap()
+        .get("kind")
+        .is_none());
+}
+
+#[test]
 fn task_inventory_is_plain_metadata_and_preserves_label_defaults() {
     let row: TaskInventoryFact = serde_json::from_value(serde_json::json!({
         "id": "task", "title": "standing intent", "scope": "demo", "open": true
@@ -61,6 +145,24 @@ fn task_inventory_is_plain_metadata_and_preserves_label_defaults() {
         "labels": {"goal": "ship/kr1", "custom": "preserved"}
     })).unwrap();
     assert_eq!(serde_json::from_value::<TaskInventoryFact>(serde_json::to_value(&labelled).unwrap()).unwrap(), labelled);
+}
+
+#[test]
+fn signpost_fact_roundtrips_as_plain_read_only_observations() {
+    let fact = SignpostFact {
+        at: "2026-10-16T00:00:00Z".parse().unwrap(),
+        triggered: vec![SignpostObservation {
+            scenario: "slow-year".into(),
+            metric: "fail_rate".into(),
+            reason: "4 is above 2".into(),
+        }],
+    };
+    let json = serde_json::to_value(&fact).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"at": "2026-10-16T00:00:00Z", "triggered": [{"scenario":"slow-year", "metric":"fail_rate", "reason":"4 is above 2"}]})
+    );
+    assert_eq!(serde_json::from_value::<SignpostFact>(json).unwrap(), fact);
 }
 
 #[test]
@@ -103,6 +205,15 @@ fn renewal_fact_metadata_and_nested_dependencies_roundtrip_without_core() {
 fn catalogue_is_complete_unique_and_has_readers() {
     let mut expected = vec![
         "ProductionFact", "ProcessMetricFact", "BenchResolutionFact",
+        "SignpostFact",
+        "MetricValuesFact",
+        "CheckEvaluationFact",
+        "CheckComparisonFact",
+        "CompiledPlanFact",
+        "WorkflowBlueprintFact",
+        "FunctionaryRosterFact",
+        "WorkflowTargetsFact",
+        "WorkflowPreviewFact",
         "InfrastructureExpiryFact", "CredentialExpiryFact", "ScheduledRunDatesFact",
         "RenewalDeclarationsFact",
         "DaemonConfigFact",

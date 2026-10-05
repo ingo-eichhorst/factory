@@ -1659,3 +1659,956 @@ fn a_shell_instruction_over_eleven_hundred_bytes_still_reaches_done() {
         result.len()
     );
 }
+
+/// Exercise the live L6 service through both public transports with actual
+/// process evidence. Shell runs have unknown usage, never guessed free cost.
+#[test]
+fn budget_service_rereads_intent_after_shell_completion_and_restart() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    let base = daemon.base_url();
+    let config: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+        &std::fs::read_to_string(daemon.root.join(".factory/config.yaml")).unwrap(),
+    )
+    .unwrap();
+    let scope_id = config["scope"]["id"].as_str().unwrap();
+    let limits = daemon.root.join(".factory/budgets/limits.yaml");
+    std::fs::create_dir_all(limits.parent().unwrap()).unwrap();
+    let write_limit = |cap: u32| {
+        let catalogue = json!({"version": 1, "scopes": {scope_id: {"monthly_usd": cap}}});
+        std::fs::write(&limits, serde_yaml_ng::to_string(&catalogue).unwrap()).unwrap();
+    };
+    write_limit(10);
+    let url = format!("{base}/api/budget?scope=demo");
+    let report = || expect_ok(&url, &get(&url))["report"].clone();
+    let before = report();
+    assert_eq!(before["budgets"][0]["id"], scope_id);
+    assert_eq!(before["budgets"][0]["monthly_usd"], 10.0);
+    assert_eq!(before["spend"]["total"]["runs"], 0);
+
+    let workflow_url = format!("{base}/api/workflows");
+    let created = expect_ok(
+        &workflow_url,
+        &post(
+            &workflow_url,
+            &json!({"name": "budget-smoke", "scope": "demo",
+                "nodes": [task_node("budget", "printf 'budget smoke\\n'")], "edges": []}),
+        ),
+    );
+    let workflow_id = created["workflow"]["id"].as_str().unwrap();
+    let start_url = format!("{workflow_url}/{workflow_id}/run");
+    let started = expect_ok(&start_url, &post(&start_url, &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let finished = wait_for("budget shell run to settle", Duration::from_secs(30), || {
+        let run = run_status(&base, run_id);
+        matches!(run["status"].as_str(), Some("done" | "failed" | "cancelled"))
+            .then_some(run)
+    });
+    assert_eq!(finished["status"], "done", "{finished}");
+    let after = report();
+    assert_eq!(after["spend"]["total"]["runs"], 1);
+    assert_eq!(after["spend"]["total"]["runs_unknown"], 1);
+    assert_eq!(after["budgets"][0]["assessment"]["state"], "unknown");
+
+    write_limit(20);
+    assert_eq!(report()["budgets"][0]["monthly_usd"], 20.0);
+    daemon.sigterm();
+    daemon.spawn();
+    let recovered = report();
+    assert_eq!(recovered["budgets"][0]["monthly_usd"], 20.0);
+    assert_eq!(recovered["spend"]["total"], after["spend"]["total"]);
+    assert_eq!(recovered["budgets"][0]["assessment"]["state"], "unknown");
+    let output = Command::new(&daemon.factory_bin)
+        .arg("--root")
+        .arg(&daemon.root)
+        .arg("--url")
+        .arg(&base)
+        .args(["--json", "budget", "--scope", "demo"])
+        .env_remove("FACTORY_TOKEN")
+        .env_remove("FACTORY_TASK_TOKEN")
+        .env_remove("FACTORY_RUN_TOKEN")
+        .env_remove("FACTORY_SOCKET")
+        .env_remove("FACTORY_URL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(cli["report"]["budgets"][0]["monthly_usd"], 20.0);
+    assert_eq!(cli["report"]["spend"]["total"], recovered["spend"]["total"]);
+    assert_eq!(cli["report"]["budgets"][0]["assessment"]["state"], "unknown");
+}
+
+#[test]
+fn goals_service_uses_live_metrics_and_retains_manual_checkins_through_cli_and_restart() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    let base = daemon.base_url();
+    let directory = daemon.root.join(".factory/goals");
+    std::fs::create_dir_all(&directory).unwrap();
+    let cycle = "cycle: {id: active, from: 2020-01-01, to: 2099-12-31}\nobjectives:\n  - id: ship\n    title: Ship\n    key_results:\n      - {id: manual, title: Manual, kind: committed, manual: true, baseline: 0, target: 1}\n      - {id: computed, title: Computed, kind: committed, metric: first_pass_yield, baseline: 0, target: 1}\n";
+    std::fs::write(directory.join("active.yaml"), cycle).unwrap();
+    let url = format!("{base}/api/goals?scope=demo&cycle=active");
+    let report = || expect_ok(&url, &get(&url))["report"].clone();
+    let before = report();
+    assert!(before["report"]["objectives"][0]["key_results"][1]["value"].is_null());
+    let workflow_url = format!("{base}/api/workflows");
+    let created = expect_ok(
+        &workflow_url,
+        &post(
+            &workflow_url,
+            &json!({"name": "goals-smoke", "scope": "demo", "nodes": [task_node("goal", "printf 'goals smoke\\n'")], "edges": []}),
+        ),
+    );
+    let workflow_id = created["workflow"]["id"].as_str().unwrap();
+    let start_url = format!("{workflow_url}/{workflow_id}/run");
+    let started = expect_ok(&start_url, &post(&start_url, &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let finished = wait_for("Goals shell run to settle", Duration::from_secs(30), || {
+        let run = run_status(&base, run_id);
+        matches!(
+            run["status"].as_str(),
+            Some("done" | "failed" | "cancelled")
+        )
+        .then_some(run)
+    });
+    assert_eq!(finished["status"], "done", "{finished}");
+    assert_eq!(
+        report()["report"]["objectives"][0]["key_results"][1]["value"],
+        1.0
+    );
+    let checkins_url = format!("{base}/api/goals/checkins");
+    expect_ok(
+        &checkins_url,
+        &post(
+            &checkins_url,
+            &json!({"kr": "ship/manual", "value": 0.5, "confidence": 7, "note": "first"}),
+        ),
+    );
+    let cli = |args: &[&str]| {
+        Command::new(&daemon.factory_bin)
+            .arg("--root")
+            .arg(&daemon.root)
+            .arg("--url")
+            .arg(&base)
+            .arg("--json")
+            .args(args)
+            .env_remove("FACTORY_TOKEN")
+            .env_remove("FACTORY_TASK_TOKEN")
+            .env_remove("FACTORY_RUN_TOKEN")
+            .env_remove("FACTORY_SOCKET")
+            .env_remove("FACTORY_URL")
+            .output()
+            .unwrap()
+    };
+    let output = cli(&[
+        "goals",
+        "checkin",
+        "ship/manual",
+        "--value",
+        "1",
+        "--confidence",
+        "8",
+        "--note",
+        "second",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let checkin: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(checkin["checkin"]["value"], 1.0);
+    let after = report();
+    assert_eq!(
+        after["checkins"]["ship/manual"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        after["report"]["objectives"][0]["key_results"][0]["confidence"],
+        8
+    );
+    let (status, _) = raw_request(
+        "POST",
+        &checkins_url,
+        Some(&json!({"kr": "ship/manual", "value": 1, "confidence": 11})),
+    )
+    .unwrap();
+    assert_eq!(status, 400);
+    std::fs::write(
+        directory.join("active.yaml"),
+        cycle
+            .replace("title: Ship", "title: Updated")
+            .replacen("target: 1", "target: 2", 1),
+    )
+    .unwrap();
+    let changed = report();
+    assert_eq!(changed["report"]["objectives"][0]["title"], "Updated");
+    assert_eq!(
+        changed["report"]["objectives"][0]["key_results"][0]["score"],
+        0.5
+    );
+    daemon.sigterm();
+    daemon.spawn();
+    let restarted = report();
+    assert_eq!(restarted["checkins"], after["checkins"]);
+    assert_eq!(
+        restarted["report"]["objectives"][0]["key_results"][1]["value"],
+        1.0
+    );
+    // Build a fresh CLI invocation after restart rather than keeping any
+    // service/metric state in the test client.
+    let output = Command::new(&daemon.factory_bin)
+        .arg("--root")
+        .arg(&daemon.root)
+        .arg("--url")
+        .arg(&base)
+        .args([
+            "--json", "goals", "status", "--scope", "demo", "--cycle", "active",
+        ])
+        .env_remove("FACTORY_TOKEN")
+        .env_remove("FACTORY_TASK_TOKEN")
+        .env_remove("FACTORY_RUN_TOKEN")
+        .env_remove("FACTORY_SOCKET")
+        .env_remove("FACTORY_URL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let restored: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(restored["report"]["checkins"], restarted["checkins"]);
+    assert_eq!(
+        restored["report"]["report"]["objectives"][0]["key_results"][0]["score"],
+        0.5
+    );
+}
+
+#[test]
+fn policy_intent_rereads_catalogues_and_receipts_after_shell_completion_and_restart() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let config_path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["policies"] = serde_yaml_ng::from_str("frameworks: [cra]").unwrap();
+    std::fs::write(&config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    let directory = daemon.root.join(".factory/policies");
+    std::fs::create_dir_all(&directory).unwrap();
+    let catalogue = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {id: a, title: Knowledge, evidence: [{check: knowledge}]}\n  - {id: b, title: Attestation, evidence: [{check: attestation}]}\n";
+    std::fs::write(directory.join("cra.yaml"), catalogue).unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let metrics_url = format!("{base}/api/metrics?ids=compliance.cra&scope=demo");
+    let current = || {
+        expect_ok(&metrics_url, &get(&metrics_url))["values"][0]["value"]
+            .as_f64()
+            .unwrap()
+    };
+    assert_eq!(current(), 0.0);
+    let cli_root = daemon.root.clone();
+    let cli_factory = daemon.factory_bin.clone();
+    let cli = |args: &[&str]| {
+        let output = Command::new(&cli_factory)
+            .arg("--root")
+            .arg(&cli_root)
+            .arg("--url")
+            .arg(&base)
+            .arg("--json")
+            .args(args)
+            .env_remove("FACTORY_TOKEN")
+            .env_remove("FACTORY_TASK_TOKEN")
+            .env_remove("FACTORY_RUN_TOKEN")
+            .env_remove("FACTORY_SOCKET")
+            .env_remove("FACTORY_URL")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let attested = cli(&[
+        "policy",
+        "attest",
+        "cra/b",
+        "--scope",
+        "demo",
+        "--evidence",
+        "QA evidence",
+        "--expires",
+        "3d",
+    ]);
+    let attestation_id = attested["attestation"]["id"].as_str().unwrap().to_string();
+    assert_eq!(current(), 0.5);
+    let knowledge = daemon.root.join(".factory/knowledge");
+    std::fs::create_dir_all(&knowledge).unwrap();
+    std::fs::write(
+        knowledge.join("qa.md"),
+        "---\ntags: [control/cra/a]\n---\n# Evidence\n",
+    )
+    .unwrap();
+    assert_eq!(current(), 1.0);
+    let policy_url = format!("{base}/api/policy?scope=demo");
+    let board = expect_ok(&policy_url, &get(&policy_url));
+    assert_eq!(
+        board["report"]["rows"][0]["statuses"][0]["status"],
+        "satisfied"
+    );
+    assert_eq!(
+        board["report"]["rows"][0]["statuses"][1]["status"],
+        "attested"
+    );
+    // A new authored control counts immediately, not only after a reload.
+    std::fs::write(
+        directory.join("cra.yaml"),
+        format!("{catalogue}  - {{id: c, title: Missing, evidence: [{{check: knowledge}}]}}\n"),
+    )
+    .unwrap();
+    assert!((current() - 2.0 / 3.0).abs() < f64::EPSILON);
+    let workflow_url = format!("{base}/api/workflows");
+    let created = expect_ok(
+        &workflow_url,
+        &post(
+            &workflow_url,
+            &json!({"name": "policy-intent-smoke", "scope": "demo", "nodes": [task_node("intent", "printf 'policy intent smoke\\n'")], "edges": []}),
+        ),
+    );
+    let start_url = format!(
+        "{workflow_url}/{}/run",
+        created["workflow"]["id"].as_str().unwrap()
+    );
+    let started = expect_ok(&start_url, &post(&start_url, &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let finished = wait_for(
+        "policy intent shell run to settle",
+        Duration::from_secs(30),
+        || {
+            let run = run_status(&base, run_id);
+            matches!(
+                run["status"].as_str(),
+                Some("done" | "failed" | "cancelled")
+            )
+            .then_some(run)
+        },
+    );
+    assert_eq!(finished["status"], "done", "{finished}");
+    assert!((current() - 2.0 / 3.0).abs() < f64::EPSILON);
+    cli(&[
+        "policy",
+        "withdraw",
+        &attestation_id,
+        "--reason",
+        "QA withdrawal",
+    ]);
+    assert!((current() - 1.0 / 3.0).abs() < f64::EPSILON);
+    daemon.sigterm();
+    daemon.spawn();
+    assert!((current() - 1.0 / 3.0).abs() < f64::EPSILON);
+    let restored = cli(&["metrics", "--scope", "demo", "compliance.cra"]);
+    assert!((restored["values"][0]["value"].as_f64().unwrap() - current()).abs() < f64::EPSILON);
+    let detail_url = format!("{base}/api/policy/controls/cra/b?scope=demo");
+    let detail = expect_ok(&detail_url, &get(&detail_url));
+    assert_eq!(detail["detail"]["attestations"][0]["id"], attestation_id);
+    assert!(detail["detail"]["attestations"][0]["withdrawn"].is_object());
+}
+
+#[test]
+fn policy_service_uses_live_l5_check_results_and_maps_real_reported_runs_after_restart() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let config_path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["policies"] = serde_yaml_ng::from_str("frameworks: [cra]").unwrap();
+    std::fs::write(config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    let directory = daemon.root.join(".factory/policies");
+    std::fs::create_dir_all(&directory).unwrap();
+    let catalogue = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {id: plant, title: Plant, evidence: [{check: task, task: policy-proof}]}\n  - {id: mapped, title: Mapped, maps_to: [cra/plant], evidence: [{check: knowledge}]}\n";
+    std::fs::write(directory.join("cra.yaml"), catalogue).unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let board_url = format!("{base}/api/policy?scope=demo");
+    let detail_url = format!("{base}/api/policy/controls/cra/mapped?scope=demo");
+    let first = expect_ok(&board_url, &get(&board_url));
+    assert!(first["report"]["rows"][0]["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|status| status["status"] == "open"));
+    let workflows_url = format!("{base}/api/workflows");
+    let created = expect_ok(
+        &workflows_url,
+        &post(
+            &workflows_url,
+            &json!({"name":"policy-service-proof", "scope":"demo", "nodes":[task_node("policy-proof", "printf 'policy service proof\\n'")], "edges":[]}),
+        ),
+    );
+    let start_url = format!(
+        "{workflows_url}/{}/run",
+        created["workflow"]["id"].as_str().unwrap()
+    );
+    let started = expect_ok(&start_url, &post(&start_url, &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let finished = wait_for(
+        "reported policy service proof",
+        Duration::from_secs(30),
+        || {
+            let run = run_status(&base, run_id);
+            matches!(
+                run["status"].as_str(),
+                Some("done" | "failed" | "cancelled")
+            )
+            .then_some(run)
+        },
+    );
+    assert_eq!(finished["status"], "done", "{finished}");
+    let current = expect_ok(&board_url, &get(&board_url));
+    assert!(
+        current["report"]["rows"][0]["statuses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|status| status["status"] == "satisfied"),
+        "{current}"
+    );
+    let detail = expect_ok(&detail_url, &get(&detail_url));
+    assert_eq!(detail["detail"]["status"]["status"], "satisfied");
+    assert!(detail["detail"]["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reference| reference["kind"] == "run"));
+    std::fs::write(
+        directory.join("cra.yaml"),
+        catalogue.replace("title: Mapped", "title: Updated"),
+    )
+    .unwrap();
+    assert_eq!(
+        expect_ok(&detail_url, &get(&detail_url))["detail"]["title"],
+        "Updated"
+    );
+    daemon.sigterm();
+    daemon.spawn();
+    let restored = expect_ok(&detail_url, &get(&detail_url));
+    assert_eq!(restored["detail"]["status"]["status"], "satisfied");
+    assert_eq!(restored["detail"]["refs"], detail["detail"]["refs"]);
+}
+
+#[test]
+fn waiting_restart_repeatedly_retains_dispatch_and_completion_evidence() {
+    if missing_prerequisites() {
+        return;
+    }
+    fn redact(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                map.retain(|key, _| !key.to_ascii_lowercase().contains("token"));
+                for child in map.values_mut() {
+                    redact(child);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    redact(child);
+                }
+            }
+            Value::String(text)
+                if text.contains("--token") || text.contains("FACTORY_RUN_TOKEN") =>
+            {
+                *text = "<redacted reporting command>".into()
+            }
+            _ => {}
+        }
+    }
+    for trial in 0..8 {
+        let mut daemon = provision();
+        let base = daemon.base_url();
+        let release = daemon.root.join("release-parent");
+        let instruction = format!(
+            "while ! test -f '{}'; do sleep 0.1; done; printf 'bound at dispatch\\n'",
+            release.display()
+        );
+        let url = format!("{base}/api/workflows");
+        let created = expect_ok(
+            &url,
+            &post(
+                &url,
+                &json!({"name":"waiting", "scope":"demo", "nodes":[task_node("parent", &instruction), task_node("child", "cat \"$FACTORY_UPSTREAM_FILE\"")], "edges":[edge("parent-child", "parent", "child")]}),
+            ),
+        );
+        let start_url = format!("{url}/{}/run", created["workflow"]["id"].as_str().unwrap());
+        let started = expect_ok(&start_url, &post(&start_url, &json!({})));
+        let run_id = started["run"]["id"].as_str().unwrap();
+        let initial = tasks(&base);
+        let parent = initial
+            .iter()
+            .find(|task| task["title"] == "parent")
+            .unwrap();
+        let child = initial
+            .iter()
+            .find(|task| task["title"] == "child")
+            .unwrap();
+        assert_eq!(child["after"], json!([parent["id"]]));
+        let (_, refusal) = raw_request(
+            "POST",
+            &format!("{base}/api/tasks/{}/run", child["id"].as_str().unwrap()),
+            Some(&json!({})),
+        )
+        .unwrap();
+        assert!(refusal.contains("override-wait"));
+        wait_for("parent launch", Duration::from_secs(15), || {
+            tasks(&base)
+                .into_iter()
+                .find(|task| task["id"] == parent["id"] && task["status"] == "running")
+        });
+        daemon.sigterm();
+        daemon.spawn();
+        std::fs::write(&release, b"released").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let final_run = loop {
+            let run = run_status(&base, run_id);
+            if run["status"] == "done" || Instant::now() >= deadline {
+                break run;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        };
+        if final_run["status"] != "done" {
+            let mut observations =
+                json!({"trial":trial, "workflow_run": final_run, "tasks": tasks(&base)});
+            for task in [&parent, &child] {
+                let id = task["id"].as_str().unwrap();
+                for suffix in ["runs", "entries", "output"] {
+                    let url = format!("{base}/api/tasks/{id}/{suffix}");
+                    if let Some((code, body)) = raw_request("GET", &url, None) {
+                        observations[format!("{}-{suffix}", task["title"].as_str().unwrap())] = json!({"http":code, "body":serde_json::from_str::<Value>(&body).unwrap_or(Value::String(body))});
+                    }
+                }
+            }
+            redact(&mut observations);
+            eprintln!(
+                "WAITING_RESTART_OBSERVATIONS {}",
+                serde_json::to_string_pretty(&observations).unwrap()
+            );
+            let log = std::fs::read_to_string(daemon.root.join("daemon.log")).unwrap_or_default();
+            for line in log
+                .lines()
+                .rev()
+                .take(100)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
+                if !line.to_ascii_lowercase().contains("token") {
+                    eprintln!("DAEMON {line}");
+                }
+            }
+        }
+        assert_eq!(
+            final_run["status"], "done",
+            "trial {trial} failed after restart; diagnostics above"
+        );
+        eprintln!("waiting restart trial {trial} completed");
+    }
+}
+
+#[test]
+fn policy_clock_owner_reads_confirmed_intake_and_keeps_receipts_through_real_restart() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let config_path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["policies"] = serde_yaml_ng::from_str("frameworks: [cra]").unwrap();
+    std::fs::write(config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    let directory = daemon.root.join(".factory/policies");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("cra.yaml"), "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {id: art-14, title: Reporting, evidence: [{check: attestation}]}\n").unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let workflows_url = format!("{base}/api/workflows");
+    let created = expect_ok(
+        &workflows_url,
+        &post(
+            &workflows_url,
+            &json!({"name":"clock-owner-proof", "scope":"demo", "nodes":[task_node("clock-proof", "printf 'clock owner proof\\n'")], "edges":[]}),
+        ),
+    );
+    let start_url = format!(
+        "{workflows_url}/{}/run",
+        created["workflow"]["id"].as_str().unwrap()
+    );
+    let started = expect_ok(&start_url, &post(&start_url, &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let finished = wait_for(
+        "reported clock-owner proof",
+        Duration::from_secs(30),
+        || {
+            let run = run_status(&base, run_id);
+            matches!(
+                run["status"].as_str(),
+                Some("done" | "failed" | "cancelled")
+            )
+            .then_some(run)
+        },
+    );
+    assert_eq!(finished["status"], "done", "{finished}");
+    let clock_url = format!("{base}/api/policy/clock?scope=demo");
+    assert!(expect_ok(&clock_url, &get(&clock_url))["clock"]["items"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let intake_url = format!("{base}/api/intake");
+    let intake = expect_ok(
+        &intake_url,
+        &post(
+            &intake_url,
+            &json!({"title":"QA-only security report", "scope":"demo", "security":true}),
+        ),
+    );
+    let item_id = intake["task"]["id"].as_str().unwrap();
+    let awareness = intake["task"]["intake"]["received_at"].clone();
+    let confirm_url = format!("{intake_url}/{item_id}/security");
+    expect_ok(
+        &confirm_url,
+        &post(
+            &confirm_url,
+            &json!({"verdict":"confirm", "evidence":"own isolated QA fixture"}),
+        ),
+    );
+    let first = expect_ok(&clock_url, &get(&clock_url));
+    assert_eq!(first["clock"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(first["clock"]["items"][0]["awareness_at"], awareness);
+    assert_eq!(first["clock"]["items"][0]["item"]["item"], item_id);
+    assert_eq!(
+        first["clock"]["items"][0]["deadlines"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let attest_url = format!("{base}/api/policy/attestations");
+    let item = format!("report:{item_id}");
+    let available = chrono::Utc::now() - chrono::Duration::hours(1);
+    let corrective_body = json!({"control":"cra/art-14", "scope":"demo", "evidence":"QA corrective evidence", "expires":"3d", "corrective_item":item, "available_at":available});
+    let anchor = expect_ok(&attest_url, &post(&attest_url, &corrective_body));
+    let anchor_id = anchor["attestation"]["id"].as_str().unwrap().to_owned();
+    let current = expect_ok(&clock_url, &get(&clock_url));
+    assert_eq!(
+        current["clock"]["items"][0]["corrective_measure"]["attestation"],
+        anchor_id
+    );
+    assert_eq!(
+        current["clock"]["items"][0]["deadlines"][2]["due_at"],
+        serde_json::to_value(available + chrono::Duration::days(14)).unwrap()
+    );
+    let submission_body = json!({"control":"cra/art-14", "scope":"demo", "evidence":"QA final notice", "expires":"3d", "clock_item":item, "deadline":"final_report"});
+    let submitted = expect_ok(&attest_url, &post(&attest_url, &submission_body));
+    let submitted_id = submitted["attestation"]["id"].as_str().unwrap().to_owned();
+    let (_, refused) = raw_request("POST", &attest_url, Some(&submission_body)).unwrap();
+    assert!(
+        refused.contains("already has a live submission"),
+        "{refused}"
+    );
+    daemon.sigterm();
+    daemon.spawn();
+    let restored = expect_ok(&clock_url, &get(&clock_url));
+    assert_eq!(restored["clock"]["items"][0]["awareness_at"], awareness);
+    assert_eq!(
+        restored["clock"]["items"][0]["corrective_measure"]["attestation"],
+        anchor_id
+    );
+    assert_eq!(
+        restored["clock"]["items"][0]["deadlines"][2]["state"],
+        "met"
+    );
+    assert_eq!(
+        restored["clock"]["items"][0]["deadlines"][2]["submission"]["attestation"],
+        submitted_id
+    );
+    let withdraw_url = format!("{attest_url}/{anchor_id}/withdraw?reason=incorrect");
+    expect_ok(&withdraw_url, &post(&withdraw_url, &json!({})));
+    let current = expect_ok(&clock_url, &get(&clock_url));
+    assert_eq!(
+        current["clock"]["items"][0]["deadlines"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(current["clock"]["items"][0]
+        .get("corrective_measure")
+        .is_none());
+    daemon.sigterm();
+    daemon.spawn();
+    assert_eq!(
+        expect_ok(&clock_url, &get(&clock_url))["clock"]["items"][0]["deadlines"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn scenarios_owner_reads_live_files_metrics_and_promotes_id_only_work_through_two_restarts() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let config_path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["policies"] = serde_yaml_ng::from_str("frameworks: [house]").unwrap();
+    std::fs::write(config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    let policies = daemon.root.join(".factory/policies");
+    std::fs::create_dir_all(policies.join("drafts")).unwrap();
+    std::fs::write(policies.join("house.yaml"), "framework: house\ntitle: House\nkind: regulation\ncontrols:\n  - {id: base, title: Base, evidence: [{check: attestation}]}\n").unwrap();
+    std::fs::write(policies.join("drafts/next.yaml"), "framework: next\ntitle: Next\nkind: regulation\ncontrols:\n  - {id: new, title: New, evidence: [{check: attestation}]}\n").unwrap();
+    let scenarios = daemon.root.join(".factory/scenarios");
+    std::fs::create_dir_all(&scenarios).unwrap();
+    let scenario_path = scenarios.join("future.yaml");
+    std::fs::write(&scenario_path, "name: future\ntitle: Future\npolicy: {add_frameworks: [next]}\ndrivers: {capacity_factor: '=2'}\nsignposts: [{metric: throughput_week, below: 99}]\n").unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let report_url = format!("{base}/api/scenarios?scope=demo");
+    let read = || expect_ok(&report_url, &get(&report_url))["report"].clone();
+    let throughput = |report: &Value| {
+        report["baseline"]["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|metric| metric["id"] == "throughput_week")
+            .unwrap()["value"]
+            .clone()
+    };
+    assert_eq!(throughput(&read()), json!(0.0));
+    let workflows = format!("{base}/api/workflows");
+    let created = expect_ok(
+        &workflows,
+        &post(
+            &workflows,
+            &json!({"name":"scenarios-owner-proof", "scope":"demo", "nodes":[task_node("scenario-proof", "printf 'scenario owner proof\\n'")], "edges":[]}),
+        ),
+    );
+    let start = format!(
+        "{workflows}/{}/run",
+        created["workflow"]["id"].as_str().unwrap()
+    );
+    let started = expect_ok(&start, &post(&start, &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let done = wait_for("reported scenario proof", Duration::from_secs(30), || {
+        let run = run_status(&base, run_id);
+        matches!(
+            run["status"].as_str(),
+            Some("done" | "failed" | "cancelled")
+        )
+        .then_some(run)
+    });
+    assert_eq!(done["status"], "done", "{done}");
+    let measured = read();
+    assert_eq!(throughput(&measured), json!(1.0));
+    assert_eq!(
+        measured["scenarios"][0]["policy_subtree"]["newly_open"],
+        json!(["next/new"])
+    );
+    assert_eq!(measured["triggered"][0]["scenario"], "future");
+    assert_eq!(
+        measured["scenarios"][0]["drivers"]["overridden"]["capacity_factor"],
+        2.0
+    );
+    let whatif = format!("{base}/api/scenarios/whatif");
+    let answer = expect_ok(
+        &whatif,
+        &post(
+            &whatif,
+            &json!({"scenario":"future", "scope":"demo", "drivers":{"capacity_factor":"=3"}}),
+        ),
+    );
+    assert_eq!(
+        answer["result"]["drivers"]["overridden"]["capacity_factor"],
+        3.0
+    );
+    let (_, invalid) = raw_request(
+        "POST",
+        &whatif,
+        Some(&json!({"scenario":"future", "scope":"demo", "drivers":{"capacity_factor":"banana"}})),
+    )
+    .unwrap();
+    assert!(invalid.contains("capacity_factor"), "{invalid}");
+    let promote = format!("{base}/api/scenarios/promote");
+    let request = json!({"scenario":"future", "scope":"demo", "agent":"shell"});
+    let receipt = expect_ok(&promote, &post(&promote, &request))["result"].clone();
+    assert_eq!(receipt["created"].as_array().unwrap().len(), 1);
+    let task = &receipt["created"][0]["task"];
+    let id = task["id"].as_str().unwrap().to_owned();
+    assert_eq!(task["scope"], "demo");
+    assert_eq!(task["labels"]["policy"], "next/new");
+    assert_eq!(task["labels"]["scenario"], "future");
+    assert_eq!(task["status"], "pending");
+    assert_eq!(
+        task["runs"], 0,
+        "promotion creates manual work, not a fake completed run"
+    );
+    let duplicate = expect_ok(&promote, &post(&promote, &request))["result"].clone();
+    assert!(duplicate["created"].as_array().unwrap().is_empty());
+    assert_eq!(duplicate["skipped"][0]["existing_task"], id);
+    daemon.sigterm();
+    daemon.spawn();
+    let restored = read();
+    assert_eq!(throughput(&restored), json!(1.0));
+    assert_eq!(
+        restored["scenarios"][0]["policy_subtree"],
+        measured["scenarios"][0]["policy_subtree"]
+    );
+    assert_eq!(
+        expect_ok(&promote, &post(&promote, &request))["result"]["skipped"][0]["existing_task"],
+        id
+    );
+    assert_eq!(
+        tasks(&base).into_iter().find(|t| t["id"] == id).unwrap()["runs"],
+        0
+    );
+    std::fs::write(&scenario_path, "name: future\ntitle: Revised future\npolicy: {add_frameworks: [next]}\ndrivers: {capacity_factor: '=4'}\nsignposts: [{metric: throughput_week, below: 99}]\n").unwrap();
+    std::fs::write(policies.join("drafts/next.yaml"), "framework: next\ntitle: Next\nkind: regulation\ncontrols:\n  - {id: new, title: New, evidence: [{check: knowledge}]}\n").unwrap();
+    let knowledge = daemon.root.join(".factory/knowledge");
+    std::fs::create_dir_all(&knowledge).unwrap();
+    std::fs::write(
+        knowledge.join("next.md"),
+        "---\ntags: [control/next/new]\n---\n# New evidence\n",
+    )
+    .unwrap();
+    let revised = read();
+    assert_eq!(
+        revised["scenarios"][0]["scenario"]["title"],
+        "Revised future"
+    );
+    assert_eq!(
+        revised["scenarios"][0]["drivers"]["overridden"]["capacity_factor"],
+        4.0
+    );
+    assert!(revised["scenarios"][0]["policy_subtree"]["newly_open"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(
+        expect_ok(&promote, &post(&promote, &request))["result"]["created"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    daemon.sigterm();
+    daemon.spawn();
+    let final_report = read();
+    assert_eq!(
+        final_report["scenarios"][0]["drivers"],
+        revised["scenarios"][0]["drivers"]
+    );
+    assert_eq!(
+        final_report["scenarios"][0]["policy_subtree"],
+        revised["scenarios"][0]["policy_subtree"]
+    );
+    assert_eq!(
+        final_report["scenarios"][0]["forecast"],
+        revised["scenarios"][0]["forecast"]
+    );
+    assert_eq!(run_status(&base, run_id)["status"], "done");
+    assert_eq!(
+        tasks(&base).into_iter().find(|t| t["id"] == id).unwrap()["labels"],
+        task["labels"]
+    );
+}
+
+#[test]
+fn workflow_preview_owners_read_live_requirements_but_dispatch_freezes_its_own_plan() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision(); daemon.sigterm();
+    let path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["policies"] = serde_yaml_ng::from_str("frameworks: [house]").unwrap();
+    config["quality"] = serde_yaml_ng::from_str("[base]").unwrap();
+    config["scope"]["agents"] = serde_yaml_ng::from_str("[{name: critic, harness: shell, lifetime: task}]").unwrap();
+    std::fs::write(path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    for arguments in [vec!["config", "user.email", "preview@example.invalid"], vec!["config", "user.name", "Preview QA"],
+        vec!["commit", "-q", "--allow-empty", "-m", "preview fixture"]] {
+        let output = Command::new("git").current_dir(&daemon.root).args(arguments).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let policies = daemon.root.join(".factory/policies"); let quality = daemon.root.join(".factory/quality");
+    std::fs::create_dir_all(&policies).unwrap(); std::fs::create_dir_all(&quality).unwrap();
+    let catalogue = |extra: &str| format!("framework: house\ntitle: House\nkind: best-practice\ncontrols:\n  - id: tested\n    title: Tested\n    requires:\n      - {{applies_to: [feature], step: tests, gate: 'true', timeout_seconds: 90}}\n{extra}");
+    let profile = |seconds: u64| format!("attributes:\n  - id: reliability\n    importance: H\n    difficulty: M\n    requires:\n      - {{applies_to: [feature], step: tests, gate: 'true', timeout_seconds: {seconds}}}\n    scenarios: [{{id: availability}}]\n");
+    std::fs::write(policies.join("house.yaml"), catalogue("      - {applies_to: [feature], step: review, by: independent}\n      - {applies_to: [feature], step: approval, by: person}\n")).unwrap();
+    std::fs::write(quality.join("base.yaml"), profile(30)).unwrap(); daemon.spawn();
+    let base = daemon.base_url(); let workflows = format!("{base}/api/workflows");
+    let mut node = task_node("work", "printf 'preview-owner-work\\n'"); node["task"]["worktree"] = json!(true);
+    let created = expect_ok(&workflows, &post(&workflows, &json!({"name":"Preview owner", "scope":"demo", "category":"feature", "nodes":[node], "edges":[]})));
+    let workflow = created["workflow"]["id"].as_str().unwrap();
+    let lint_url = format!("{base}/api/workflow-lint?workflow={workflow}");
+    let lint = || expect_ok(&lint_url, &get(&lint_url))["lint"].clone();
+    let first = lint();
+    assert_eq!(first["plans"][0]["steps"].as_array().unwrap().len(), 3);
+    assert_eq!(first["plans"][0]["steps"].as_array().unwrap().iter().find(|step| step["step"] == "tests").unwrap()["timeout_seconds"], 30);
+    let controls = first["injected"]["nodes"].as_array().unwrap();
+    assert_eq!(controls.iter().find(|node| node["kind"] == "review").unwrap()["gate"]["actor"], "critic");
+    assert_eq!(controls.iter().find(|node| node["kind"] == "approval").unwrap()["gate"]["actor"], "owner");
+    let report_url = format!("{base}/api/policy?scope=demo");
+    let first_report = expect_ok(&report_url, &get(&report_url))["report"].clone();
+    assert_eq!(first_report["workflow_enforcement"].as_array().unwrap().len(), 3);
+    assert!(first_report.get("workflow_findings").is_none());
+    let tasks_url = format!("{base}/api/tasks");
+    let task = expect_ok(&tasks_url, &post(&tasks_url, &json!({"title":"Fresh dispatch", "scope":"demo", "agent":"shell",
+        "category":"feature", "worktree":true, "instructions":"printf 'fresh dispatch proof\\n'"})))["task"].clone();
+    let task_id = task["id"].as_str().unwrap();
+    // Authored requirements change after task creation and the first preview.
+    std::fs::write(policies.join("house.yaml"), catalogue("")).unwrap();
+    std::fs::write(quality.join("base.yaml"), profile(5)).unwrap();
+    let updated = lint(); assert_eq!(updated["plans"][0]["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(updated["plans"][0]["steps"][0]["timeout_seconds"], 5);
+    let start = format!("{base}/api/tasks/{task_id}/run"); expect_ok(&start, &post(&start, &json!({})));
+    let runs_url = format!("{base}/api/tasks/{task_id}/runs");
+    let run = wait_for("shell-reported work and its live compiled gate", Duration::from_secs(30), || {
+        let history = expect_ok(&runs_url, &get(&runs_url));
+        history["runs"].as_array().unwrap().first().filter(|run| run["status"] == "done").cloned()
+    });
+    assert_eq!(run["required_steps"].as_array().unwrap().len(), 1);
+    assert_eq!(run["required_steps"][0]["timeout_seconds"], 5);
+    assert_eq!(run["required_steps"][0]["required_by"], json!(["house/tested", "quality/reliability"]));
+    let completed = tasks(&base).into_iter().find(|row| row["id"] == task_id).unwrap();
+    assert!(completed["result"].as_str().unwrap().contains("fresh dispatch proof"));
+    let evidence_url = format!("{base}/api/runs/{}/attestations", run["id"].as_str().unwrap());
+    let evidence = expect_ok(&evidence_url, &get(&evidence_url));
+    assert_eq!(evidence["attestations"][0]["verdict"], "pass");
+    // A later read is live; the execution snapshot and append-only receipt
+    // remain the exact plan actually used, including after a daemon restart.
+    std::fs::write(quality.join("base.yaml"), profile(2)).unwrap();
+    assert_eq!(lint()["plans"][0]["steps"][0]["timeout_seconds"], 2);
+    daemon.sigterm(); daemon.spawn();
+    let restarted = expect_ok(&runs_url, &get(&runs_url))["runs"][0].clone();
+    assert_eq!(restarted["required_steps"], run["required_steps"]); assert_eq!(restarted["status"], "done");
+    assert_eq!(expect_ok(&evidence_url, &get(&evidence_url)), evidence);
+    assert_eq!(lint()["plans"][0]["steps"][0]["timeout_seconds"], 2);
+    let final_report = expect_ok(&report_url, &get(&report_url))["report"].clone();
+    assert_eq!(final_report["workflow_enforcement"].as_array().unwrap().len(), 1);
+}

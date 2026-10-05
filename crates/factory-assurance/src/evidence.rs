@@ -186,9 +186,9 @@ pub struct QualityScope<'a> {
 }
 
 pub struct Service<'a, P> {
-    ports: P,
-    own: facts::Provider<'a>,
-    scopes: ScopeTree,
+    pub(crate) ports: P,
+    pub(crate) own: facts::Provider<'a>,
+    pub(crate) scopes: ScopeTree,
 }
 
 impl<'a, P: Ports> Service<'a, P> {
@@ -779,6 +779,523 @@ mod tests {
             },
         )
     }
+
+    #[async_trait]
+    impl Provide<factory_kernel::ProductionFact> for Process {
+        type Query = factory_process::measurements::ProductionQuery;
+        type Value = factory_kernel::ProductionFact;
+        type Error = FactoryError;
+        async fn get(&self, q: &Self::Query) -> Result<Self::Value> {
+            self.0.record(
+                "production",
+                vec![
+                    q.scope.clone().unwrap_or_default(),
+                    q.minutes.unwrap().to_string(),
+                    q.subtree.to_string(),
+                ],
+            )?;
+            Ok(factory_kernel::ProductionFact {
+                bin: q.bin,
+                from: q.now,
+                to: q.now,
+                buckets: Vec::new(),
+                daily: Vec::new(),
+                earliest_run: None,
+            })
+        }
+    }
+    #[async_trait]
+    impl Provide<factory_kernel::ProcessMetricFact> for Process {
+        type Query = factory_process::measurements::ProcessMetricsQuery;
+        type Value = BTreeMap<String, factory_kernel::ProcessMetricFact>;
+        type Error = FactoryError;
+        async fn get(&self, q: &Self::Query) -> Result<Self::Value> {
+            self.0.record(
+                "process",
+                std::iter::once(q.scope.clone().unwrap_or_default())
+                    .chain(q.names.iter().cloned())
+                    .collect(),
+            )?;
+            Ok(q.names
+                .iter()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        factory_kernel::ProcessMetricFact {
+                            name: name.clone(),
+                            value: Some(self.0.generation.load(Ordering::SeqCst) as f64),
+                            as_of: q.now - chrono::Duration::hours(1),
+                            reason: None,
+                        },
+                    )
+                })
+                .collect())
+        }
+    }
+    #[async_trait]
+    impl Provide<factory_kernel::EnvironmentMetricFact> for Infrastructure {
+        type Query = Option<String>;
+        type Value = BTreeMap<String, factory_kernel::EnvironmentMetricFact>;
+        type Error = FactoryError;
+        async fn get(&self, q: &Self::Query) -> Result<Self::Value> {
+            self.0
+                .record("environments", vec![q.clone().unwrap_or_default()])?;
+            Ok(BTreeMap::new())
+        }
+    }
+    impl crate::metrics_service::Ports for Inputs {
+        capability!(Production, production, process, Process);
+        capability!(Process, process, process, Process);
+        capability!(Environments, environments, infrastructure, Infrastructure);
+    }
+    async fn metric_plan(
+        evidence: &Service<'_, Inputs>,
+        names: &[&str],
+        scope: Option<&str>,
+    ) -> crate::metrics_service::Plan {
+        let ids: Vec<_> = names
+            .iter()
+            .map(|name| metrics::MetricId::new(*name).unwrap())
+            .collect();
+        crate::metrics_service::Plan::prepare(
+            &ids,
+            std::env::temp_dir(),
+            &evidence.scopes,
+            &crate::quality_inputs::Configuration::default(),
+            scope,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn metrics_owner_shares_selective_reads_and_preserves_order_scope_unknown_and_freshness()
+    {
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let names = [
+            "bench.resolve_rate.missing",
+            "cost_week",
+            "fail_rate",
+            "agent_hours",
+            "backup_age_hours",
+            "backup_verified_age_days",
+            "gate_fail_rate",
+            "conformance_rate.build",
+            "availability.production",
+            "throughput_week",
+            "first_pass_yield",
+            "scrap_rate",
+            "fail_rate",
+        ];
+        let plan = metric_plan(&evidence, &names, Some("projects/work")).await;
+        assert_eq!(plan.scope(), Some("parent"));
+        let metrics = crate::metrics_service::Service::new(evidence);
+        let gathered = metrics
+            .gather(&plan, None, time(), Some(metrics::MetricsWindow::Day))
+            .await
+            .unwrap();
+        let output = metrics
+            .finish(
+                &plan,
+                gathered,
+                &Ok(BTreeMap::new()),
+                time(),
+                Some(metrics::MetricsWindow::Day),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            output
+                .values
+                .iter()
+                .map(|v| v.id.as_str())
+                .collect::<Vec<_>>(),
+            names[..names.len() - 1]
+        );
+        assert_eq!(output.registry.len(), output.values.len());
+        assert_eq!(output.series.len(), 3);
+        for kind in [
+            "production",
+            "process",
+            "backup",
+            "attested",
+            "environments",
+            "spend",
+        ] {
+            assert_eq!(recorder.calls(kind).len(), 1, "{kind} read is shared");
+        }
+        assert_eq!(recorder.calls("production")[0], ["parent", "1440", "true"]);
+        assert_eq!(
+            recorder.calls("process")[0],
+            ["parent", "agent_hours", "fail_rate"]
+        );
+        assert_eq!(
+            recorder.calls("attested")[0],
+            [
+                "child",
+                "parent",
+                "2026-10-15T12:00:00+00:00",
+                "2026-10-16T12:00:00+00:00"
+            ]
+        );
+        for name in [
+            "bench.resolve_rate.missing",
+            "availability.production",
+            "gate_fail_rate",
+            "conformance_rate.build",
+            "backup_age_hours",
+        ] {
+            let value = output
+                .values
+                .iter()
+                .find(|v| v.id.as_str() == name)
+                .unwrap();
+            assert!(
+                value.value.is_none() && value.reason.is_some(),
+                "{name} remains unknown"
+            );
+        }
+        let fail = output
+            .values
+            .iter()
+            .find(|v| v.id.as_str() == "fail_rate")
+            .unwrap();
+        assert_eq!(fail.as_of, time() - chrono::Duration::hours(1));
+        recorder.generation.store(4, Ordering::SeqCst);
+        let gathered = metrics.gather(&plan, None, time(), None).await.unwrap();
+        let output = metrics
+            .finish(&plan, gathered, &Ok(BTreeMap::new()), time(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            output
+                .values
+                .iter()
+                .find(|v| v.id.as_str() == "fail_rate")
+                .unwrap()
+                .value,
+            Some(4.0)
+        );
+        assert!(
+            recorder.calls("agents").is_empty()
+                && recorder.calls("daemon").is_empty()
+                && recorder.calls("secrets").is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_owner_no_unneeded_reads_and_needed_provider_failure_is_not_a_zero() {
+        let recorder = Arc::new(Recorder::default());
+        *recorder.failing.lock().unwrap() = Some("production");
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let plan = metric_plan(&evidence, &["bench.resolve_rate.absent"], None).await;
+        let production = metric_plan(&evidence, &["throughput_week"], None).await;
+        let metrics = crate::metrics_service::Service::new(evidence);
+        let gathered = metrics.gather(&plan, None, time(), None).await.unwrap();
+        let output = metrics
+            .finish(&plan, gathered, &Ok(BTreeMap::new()), time(), None)
+            .await
+            .unwrap();
+        assert!(output.values[0].value.is_none());
+        assert!(recorder.calls.lock().unwrap().is_empty());
+        assert!(
+            matches!(metrics.gather(&production, None, time(), None).await, Err(FactoryError::BadRequest(message)) if message == "production unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_owner_evaluates_raw_policy_inputs_and_keeps_best_practice_only_framework_unknown(
+    ) {
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let plan = metric_plan(&evidence, &["compliance.test", "open_controls.test"], None).await;
+        let scope = evidence.scopes.scopes[0].clone();
+        let metrics = crate::metrics_service::Service::new(evidence);
+        let raw = subject(vec![Check::Daemon {
+            fact: "foreman_enabled".into(),
+        }]);
+        let policy = crate::metrics_service::PolicyInputs {
+            scopes: vec![crate::metrics_service::PolicyScope {
+                scope,
+                subjects: vec![EvaluationSubject {
+                    control: raw.control,
+                    title: raw.title,
+                    kind: false,
+                    maps_to: raw.maps_to,
+                    evidence: raw.evidence,
+                    max_age: raw.max_age,
+                    not_applicable: raw.not_applicable,
+                }],
+                budget: None,
+            }],
+            attestations: Vec::new(),
+        };
+        let gathered = metrics
+            .gather(&plan, Some(&policy), time(), None)
+            .await
+            .unwrap();
+        let output = metrics
+            .finish(&plan, gathered, &Ok(BTreeMap::new()), time(), None)
+            .await
+            .unwrap();
+        assert!(output.values[0].value.is_none());
+        assert_eq!(output.values[1].value, Some(0.0));
+        let mut policy = policy;
+        policy.scopes[0].subjects[0].kind = true;
+        recorder.generation.store(1, Ordering::SeqCst);
+        let gathered = metrics
+            .gather(&plan, Some(&policy), time(), None)
+            .await
+            .unwrap();
+        let output = metrics
+            .finish(&plan, gathered, &Ok(BTreeMap::new()), time(), None)
+            .await
+            .unwrap();
+        assert_eq!(output.values[0].value, Some(1.0));
+        assert_eq!(recorder.calls("daemon").len(), 2);
+        assert!(recorder.calls("attested").is_empty() && recorder.calls("spend").is_empty());
+    }
+
+    #[tokio::test]
+    async fn metrics_owner_expands_quality_dependencies_and_judges_live_budget_evidence() {
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let scratch = Scratch(
+            std::env::temp_dir().join(format!("factory-metric-quality-{}", uuid::Uuid::new_v4())),
+        );
+        let dir = quality::quality_dir(&scratch.0);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("base.yaml"),
+            "attributes:\n  - id: reliability.availability\n    importance: H\n    difficulty: M\n    scenarios:\n      - id: failure\n        measure: { metric: fail_rate, below: 0.1 }\n      - id: budget\n        measure: { check: budget_within }\n"
+        ).unwrap();
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let config = crate::quality_inputs::Configuration {
+            scopes: vec![crate::quality_inputs::ScopeConfiguration {
+                id: "parent-id".into(),
+                scope: evidence.scopes.scopes[0].clone(),
+                layers: vec![quality::QualityLayer {
+                    scope: "parent".into(),
+                    profiles: vec!["base".into()],
+                }],
+            }],
+        };
+        let ids = [
+            metrics::MetricId::new("quality.reliability").unwrap(),
+            metrics::MetricId::new("fail_rate").unwrap(),
+        ];
+        let plan = crate::metrics_service::Plan::prepare(
+            &ids,
+            scratch.0.clone(),
+            &evidence.scopes,
+            &config,
+            Some("parent"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(plan.quality_budget_ids(), ["parent-id"]);
+        let metrics = crate::metrics_service::Service::new(evidence);
+        let budgets = Ok(BTreeMap::from([(
+            "parent-id".into(),
+            BudgetIntent {
+                caps: vec![("parent".into(), 0.0)],
+                error: None,
+            },
+        )]));
+        let gathered = metrics.gather(&plan, None, time(), None).await.unwrap();
+        let output = metrics
+            .finish(&plan, gathered, &budgets, time(), None)
+            .await
+            .unwrap();
+        assert_eq!(output.values[0].value, Some(1.0));
+        assert_eq!(output.values[1].value, Some(0.0));
+        assert_eq!(recorder.calls("process").len(), 1);
+        assert_eq!(recorder.calls("spend").len(), 1);
+        recorder.generation.store(2, Ordering::SeqCst);
+        let gathered = metrics.gather(&plan, None, time(), None).await.unwrap();
+        let output = metrics
+            .finish(&plan, gathered, &budgets, time(), None)
+            .await
+            .unwrap();
+        assert_eq!(output.values[0].value, Some(0.0));
+        assert_eq!(output.values[1].value, Some(2.0));
+        let gathered = metrics.gather(&plan, None, time(), None).await.unwrap();
+        let output = metrics
+            .finish(
+                &plan,
+                gathered,
+                &Err("budget intent read: synthetic join failure".into()),
+                time(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(output.values[0].value.is_none());
+        assert!(output.values[0]
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("the quality evaluation failed: budget intent read: synthetic join failure"));
+        assert_eq!(output.values[1].value, Some(2.0));
+        assert!(recorder.calls("production").is_empty() && recorder.calls("attested").is_empty());
+    }
+    async fn signpost_read(evidence: &Service<'_, Inputs>) -> crate::signposts::Read {
+        crate::signposts::Read {
+            now: time(),
+            plan: metric_plan(evidence, &["fail_rate"], None).await,
+            scenarios: vec![crate::signposts::ScenarioInput {
+                name: "slow-year".into(),
+                signposts: vec![crate::signposts::Signpost {
+                    metric: metrics::MetricId::new("fail_rate").unwrap(),
+                    below: None,
+                    above: Some(2.0),
+                    from: None,
+                }],
+            }],
+            policy: None,
+            budgets: Ok(BTreeMap::new()),
+            revision: vec![("slow.yaml".into(), None, 1)],
+            use_cache: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn signpost_owner_computes_live_metrics_and_caches_only_successful_revisions() {
+        use crate::signposts::{Cache, Provider};
+        use factory_kernel::{People, SignpostFact};
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let mut read = signpost_read(&evidence).await;
+        let cache = Cache::default();
+        let provider = Provider::new(crate::metrics_service::Service::new(evidence), &cache);
+        let facts = Facts::<People>::new();
+        recorder.generation.store(4, Ordering::SeqCst);
+        let original = facts
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(original.at, read.now);
+        assert_eq!(original.triggered.len(), 1);
+        assert_eq!(original.triggered[0].scenario, "slow-year");
+        assert_eq!(original.triggered[0].metric, "fail_rate");
+        assert_eq!(original.triggered[0].reason, "4 is above 2");
+        assert_eq!(
+            recorder.calls("process"),
+            [vec![String::new(), "fail_rate".into()]]
+        );
+        assert!(cache.is_populated());
+        recorder.generation.store(0, Ordering::SeqCst);
+        read.now += chrono::Duration::seconds(1);
+        assert_eq!(
+            facts
+                .get::<SignpostFact, _>(&provider, &read)
+                .await
+                .unwrap(),
+            original
+        );
+        assert_eq!(recorder.calls("process").len(), 1);
+        read.revision[0].2 = 2;
+        let quiet = facts
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert!(quiet.triggered.is_empty());
+        assert_eq!(quiet.at, read.now);
+        assert_eq!(recorder.calls("process").len(), 2);
+        read.revision[0].2 = 3;
+        *recorder.failing.lock().unwrap() = Some("process");
+        assert!(facts
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .is_err());
+        assert_eq!(recorder.calls("process").len(), 3);
+        *recorder.failing.lock().unwrap() = None;
+        recorder.generation.store(5, Ordering::SeqCst);
+        let retried = facts
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(retried.triggered[0].reason, "5 is above 2");
+        assert_eq!(
+            recorder.calls("process").len(),
+            4,
+            "failed computation was not cached"
+        );
+        assert!(recorder.calls("production").is_empty());
+        assert!(recorder.calls("spend").is_empty());
+        assert!(recorder.calls("backup").is_empty());
+    }
+
+    #[tokio::test]
+    async fn signpost_owner_fresh_reads_preserve_authored_order_and_never_populate_cache() {
+        use crate::signposts::{Cache, Provider, ScenarioInput};
+        use factory_kernel::{People, SignpostFact};
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let mut read = signpost_read(&evidence).await;
+        read.use_cache = false;
+        read.scenarios.push(ScenarioInput {
+            name: "second".into(),
+            signposts: read.scenarios[0].signposts.clone(),
+        });
+        let cache = Cache::default();
+        let provider = Provider::new(crate::metrics_service::Service::new(evidence), &cache);
+        let facts = Facts::<People>::new();
+        recorder.generation.store(3, Ordering::SeqCst);
+        let fact = facts
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(
+            fact.triggered
+                .iter()
+                .map(|r| r.scenario.as_str())
+                .collect::<Vec<_>>(),
+            ["slow-year", "second"]
+        );
+        recorder.generation.store(2, Ordering::SeqCst);
+        assert!(facts
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .unwrap()
+            .triggered
+            .is_empty());
+        assert_eq!(recorder.calls("process").len(), 2);
+        assert!(!cache.is_populated());
+    }
+
+    #[tokio::test]
+    async fn signpost_owner_empty_inputs_do_not_probe_any_lower_fact() {
+        use crate::signposts::{Cache, Provider};
+        use factory_kernel::{People, SignpostFact};
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let mut read = signpost_read(&evidence).await;
+        read.plan = metric_plan(&evidence, &[], None).await;
+        read.scenarios.clear();
+        let cache = Cache::default();
+        let provider = Provider::new(crate::metrics_service::Service::new(evidence), &cache);
+        assert!(Facts::<People>::new()
+            .get::<SignpostFact, _>(&provider, &read)
+            .await
+            .unwrap()
+            .triggered
+            .is_empty());
+        assert!(recorder.calls.lock().unwrap().is_empty());
+    }
+
     fn subject(evidence: Vec<Check>) -> EvaluationSubject {
         EvaluationSubject {
             control: "test/check".parse().unwrap(),
@@ -1195,6 +1712,238 @@ mod tests {
             recorder.calls.lock().unwrap().len(),
             6,
             "only empty task/workflow owner fast paths were called"
+        );
+    }
+
+    #[tokio::test]
+    async fn physical_check_fact_owns_live_evaluation_and_shared_selective_reads() {
+        use crate::check_evaluation::{Provider, Read, ScopeInput};
+        use factory_kernel::{CheckEvaluationFact, StatusKind, L6};
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let owner = service(&recorder, &bench);
+        let mut knowledge = subject(vec![Check::Knowledge { tag: None }]);
+        knowledge.control = "test/knowledge".parse().unwrap();
+        let mut host = subject(vec![Check::Daemon {
+            fact: "foreman_enabled".into(),
+        }]);
+        host.control = "test/host".parse().unwrap();
+        let mut task = subject(vec![Check::Task {
+            task: "named".into(),
+            max_age: None,
+        }]);
+        task.control = "test/task".parse().unwrap();
+        let scopes = owner.scopes.scopes[..2]
+            .iter()
+            .map(|scope| ScopeInput {
+                scope: scope.clone(),
+                subjects: vec![knowledge.clone(), host.clone(), task.clone()],
+            })
+            .collect();
+        let read = Read {
+            scopes,
+            tags: BTreeSet::new(),
+            attestations: Vec::new(),
+            budgets: Ok(vec![None, None]),
+            now: Some(time()),
+        };
+        let provider = Provider::new(owner);
+        let facts = Facts::<L6>::new();
+        let first = facts
+            .get::<CheckEvaluationFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(first.at, time());
+        assert_eq!(first.scopes.len(), 2);
+        assert_eq!(first.scopes[0].statuses[0].control.id, "host");
+        assert_eq!(first.scopes[0].statuses[0].status.kind(), StatusKind::Open);
+        assert_eq!(recorder.calls("daemon").len(), 1);
+        assert!(recorder.calls("dependencies").is_empty());
+        assert!(recorder.calls("secrets").is_empty());
+        assert!(recorder.calls("agents").is_empty());
+        recorder.generation.store(1, Ordering::SeqCst);
+        let next = facts
+            .get::<CheckEvaluationFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(
+            next.scopes[0].statuses[0].status.kind(),
+            StatusKind::Satisfied,
+            "{next:?}"
+        );
+        assert_ne!(
+            next.scopes[1].statuses[2].refs,
+            first.scopes[1].statuses[2].refs
+        );
+        assert_eq!(
+            recorder.calls("daemon").len(),
+            2,
+            "shared once per read, not once forever"
+        );
+        assert_eq!(
+            recorder.calls("tasks").len(),
+            4,
+            "fresh per-scope reads on each request"
+        );
+        assert!(serde_json::to_value(&next.scopes[0].statuses[0])
+            .unwrap()
+            .get("kind")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn physical_check_fact_preserves_shared_failure_priority_and_retries_without_cache() {
+        use crate::check_evaluation::{Provider, Read, ScopeInput};
+        use factory_kernel::{CheckEvaluationFact, L6};
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let owner = service(&recorder, &bench);
+        let mut read = Read {
+            scopes: vec![ScopeInput {
+                scope: owner.scopes.scopes[1].clone(),
+                subjects: vec![subject(vec![Check::Daemon {
+                    fact: "foreman_enabled".into(),
+                }])],
+            }],
+            tags: BTreeSet::new(),
+            attestations: Vec::new(),
+            budgets: Err(FactoryError::BadRequest(
+                "authored budget unavailable".into(),
+            )),
+            now: None,
+        };
+        let provider = Provider::new(owner);
+        let facts = Facts::<L6>::new();
+        *recorder.failing.lock().unwrap() = Some("daemon");
+        assert_eq!(
+            facts
+                .get::<CheckEvaluationFact, _>(&provider, &read)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "invalid request: daemon unavailable"
+        );
+        *recorder.failing.lock().unwrap() = None;
+        assert_eq!(
+            facts
+                .get::<CheckEvaluationFact, _>(&provider, &read)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "invalid request: authored budget unavailable"
+        );
+        read.budgets = Ok(vec![None]);
+        *recorder.failing.lock().unwrap() = Some("tasks");
+        assert_eq!(
+            facts
+                .get::<CheckEvaluationFact, _>(&provider, &read)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "invalid request: tasks unavailable"
+        );
+        *recorder.failing.lock().unwrap() = None;
+        let before = Utc::now();
+        let recovered = facts
+            .get::<CheckEvaluationFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert!(recovered.at >= before && recovered.at <= Utc::now());
+    }
+
+    #[tokio::test]
+    async fn comparison_fact_gathers_only_primary_evidence_once_and_retries_live() {
+        use crate::check_evaluation::{ComparisonRead, Provider, Read, ScopeInput};
+        use factory_kernel::{CheckComparisonFact, StatusKind, L6};
+        let recorder = Arc::new(Recorder::default());
+        recorder.generation.store(1, Ordering::SeqCst);
+        let bench = BenchStore::in_memory().unwrap();
+        let owner = service(&recorder, &bench);
+        let scope = owner.scopes.scopes[0].clone();
+        let knowledge = subject(vec![Check::Knowledge {
+            tag: Some("owned".into()),
+        }]);
+        let host = subject(vec![Check::Daemon {
+            fact: "foreman_enabled".into(),
+        }]);
+        let provider = Provider::new(owner);
+        let mut read = ComparisonRead {
+            primary: Read {
+                scopes: vec![ScopeInput {
+                    scope: scope.clone(),
+                    subjects: vec![knowledge.clone()],
+                }],
+                tags: BTreeSet::from(["owned".into()]),
+                attestations: vec![],
+                budgets: Ok(vec![None]),
+                now: Some(time()),
+            },
+            alternative: vec![ScopeInput {
+                scope: scope.clone(),
+                subjects: vec![host.clone()],
+            }],
+        };
+        let facts = Facts::<L6>::new();
+        let first = facts
+            .get::<CheckComparisonFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(first.at, time());
+        assert_eq!(
+            first.scopes[0].primary[0].status.kind(),
+            StatusKind::Satisfied
+        );
+        assert_eq!(
+            first.scopes[0].alternative[0].status.kind(),
+            StatusKind::Open
+        );
+        assert!(
+            recorder.calls("daemon").is_empty(),
+            "the alternative cannot enlarge the primary's gather"
+        );
+        read.primary.scopes[0].subjects = vec![host];
+        read.alternative[0].subjects = vec![knowledge];
+        read.primary.budgets = Err(FactoryError::BadRequest(
+            "authored budget unavailable".into(),
+        ));
+        *recorder.failing.lock().unwrap() = Some("daemon");
+        assert!(facts
+            .get::<CheckComparisonFact, _>(&provider, &read)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("daemon unavailable"));
+        *recorder.failing.lock().unwrap() = None;
+        assert!(facts
+            .get::<CheckComparisonFact, _>(&provider, &read)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("authored budget unavailable"));
+        read.primary.budgets = Ok(vec![None]);
+        let before = recorder.calls("daemon").len();
+        let next = facts
+            .get::<CheckComparisonFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(recorder.calls("daemon").len(), before + 1);
+        assert_eq!(
+            next.scopes[0].primary[0].status.kind(),
+            StatusKind::Satisfied
+        );
+        assert_eq!(
+            next.scopes[0].alternative[0].status.kind(),
+            StatusKind::Satisfied
+        );
+        recorder.generation.store(0, Ordering::SeqCst);
+        let next = facts
+            .get::<CheckComparisonFact, _>(&provider, &read)
+            .await
+            .unwrap();
+        assert_eq!(next.scopes[0].primary[0].status.kind(), StatusKind::Open);
+        assert_eq!(
+            next.scopes[0].alternative[0].status.kind(),
+            StatusKind::Satisfied
         );
     }
 }

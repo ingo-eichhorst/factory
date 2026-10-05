@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+
+test("a failed sandbox rebuild has a distinct Inbox label", () => {
+  assert.equal(kindLabel("sandbox_image_stale"), "sandbox image stale");
+});
 import { readFileSync } from "node:fs";
 
 import {

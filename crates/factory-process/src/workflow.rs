@@ -1,6 +1,6 @@
 //! Durable process definitions and their execution attempts.
 
-use crate::control_plan::{self, ControlPlan, PlanStep, RequiredStep, StepKind};
+use crate::control_plan::{self, ControlPlan, ControlPlanExt, PlanStep, RequiredStep, StepKind};
 use crate::task::NewTask;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

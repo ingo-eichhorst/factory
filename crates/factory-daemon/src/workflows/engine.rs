@@ -3745,7 +3745,7 @@ impl Engine {
         // untouched -- a later plan applies to later runs, never this one.
         let plans = self.control_plans(&definition).await?;
         let (mut definition, _) = definition.inject(&plans);
-        self.bind_functionaries(&mut definition)?;
+        self.bind_functionaries(&mut definition).await?;
         self.freeze_workflow_workspace(&mut definition).await?;
         definition.validate().map_err(FactoryError::BadRequest)?;
         let mut run = WorkflowRun::new(definition, caller.as_workflow_actor());

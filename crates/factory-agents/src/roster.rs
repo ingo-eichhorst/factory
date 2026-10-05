@@ -396,5 +396,21 @@ pub fn agent_facts_for(
         .collect()
 }
 
+#[async_trait::async_trait]
+impl factory_kernel::Provide<factory_kernel::FunctionaryRosterFact> for Provider {
+    type Query = String;
+    type Value = factory_kernel::FunctionaryRosterFact;
+    type Error = FactoryError;
+    async fn get(&self, query: &String) -> Result<Self::Value> {
+        let scope = factory_kernel::resolve_scope(&self.scopes, query)?;
+        Ok(factory_kernel::FunctionaryRosterFact {
+            scope: scope.name.clone(),
+            default_agent: scope.agent.as_ref().map(|agent|agent.adapter().to_owned()),
+            names: agents_with(&scope.name, scope.agent.as_ref(), &scope.agents, &self.foreman)
+                .iter().map(|agent|agent.name()).collect(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests;

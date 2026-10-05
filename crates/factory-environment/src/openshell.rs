@@ -811,6 +811,10 @@ pub struct Readiness {
     /// The image a run would be made from now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// A rebuild failed and this agent still selects an older image (#272).
+    /// Orthogonal to readiness: a previously smoked image remains usable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_build_failure: Option<factory_kernel::ImageBuildFailure>,
     /// What else is true and worth a glance: an image rebuilding in the
     /// background, a smoke that reached its endpoint without confirming.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2544,12 +2548,15 @@ policy: {}
             since: at,
             checked_at: at,
             image: None,
+            image_build_failure: None,
             notes: vec![],
             expiring: vec![],
         };
         assert_eq!(r.reason(), "the sandbox needs the credential for factory-claude; supply it with `claude setup-token`");
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["state"], "needs");
+        assert!(json.get("image_build_failure").is_none());
+        assert_eq!(serde_json::from_value::<Readiness>(json).unwrap(), r, "old responses omit the additive failure field");
         let m = ManagedProvider {
             name: "p".into(),
             kind: "t".into(),

@@ -83,3 +83,12 @@ fn every_level_pair_and_people_reader_are_checked_by_the_real_get_method() {
     );
     fixture.check(&read_source("People", "L6"), false, "Level");
 }
+
+#[test]
+fn live_check_result_fact_allows_direction_and_people_but_rejects_process_and_same_level() {
+    let fixture = Fixture::new();
+    for (reader, allowed) in [("L6", true), ("People", true), ("L4", false), ("L5", false)] {
+        let source = format!("use factory_kernel::*; async fn read<P: Provide<CheckEvaluationFact, Query = ()>>(provider: &P) {{ let _ = Facts::<{reader}>::new().get::<CheckEvaluationFact, P>(provider, &()).await; }}");
+        fixture.check(&source, allowed, "Below<");
+    }
+}

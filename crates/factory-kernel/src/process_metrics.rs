@@ -14,6 +14,17 @@ pub enum ProductionBin {
     Week,
 }
 
+/// Plain selection input for the live L4 production provider. The producer
+/// owns window selection, subtree membership and bucket arithmetic.
+pub struct ProductionQuery {
+    pub scope: Option<String>,
+    pub now: chrono::DateTime<Utc>,
+    pub minutes: Option<u32>,
+    pub bin: ProductionBin,
+    /// The people production endpoint remains exact; metrics ask for a subtree.
+    pub subtree: bool,
+}
+
 /// One period of finished runs. `scrapped`, `reworked` and `first_pass` are
 /// all read against `finished`, not tallied separately from it -- a run that
 /// fails on its second attempt is one run, counted once, in each of the

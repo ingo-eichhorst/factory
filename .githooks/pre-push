@@ -3,9 +3,9 @@
 # never from a keyboard here -- see AGENTS.md, "Branches, worktrees and pull
 # requests".
 #
-# GitHub cannot enforce this for us: the repository is private on a free plan,
-# and rulesets and branch protection are both paid features there. So this hook
-# is the enforcement, which means it is only as good as its installation --
+# GitHub does not enforce this for us today: the repository is public, and its
+# `protect main` ruleset exists but is disabled. So this hook is the
+# enforcement, which means it is only as good as its installation --
 # `git config core.hooksPath .githooks`, once per clone.
 #
 # stdin gives one line per ref being pushed:
@@ -51,8 +51,8 @@ $switch      git push -u origin $target
   A merge on GitHub is what moves main; afterwards, fast-forward locally with
   \`git switch main && git pull --ff-only\`.
 
-  This hook is the only thing enforcing that -- GitHub rulesets need a paid
-  plan on a private repository. If you are certain you want to bypass it, you
+  This hook is the only thing enforcing that -- the repository's GitHub
+  ruleset for main is disabled. If you are certain you want to bypass it, you
   have to say so out loud: git push --no-verify.
 
 MSG

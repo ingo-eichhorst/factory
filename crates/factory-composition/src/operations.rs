@@ -290,6 +290,8 @@ pub enum ExceptionKind {
     /// soon as it is known rather than at the due time, naming the one
     /// missing thing and the command that supplies it.
     SandboxNotReady,
+    /// The current sandbox image failed to build; an older image is selected.
+    SandboxImageStale,
     /// A managed provider's declared credential expires within
     /// `openshell::EXPIRY_WARNING_DAYS`, or already has. Only a credential
     /// written inline with its own `expires:` (`#234`): a declared secret's
@@ -310,6 +312,7 @@ impl ExceptionKind {
             Self::TriggeredSignpost => "triggered_signpost",
             Self::HarnessUnhealthy => "harness_unhealthy",
             Self::SandboxNotReady => "sandbox_not_ready",
+            Self::SandboxImageStale => "sandbox_image_stale",
             Self::CredentialExpiring => "credential_expiring",
         }
     }
@@ -1169,6 +1172,31 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 since: sb.readiness.since,
                 age_s: seconds(now - sb.readiness.since),
                 reason,
+                actions: Vec::new(),
+                suspicion: false,
+                observation: false,
+                also: Vec::new(),
+            });
+        }
+        if let Some(failure) = &sb.readiness.image_build_failure {
+            let command = failure.command.as_ref()
+                .map(|command| format!("; rebuild with `{command}`"))
+                .unwrap_or_default();
+            attention.push(Exception {
+                kind: ExceptionKind::SandboxImageStale,
+                severity: Severity::Medium,
+                scope: Some(sb.scope.clone()),
+                task_id: single(&sb.scheduled),
+                title: Some(sb.agent.clone()),
+                run_id: None,
+                agent: Some(sb.agent.clone()),
+                since: failure.since,
+                age_s: seconds(now - failure.since),
+                reason: format!(
+                    "the current sandbox image ({}) failed to build ({}); the selected image is older: {}{}",
+                    failure.expected_key, failure.reason,
+                    sb.readiness.image.as_deref().unwrap_or("unknown"), command
+                ),
                 actions: Vec::new(),
                 suspicion: false,
                 observation: false,
@@ -2202,6 +2230,7 @@ mod tests {
             since,
             checked_at: now(),
             image: None,
+            image_build_failure: None,
             notes: vec![],
             expiring: vec![],
         };
@@ -2287,6 +2316,36 @@ mod tests {
         })
         .attention
         .is_empty());
+    }
+
+    #[test]
+    fn a_failed_image_rebuild_is_attention_even_when_ready_and_unscheduled() {
+        use factory_environment::openshell::{Readiness, ReadinessState};
+        let sandbox = SandboxAttention {
+            scope: "demo".into(), agent: "curator".into(), scheduled: vec![],
+            readiness: Readiness {
+                state: ReadinessState::Ready, thing: None, command: None,
+                since: ago(60), checked_at: now(), image: Some("/old/rootfs.tar.gz".into()),
+                image_build_failure: Some(factory_kernel::ImageBuildFailure {
+                    expected_key: "new-key".into(), reason: "missing C compiler; see /build.log".into(),
+                    since: ago(5), command: Some("build-image.sh rootfs".into()),
+                }), notes: vec![], expiring: vec![],
+            },
+        };
+        let mut input = OperationsInput { now: now(), sandboxes: vec![sandbox], ..Default::default() };
+        let result = report(&input);
+        assert_eq!(result.attention.len(), 1);
+        let item = &result.attention[0];
+        assert_eq!((item.kind, item.severity), (ExceptionKind::SandboxImageStale, Severity::Medium));
+        assert_eq!(item.age_s, 300.0, "age starts at the failed build, not readiness");
+        assert!(item.reason.contains("new-key") && item.reason.contains("/old/rootfs.tar.gz"));
+        assert!(item.reason.contains("/build.log") && item.reason.contains("build-image.sh rootfs"));
+        assert!(!item.suspicion && !item.observation && item.actions.is_empty());
+        input.scope = Some(ScopeFilter::exactly("elsewhere"));
+        assert!(report(&input).attention.is_empty());
+        input.scope = None;
+        input.sandboxes[0].readiness.image_build_failure = None;
+        assert!(report(&input).attention.is_empty(), "recovery removes the warning");
     }
 
     #[test]

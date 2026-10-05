@@ -493,12 +493,18 @@ command that supplies it, on L2 Sandboxes and the roster:
    installed `factory` CLI's digest name it, so a change to either is a new
    image, built in the background with `build-image.sh rootfs` into
    `<instance>/.factory/openshell-images/<key>/` and renamed into place when
-   complete. Runs keep using the previous image until then, and the previous
+   complete. Runs keep using the previous image until then. A failed rebuild
+   keeps a previously smoke-tested image usable, but raises a stale-image
+   warning in Doctor and Inbox with the failed build key, log and rebuild
+   command; readiness does not claim that the image is current. The previous
    one is kept after; older ones are removed. The in-image CLI is
    cross-compiled from the Factory checkout the daemon was built from (or
    `FACTORY_OPENSHELL_SOURCE`), into a cargo target directory under
    `openshell-images/`, never the checkout's own `target/`. Needs `cargo` with
-   `rustup`, `crane` and `bsdtar` on the host; the build log is beside the
+   `rustup`, `crane` and `bsdtar` on the host. The recipe downloads a
+   digest-pinned, host-native Zig C compiler into its temporary directory
+   to compile bundled SQLite for aarch64 musl; it installs no global
+   toolchain. The build log is beside the
    image. A named `image:` is only checked, never built.
 3. **Profiles.** The two Factory ships (`claude-code-oauth`,
    `github-publish`) are imported when a provider names them.
@@ -631,7 +637,8 @@ conversation and answerability, is still a lifecycle follow-up in #218.
   The daemon has to serve the http interface (it does by default).
 - **The binaries.** The image carries its own Linux `factory` and `herdr`.
   `examples/openshell/build-image.sh` builds it: Factory's CLI cross-compiled
-  to static aarch64 Linux with `rust-lld` (no Linux toolchain), herdr's and
+  to static aarch64 Linux with `rust-lld` and a temporary, digest-pinned Zig
+  C cross-compiler (including the bundled SQLite dependency), herdr's and
   jq's Linux releases, Claude Code's managed settings with the allow rules an
   unattended run needs (`git push`, `gh pr create`, `gh pr merge`), a git
   config using `gh` for GitHub credentials, and a Claude Code home that has
@@ -1850,14 +1857,16 @@ reads — `Quiet`, `Triggered`, `NotYetActive` (before its own `from`), or
 `NoData`. Never itself starts, stops, or gates anything (design §8). A
 triggered signpost is meant to be visible outside the Scenarios tab too —
 on the dashboard, in the inbox, as an **observation**, never an automatic
-consequence. The Inbox (`ui/js/dashboard.js`'s `inboxItems`) is built
-entirely client-side, off the task list alone, with no daemon-side inbox
-aggregate to add to; instead, `ScenariosReport::triggered` flattens every
-currently-`Triggered` signpost across every scenario, named alongside the
-scenario it belongs to, so a dashboard or inbox reader does not have to
-walk every card itself. The L6 Scenarios UI slice
-(`ui/js/{scenarios,scenarios-model}.js`, not part of this slice) is
-expected to read this field and render it on the dashboard. A signpost
+consequence. L5 owns the canonical threshold evaluator and live
+`SignpostFact` provider; it computes the named metrics itself. The Dashboard
+and Inbox read `GET /api/signposts` directly through the people-side fact
+channel, not through Operations or an L6 report. They render observations in
+a separate section with no task actions and no contribution to the waiting
+count. A failed read shows an availability warning, not an empty success.
+The provider may reuse a successful fact for a minute while scenario-file
+metadata is unchanged; errors are not cached. `ScenariosReport::triggered`
+keeps its existing flattened wire projection and shares the L5 evaluator.
+A signpost
 names any registry metric with no scenario code of its own required to
 support it -- `backup_age_hours` and `backup_verified_age_days` (`#154`,
 "Policy facts and metrics" under "Backup") work exactly the same way as
@@ -2640,8 +2649,9 @@ the queue however long ago it failed -- open runs' own journals for their last w
 blocked run's reason, `schedule_skipped` entries from the last day, and
 answers and run requests over both windows (`TaskStore::entries_of_kinds`,
 one query rather than a walk over every journal; a store that cannot search
-returns nothing). Triggered signposts are reused for a minute while the
-scenario files are unchanged -- computing them runs the metrics they name.
+returns nothing). Operations never gathers signposts. The Dashboard reads
+their separate L5 fact; signpost evaluation and its short cache do not belong
+to process attention.
 
 **Exceptions.** Only what a person can act on:
 
@@ -2654,7 +2664,6 @@ scenario files are unchanged -- computing them runs the metrics they name.
 | `schedule_late` | a slot passed two ticks ago and nothing was dispatched | medium |
 | `schedule_missed` | slots the scheduler passed over (`schedule_skipped`) in the last day | medium |
 | `liveness_lost` | a **permanent** agent's session is gone -- never judged on being quiet | high |
-| `triggered_signpost` | a scenario signpost is past its threshold -- an observation, on the unscoped report only | low |
 
 A run appears once, as its most severe kind, with any other kinds it matched
 in `also`. Each exception lists the actions it allows.
@@ -5046,7 +5055,7 @@ ports, preserving unknown values, existing window rules, scoped production
 and series/current-value agreement. Production's old wire names re-export
 the L0 schema unchanged. Shared subtree resolution now belongs to the common
 scope model, not L6 Policy, so lower levels do not import a policy helper.
-This does not finish the evaluator, signpost, crate or service migrations.
+This does not finish the complete live service migration.
 
 Standing-task inventory reads also use an L4-owned port. Its L0 metadata
 contains the task id, title, persisted scope, labels and authoritative
@@ -5102,8 +5111,8 @@ OpenShell execution/cleanup records and its evidence collector move together
 into L2, with canonical daemon re-exports. Their command argv, ownership checks,
 fail-closed behavior, evidence bounds/redaction and restart/cleanup contracts
 stay the same. Attachment authorization and task journaling still sit outside
-L2 pending the strict adjacent-command migration. The six-service, signpost and
-upper-level routing work remain unfinished.
+L2 pending the strict adjacent-command migration. The complete six-service
+split and remaining adjacent command paths are unfinished.
 
 L3's `factory-agents` owns standing-agent state, role resolution, harness
 health, both agent adapter traits and the cumulative session-usage contract.
@@ -5144,7 +5153,7 @@ complete TaskStore seam. Dispatch projection into L3 is owned by L4 too.
 Core keeps identical canonical paths; existing workflow/compiler integration
 tests stay outside the ladder, without an upper-level dev dependency.
 
-L4 keeps generic execution plans and gate verification. L5's
+L0 holds plain generic execution-plan data; L4 keeps gate verification. L5's
 `factory-assurance` owns requirement validation and the sole compiler of
 policy and quality sources into that plan; L4 imports no declaration or
 compiler from above. The old core `resolve` path is only the adaptation
@@ -5168,8 +5177,8 @@ hub or agent-lifecycle dependency enters L5. Stored and wire JSON is unchanged.
 The benchmark progress backstop has an independent L5 timer: immediate first
 tick, the same startup cadence, delayed missed ticks, one sweep at a time and
 explicit shutdown. L4's process scheduler no longer sweeps benchmark runs.
-Full provider/service isolation, signposts and remediation/promotion routing
-remain unfinished.
+Complete live service isolation and the remaining adjacent command paths
+are unfinished.
 
 `Task.bench_origin` is an L4 `OriginRef`, opaque to process. It has no
 benchmark-field API; the benchmark owner alone decodes its legacy object
@@ -5233,8 +5242,7 @@ adapter methods intact. The observer stream remains lossy, with no subscribers
 normal and whole-run tokens/digests redacted before publication; it is not a
 fact log. Concrete HTTP/socket mounts, the actual router and its single
 `Engine::handle(Envelope)`/`access.rs` authorization entry remain in the daemon.
-Moving page projections does not isolate their live gatherers or claim to
-finish the Operations signpost reader move.
+Moving page projections does not isolate all their live gatherers.
 
 The live benchmark resolution, gate and knowledge-tag providers now live in
 L5's `factory-assurance`, holding only its benchmark store and instance root.
@@ -5295,13 +5303,111 @@ budget caps and errors, never spend or a precomputed verdict. Exact-scope
 history, path-based receipt ancestry, twice-window stale lookbacks, shared
 subtree reads and unknown/missing evidence are preserved. The outside wiring
 constructs real physical providers, with no Engine callback entering L5.
-Metric gathering, signposts and the complete six-service split still remain.
+L5 also owns the actual live metric service: registry resolution, lazy
+production/process/spend/conformance/backup/environment fact reads, same-level
+benchmark reads, series arithmetic and Quality/compliance figures. Quality
+profile loading, fingerprints and recursion-safe metric dependencies live
+there too. L6 projects raw applicable controls, receipts and budget limits;
+L5 evaluates them, never asking for a Policy page or accepting an upper-level
+rollup. The outside request retains historical Policy page failure preflights
+without passing their decorations into L5.
+
+Signposts are an actual L5-produced L0 fact. The provider receives raw
+authored thresholds, policy subjects, receipts and caps, then uses L5's live
+metric service and canonical evaluator itself. It holds no Engine callback
+and accepts no precomputed metric values or upper-level verdicts. Its own
+short in-memory cache preserves successful snapshots only, invalidates on
+scenario-file metadata changes and never persists a status table. Dashboard
+and Inbox read the people-side fact directly; Operations never gathers it.
+Authored scenario intent remains in L6, which re-exports the canonical L5
+threshold/evaluator types for unchanged scenario projections.
+
+L6's live Budget service owns catalogue rereads, path-based scope selection,
+UTC-month windows and independent-cap assessment. Outside wiring supplies
+only fresh plain scope identities and the physical L4 spend provider; L6
+reads it through `Facts<L6>`, never an Engine callback or precomputed spend.
+The plain `SpendQuery` is shared L0 data with canonical legacy re-exports.
+At the exact month boundary, an empty window remains known empty without a
+provider read. This completes Budget's request path, not the six-service split.
+
+L6's live Goals service now owns catalogue reads, cycle selection, scope
+filtering, scoring, label context and manual check-in validation/history. It
+reads the plain L0 `MetricValuesFact` through `Facts<L6>`; the physical L5
+provider computes it using the same live metric service and raw authored
+inputs, never an Engine callback or supplied metric values. Metric identity
+and value schemas are canonical L0 data, with unchanged legacy re-exports;
+registry resolution and arithmetic remain L5. The Goals response structs
+are canonical L6 data, re-exported by the existing wire paths.
+Request-only Policy compatibility checks remain outside both services. A
+request-local L5 read-phase diagnostic preserves their error priority; it is
+never evidence, a cached metric/status, or something a level reader uses.
+Goal label execution still needs the remaining command-ladder migration.
+
+L6's live policy-intent service now owns authored catalogue reads, current
+policy receipts, applicability and raw budget inputs for metrics, Goals,
+Signposts, Policy, Quality and Scenarios. Its knowledge-tag read uses the
+actual L5 capability through `Facts<L6>`. Policy configuration canonically
+re-exports L6's declaration type and uses the same L6 path-chain algorithm;
+the service receives fresh raw scope declarations, never a resolved chain or
+Policy report. It rereads limits only when a check or Quality plan needs them,
+preserving invalid authored intent as error data for the L5 evaluator. No
+spend or compliance judgement is computed in this input service.
+
+Policy report/detail reads now belong to a physical L6 service. It owns
+applicability, receipt history, authored classifications, rollups, findings
+and remediation links, reading the actual L5 `CheckEvaluationFact` and L4
+inventory through `Facts<L6>`. The L5 producer gathers lower evidence live
+with its existing service, then calls the sole unchanged check evaluator.
+The fact contains only plain L0 observations, statuses, references and
+findings, never L6 classifications or a Policy report. Status precedence
+and result construction stay private to L5; legacy status/result types are
+canonical L0 re-exports with unchanged JSON. Shared lower failures precede
+deferred raw-budget errors, and report/detail clock timing stays distinct.
+The same L6 service now owns reporting-clock subtree selection, live typed
+L2 exploited-finding and L4 confirmed-report reads, receipt history and the
+canonical deadline fold. It owns attestation/withdrawal validation and writes
+to its existing append-only store too, preserving error priority, exact item
+scope, corrective anchors and submission deduplication. The router supplies
+only raw caller/request inputs and physical providers; it retains its one
+authorization check and existing receipt-change events. Workflow preview
+decorations now use the live L5 preview fact described below. These paths do
+not complete the six-service split.
+
+The live Scenarios service now belongs to L6 too: authored real/draft
+catalogues, overlays, goal changes, backlog, forecasts and promotion deltas
+are selected and folded there. It reads live metrics, process inventory,
+production and L5 check observations through `Facts<L6>`, not supplied
+results or an Engine callback. Report and what-if phases let outside wiring
+preserve request-only metric error priority without handing metrics back in.
+Promotion uses L5's plain `CheckComparisonFact`: both declaration sets are
+evaluated against one overlay-selected evidence gather, preserving the
+original lazy reads. L6 submits the selected work through its same-level
+remediation service and the L6→L5→L4 command chain; only ids return, with
+legacy task payload hydration outside. Scenarios response data is canonical
+L6 vocabulary with unchanged wire re-exports. Remaining command paths and
+complete six-service isolation are still unfinished.
+
+Execution plans and workflow previews now have physical live owners too.
+L6 loads its own applicable authored policy requirements; the L5 plan provider
+loads current Quality profiles and invokes the sole unchanged compiler. L0
+holds only generic plan data. L4 supplies strongly typed authored workflow
+blueprints, normalizing legacy rows without exposing task/run lifecycle.
+The L5 preview service reads those facts, validates and expands part previews
+with the canonical process algorithms, compiles live plans, injects generic
+steps, and binds functionaries from L3's declaration-order roster fact. The
+same binding is used when dispatch freezes a run; preview results never replace
+fresh dispatch-time compilation. No Engine callback or upper report enters L5.
+L6 Policy owns workflow selection and failure folds through `WorkflowTargetsFact`
+and `WorkflowPreviewFact`; neither port returns a lower-level report. Store-wide
+failures remain fatal and individual lint refusals remain findings. The router
+only prepares raw authored inputs and hydrates the unchanged people-side lint
+response. These services do not finish every timer or adjacent command path.
 
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),
 with ADR 0004 amended to name the evidence channel. Every registered fact
-provider has a physical producing-level owner. The signpost producer/reader
-move, six complete live services and the other adjacent command paths remain
+provider has a physical producing-level owner. Six complete live services
+and the other adjacent command paths remain
 in #193.
 
 ## Layout

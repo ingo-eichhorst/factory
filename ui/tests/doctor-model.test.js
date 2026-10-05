@@ -6,6 +6,7 @@ import {
   findingSummary,
   gatewaySummary,
   identityText,
+  imageFailureSummary,
   scanAge,
   statusSummary,
 } from "../js/doctor-model.js";
@@ -52,4 +53,14 @@ test("an OpenShell gateway says whether it answers and when Factory last started
   assert.match(up.started, /started by Factory at 2026-10-04T07:00:00Z with launchctl kickstart/);
   const down = gatewaySummary({ gateway: "openshell", status: "unreachable", detail: "connection refused" });
   assert.deepEqual([down.level, down.label, down.started, down.detail], ["bad", "unreachable", null, "connection refused"]);
+});
+
+test("image failures expose server evidence, not an inferred readiness verdict", () => {
+  const row = { scope: "demo", agent: "curator", image: "/old/rootfs.tar.gz", failure: {
+    expected_key: "new-key", reason: "no C compiler", since: "2026-10-05T08:00:00Z", command: "build-image.sh rootfs",
+  } };
+  assert.deepEqual(imageFailureSummary(row), {
+    name: "demo / curator", key: "new-key", reason: "no C compiler", since: "2026-10-05T08:00:00Z",
+    image: "/old/rootfs.tar.gz", command: "build-image.sh rootfs",
+  });
 });

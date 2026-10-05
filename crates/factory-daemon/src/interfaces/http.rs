@@ -170,6 +170,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/goals", get(goals))
         .route("/api/goals/checkins", post(create_goals_checkin))
         .route("/api/scenarios", get(scenarios))
+        .route("/api/signposts", get(signposts))
         .route("/api/scenarios/promote", post(scenario_promote))
         .route("/api/scenarios/whatif", post(scenario_whatif))
         // The L6 Quality attributes tab (`#107`).
@@ -1156,6 +1157,11 @@ async fn scenarios(State(engine): State<Arc<Engine>>, Query(q): Query<ScenariosQ
         },
     )
     .await
+}
+
+/// Read L5's fact through the existing envelope and authorization entry.
+async fn signposts(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::Signposts).await
 }
 
 #[derive(serde::Deserialize)]
@@ -2948,6 +2954,35 @@ mod tests {
         let code = raw.split(' ').nth(1).unwrap().parse().unwrap();
         let body = raw.split("\r\n\r\n").nth(1).unwrap_or_default().to_string();
         (code, body)
+    }
+
+    #[tokio::test]
+    async fn signpost_route_serves_the_l5_fact_and_its_embedded_dashboard_model() {
+        let addr = serve().await;
+        let (code, body) = call(addr, "GET", "/api/signposts", false, "").await;
+        assert_eq!(code, 200, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["data"]["kind"], "signposts");
+        let fact: factory_kernel::SignpostFact =
+            serde_json::from_value(json["data"]["fact"].clone()).unwrap();
+        assert!(fact.triggered.is_empty());
+        assert!((chrono::Utc::now() - fact.at).num_seconds().abs() < 10);
+        let (code, body) = call(addr, "POST", "/api/rpc", true, r#"{"op":"signposts"}"#).await;
+        assert_eq!(code, 200, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["data"]["kind"], "signposts");
+        let (code, body) = call(
+            addr,
+            "POST",
+            "/api/rpc",
+            true,
+            r#"{"op":"signposts","token":"unknown-test-token"}"#,
+        )
+        .await;
+        assert_eq!(code, 403, "{body}");
+        let (code, body) = call(addr, "GET", "/ui/js/signposts-model.js", false, "").await;
+        assert_eq!(code, 200, "{body}");
+        assert!(body.contains("export function signpostObservations"));
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ license.workspace = true
 level = 6
 
 [dependencies]
+anyhow.workspace = true
 factory-kernel = { path = "../factory-kernel" }
 factory-assurance = { path = "../factory-assurance" }
 chrono.workspace = true
