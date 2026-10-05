@@ -765,6 +765,10 @@ pub const RECIPE: &[(&str, &str)] = &[
         "claude.json",
         include_str!("../../../examples/openshell/claude.json"),
     ),
+    (
+        "gh-config.yml",
+        include_str!("../../../examples/openshell/gh-config.yml"),
+    ),
 ];
 
 /// The image Factory builds is named by what it was built from: the recipe
@@ -2425,6 +2429,30 @@ policy: {}
         assert!(RECIPE
             .iter()
             .any(|(name, body)| *name == "build-image.sh" && body.contains("FACTORY_SOURCE")));
+    }
+
+    /// The provisioner writes out only `RECIPE` before it runs
+    /// `build-image.sh`, so every file the script reads beside itself has to
+    /// be in it. `gh-config.yml` (#274) was not, and every provisioned build
+    /// failed at `cp "$here/gh-config.yml"` while a build run straight from
+    /// `examples/openshell/` passed.
+    #[test]
+    fn the_recipe_carries_every_file_build_image_reads_beside_itself() {
+        let (_, script) = RECIPE.iter().find(|(name, _)| *name == "build-image.sh").unwrap();
+        let mut read = Vec::new();
+        for piece in script.split("\"$here/").skip(1) {
+            let name = piece.split('"').next().unwrap();
+            if !name.starts_with("..") {
+                read.push(name);
+            }
+        }
+        assert!(read.contains(&"gh-config.yml"), "{read:?}");
+        for name in read {
+            assert!(
+                RECIPE.iter().any(|(listed, _)| *listed == name),
+                "build-image.sh reads {name} beside itself, but RECIPE does not write it out"
+            );
+        }
     }
 
     /// Nobody answers a sandboxed run's terminal. The 2026-10-04 audit hung
