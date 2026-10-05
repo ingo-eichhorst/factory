@@ -1743,3 +1743,152 @@ fn budget_service_rereads_intent_after_shell_completion_and_restart() {
     assert_eq!(cli["report"]["spend"]["total"], recovered["spend"]["total"]);
     assert_eq!(cli["report"]["budgets"][0]["assessment"]["state"], "unknown");
 }
+
+#[test]
+fn goals_service_uses_live_metrics_and_retains_manual_checkins_through_cli_and_restart() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    let base = daemon.base_url();
+    let directory = daemon.root.join(".factory/goals");
+    std::fs::create_dir_all(&directory).unwrap();
+    let cycle = "cycle: {id: active, from: 2020-01-01, to: 2099-12-31}\nobjectives:\n  - id: ship\n    title: Ship\n    key_results:\n      - {id: manual, title: Manual, kind: committed, manual: true, baseline: 0, target: 1}\n      - {id: computed, title: Computed, kind: committed, metric: first_pass_yield, baseline: 0, target: 1}\n";
+    std::fs::write(directory.join("active.yaml"), cycle).unwrap();
+    let url = format!("{base}/api/goals?scope=demo&cycle=active");
+    let report = || expect_ok(&url, &get(&url))["report"].clone();
+    let before = report();
+    assert!(before["report"]["objectives"][0]["key_results"][1]["value"].is_null());
+    let workflow_url = format!("{base}/api/workflows");
+    let created = expect_ok(
+        &workflow_url,
+        &post(
+            &workflow_url,
+            &json!({"name": "goals-smoke", "scope": "demo", "nodes": [task_node("goal", "printf 'goals smoke\\n'")], "edges": []}),
+        ),
+    );
+    let workflow_id = created["workflow"]["id"].as_str().unwrap();
+    let start_url = format!("{workflow_url}/{workflow_id}/run");
+    let started = expect_ok(&start_url, &post(&start_url, &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let finished = wait_for("Goals shell run to settle", Duration::from_secs(30), || {
+        let run = run_status(&base, run_id);
+        matches!(
+            run["status"].as_str(),
+            Some("done" | "failed" | "cancelled")
+        )
+        .then_some(run)
+    });
+    assert_eq!(finished["status"], "done", "{finished}");
+    assert_eq!(
+        report()["report"]["objectives"][0]["key_results"][1]["value"],
+        1.0
+    );
+    let checkins_url = format!("{base}/api/goals/checkins");
+    expect_ok(
+        &checkins_url,
+        &post(
+            &checkins_url,
+            &json!({"kr": "ship/manual", "value": 0.5, "confidence": 7, "note": "first"}),
+        ),
+    );
+    let cli = |args: &[&str]| {
+        Command::new(&daemon.factory_bin)
+            .arg("--root")
+            .arg(&daemon.root)
+            .arg("--url")
+            .arg(&base)
+            .arg("--json")
+            .args(args)
+            .env_remove("FACTORY_TOKEN")
+            .env_remove("FACTORY_TASK_TOKEN")
+            .env_remove("FACTORY_RUN_TOKEN")
+            .env_remove("FACTORY_SOCKET")
+            .env_remove("FACTORY_URL")
+            .output()
+            .unwrap()
+    };
+    let output = cli(&[
+        "goals",
+        "checkin",
+        "ship/manual",
+        "--value",
+        "1",
+        "--confidence",
+        "8",
+        "--note",
+        "second",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let checkin: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(checkin["checkin"]["value"], 1.0);
+    let after = report();
+    assert_eq!(
+        after["checkins"]["ship/manual"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        after["report"]["objectives"][0]["key_results"][0]["confidence"],
+        8
+    );
+    let (status, _) = raw_request(
+        "POST",
+        &checkins_url,
+        Some(&json!({"kr": "ship/manual", "value": 1, "confidence": 11})),
+    )
+    .unwrap();
+    assert_eq!(status, 400);
+    std::fs::write(
+        directory.join("active.yaml"),
+        cycle
+            .replace("title: Ship", "title: Updated")
+            .replacen("target: 1", "target: 2", 1),
+    )
+    .unwrap();
+    let changed = report();
+    assert_eq!(changed["report"]["objectives"][0]["title"], "Updated");
+    assert_eq!(
+        changed["report"]["objectives"][0]["key_results"][0]["score"],
+        0.5
+    );
+    daemon.sigterm();
+    daemon.spawn();
+    let restarted = report();
+    assert_eq!(restarted["checkins"], after["checkins"]);
+    assert_eq!(
+        restarted["report"]["objectives"][0]["key_results"][1]["value"],
+        1.0
+    );
+    // Build a fresh CLI invocation after restart rather than keeping any
+    // service/metric state in the test client.
+    let output = Command::new(&daemon.factory_bin)
+        .arg("--root")
+        .arg(&daemon.root)
+        .arg("--url")
+        .arg(&base)
+        .args([
+            "--json", "goals", "status", "--scope", "demo", "--cycle", "active",
+        ])
+        .env_remove("FACTORY_TOKEN")
+        .env_remove("FACTORY_TASK_TOKEN")
+        .env_remove("FACTORY_RUN_TOKEN")
+        .env_remove("FACTORY_SOCKET")
+        .env_remove("FACTORY_URL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let restored: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(restored["report"]["checkins"], restarted["checkins"]);
+    assert_eq!(
+        restored["report"]["report"]["objectives"][0]["key_results"][0]["score"],
+        0.5
+    );
+}

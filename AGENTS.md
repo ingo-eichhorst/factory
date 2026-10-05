@@ -301,6 +301,17 @@ something impossible.
   through `Facts<L6>` with the canonical L0 `SpendQuery`. Never pass Engine
   callbacks, precomputed spend or a budget verdict into the service. The exact
   first instant of a month is known empty and does not read the provider.
+  L6's live Goals service owns catalogue reads, cycle selection, path filtering,
+  scoring, label context and manual check-in validation/history. It reads
+  `MetricValuesFact` through `Facts<L6>`; the physical L5 provider gathers and
+  computes values from raw authored inputs using its own live metric service.
+  MetricId/MetricValue are plain canonical L0 vocabulary; the registry and
+  arithmetic stay L5. Goals response structs are canonical L6 data with wire
+  re-exports. Never pass a metric result into Goals from the outside router.
+  Keep request-only compatibility failure checks outside both services; a
+  request-local provider read-phase diagnostic may sequence those errors but
+  is never metric evidence/status or a level reader's channel. Goal label
+  execution still needs its adjacent command migration.
   The complete six-service split still remains.
   L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.

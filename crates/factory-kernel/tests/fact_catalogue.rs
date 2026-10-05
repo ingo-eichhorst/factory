@@ -17,6 +17,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<ProcessMetricFact, L4>("ProcessMetricFact", "L4");
     assert_producer::<BenchResolutionFact, L5>("BenchResolutionFact", "L5");
     assert_producer::<SignpostFact, L5>("SignpostFact", "L5");
+    assert_producer::<MetricValuesFact, L5>("MetricValuesFact", "L5");
     assert_producer::<InfrastructureExpiryFact, L1>("InfrastructureExpiryFact", "L1");
     assert_producer::<RenewalDeclarationsFact, L1>("RenewalDeclarationsFact", "L1");
     assert_producer::<CredentialExpiryFact, L2>("CredentialExpiryFact", "L2");
@@ -46,6 +47,25 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<CostReport, L4>("CostReport", "L4");
     assert_producer::<GateFact, L5>("GateFact", "L5");
     assert_producer::<KnowledgeTags, L5>("KnowledgeTags", "L5");
+}
+
+#[test]
+fn metric_values_are_plain_validated_identity_data_without_registry_resolution() {
+    let fact: MetricValuesFact = serde_json::from_value(serde_json::json!({"values": [
+        {"id": "unregistered.family", "value": null, "as_of": "2026-10-16T12:00:00Z"}
+    ]}))
+    .unwrap();
+    assert_eq!(fact.values[0].id.as_str(), "unregistered.family");
+    assert_eq!(
+        serde_json::from_value::<MetricValuesFact>(serde_json::to_value(&fact).unwrap()).unwrap(),
+        fact
+    );
+    assert!(
+        serde_json::from_value::<MetricValuesFact>(serde_json::json!({"values": [
+            {"id": "invalid..id", "value": null, "as_of": "2026-10-16T12:00:00Z"}
+        ]}))
+        .is_err()
+    );
 }
 
 #[test]
@@ -123,6 +143,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
     let mut expected = vec![
         "ProductionFact", "ProcessMetricFact", "BenchResolutionFact",
         "SignpostFact",
+        "MetricValuesFact",
         "InfrastructureExpiryFact", "CredentialExpiryFact", "ScheduledRunDatesFact",
         "RenewalDeclarationsFact",
         "DaemonConfigFact",

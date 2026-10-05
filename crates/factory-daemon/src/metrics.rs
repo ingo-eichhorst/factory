@@ -198,32 +198,7 @@ impl Engine {
         ids
     }
 }
-/// Every metric id `catalogue` itself names -- `direction.yaml`'s
-/// `north_star`/`inputs` and every key result's own bound metric -- filtered
-/// to ids `metrics::resolve` has at least heard of (`Unknown` ones are
-/// dropped; `Unavailable` ones are kept, so they still come back with their
-/// reason rather than silently vanishing from a report).
-pub(crate) fn goals_metric_ids(catalogue: &GoalsCatalogue) -> Vec<MetricId> {
-    let mut ids = Vec::new();
-    if let Some(direction) = &catalogue.direction {
-        if let Some(north_star) = &direction.north_star {
-            push_if_known(&mut ids, &north_star.metric);
-        }
-        for input in &direction.inputs {
-            push_if_known(&mut ids, input);
-        }
-    }
-    for cycle in &catalogue.cycles {
-        for objective in &cycle.objectives {
-            for kr in &objective.key_results {
-                if let Some(bound) = kr.bound_metric(&objective.id) {
-                    push_if_known(&mut ids, &bound);
-                }
-            }
-        }
-    }
-    ids
-}
+pub(crate) use factory_direction::goals_service::metric_ids as goals_metric_ids;
 
 pub(crate) fn push_if_known(ids: &mut Vec<MetricId>, id: &MetricId) {
     if !matches!(metrics::resolve(id), Err(MetricError::Unknown(_))) {
@@ -2645,6 +2620,248 @@ mod tests {
             metric(&default_window, "conformance_rate.feature").value,
             Some(2.0 / 3.0),
             "the default 28d window still counts all three"
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_value_fact_rereads_real_lower_stores_and_retries_after_a_failed_read() {
+        let (engine, database) = scoped_engine();
+        let now = Utc::now();
+        timed_run(
+            &engine,
+            &database,
+            "first",
+            "work",
+            RunStatus::Done,
+            now - chrono::Duration::hours(3),
+            Some(now - chrono::Duration::hours(2)),
+            Some(measured(2.0, 200)),
+        )
+        .await;
+        let snapshot = engine.factory_snapshot();
+        let plan = factory_assurance::metrics_service::Plan::prepare(
+            &[
+                MetricId::new("cost_week").unwrap(),
+                MetricId::new("first_pass_yield").unwrap(),
+                MetricId::new("cost_week").unwrap(),
+            ],
+            snapshot.root.clone(),
+            &snapshot.scope_tree(),
+            &crate::quality::quality_configuration(&snapshot),
+            Some("work"),
+        )
+        .await
+        .unwrap();
+        let query = factory_assurance::metric_values::Read {
+            plan,
+            policy: Ok(None),
+            budgets: Ok(BTreeMap::new()),
+            now,
+            window: None,
+        };
+        let provider = <factory_kernel::MetricValuesFact as crate::facts::Port>::provider(&engine);
+        let facts = factory_kernel::Facts::<L6>::new();
+        let first = facts
+            .get::<factory_kernel::MetricValuesFact, _>(&provider, &query)
+            .await
+            .unwrap();
+        assert_eq!(first.values.len(), 2);
+        assert_eq!(first.values[0].value, Some(2.0));
+        assert_eq!(first.values[1].value, Some(1.0));
+        timed_run(
+            &engine,
+            &database,
+            "failed",
+            "work",
+            RunStatus::Failed,
+            now - chrono::Duration::hours(2),
+            Some(now - chrono::Duration::hours(1)),
+            Some(measured(3.0, 300)),
+        )
+        .await;
+        timed_run(
+            &engine,
+            &database,
+            "outside",
+            "side",
+            RunStatus::Done,
+            now - chrono::Duration::hours(2),
+            Some(now - chrono::Duration::hours(1)),
+            Some(measured(99.0, 9900)),
+        )
+        .await;
+        let next = facts
+            .get::<factory_kernel::MetricValuesFact, _>(&provider, &query)
+            .await
+            .unwrap();
+        assert_eq!(next.values[0].value, Some(5.0));
+        assert_eq!(next.values[1].value, Some(0.5));
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute("ALTER TABLE runs RENAME TO qa_temporarily_hidden_runs", [])
+            .unwrap();
+        assert!(facts
+            .get::<factory_kernel::MetricValuesFact, _>(&provider, &query)
+            .await
+            .is_err());
+        connection
+            .execute("ALTER TABLE qa_temporarily_hidden_runs RENAME TO runs", [])
+            .unwrap();
+        assert_eq!(
+            facts
+                .get::<factory_kernel::MetricValuesFact, _>(&provider, &query)
+                .await
+                .unwrap(),
+            next
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_value_fact_uses_the_same_compliance_quality_and_benchmark_algorithms() {
+        let (engine, _) = scoped_engine();
+        let now = Utc::now();
+        let ids = [
+            "compliance.cra",
+            "open_controls.cra",
+            "quality.reliability",
+            "bench.resolve_rate.missing",
+        ]
+        .into_iter()
+        .map(|id| MetricId::new(id).unwrap())
+        .collect::<Vec<_>>();
+        let snapshot = engine.factory_snapshot();
+        let plan = factory_assurance::metrics_service::Plan::prepare(
+            &ids,
+            snapshot.root.clone(),
+            &snapshot.scope_tree(),
+            &crate::quality::quality_configuration(&snapshot),
+            Some("work"),
+        )
+        .await
+        .unwrap();
+        let policy = Some(
+            engine
+                .metric_policy_inputs(&snapshot, plan.scope())
+                .await
+                .unwrap(),
+        );
+        let budgets = engine.metric_quality_budgets(&snapshot, &plan).await;
+        let query = factory_assurance::metric_values::Read {
+            plan,
+            policy: Ok(policy),
+            budgets,
+            now,
+            window: None,
+        };
+        let provider = <factory_kernel::MetricValuesFact as crate::facts::Port>::provider(&engine);
+        let observed = factory_kernel::Facts::<L6>::new()
+            .get::<factory_kernel::MetricValuesFact, _>(&provider, &query)
+            .await
+            .unwrap();
+        let original = engine
+            .metrics_for(&ids, now, Some("work"), None)
+            .await
+            .unwrap();
+        assert_eq!(observed.values, original.values);
+    }
+
+    #[tokio::test]
+    async fn metric_value_fact_defers_authored_input_errors_and_clears_failure_phase_on_retry() {
+        let (engine, database) = scoped_engine();
+        let now = Utc::now();
+        let snapshot = engine.factory_snapshot();
+        let plan = factory_assurance::metrics_service::Plan::prepare(
+            &[
+                MetricId::new("unit_cost").unwrap(),
+                MetricId::new("compliance.cra").unwrap(),
+            ],
+            snapshot.root.clone(),
+            &snapshot.scope_tree(),
+            &crate::quality::quality_configuration(&snapshot),
+            None,
+        )
+        .await
+        .unwrap();
+        let query = factory_assurance::metric_values::Read {
+            plan,
+            policy: Err(factory_core::error::FactoryError::BadRequest(
+                "authored input unavailable".into(),
+            )),
+            budgets: Ok(BTreeMap::new()),
+            now,
+            window: None,
+        };
+        let provider = <factory_kernel::MetricValuesFact as crate::facts::Port>::provider(&engine);
+        let facts = factory_kernel::Facts::<L6>::new();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute("ALTER TABLE runs RENAME TO qa_temporarily_hidden_runs", [])
+            .unwrap();
+        let initial = facts
+            .get::<factory_kernel::MetricValuesFact, _>(&provider, &query)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            initial.code(),
+            "adapter_failed",
+            "initial lower errors precede raw authored-input errors: {initial}"
+        );
+        assert!(!provider.policy_was_gathered());
+        connection
+            .execute("ALTER TABLE qa_temporarily_hidden_runs RENAME TO runs", [])
+            .unwrap();
+        for _ in 0..2 {
+            let error = facts
+                .get::<factory_kernel::MetricValuesFact, _>(&provider, &query)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), "bad_request");
+            assert_eq!(
+                error.to_string(),
+                "invalid request: authored input unavailable"
+            );
+            assert!(!provider.policy_was_gathered());
+        }
+    }
+
+    #[tokio::test]
+    async fn goals_keep_request_preflight_errors_ahead_of_final_metric_read_failures() {
+        let (engine, database) = scoped_engine();
+        let root = engine.factory_snapshot().root.clone();
+        std::fs::create_dir_all(root.join(".factory/goals")).unwrap();
+        std::fs::write(root.join(".factory/goals/direction.yaml"),
+            "vision: V\nmission: M\nnorth_star: {metric: compliance.cra, why: Count}\ninputs: [conformance_rate.feature]\n").unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "ALTER TABLE tasks RENAME TO qa_temporarily_hidden_tasks",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("ALTER TABLE runs RENAME TO qa_temporarily_hidden_runs", [])
+            .unwrap();
+        let ids = [
+            MetricId::new("compliance.cra").unwrap(),
+            MetricId::new("conformance_rate.feature").unwrap(),
+        ];
+        let original = engine.metrics(&ids, Utc::now()).await.unwrap_err();
+        let moved = engine.goals_report(None, None).await.unwrap_err();
+        connection
+            .execute(
+                "ALTER TABLE qa_temporarily_hidden_tasks RENAME TO tasks",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("ALTER TABLE qa_temporarily_hidden_runs RENAME TO runs", [])
+            .unwrap();
+        assert!(original.to_string().contains("tasks"), "{original}");
+        assert_eq!(moved.code(), original.code());
+        assert_eq!(moved.to_string(), original.to_string());
+        assert!(
+            engine.goals_report(None, None).await.is_ok(),
+            "the next request must not retain the failed read"
         );
     }
 }

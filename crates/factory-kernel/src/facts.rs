@@ -3,7 +3,7 @@
 //! and behavior. Provide defines live ports; Below enforces reader direction.
 
 use crate::fact_vocabulary::*;
-use crate::{ArtifactProvenance, CostReport, ProductionFact, ProcessMetricFact, BenchResolutionFact, SandboxServiceEvidenceFact};
+use crate::{ArtifactProvenance, CostReport, ProductionFact, ProcessMetricFact, BenchResolutionFact, MetricValuesFact, SandboxServiceEvidenceFact};
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,9 @@ impl Fact for ProcessMetricFact {
     type Producer = L4;
 }
 impl Fact for BenchResolutionFact {
+    type Producer = L5;
+}
+impl Fact for MetricValuesFact {
     type Producer = L5;
 }
 
@@ -695,6 +698,10 @@ pub struct FactCatalogueEntry {
 /// a wrong level reader a compile error instead of a comment. All listed schemas
 /// and their nested vocabulary now live in L0.
 pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
+    FactCatalogueEntry {
+        fact: "MetricValuesFact", producer: "L5", readers: &["L6 Goals"],
+        lives_in_kernel: true, note: "current registry values computed by the live L5 metric service",
+    },
     FactCatalogueEntry {
         fact: "SignpostFact", producer: "L5", readers: &["People Dashboard"],
         lives_in_kernel: true, note: "live metric-backed scenario observations, with no automatic consequences",

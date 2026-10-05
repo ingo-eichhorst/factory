@@ -78,7 +78,7 @@ impl GoalsStore {
     /// Insert one check-in row. Never fails on a duplicate value or
     /// confidence -- validation (KR exists and is manual, confidence
     /// `0..=10`, a finite value) happens before this is ever called
-    /// (`Engine::goals_checkin`), so this is a pure append.
+    /// (`goals_service::Service::checkin`), so this is a pure append.
     pub async fn append(&self, checkin: &CheckIn) -> Result<()> {
         let checkin = checkin.clone();
         self.with_conn(move |conn| {

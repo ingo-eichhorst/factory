@@ -14,6 +14,8 @@
 pub mod budget;
 pub mod budget_service;
 pub mod goals;
+pub mod goals_service;
+pub mod goals_view;
 pub mod goals_store;
 pub mod policy;
 pub mod policy_export;

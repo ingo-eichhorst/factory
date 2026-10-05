@@ -5323,6 +5323,19 @@ The plain `SpendQuery` is shared L0 data with canonical legacy re-exports.
 At the exact month boundary, an empty window remains known empty without a
 provider read. This completes Budget's request path, not the six-service split.
 
+L6's live Goals service now owns catalogue reads, cycle selection, scope
+filtering, scoring, label context and manual check-in validation/history. It
+reads the plain L0 `MetricValuesFact` through `Facts<L6>`; the physical L5
+provider computes it using the same live metric service and raw authored
+inputs, never an Engine callback or supplied metric values. Metric identity
+and value schemas are canonical L0 data, with unchanged legacy re-exports;
+registry resolution and arithmetic remain L5. The Goals response structs
+are canonical L6 data, re-exported by the existing wire paths.
+Request-only Policy compatibility checks remain outside both services. A
+request-local L5 read-phase diagnostic preserves their error priority; it is
+never evidence, a cached metric/status, or something a level reader uses.
+Goal label execution still needs the remaining command-ladder migration.
+
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),
 with ADR 0004 amended to name the evidence channel. Every registered fact

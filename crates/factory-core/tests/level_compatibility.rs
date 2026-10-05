@@ -470,3 +470,26 @@ fn spend_query_is_canonical_plain_kernel_vocabulary_with_unchanged_legacy_json()
     assert_eq!(empty.group_by, factory_kernel::CostGroupBy::Task);
     assert!(empty.scope.is_none() && empty.from.is_none() && empty.to.is_none());
 }
+
+#[test]
+fn metric_identity_values_and_goals_views_are_canonical_with_the_original_wire_shape() {
+    let id = factory_kernel::MetricId::new("compliance.cra").unwrap();
+    let legacy: factory_core::metrics::MetricId = id.clone();
+    let owned: factory_assurance::metrics::MetricId = legacy;
+    assert_eq!(owned, id);
+    let value = factory_kernel::MetricValue {
+        id,
+        value: None,
+        as_of: "2026-10-16T12:00:00Z".parse().unwrap(),
+        reason: Some("no catalogue".into()),
+    };
+    let legacy: factory_core::metrics::MetricValue = value.clone();
+    assert_eq!(
+        serde_json::to_value(legacy).unwrap(),
+        json!({"id": "compliance.cra", "value": null, "as_of": "2026-10-16T12:00:00Z", "reason": "no catalogue"})
+    );
+    let report: Option<factory_direction::goals_view::GoalsReport> = None;
+    let report: Option<factory_core::protocol::GoalsReport> = report;
+    let _: Option<factory_interfaces::protocol::GoalsReport> = report;
+    assert!(factory_kernel::MetricId::new("invalid..id").is_err());
+}

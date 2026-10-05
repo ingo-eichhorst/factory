@@ -138,6 +138,13 @@ port!(
     l5::signpost_provider
 );
 port!(
+    MetricValuesFact,
+    factory_assurance::metric_values::Provider<'a, checks::Ports<'a>>,
+    factory_assurance::metric_values::Read,
+    MetricValuesFact,
+    l5::metric_provider
+);
+port!(
     BackupFact,
     factory_infrastructure::backup_facts::Provider<'a>,
     DateTime<Utc>,
@@ -586,6 +593,7 @@ mod tests {
         registered::<ProcessMetricFact>();
         registered::<BenchResolutionFact>();
         registered::<SignpostFact>();
+        registered::<MetricValuesFact>();
         registered::<DaemonConfigFact>();
         registered::<BackupFact>();
         registered::<ScopeCapacityFact>();
@@ -621,6 +629,89 @@ mod tests {
         wired.sort_unstable();
         catalogue.sort_unstable();
         assert_eq!(wired, catalogue);
+    }
+
+    #[test]
+    fn goals_own_live_reads_and_checkins_and_the_metric_fact_owns_its_computation() {
+        let goals = include_str!("../../../factory-direction/src/goals_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let compact: String = goals.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("Facts::<L6>::new().get::<MetricValuesFact,_>"));
+        for required in [
+            "goals::load",
+            "goals::evaluate",
+            "self.store.all()",
+            "self.store.append",
+            "goals::current_cycle",
+            "ancestors_of",
+        ] {
+            assert!(goals.contains(required), "Goals owner lost {required}");
+        }
+        let metric = include_str!("../../../factory-assurance/src/metric_values.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(metric.contains("Provide<MetricValuesFact>"));
+        assert!(
+            metric.contains(".gather_measurements(")
+                && metric.contains(".gather_policy(")
+                && metric.contains(".finish(")
+        );
+        for owner in [goals, metric] {
+            for forbidden in [
+                "factory_core",
+                "factory_composition",
+                "factory_interfaces",
+                "factory_daemon",
+                "Engine",
+                "TaskStore",
+                "dyn Fn",
+                "BoxFuture",
+            ] {
+                assert!(
+                    !owner.contains(forbidden),
+                    "Owner gained backedge/callback {forbidden}"
+                );
+            }
+        }
+        let query = metric
+            .split("pub struct Read")
+            .nth(1)
+            .unwrap()
+            .split("pub struct Provider")
+            .next()
+            .unwrap();
+        assert!(
+            !query.contains("MetricValue")
+                && !query.contains("Gathered")
+                && !query.contains("Metrics>")
+        );
+        let wiring = include_str!("../goals/mod.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        // Test-only imports occur before the runtime. Inspect the complete
+        // prefix through the actual test module instead of stopping there.
+        let runtime = include_str!("../goals/mod.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert!(runtime.contains("goals_service::Service::new"));
+        for forbidden in [
+            "goals::load",
+            "goals::evaluate",
+            "self.goals.all",
+            "self.goals.append",
+            "self.metrics(",
+        ] {
+            assert!(
+                !runtime.contains(forbidden),
+                "Router retained Goals behavior {forbidden}"
+            );
+        }
+        assert!(wiring.contains("Outside-stack"));
     }
 
     #[test]
