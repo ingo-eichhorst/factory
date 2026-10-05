@@ -25,13 +25,14 @@
 use chrono::{DateTime, Utc};
 use factory_core::backup::{
     is_excluded, CheckStatus, DatabaseFacts, ExcludedFile, Group, GroupTotal, Manifest, ManifestFile,
-    ManifestInstance, VerifyCheck, AUTHORED, DATABASE_ENTRY, MANIFEST_FILE, MANIFEST_VERSION, OPTIONAL,
+    ManifestInstance, ScopeIncludeRow, ScopeIncludeTotal, VerifyCheck, AUTHORED, DATABASE_ENTRY, MANIFEST_FILE,
+    MANIFEST_VERSION, OPTIONAL,
 };
 use factory_core::config::{CONFIG_FILE, FACTORY_DIR};
 use factory_core::error::{FactoryError, Result};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -167,6 +168,13 @@ pub struct Plan {
     /// validated -- `take` still re-parses it, cheaply, rather than trust a
     /// config that could in principle have changed underneath it.
     pub encrypt_to: Option<String>,
+    /// `#279`: every scope's own declared `backup.include`, raw -- `(scope
+    /// name, the scope's own directory relative to the root, its raw
+    /// `backup.include` strings)`, exactly `Config::backup_includes`'s own
+    /// shape. Resolved and probed fresh inside `take`, never trusted from a
+    /// config that could in principle have changed underneath it, the same
+    /// reasoning `encrypt_to` above already follows.
+    pub scope_includes: Vec<(String, PathBuf, Vec<String>)>,
 }
 
 /// A snapshot as written.
@@ -177,6 +185,9 @@ pub struct Taken {
     pub files: u64,
     pub database_bytes: u64,
     pub groups: Vec<GroupTotal>,
+    /// `#279`: every declared scope include this snapshot held, archived
+    /// or not.
+    pub scope_includes: Vec<ScopeIncludeTotal>,
 }
 
 /// A directory removed when this goes out of scope, however that happens.
@@ -281,18 +292,77 @@ pub fn take(plan: &Plan, destination: &Path, name: &str, at: DateTime<Utc>) -> R
     }
 
     // -- what goes in, decided before anything is read --------------------
+    //
+    // `seen` tracks every relative path claimed so far, across the config
+    // entries, every authored directory and every `#279` scope declaration
+    // below, in that order -- so an overlap anywhere (two declarations
+    // covering the same file, the same declaration written twice, or a
+    // declared directory that happens to contain a nested scope's own
+    // `.factory/config.yaml`, already claimed above as `Group::Config`)
+    // archives and lists that file exactly once, under whichever claim
+    // came first. See `walk`'s own doc comment.
     let mut excluded = Vec::new();
     let mut entries: Vec<(String, PathBuf, Group)> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     let root_config = format!("{FACTORY_DIR}/{CONFIG_FILE}");
+    seen.insert(root_config.clone());
     entries.push((root_config.clone(), plan.root.join(&root_config), Group::Config));
     for scope in &plan.scope_configs {
-        if *scope != root_config && !entries.iter().any(|(p, ..)| p == scope) {
+        if seen.insert(scope.clone()) {
             entries.push((scope.clone(), plan.root.join(scope), Group::Config));
         }
     }
     let optional = if plan.include_logs { &OPTIONAL[..] } else { &[] };
     for (group, dir, _) in AUTHORED.iter().chain(optional) {
-        walk(&plan.root, dir.trim_end_matches('/'), *group, &mut entries, &mut excluded);
+        walk(&plan.root, dir.trim_end_matches('/'), *group, &mut entries, &mut excluded, &mut seen);
+    }
+
+    // `#279`: every scope's own declared `backup.include`, resolved and
+    // probed fresh -- never trusted from a config that could in principle
+    // have changed underneath this call, the same reasoning `encrypt_to`
+    // above already follows. A refused or still-missing declaration is
+    // recorded in `excluded` exactly like a file `is_excluded` or a
+    // symlink `walk` itself finds, and seeds this snapshot's own
+    // `scope_includes` with zero files -- never a reason to fail the
+    // backup, and never a reason to skip any other declared directory.
+    let mut scope_include_totals: Vec<ScopeIncludeTotal> = Vec::new();
+    for row in factory_infrastructure::backup_facts::resolve_scope_includes(&plan.root, &plan.scope_includes) {
+        let ScopeIncludeRow { scope, declared, path, unavailable, .. } = row;
+        match (path, unavailable) {
+            (relative, Some(reason)) => {
+                let shown = relative.clone().unwrap_or_else(|| declared.clone());
+                excluded.push(ExcludedFile { path: format!("{scope}: {shown}"), reason: reason.clone() });
+                scope_include_totals.push(ScopeIncludeTotal {
+                    scope,
+                    declared,
+                    path: relative,
+                    unavailable: Some(reason),
+                    files: 0,
+                    bytes: 0,
+                });
+            }
+            (Some(relative), None) => {
+                walk(&plan.root, &relative, Group::ScopeData, &mut entries, &mut excluded, &mut seen);
+                // Files and bytes are filled in below, once every entry has
+                // actually been read and hashed -- never guessed from the
+                // walk alone, which only lists what is there, not what
+                // `is_excluded`, a symlink or an earlier claim (this
+                // declaration's own `seen` check above) leaves out of it.
+                // A file a different declaration already claimed still
+                // counts here: the prefix match below counts what is
+                // archived under this path, never what this call's own
+                // walk happened to add.
+                scope_include_totals.push(ScopeIncludeTotal {
+                    scope,
+                    declared,
+                    path: Some(relative),
+                    unavailable: None,
+                    files: 0,
+                    bytes: 0,
+                });
+            }
+            (None, None) => unreachable!("resolve_scope_includes always names a path when it is not refused"),
+        }
     }
 
     // -- the archive -------------------------------------------------------
@@ -390,12 +460,27 @@ pub fn take(plan: &Plan, destination: &Path, name: &str, at: DateTime<Utc>) -> R
         total.files += 1;
         total.bytes += f.size;
     }
+    // `#279`: now that every file has actually been read and hashed, count
+    // each declared directory's own share of them -- never from the walk
+    // alone, which lists what is there before `is_excluded` or a symlink
+    // leaves anything out of it.
+    for total in &mut scope_include_totals {
+        let Some(relative) = &total.path else { continue };
+        let prefix = format!("{relative}/");
+        for f in &files {
+            if f.path.starts_with(&prefix) {
+                total.files += 1;
+                total.bytes += f.size;
+            }
+        }
+    }
     Ok(Taken {
         size_bytes: fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0),
         path: final_path,
         files: files.len() as u64,
         database_bytes,
         groups: groups.into_values().collect(),
+        scope_includes: scope_include_totals,
     })
 }
 
@@ -412,7 +497,16 @@ fn entry_header(size: u64, mtime: u64) -> tar::Header {
 /// group)`. A symbolic link is never followed -- it could lead anywhere,
 /// a secrets file included -- and an excluded name is never opened; both
 /// are written down in the manifest instead.
-fn walk(root: &Path, dir: &str, group: Group, out: &mut Vec<(String, PathBuf, Group)>, excluded: &mut Vec<ExcludedFile>) {
+///
+/// `seen` is shared across every call this snapshot makes, in order, so a
+/// path already claimed by an earlier one -- the root config, another
+/// authored directory, or an overlapping `#279` scope declaration --
+/// is silently left alone here rather than archived and listed a second
+/// time: the earlier call's group wins, and a config file a scope's own
+/// declared directory happens to contain stays `Group::Config`. This is
+/// not a new exclusion (nothing goes in `excluded` for it): the file is in
+/// the backup, just not claimed twice.
+fn walk(root: &Path, dir: &str, group: Group, out: &mut Vec<(String, PathBuf, Group)>, excluded: &mut Vec<ExcludedFile>, seen: &mut BTreeSet<String>) {
     let Ok(read) = fs::read_dir(root.join(dir)) else { return };
     let mut children: Vec<_> = read.flatten().collect();
     children.sort_by_key(|e| e.file_name());
@@ -425,8 +519,8 @@ fn walk(root: &Path, dir: &str, group: Group, out: &mut Vec<(String, PathBuf, Gr
         } else if meta.file_type().is_symlink() {
             excluded.push(ExcludedFile { path: relative, reason: "a symbolic link: not followed".into() });
         } else if meta.is_dir() {
-            walk(root, &relative, group, out, excluded);
-        } else if meta.is_file() {
+            walk(root, &relative, group, out, excluded, seen);
+        } else if meta.is_file() && seen.insert(relative.clone()) {
             out.push((relative, child.path(), group));
         }
     }
@@ -1155,6 +1249,15 @@ mod tests {
         }
 
         fn plan_with(&self, include_logs: bool, encrypt_to: Option<String>) -> Plan {
+            self.plan_with_scope_includes(include_logs, encrypt_to, Vec::new())
+        }
+
+        fn plan_with_scope_includes(
+            &self,
+            include_logs: bool,
+            encrypt_to: Option<String>,
+            scope_includes: Vec<(String, PathBuf, Vec<String>)>,
+        ) -> Plan {
             Plan {
                 root: self.root.clone(),
                 database: self.root.join(".factory/factory.sqlite"),
@@ -1162,6 +1265,7 @@ mod tests {
                 scope_configs: vec!["projects/demo/.factory/config.yaml".into()],
                 include_logs,
                 encrypt_to,
+                scope_includes,
             }
         }
 
@@ -1173,6 +1277,24 @@ mod tests {
             let destination = prepare_destination(&self.root, &self.destination).unwrap();
             let name = archive_name("Test Instance", Utc::now(), encrypt_to.is_some());
             take(&self.plan_with(include_logs, encrypt_to), &destination, &name, Utc::now()).unwrap()
+        }
+
+        /// `#279`: like `take`, with `scope.backup.include` declarations
+        /// plugged into the plan -- `(scope name, scope directory relative
+        /// to the root, raw `include` strings)`. The "demo" scope's own
+        /// directory is `projects/demo`. `at` is explicit, never
+        /// `Utc::now()`, so two calls against the same destination (a
+        /// directory created between them, say) never collide on an
+        /// archive name truncated to the second.
+        fn take_with_scope_includes(
+            &self,
+            declarations: Vec<(String, PathBuf, Vec<String>)>,
+            at: DateTime<Utc>,
+        ) -> Taken {
+            let destination = prepare_destination(&self.root, &self.destination).unwrap();
+            let name = archive_name("Test Instance", at, false);
+            let plan = self.plan_with_scope_includes(false, None, declarations);
+            take(&plan, &destination, &name, at).unwrap()
         }
 
         fn manifest(archive: &Path) -> Manifest {
@@ -1199,6 +1321,36 @@ mod tests {
                 }
             }
             panic!("no manifest");
+        }
+
+        /// `#279`: unpack a plain `source` archive into memory, let `mutate`
+        /// change its entries, then write a fresh plain archive to `into` --
+        /// for a test that needs a manifest disagreeing with what is
+        /// actually archived, which `take` itself can never produce on its
+        /// own (it hashes and archives the same bytes).
+        fn rewrite_archive(source: &Path, into: &Path, mutate: impl FnOnce(&mut BTreeMap<String, Vec<u8>>)) {
+            let file = File::open(source).unwrap();
+            let decoder = zstd::Decoder::new(file).unwrap();
+            let mut tar_in = tar::Archive::new(decoder);
+            let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+            for entry in tar_in.entries().unwrap() {
+                let mut entry = entry.unwrap();
+                let path = entry.path().unwrap().to_string_lossy().into_owned();
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                entries.insert(path, bytes);
+            }
+            mutate(&mut entries);
+
+            let out = File::create(into).unwrap();
+            let encoder = zstd::Encoder::new(out, 3).unwrap();
+            let mut tar_out = tar::Builder::new(encoder);
+            for (path, bytes) in &entries {
+                let mut header = entry_header(bytes.len() as u64, 0);
+                tar_out.append_data(&mut header, path, bytes.as_slice()).unwrap();
+            }
+            let encoder = tar_out.into_inner().unwrap();
+            encoder.finish().unwrap();
         }
     }
 
@@ -1623,5 +1775,270 @@ mod tests {
         assert!(e.contains("line 2"), "{e}");
         assert!(!e.contains(&secret_line), "the identity's own secret text leaked into the error: {e}");
         assert!(!e.contains("not-an-identity-at-all"), "the offending line's own text leaked into the error: {e}");
+    }
+
+    // ================================================================= #279
+    //
+    // The "demo" scope `Instance::new` already writes lives at
+    // `projects/demo`; `../../data/<x>` from there resolves to the
+    // instance-root-level `data/<x>` the issue's own example uses.
+
+    #[test]
+    fn a_declared_directory_is_archived_with_sha256_entries_and_counted() {
+        let instance = Instance::new("scope-include-take");
+        fs::create_dir_all(instance.root.join("data/finance")).unwrap();
+        fs::write(instance.root.join("data/finance/ledger.csv"), "2026-01-01,100.00\n").unwrap();
+        fs::write(instance.root.join("data/finance/receipt.pdf"), "%PDF-fake").unwrap();
+        let declarations = vec![("demo".into(), PathBuf::from("projects/demo"), vec!["../../data/finance".into()])];
+        let taken = instance.take_with_scope_includes(declarations, Utc::now());
+
+        let manifest = Instance::manifest(&taken.path);
+        let ledger = manifest.files.iter().find(|f| f.path == "data/finance/ledger.csv").expect("ledger archived");
+        assert_eq!(ledger.group, Group::ScopeData);
+        assert_eq!(ledger.sha256, hex(&Sha256::digest(b"2026-01-01,100.00\n")));
+        assert!(manifest.files.iter().any(|f| f.path == "data/finance/receipt.pdf"));
+
+        assert_eq!(taken.scope_includes.len(), 1);
+        let total = &taken.scope_includes[0];
+        assert_eq!(total.scope, "demo");
+        assert_eq!(total.declared, "../../data/finance");
+        assert_eq!(total.path.as_deref(), Some("data/finance"));
+        assert_eq!(total.unavailable, None);
+        assert_eq!(total.files, 2);
+        assert_eq!(total.bytes, "2026-01-01,100.00\n".len() as u64 + "%PDF-fake".len() as u64);
+    }
+
+    #[test]
+    fn verify_fails_on_an_included_file_that_is_missing_changed_or_unlisted() {
+        let instance = Instance::new("scope-include-verify-fail");
+        fs::create_dir_all(instance.root.join("data/finance")).unwrap();
+        fs::write(instance.root.join("data/finance/ledger.csv"), "original\n").unwrap();
+        let declarations = vec![("demo".into(), PathBuf::from("projects/demo"), vec!["../../data/finance".into()])];
+        let taken = instance.take_with_scope_includes(declarations, Utc::now());
+        let checksums_failed =
+            |archive: &Path| verify(archive, "inst-1", None).iter().any(|c| c.name == "checksums" && c.status == CheckStatus::Fail);
+
+        // Sanity: the snapshot `take` itself wrote verifies clean.
+        assert!(!checksums_failed(&taken.path));
+
+        let changed = instance.destination.join("changed.tar.zst");
+        Instance::rewrite_archive(&taken.path, &changed, |entries| {
+            entries.insert("data/finance/ledger.csv".into(), b"tampered\n".to_vec());
+        });
+        assert!(checksums_failed(&changed), "changed bytes must fail checksums");
+
+        let missing = instance.destination.join("missing.tar.zst");
+        Instance::rewrite_archive(&taken.path, &missing, |entries| {
+            entries.remove("data/finance/ledger.csv");
+        });
+        assert!(checksums_failed(&missing), "a manifest entry with nothing archived for it must fail checksums");
+
+        let unlisted = instance.destination.join("unlisted.tar.zst");
+        Instance::rewrite_archive(&taken.path, &unlisted, |entries| {
+            entries.insert("data/finance/extra.csv".into(), b"surprise\n".to_vec());
+        });
+        assert!(checksums_failed(&unlisted), "an archived file the manifest never named must fail checksums");
+    }
+
+    #[test]
+    fn overlapping_declared_directories_archive_each_file_once_and_restore_cleanly() {
+        let instance = Instance::new("scope-include-overlap");
+        fs::create_dir_all(instance.root.join("data/finance")).unwrap();
+        fs::write(instance.root.join("data/finance/ledger.csv"), "ledger\n").unwrap();
+        fs::write(instance.root.join("data/other.csv"), "other\n").unwrap();
+        // The broader declaration is listed first; the narrower one is a
+        // subdirectory of it, declared separately (by the same scope here,
+        // but the rule is the same across two different scopes).
+        let declarations = vec![(
+            "demo".into(),
+            PathBuf::from("projects/demo"),
+            vec!["../../data".into(), "../../data/finance".into()],
+        )];
+        let taken = instance.take_with_scope_includes(declarations, Utc::now());
+
+        let manifest = Instance::manifest(&taken.path);
+        for path in ["data/finance/ledger.csv", "data/other.csv"] {
+            let matches: Vec<&ManifestFile> = manifest.files.iter().filter(|f| f.path == path).collect();
+            assert_eq!(matches.len(), 1, "{path} must appear exactly once: {:?}", manifest.files);
+        }
+
+        // Each declaration's own total still counts a file it covers, even
+        // one the *other* declaration's walk was the one that actually
+        // archived -- the totals are a prefix match over the final,
+        // deduplicated file list, never tied to which call added what.
+        assert_eq!(taken.scope_includes.len(), 2);
+        let broad = taken.scope_includes.iter().find(|t| t.declared == "../../data").unwrap();
+        assert_eq!(broad.files, 2, "both files are under data/: {taken:?}");
+        let narrow = taken.scope_includes.iter().find(|t| t.declared == "../../data/finance").unwrap();
+        assert_eq!(narrow.files, 1, "only ledger.csv is under data/finance/: {taken:?}");
+
+        let checks = verify(&taken.path, "inst-1", None);
+        assert!(checks.iter().all(|c| c.status != CheckStatus::Fail), "{checks:?}");
+
+        let into = instance.root.parent().unwrap().join("restored-overlap");
+        let restored = restore(&taken.path, "inst-1", &instance.root, &into, None).unwrap();
+        assert!(!restored.checks.iter().any(|c| c.status == CheckStatus::Fail), "{:?}", restored.checks);
+        assert_eq!(fs::read(into.join("data/finance/ledger.csv")).unwrap(), b"ledger\n");
+        assert_eq!(fs::read(into.join("data/other.csv")).unwrap(), b"other\n");
+    }
+
+    #[test]
+    fn a_scope_declaring_its_own_directory_does_not_duplicate_its_already_archived_config() {
+        // A directory a scope declares can perfectly well contain that
+        // scope's (or a nested scope's) own `.factory/config.yaml` --
+        // already archived as `Group::Config` by the config loop above,
+        // which runs first. Re-finding it while walking the declared
+        // directory must not add a second, `Group::ScopeData` copy.
+        let instance = Instance::new("scope-include-self");
+        let declarations = vec![("demo".into(), PathBuf::from("projects/demo"), vec![".".into()])];
+        let taken = instance.take_with_scope_includes(declarations, Utc::now());
+
+        let manifest = Instance::manifest(&taken.path);
+        let matches: Vec<&ManifestFile> =
+            manifest.files.iter().filter(|f| f.path == "projects/demo/.factory/config.yaml").collect();
+        assert_eq!(matches.len(), 1, "{:?}", manifest.files);
+        assert_eq!(matches[0].group, Group::Config, "the earlier claim wins, so Config stays Config");
+
+        let checks = verify(&taken.path, "inst-1", None);
+        assert!(checks.iter().all(|c| c.status != CheckStatus::Fail), "{checks:?}");
+    }
+
+    #[test]
+    fn the_same_entry_declared_twice_is_archived_once() {
+        let instance = Instance::new("scope-include-duplicate-declaration");
+        fs::create_dir_all(instance.root.join("data/finance")).unwrap();
+        fs::write(instance.root.join("data/finance/ledger.csv"), "ok\n").unwrap();
+        let declarations = vec![(
+            "demo".into(),
+            PathBuf::from("projects/demo"),
+            vec!["../../data/finance".into(), "../../data/finance".into()],
+        )];
+        let taken = instance.take_with_scope_includes(declarations, Utc::now());
+
+        let manifest = Instance::manifest(&taken.path);
+        let matches: Vec<&ManifestFile> = manifest.files.iter().filter(|f| f.path == "data/finance/ledger.csv").collect();
+        assert_eq!(matches.len(), 1, "{:?}", manifest.files);
+    }
+
+    #[test]
+    fn restore_places_a_declared_directory_at_its_relative_path_and_never_touches_the_live_root() {
+        let instance = Instance::new("scope-include-restore");
+        fs::create_dir_all(instance.root.join("data/finance")).unwrap();
+        fs::write(instance.root.join("data/finance/ledger.csv"), "2026-01-01,100.00\n").unwrap();
+        let declarations = vec![("demo".into(), PathBuf::from("projects/demo"), vec!["../../data/finance".into()])];
+        let taken = instance.take_with_scope_includes(declarations, Utc::now());
+        let original = fs::metadata(instance.root.join("data/finance/ledger.csv")).unwrap().modified().unwrap();
+
+        let into = instance.root.parent().unwrap().join("restored-scope-data");
+        let restored = restore(&taken.path, "inst-1", &instance.root, &into, None).unwrap();
+        assert!(!restored.checks.iter().any(|c| c.status == CheckStatus::Fail), "{:?}", restored.checks);
+        assert_eq!(fs::read(into.join("data/finance/ledger.csv")).unwrap(), b"2026-01-01,100.00\n");
+
+        // The live root is untouched -- same bytes, same mtime, still there.
+        assert_eq!(fs::read(instance.root.join("data/finance/ledger.csv")).unwrap(), b"2026-01-01,100.00\n");
+        assert_eq!(fs::metadata(instance.root.join("data/finance/ledger.csv")).unwrap().modified().unwrap(), original);
+    }
+
+    #[test]
+    fn secrets_env_files_and_symlinks_inside_an_included_directory_are_never_archived() {
+        let instance = Instance::new("scope-include-exclusions");
+        fs::create_dir_all(instance.root.join("data/finance/secrets")).unwrap();
+        fs::write(instance.root.join("data/finance/secrets/api-key.txt"), "hunter2").unwrap();
+        fs::write(instance.root.join("data/finance/.env"), "KEY=hunter2").unwrap();
+        fs::write(instance.root.join("data/finance/ledger.csv"), "ok\n").unwrap();
+        std::os::unix::fs::symlink(
+            instance.root.join("data/finance/ledger.csv"),
+            instance.root.join("data/finance/ledger-link.csv"),
+        )
+        .unwrap();
+        fs::create_dir(instance.root.join("data/finance/exports-elsewhere")).unwrap();
+        std::os::unix::fs::symlink(
+            instance.root.join("data/finance/exports-elsewhere"),
+            instance.root.join("data/finance/exports"),
+        )
+        .unwrap();
+        let declarations = vec![("demo".into(), PathBuf::from("projects/demo"), vec!["../../data/finance".into()])];
+        let taken = instance.take_with_scope_includes(declarations, Utc::now());
+
+        let manifest = Instance::manifest(&taken.path);
+        let scope_data_paths: Vec<&str> =
+            manifest.files.iter().filter(|f| f.group == Group::ScopeData).map(|f| f.path.as_str()).collect();
+        assert_eq!(scope_data_paths, ["data/finance/ledger.csv"], "only the plain file is archived: {scope_data_paths:?}");
+        let excluded: Vec<&str> = manifest.excluded.iter().map(|e| e.path.as_str()).collect();
+        assert!(excluded.contains(&"data/finance/.env"), "{excluded:?}");
+        assert!(excluded.contains(&"data/finance/secrets"), "{excluded:?}");
+        assert!(excluded.contains(&"data/finance/ledger-link.csv"), "{excluded:?}");
+        assert!(excluded.contains(&"data/finance/exports"), "{excluded:?}");
+        assert_eq!(taken.scope_includes[0].files, 1);
+    }
+
+    #[test]
+    fn a_declaration_under_secrets_or_escaping_the_root_is_a_finding_not_a_failed_backup() {
+        let instance = Instance::new("scope-include-refused");
+        let declarations = vec![(
+            "demo".into(),
+            PathBuf::from("projects/demo"),
+            vec!["secrets/dump".into(), "../../../etc".into()],
+        )];
+        let taken = instance.take_with_scope_includes(declarations, Utc::now());
+
+        assert_eq!(taken.scope_includes.len(), 2);
+        let by_declared: BTreeMap<&str, &ScopeIncludeTotal> =
+            taken.scope_includes.iter().map(|t| (t.declared.as_str(), t)).collect();
+        assert_eq!(by_declared["secrets/dump"].unavailable.as_deref(), Some("a secret: never read, never copied"));
+        assert_eq!(by_declared["secrets/dump"].path, None);
+        assert_eq!(by_declared["../../../etc"].unavailable.as_deref(), Some("escapes the instance root"));
+        assert_eq!(by_declared["../../../etc"].files, 0);
+
+        let manifest = Instance::manifest(&taken.path);
+        assert!(manifest.files.iter().all(|f| f.group != Group::ScopeData), "nothing was archived for either");
+        let excluded: Vec<&str> = manifest.excluded.iter().map(|e| e.path.as_str()).collect();
+        assert!(excluded.iter().any(|p| p.contains("secrets/dump")), "{excluded:?}");
+        assert!(excluded.iter().any(|p| p.contains("../../../etc")), "{excluded:?}");
+
+        // The verify/checksum path treats this exactly like any other
+        // snapshot: a refused declaration is not a failed backup.
+        let checks = verify(&taken.path, "inst-1", None);
+        assert!(checks.iter().all(|c| c.status != CheckStatus::Fail), "{checks:?}");
+    }
+
+    #[test]
+    fn a_missing_declared_directory_is_a_finding_then_included_automatically_once_created() {
+        let instance = Instance::new("scope-include-missing-then-created");
+        let declarations = vec![("demo".into(), PathBuf::from("projects/demo"), vec!["../../data/finance".into()])];
+
+        let first = instance.take_with_scope_includes(declarations.clone(), Utc::now());
+        assert_eq!(first.scope_includes[0].unavailable.as_deref(), Some("declared, but does not exist yet"));
+        assert_eq!(first.scope_includes[0].files, 0);
+        let first_manifest = Instance::manifest(&first.path);
+        assert!(first_manifest.files.iter().all(|f| f.group != Group::ScopeData));
+        assert!(
+            first_manifest.excluded.iter().any(|e| e.path.contains("data/finance")),
+            "{:?}",
+            first_manifest.excluded
+        );
+
+        // Created later, with no restart and no change to the declaration
+        // itself -- `take` resolves it fresh every time it runs.
+        fs::create_dir_all(instance.root.join("data/finance")).unwrap();
+        fs::write(instance.root.join("data/finance/ledger.csv"), "ok\n").unwrap();
+        let second = instance.take_with_scope_includes(declarations, Utc::now() + chrono::Duration::seconds(1));
+        assert_eq!(second.scope_includes[0].unavailable, None);
+        assert_eq!(second.scope_includes[0].files, 1);
+        let second_manifest = Instance::manifest(&second.path);
+        assert!(second_manifest.files.iter().any(|f| f.path == "data/finance/ledger.csv"));
+    }
+
+    #[test]
+    fn a_snapshot_with_no_declared_includes_still_verifies_exactly_as_before() {
+        // No `scope.backup.include` at all -- the acceptance case every
+        // existing instance is in today. Nothing about the archive, the
+        // manifest or verification changes for it.
+        let instance = Instance::new("scope-include-none-declared");
+        let taken = instance.take(false);
+        assert!(taken.scope_includes.is_empty());
+        assert!(Instance::manifest(&taken.path).files.iter().all(|f| f.group != Group::ScopeData));
+        let checks = verify(&taken.path, "inst-1", None);
+        assert!(checks.iter().all(|c| c.status != CheckStatus::Fail), "{checks:?}");
     }
 }

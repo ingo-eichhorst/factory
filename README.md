@@ -4612,6 +4612,7 @@ A snapshot is one `factory-backup-<instance>-<utc>.tar.zst` holding:
   `PRAGMA integrity_check` before anything is archived;
 - the root `.factory/config.yaml` and every registered scope's own;
 - `.factory/{knowledge,datasets,policies,goals,scenarios,quality,vex,intake,budgets}/`, whole;
+- every scope's own declared `backup.include` directories (`#279`, below);
 - a `manifest.json`, written last: instance, daemon version (there is no
   build commit compiled in, so none is claimed), the database's
   `user_version`, tables and integrity result, and the path, size and sha256
@@ -4625,6 +4626,53 @@ it to its git remote. Each file is read once and hashed and archived from the
 same bytes, so the manifest cannot disagree with the archive. The archive is
 written as a hidden `.partial` and renamed into place only when complete and
 synced.
+
+**A scope's own data outside git (`#279`).** `.factory/` is backed up, and
+source code is backed up by pushing it to its git remote -- but a scope's
+data that lives in neither, gitignored on purpose (business records, personal
+data, anything too large or too sensitive for a repository), falls through
+both. A scope declares it in its own `.factory/config.yaml`:
+
+```yaml
+# a scope's own .factory/config.yaml
+scope:
+  name: finance
+  backup:
+    include: [../data/finance, ../data/invoices]   # relative to the scope directory
+```
+
+Each entry is resolved against the scope's own directory and must stay
+inside the instance root once every `..` is resolved by path component, never
+by string prefix. Snapshots archive every file found there -- in the
+manifest with its path, size and sha256, exactly like `.factory/` above --
+at its path relative to the instance root, the same convention every other
+archived file already follows, so an unpacked snapshot is laid out exactly
+like the instance it came from. `verify` checks these files by checksum
+exactly like any other, failing on one missing, changed or unlisted; `restore
+--into <new-root>` puts them back at the same relative paths, never over the
+live instance. The same exclusions hold inside a declared directory without
+exception: anything under a `secrets/` component is never opened, `.env`
+files are never archived, and a symbolic link is never followed (named in
+the manifest instead, like any other excluded file).
+
+A declaration is never a load-time failure -- scope configs are read once, at
+daemon startup, and a directory that does not exist *yet* is routine: it is
+created later, without a restart, and is included starting with the very
+next snapshot with no further action. Only a declaration that is
+structurally unsafe is refused: it escapes the instance root, sits under (or
+is itself) a `secrets/` component, or is itself a symbolic link. A refusal is
+a finding, reported wherever the directory would otherwise be shown --
+`factory backup status`'s and the L1 Backup page's own "Scope data" section
+-- never a reason the daemon fails to start or any other scope's backup is
+affected. The same section shows, per declared directory, its file count and
+total size in the newest snapshot, resolved fresh from the live config on
+every read -- so a missing directory shows as missing right up until it is
+created, and a refused one keeps showing why for as long as the declaration
+stays that way.
+
+Such data is typically the most sensitive a snapshot holds -- personal data,
+business records -- so `encrypt_to` (below) is strongly recommended whenever
+a scope declares one.
 
 **Encryption (`#152`).** `infrastructure.backup.encrypt_to` names a single
 native X25519 recipient (`age1…`, from `age-keygen` or an equivalent); an SSH
@@ -4780,7 +4828,11 @@ shown as unknown -- never claimed as a problem or as fine.
 `factory backup status` prints a `CODE` block and a `TIME MACHINE` line
 alongside the snapshot status; the L1 › Backup page draws the same as a
 "Code" table and a Time Machine fact, regardless of whether a backup is
-configured at all.
+configured at all. When any scope declares `backup.include` (`#279`), the
+same command prints a `SCOPE DATA` block -- one line per declared
+directory, its live status (ready, not yet created, or a refusal) and the
+newest snapshot's own file count and size -- and the page draws the same as
+a "Scope data" table, also regardless of whether a backup is configured.
 
 Every backup and verification is an event -- `backup_completed`,
 `backup_failed`, `backup_verified` -- and a row in an append-only
@@ -4803,6 +4855,19 @@ section the two registry metrics (`backup_age_hours`/
 special case here: an encrypted newest snapshot counts toward
 `backup_verified` only once an owner has actually verified it with its
 identity, exactly as a plaintext one does.
+
+A scope's declared `backup.include` directories (`#279`) need no special
+case here either, for the same reason: `backup_verified` already means "the
+newest snapshot's every listed file checked out by checksum", and a
+declared directory's files are just more entries in that same manifest --
+checked, passed or failed, exactly like `.factory/` itself. The one thing
+`backup_verified` cannot see is a declaration never fed into any snapshot at
+all because it was refused or still missing at every backup since: that is
+the "Scope data" section's own finding, visible on the page and in `factory
+backup status`, never folded into this one fact. A policy control that wants
+coverage of a scope's own data specifically -- `gobd/datensicherung`, say --
+still has to read that finding itself; `backup_verified` only ever answers
+for the snapshot as a whole.
 
 ### The host's power mode (#260)
 

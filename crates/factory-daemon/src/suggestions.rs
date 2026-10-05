@@ -426,6 +426,7 @@ mod tests {
             dependencies: Default::default(),
             environments: Vec::new(),
             renewals: Vec::new(),
+            backup: None,
         };
         let root = Scope {
             id: "root-id".into(),
@@ -460,6 +461,7 @@ mod tests {
             dependencies: Default::default(),
             environments: Vec::new(),
             renewals: Vec::new(),
+            backup: None,
         };
         let config = Config {
             version: 1,

@@ -3383,6 +3383,23 @@ fn backup_status_text(payload: &Payload) -> Option<String> {
             out.push_str(&format!("  {scopes:<24} {remote:<44} {state}\n"));
         }
     }
+    // `#279`: a scope's own declared `backup.include` directories, shown
+    // whether or not a backup is even configured -- the same reasoning
+    // `code` above already follows.
+    if !report.scope_includes.is_empty() {
+        out.push_str("\nSCOPE DATA\n");
+        for row in &report.scope_includes {
+            let path = row.path.as_deref().unwrap_or(&row.declared);
+            let state = match &row.unavailable {
+                Some(reason) => reason.clone(),
+                None => match (row.files, row.bytes) {
+                    (Some(files), Some(size)) => format!("{files} file{} · {}", if files == 1 { "" } else { "s" }, bytes(size)),
+                    _ => "not backed up yet".into(),
+                },
+            };
+            out.push_str(&format!("  {:<16} {:<30} {state}\n", row.scope, path));
+        }
+    }
     out.push_str("\nTIME MACHINE  ");
     out.push_str(&match &report.time_machine {
         Some(TimeMachineFact::Configured { destinations }) => format!("configured -- {}\n", destinations.join(", ")),
@@ -7518,6 +7535,7 @@ mod tests {
             exclude: vec![],
             code: vec![],
             time_machine: None,
+            scope_includes: vec![],
         }
     }
 
@@ -7553,6 +7571,48 @@ mod tests {
         assert!(text.contains("verify       no drill scheduled"), "{text}");
         assert!(!text.contains("next drill"), "{text}");
         assert!(!text.contains("drill skip"), "{text}");
+    }
+
+    /// `#279`: `factory backup status` lists each scope's own declared
+    /// `backup.include` directories, with the newest snapshot's own count
+    /// when there is one and a plain reason otherwise -- never a path the
+    /// daemon did not already resolve and send.
+    #[test]
+    fn backup_status_prints_a_scope_data_section_per_declared_directory() {
+        use factory_core::backup::{ScopeIncludeRow, ScopeIncludeState};
+        let mut report = encrypted_report();
+        report.scope_includes = vec![
+            ScopeIncludeRow {
+                scope: "finance".into(),
+                declared: "../data/finance".into(),
+                path: Some("data/finance".into()),
+                state: ScopeIncludeState::Ready,
+                unavailable: None,
+                files: Some(12),
+                bytes: Some(34_000),
+            },
+            ScopeIncludeRow {
+                scope: "finance".into(),
+                declared: "../data/invoices".into(),
+                path: Some("data/invoices".into()),
+                state: ScopeIncludeState::Missing,
+                unavailable: Some("declared, but does not exist yet".into()),
+                files: None,
+                bytes: None,
+            },
+        ];
+        let payload = Payload::Backup { report: Box::new(report) };
+        let text = backup_status_text(&payload).unwrap();
+        assert!(text.contains("SCOPE DATA"), "{text}");
+        assert!(text.contains("finance") && text.contains("data/finance") && text.contains("12 files"), "{text}");
+        assert!(text.contains("data/invoices") && text.contains("declared, but does not exist yet"), "{text}");
+    }
+
+    #[test]
+    fn backup_status_omits_the_scope_data_section_when_nothing_is_declared() {
+        let payload = Payload::Backup { report: Box::new(encrypted_report()) };
+        let text = backup_status_text(&payload).unwrap();
+        assert!(!text.contains("SCOPE DATA"), "{text}");
     }
 
     #[test]

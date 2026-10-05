@@ -442,6 +442,24 @@ impl Config {
         out
     }
 
+    /// Every scope's own declared `backup.include`, with the name and own
+    /// directory (relative to the instance root, as `Scope.path` always
+    /// is) of the scope that wrote it (`#279`) -- a plain projection L1's
+    /// live backup gather resolves and probes, so that crate never has to
+    /// depend on this one to read `Scope` itself. `environments`'s own
+    /// de-duplication: the root scope can also be listed in `scopes:`.
+    pub fn backup_includes(&self) -> Vec<(String, PathBuf, Vec<String>)> {
+        let mut out: Vec<(String, PathBuf, Vec<String>)> = Vec::new();
+        for scope in self.scope.iter().chain(&self.scopes) {
+            let Some(backup) = &scope.backup else { continue };
+            if backup.include.is_empty() || out.iter().any(|(name, ..)| *name == scope.name) {
+                continue;
+            }
+            out.push((scope.name.clone(), scope.path.clone(), backup.include.clone()));
+        }
+        out
+    }
+
     /// Validate the instance file before discovery replaces its legacy scope
     /// list. Local scope files are checked by `validate` after discovery.
     ///
@@ -1365,6 +1383,17 @@ pub struct Scope {
     /// This scope's authored important-date metadata, kept in its own config.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub renewals: Vec<factory_infrastructure::renewals::RenewalDecl>,
+    /// Directories outside `.factory/` that belong in the instance's backup
+    /// snapshots (`#279`) -- see `factory_infrastructure::backup::ScopeBackupConfig`.
+    /// Parsed permissively, like `environments` above: whether a declared
+    /// entry is actually safe to archive is never checked here or anywhere
+    /// discovery or `Config::validate` reach, because a directory that
+    /// does not exist *yet* must not fail the daemon's start, and scope
+    /// configs are only ever read once, at startup. L1's own live backup
+    /// gather resolves each entry fresh on every report and snapshot
+    /// instead, and reports a structurally unsafe one as a finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<factory_infrastructure::backup::ScopeBackupConfig>,
 }
 
 
@@ -1771,6 +1800,40 @@ mod tests {
             serde_yaml_ng::from_str(&format!("id: {name}-id\nname: {name}\n")).unwrap();
         scope.path = PathBuf::from(path);
         scope
+    }
+
+    // ============================================================= #279
+
+    #[test]
+    fn backup_includes_collects_only_scopes_that_declared_one() {
+        let mut finance = scope_at("finance", "projects/finance");
+        finance.backup = Some(factory_infrastructure::backup::ScopeBackupConfig {
+            include: vec!["../../data/finance".into()],
+        });
+        let other = scope_at("other", "projects/other");
+        let f = factory_with(vec![finance, other]);
+        assert_eq!(
+            f.config.backup_includes(),
+            vec![("finance".to_string(), PathBuf::from("projects/finance"), vec!["../../data/finance".to_string()])]
+        );
+    }
+
+    #[test]
+    fn backup_includes_counts_the_root_scope_listed_twice_only_once() {
+        // The root scope can also be listed in `scopes:` once discovery has
+        // run -- `environments()`'s own de-duplication, for the same reason.
+        let mut root = scope_at("root", ".");
+        root.backup = Some(factory_infrastructure::backup::ScopeBackupConfig { include: vec!["data".into()] });
+        let mut f = factory_with(vec![root.clone()]);
+        f.config.scope = Some(root);
+        assert_eq!(f.config.backup_includes().len(), 1);
+    }
+
+    #[test]
+    fn a_scope_with_no_backup_block_contributes_nothing() {
+        let plain = scope_at("plain", "projects/plain");
+        let f = factory_with(vec![plain]);
+        assert_eq!(f.config.backup_includes(), Vec::new());
     }
 
     /// Locks `Duration`'s wire form inside a real config struct, not just
