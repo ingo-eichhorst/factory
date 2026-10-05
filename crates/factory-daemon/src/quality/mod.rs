@@ -617,14 +617,14 @@ mod tests {
         let mut demo = scope_at("demo-id", "demo", ".", &["reported-profile"]);
         demo.metrics = Some(factory_core::config::ScopeMetricsDeclaration {
             source: Some(factory_core::config::ScopeMetricsSource {
-                id: "demo".into(),
-                file: "metrics.json".into(),
+                id: Some("demo".into()),
+                file: Some("metrics.json".into()),
             }),
             declare: vec![factory_core::config::ScopeMetricsDeclared {
-                id: "x".into(),
-                title: "Demo X".into(),
-                unit: "ratio".into(),
-                better: "higher".into(),
+                id: Some("x".into()),
+                title: Some("Demo X".into()),
+                unit: Some("ratio".into()),
+                better: Some("higher".into()),
             }],
         });
         let config = Config {

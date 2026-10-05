@@ -245,14 +245,14 @@ mod tests {
         let mut company = scope_at("company-id", "company", ".");
         company.metrics = Some(factory_core::config::ScopeMetricsDeclaration {
             source: Some(factory_core::config::ScopeMetricsSource {
-                id: "demo".into(),
-                file: "metrics.json".into(),
+                id: Some("demo".into()),
+                file: Some("metrics.json".into()),
             }),
             declare: vec![factory_core::config::ScopeMetricsDeclared {
-                id: "x".into(),
-                title: "Demo X".into(),
-                unit: "ratio".into(),
-                better: "higher".into(),
+                id: Some("x".into()),
+                title: Some("Demo X".into()),
+                unit: Some("ratio".into()),
+                better: Some("higher".into()),
             }],
         });
         let config = Config {
@@ -321,14 +321,14 @@ mod tests {
         let mut company = scope_at("company-id", "company", ".");
         company.metrics = Some(factory_core::config::ScopeMetricsDeclaration {
             source: Some(factory_core::config::ScopeMetricsSource {
-                id: "finance".into(),
-                file: "metrics.json".into(),
+                id: Some("finance".into()),
+                file: Some("metrics.json".into()),
             }),
             declare: vec![factory_core::config::ScopeMetricsDeclared {
-                id: "unresolved_transactions".into(),
-                title: "Unresolved transactions".into(),
-                unit: "count".into(),
-                better: "lower".into(),
+                id: Some("unresolved_transactions".into()),
+                title: Some("Unresolved transactions".into()),
+                unit: Some("count".into()),
+                better: Some("lower".into()),
             }],
         });
         let config = Config {
@@ -391,14 +391,14 @@ mod tests {
         let mut company = scope_at("company-id", "company", ".");
         company.metrics = Some(factory_core::config::ScopeMetricsDeclaration {
             source: Some(factory_core::config::ScopeMetricsSource {
-                id: "finance".into(),
-                file: "metrics.json".into(),
+                id: Some("finance".into()),
+                file: Some("metrics.json".into()),
             }),
             declare: vec![factory_core::config::ScopeMetricsDeclared {
-                id: "beleg_coverage".into(),
-                title: "Beleg coverage".into(),
-                unit: "ratio".into(),
-                better: "higher".into(),
+                id: Some("beleg_coverage".into()),
+                title: Some("Beleg coverage".into()),
+                unit: Some("ratio".into()),
+                better: Some("higher".into()),
             }],
         });
         let config = Config {

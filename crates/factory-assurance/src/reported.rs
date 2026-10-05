@@ -36,27 +36,33 @@ use std::{
 // ============================================================ declaration
 
 /// One scope's raw `scope.metrics` block, exactly as the composition layer
-/// parsed it -- plain strings, no validation. `None` means the scope wrote
-/// no `metrics:` block at all.
+/// parsed it -- plain strings, no validation. The outer `Option` (on
+/// `ScopeDeclaration::source`) means the scope wrote no `metrics:` block
+/// at all; each field *inside* a present block is itself optional too --
+/// a missing `id`/`file` is an authoring mistake [`validate`] turns into
+/// a finding, the same as an invalid one, never a reason the scope's
+/// whole config file fails to parse (`#278`).
 #[derive(Debug, Clone, Default)]
 pub struct RawSource {
-    pub id: String,
-    pub file: String,
+    pub id: Option<String>,
+    pub file: Option<String>,
     pub declare: Vec<RawDeclared>,
 }
 
+/// See [`RawSource`]'s doc comment: every field is optional for the same
+/// reason -- a missing one is [`validate`]'s job to turn into a finding,
+/// not serde's job to refuse to parse.
 #[derive(Debug, Clone, Default)]
 pub struct RawDeclared {
-    pub id: String,
-    pub title: String,
-    pub unit: String,
-    /// `"higher"` or `"lower"` -- see `metrics::Better`. Required at the
-    /// config layer (`ScopeMetricsDeclared.better`); validated here like
-    /// `unit`, never defaulted, since `resolve`'s own placeholder cannot
-    /// know it and a wrong default would risk exactly the false
-    /// wrong-direction (or false not-wrong) Goals finding this exists to
-    /// prevent.
-    pub better: String,
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub unit: Option<String>,
+    /// `"higher"` or `"lower"` -- see `metrics::Better`. Missing or an
+    /// unknown spelling are both [`FindingKind::UnknownBetter`]: `resolve`'s
+    /// own placeholder cannot know this direction, and a wrong default
+    /// would risk exactly the false wrong-direction (or false not-wrong)
+    /// Goals finding this field exists to prevent.
+    pub better: Option<String>,
 }
 
 /// One scope's identity plus its raw declaration, handed in fresh by the
@@ -81,7 +87,8 @@ pub struct Configuration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
-    /// A source or metric id is not the slug/segment shape it must be.
+    /// A source or metric id is not the slug/segment shape it must be, or
+    /// is missing.
     BadSlug,
     /// Two scopes declared the same source id.
     DuplicateSourceId,
@@ -94,10 +101,14 @@ pub enum FindingKind {
     PathUnderSecrets,
     /// The resolved path is, or passes through, a symlink.
     PathIsSymlink,
-    /// `declare[].unit` is not one of `metrics::Unit`'s spellings.
+    /// `declare[].unit` is not one of `metrics::Unit`'s spellings, or is
+    /// missing.
     UnknownUnit,
-    /// `declare[].better` is not `higher` or `lower`.
+    /// `declare[].better` is not `higher` or `lower`, or is missing.
     UnknownBetter,
+    /// A field with no shape or spelling of its own to be "wrong" --
+    /// `source.file` or `declare[].title` -- was not given at all.
+    MissingField,
 }
 
 /// One authoring mistake in a `scope.metrics` declaration -- never a reason
@@ -180,30 +191,47 @@ pub fn validate(root: &Path, configuration: &Configuration) -> Catalogue {
 
     for decl in &configuration.scopes {
         let Some(raw) = &decl.source else { continue };
-        let subject = format!("{}/{}", decl.scope.name, raw.id);
+        let subject = format!(
+            "{}/{}",
+            decl.scope.name,
+            raw.id.as_deref().unwrap_or("<missing source id>")
+        );
 
-        if !is_slug(&raw.id) {
+        // A missing id is [`FindingKind::BadSlug`], exactly like an
+        // invalid one -- `#278`'s fix: neither ever fails this scope's
+        // config file to parse, only drops this one source.
+        let Some(source_id) = raw.id.as_deref().filter(|id| is_slug(id)) else {
             findings.push(finding(
                 FindingKind::BadSlug,
                 &subject,
-                format!("{:?} is not a valid metrics source id (a slug)", raw.id),
+                match &raw.id {
+                    None => "no source id was given".to_string(),
+                    Some(id) => format!("{id:?} is not a valid metrics source id (a slug)"),
+                },
             ));
             continue;
-        }
-        if sources.contains_key(&raw.id) {
+        };
+        if sources.contains_key(source_id) {
             findings.push(finding(
                 FindingKind::DuplicateSourceId,
                 &subject,
                 format!(
-                    "source id {:?} is already declared by scope {:?}",
-                    raw.id,
-                    sources[&raw.id].scope.name
+                    "source id {source_id:?} is already declared by scope {:?}",
+                    sources[source_id].scope.name
                 ),
             ));
             continue;
         }
 
-        let path = match resolve_contained(&root_norm, &decl.scope.path, &raw.file) {
+        let Some(file) = raw.file.as_deref() else {
+            findings.push(finding(
+                FindingKind::MissingField,
+                &subject,
+                "no file was given for this source".to_string(),
+            ));
+            continue;
+        };
+        let path = match resolve_contained(&root_norm, &decl.scope.path, file) {
             Ok(path) => path,
             Err((kind, detail)) => {
                 findings.push(finding(kind, &subject, detail));
@@ -221,43 +249,63 @@ pub fn validate(root: &Path, configuration: &Configuration) -> Catalogue {
 
         let mut declared = BTreeMap::new();
         for d in &raw.declare {
-            let metric_subject = format!("{subject}/{}", d.id);
-            if !is_metric_segment(&d.id) {
+            let metric_subject = format!(
+                "{subject}/{}",
+                d.id.as_deref().unwrap_or("<missing metric id>")
+            );
+            let Some(metric_id) = d.id.as_deref().filter(|id| is_metric_segment(id)) else {
                 findings.push(finding(
                     FindingKind::BadSlug,
                     &metric_subject,
-                    format!("{:?} is not a valid metric id", d.id),
-                ));
-                continue;
-            }
-            if declared.contains_key(&d.id) {
-                findings.push(finding(
-                    FindingKind::DuplicateMetricId,
-                    &metric_subject,
-                    format!("metric id {:?} is declared twice; the first wins", d.id),
-                ));
-                continue;
-            }
-            let Some(unit) = parse_unit(&d.unit) else {
-                findings.push(finding(
-                    FindingKind::UnknownUnit,
-                    &metric_subject,
-                    format!("{:?} is not a known metric unit", d.unit),
+                    match &d.id {
+                        None => "no metric id was given".to_string(),
+                        Some(id) => format!("{id:?} is not a valid metric id"),
+                    },
                 ));
                 continue;
             };
-            let Some(better) = parse_better(&d.better) else {
+            if declared.contains_key(metric_id) {
+                findings.push(finding(
+                    FindingKind::DuplicateMetricId,
+                    &metric_subject,
+                    format!("metric id {metric_id:?} is declared twice; the first wins"),
+                ));
+                continue;
+            }
+            let Some(title) = d.title.as_deref() else {
+                findings.push(finding(
+                    FindingKind::MissingField,
+                    &metric_subject,
+                    "no title was given for this metric".to_string(),
+                ));
+                continue;
+            };
+            let Some(unit) = d.unit.as_deref().and_then(parse_unit) else {
+                findings.push(finding(
+                    FindingKind::UnknownUnit,
+                    &metric_subject,
+                    match &d.unit {
+                        None => "no unit was given for this metric".to_string(),
+                        Some(u) => format!("{u:?} is not a known metric unit"),
+                    },
+                ));
+                continue;
+            };
+            let Some(better) = d.better.as_deref().and_then(parse_better) else {
                 findings.push(finding(
                     FindingKind::UnknownBetter,
                     &metric_subject,
-                    format!("{:?} is not `higher` or `lower`", d.better),
+                    match &d.better {
+                        None => "no direction (better) was given for this metric".to_string(),
+                        Some(b) => format!("{b:?} is not `higher` or `lower`"),
+                    },
                 ));
                 continue;
             };
             declared.insert(
-                d.id.clone(),
+                metric_id.to_string(),
                 DeclaredMetric {
-                    title: d.title.clone(),
+                    title: title.to_string(),
                     unit,
                     better,
                 },
@@ -265,9 +313,9 @@ pub fn validate(root: &Path, configuration: &Configuration) -> Catalogue {
         }
 
         sources.insert(
-            raw.id.clone(),
+            source_id.to_string(),
             ValidSource {
-                id: raw.id.clone(),
+                id: source_id.to_string(),
                 scope: decl.scope.clone(),
                 path,
                 declared,
@@ -580,15 +628,15 @@ mod tests {
 
     fn source(id: &str, file: &str, declare: &[(&str, &str, &str, &str)]) -> RawSource {
         RawSource {
-            id: id.to_string(),
-            file: file.to_string(),
+            id: Some(id.to_string()),
+            file: Some(file.to_string()),
             declare: declare
                 .iter()
                 .map(|(id, title, unit, better)| RawDeclared {
-                    id: id.to_string(),
-                    title: title.to_string(),
-                    unit: unit.to_string(),
-                    better: better.to_string(),
+                    id: Some(id.to_string()),
+                    title: Some(title.to_string()),
+                    unit: Some(unit.to_string()),
+                    better: Some(better.to_string()),
                 })
                 .collect(),
         }
@@ -804,6 +852,140 @@ mod tests {
             .findings
             .iter()
             .any(|f| f.kind == FindingKind::UnknownBetter));
+    }
+
+    // -- missing (not just invalid) fields never fail config load (`#278`) --
+
+    /// A `declare[]` entry missing `better` entirely gets the same
+    /// treatment as an unknown spelling of it: `UnknownBetter`, the
+    /// metric dropped, the source otherwise kept. Never a parse error --
+    /// this is `validate`'s job, never `discovery::read_scope`'s.
+    #[test]
+    fn a_declared_metric_missing_better_is_an_unknown_better_finding_and_is_dropped() {
+        let root = tmp_root();
+        let config = Configuration {
+            scopes: vec![ScopeDeclaration {
+                scope: scope("finance", "projects/finance"),
+                source: Some(RawSource {
+                    id: Some("finance".to_string()),
+                    file: Some("metrics.json".to_string()),
+                    declare: vec![RawDeclared {
+                        id: Some("x".to_string()),
+                        title: Some("X".to_string()),
+                        unit: Some("count".to_string()),
+                        better: None,
+                    }],
+                }),
+            }],
+        };
+        let catalogue = validate(&root, &config);
+        let source = catalogue.sources.get("finance").unwrap();
+        assert!(!source.declared.contains_key("x"));
+        assert_eq!(catalogue.findings.len(), 1);
+        assert_eq!(catalogue.findings[0].kind, FindingKind::UnknownBetter);
+    }
+
+    /// Same for a missing `title` -- there is no "invalid title" shape to
+    /// reuse a finding kind from, so this is `MissingField`.
+    #[test]
+    fn a_declared_metric_missing_title_is_a_missing_field_finding_and_is_dropped() {
+        let root = tmp_root();
+        let config = Configuration {
+            scopes: vec![ScopeDeclaration {
+                scope: scope("finance", "projects/finance"),
+                source: Some(RawSource {
+                    id: Some("finance".to_string()),
+                    file: Some("metrics.json".to_string()),
+                    declare: vec![RawDeclared {
+                        id: Some("x".to_string()),
+                        title: None,
+                        unit: Some("count".to_string()),
+                        better: Some("higher".to_string()),
+                    }],
+                }),
+            }],
+        };
+        let catalogue = validate(&root, &config);
+        let source = catalogue.sources.get("finance").unwrap();
+        assert!(!source.declared.contains_key("x"));
+        assert_eq!(catalogue.findings.len(), 1);
+        assert_eq!(catalogue.findings[0].kind, FindingKind::MissingField);
+    }
+
+    /// Same for a missing `unit`: `UnknownUnit`, the same kind an invalid
+    /// spelling of it already gets.
+    #[test]
+    fn a_declared_metric_missing_unit_is_an_unknown_unit_finding_and_is_dropped() {
+        let root = tmp_root();
+        let config = Configuration {
+            scopes: vec![ScopeDeclaration {
+                scope: scope("finance", "projects/finance"),
+                source: Some(RawSource {
+                    id: Some("finance".to_string()),
+                    file: Some("metrics.json".to_string()),
+                    declare: vec![RawDeclared {
+                        id: Some("x".to_string()),
+                        title: Some("X".to_string()),
+                        unit: None,
+                        better: Some("higher".to_string()),
+                    }],
+                }),
+            }],
+        };
+        let catalogue = validate(&root, &config);
+        let source = catalogue.sources.get("finance").unwrap();
+        assert!(!source.declared.contains_key("x"));
+        assert_eq!(catalogue.findings.len(), 1);
+        assert_eq!(catalogue.findings[0].kind, FindingKind::UnknownUnit);
+    }
+
+    /// A `source` missing `file` entirely drops the *whole* source (there
+    /// is nothing to read without it), as a `MissingField` finding --
+    /// never a reason the scope's config file fails to parse.
+    #[test]
+    fn a_source_missing_file_is_a_missing_field_finding_and_the_whole_source_is_dropped() {
+        let root = tmp_root();
+        let config = Configuration {
+            scopes: vec![ScopeDeclaration {
+                scope: scope("finance", "projects/finance"),
+                source: Some(RawSource {
+                    id: Some("finance".to_string()),
+                    file: None,
+                    declare: vec![RawDeclared {
+                        id: Some("x".to_string()),
+                        title: Some("X".to_string()),
+                        unit: Some("count".to_string()),
+                        better: Some("higher".to_string()),
+                    }],
+                }),
+            }],
+        };
+        let catalogue = validate(&root, &config);
+        assert!(catalogue.sources.is_empty());
+        assert_eq!(catalogue.findings.len(), 1);
+        assert_eq!(catalogue.findings[0].kind, FindingKind::MissingField);
+    }
+
+    /// A source missing its own `id` is `BadSlug`, the same kind an
+    /// invalid slug already gets -- and, since nothing was registered
+    /// under any id, it can never collide with a later `DuplicateSourceId`.
+    #[test]
+    fn a_source_missing_id_is_a_bad_slug_finding() {
+        let root = tmp_root();
+        let config = Configuration {
+            scopes: vec![ScopeDeclaration {
+                scope: scope("finance", "projects/finance"),
+                source: Some(RawSource {
+                    id: None,
+                    file: Some("metrics.json".to_string()),
+                    declare: Vec::new(),
+                }),
+            }],
+        };
+        let catalogue = validate(&root, &config);
+        assert!(catalogue.sources.is_empty());
+        assert_eq!(catalogue.findings.len(), 1);
+        assert_eq!(catalogue.findings[0].kind, FindingKind::BadSlug);
     }
 
     #[test]

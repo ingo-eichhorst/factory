@@ -1482,8 +1482,8 @@ mod tests {
         let declare_dup = |id: &str, file: &str| {
             Some(factory_core::config::ScopeMetricsDeclaration {
                 source: Some(factory_core::config::ScopeMetricsSource {
-                    id: id.to_string(),
-                    file: file.to_string(),
+                    id: Some(id.to_string()),
+                    file: Some(file.to_string()),
                 }),
                 declare: Vec::new(),
             })

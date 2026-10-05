@@ -1029,20 +1029,20 @@ mod tests {
             scopes: vec![crate::reported::ScopeDeclaration {
                 scope: ScopeNode { name: "parent".into(), path: "projects/work".into() },
                 source: Some(crate::reported::RawSource {
-                    id: "demo".into(),
-                    file: "../../metrics.json".into(),
+                    id: Some("demo".into()),
+                    file: Some("../../metrics.json".into()),
                     declare: vec![
                         crate::reported::RawDeclared {
-                            id: "a".into(),
-                            title: "A".into(),
-                            unit: "count".into(),
-                            better: "higher".into(),
+                            id: Some("a".into()),
+                            title: Some("A".into()),
+                            unit: Some("count".into()),
+                            better: Some("higher".into()),
                         },
                         crate::reported::RawDeclared {
-                            id: "b".into(),
-                            title: "B".into(),
-                            unit: "count".into(),
-                            better: "higher".into(),
+                            id: Some("b".into()),
+                            title: Some("B".into()),
+                            unit: Some("count".into()),
+                            better: Some("higher".into()),
                         },
                     ],
                 }),

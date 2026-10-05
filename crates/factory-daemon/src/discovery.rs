@@ -364,6 +364,142 @@ mod tests {
         assert_eq!(scope.declared_agents()[0].name(), "reviewer");
     }
 
+    // `#278` fix: a scope's own `.factory/config.yaml` missing an optional
+    // `scope.metrics` field must still load through the real daemon-start
+    // path (`apply`/`read_scope`) -- a missing value is L5's own
+    // `reported::validate` finding to raise, never a reason
+    // `discovery::apply` (and so the whole daemon) fails to start.
+
+    #[test]
+    fn apply_loads_a_scope_whose_metrics_declaration_is_complete() {
+        let s = Scratch::new("metrics-complete");
+        s.write_scope(
+            "projects/finance",
+            "version: 1\nscope:\n  id: finance-id\n  name: finance\n  metrics:\n\
+             \x20\x20\x20\x20source: { id: finance, file: metrics.json }\n\
+             \x20\x20\x20\x20declare:\n\
+             \x20\x20\x20\x20\x20\x20- { id: beleg_coverage, title: Beleg coverage, unit: ratio, better: higher }\n",
+        );
+        let mut f = factory(&s.path(), None);
+
+        apply(&mut f).unwrap();
+
+        let catalogue = factory_assurance::reported::validate(
+            &f.root,
+            &crate::metrics::reported_configuration(&f),
+        );
+        let source = catalogue.sources.get("finance").unwrap();
+        assert!(source.declared.contains_key("beleg_coverage"));
+        assert!(catalogue.findings.is_empty(), "{:?}", catalogue.findings);
+    }
+
+    #[test]
+    fn apply_loads_a_scope_whose_declared_metric_is_missing_better() {
+        let s = Scratch::new("metrics-missing-better");
+        s.write_scope(
+            "projects/finance",
+            "version: 1\nscope:\n  id: finance-id\n  name: finance\n  metrics:\n\
+             \x20\x20\x20\x20source: { id: finance, file: metrics.json }\n\
+             \x20\x20\x20\x20declare:\n\
+             \x20\x20\x20\x20\x20\x20- { id: beleg_coverage, title: Beleg coverage, unit: ratio }\n",
+        );
+        let mut f = factory(&s.path(), None);
+
+        apply(&mut f).unwrap();
+
+        let catalogue = factory_assurance::reported::validate(
+            &f.root,
+            &crate::metrics::reported_configuration(&f),
+        );
+        let source = catalogue.sources.get("finance").unwrap();
+        assert!(!source.declared.contains_key("beleg_coverage"));
+        assert_eq!(catalogue.findings.len(), 1);
+        assert_eq!(
+            catalogue.findings[0].kind,
+            factory_assurance::reported::FindingKind::UnknownBetter
+        );
+    }
+
+    #[test]
+    fn apply_loads_a_scope_whose_declared_metric_is_missing_title() {
+        let s = Scratch::new("metrics-missing-title");
+        s.write_scope(
+            "projects/finance",
+            "version: 1\nscope:\n  id: finance-id\n  name: finance\n  metrics:\n\
+             \x20\x20\x20\x20source: { id: finance, file: metrics.json }\n\
+             \x20\x20\x20\x20declare:\n\
+             \x20\x20\x20\x20\x20\x20- { id: beleg_coverage, unit: ratio, better: higher }\n",
+        );
+        let mut f = factory(&s.path(), None);
+
+        apply(&mut f).unwrap();
+
+        let catalogue = factory_assurance::reported::validate(
+            &f.root,
+            &crate::metrics::reported_configuration(&f),
+        );
+        let source = catalogue.sources.get("finance").unwrap();
+        assert!(!source.declared.contains_key("beleg_coverage"));
+        assert_eq!(catalogue.findings.len(), 1);
+        assert_eq!(
+            catalogue.findings[0].kind,
+            factory_assurance::reported::FindingKind::MissingField
+        );
+    }
+
+    #[test]
+    fn apply_loads_a_scope_whose_declared_metric_is_missing_unit() {
+        let s = Scratch::new("metrics-missing-unit");
+        s.write_scope(
+            "projects/finance",
+            "version: 1\nscope:\n  id: finance-id\n  name: finance\n  metrics:\n\
+             \x20\x20\x20\x20source: { id: finance, file: metrics.json }\n\
+             \x20\x20\x20\x20declare:\n\
+             \x20\x20\x20\x20\x20\x20- { id: beleg_coverage, title: Beleg coverage, better: higher }\n",
+        );
+        let mut f = factory(&s.path(), None);
+
+        apply(&mut f).unwrap();
+
+        let catalogue = factory_assurance::reported::validate(
+            &f.root,
+            &crate::metrics::reported_configuration(&f),
+        );
+        let source = catalogue.sources.get("finance").unwrap();
+        assert!(!source.declared.contains_key("beleg_coverage"));
+        assert_eq!(catalogue.findings.len(), 1);
+        assert_eq!(
+            catalogue.findings[0].kind,
+            factory_assurance::reported::FindingKind::UnknownUnit
+        );
+    }
+
+    #[test]
+    fn apply_loads_a_scope_whose_source_is_missing_file() {
+        let s = Scratch::new("metrics-missing-file");
+        s.write_scope(
+            "projects/finance",
+            "version: 1\nscope:\n  id: finance-id\n  name: finance\n  metrics:\n\
+             \x20\x20\x20\x20source: { id: finance }\n\
+             \x20\x20\x20\x20declare:\n\
+             \x20\x20\x20\x20\x20\x20- { id: beleg_coverage, title: Beleg coverage, unit: ratio, better: higher }\n",
+        );
+        let mut f = factory(&s.path(), None);
+
+        apply(&mut f).unwrap();
+
+        let catalogue = factory_assurance::reported::validate(
+            &f.root,
+            &crate::metrics::reported_configuration(&f),
+        );
+        assert!(catalogue.sources.is_empty());
+        assert_eq!(catalogue.findings.len(), 1);
+        assert_eq!(
+            catalogue.findings[0].kind,
+            factory_assurance::reported::FindingKind::MissingField
+        );
+    }
+
     #[test]
     fn the_instance_root_can_also_be_a_scope() {
         let s = Scratch::new("root");

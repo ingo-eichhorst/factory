@@ -1372,6 +1372,7 @@ pub struct Scope {
 /// every metric id that file may report, with the title and unit L5's
 /// registry listing shows for it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeMetricsDeclaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<ScopeMetricsSource>,
@@ -1379,25 +1380,44 @@ pub struct ScopeMetricsDeclaration {
     pub declare: Vec<ScopeMetricsDeclared>,
 }
 
+/// Every field is optional here on purpose: a *missing* `id`/`file` is an
+/// authoring mistake the same as an invalid one (a bad slug, a path that
+/// escapes the instance), and L5's `reported::validate` turns either into
+/// the same kind of finding -- never a parse failure that would abort
+/// `discovery::apply` and take the whole daemon down with it on the next
+/// restart. Unknown keys are still refused (`deny_unknown_fields`), the
+/// same convention every neighbouring scope block already follows.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeMetricsSource {
-    pub id: String,
-    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
+/// See [`ScopeMetricsSource`]'s doc comment: every field is optional for
+/// the same reason. A missing `better` is handled exactly like an unknown
+/// spelling of it -- the same `UnknownBetter` finding, this one declared
+/// metric left out -- never a reason the scope's whole config file fails
+/// to parse.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeMetricsDeclared {
-    pub id: String,
-    pub title: String,
-    pub unit: String,
-    /// `higher` or `lower` -- required, not defaulted: `metrics::resolve`
-    /// is pure and has no access to this declaration, so a missing
-    /// direction can never be guessed at `higher` without risking exactly
-    /// the wrong-direction Goals finding this field exists to prevent for
-    /// a metric that is actually lower-is-better. Validated (and an
-    /// unknown spelling turned into a finding, never a parse failure) by
-    /// L5's `reported::validate`, the same as `unit` above.
-    pub better: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// `higher` or `lower`. `metrics::resolve` is pure and has no access
+    /// to this declaration, so a missing direction can never be guessed at
+    /// `higher` without risking exactly the wrong-direction Goals finding
+    /// this field exists to prevent for a metric that is actually
+    /// lower-is-better -- a missing value here is a finding
+    /// (`UnknownBetter`), not a guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub better: Option<String>,
 }
 
 
@@ -2947,18 +2967,37 @@ mod tests {
         let s: Scope = serde_yaml_ng::from_str(yaml).unwrap();
         let declaration = s.metrics.as_ref().unwrap();
         let source = declaration.source.as_ref().unwrap();
-        assert_eq!(source.id, "finance");
-        assert_eq!(source.file, "../data/finance/metrics.json");
+        assert_eq!(source.id.as_deref(), Some("finance"));
+        assert_eq!(source.file.as_deref(), Some("../data/finance/metrics.json"));
         assert_eq!(declaration.declare.len(), 2);
-        assert_eq!(declaration.declare[0].id, "beleg_coverage");
-        assert_eq!(declaration.declare[0].title, "Beleg coverage");
-        assert_eq!(declaration.declare[0].unit, "ratio");
-        assert_eq!(declaration.declare[0].better, "higher");
-        assert_eq!(declaration.declare[1].better, "lower");
+        assert_eq!(declaration.declare[0].id.as_deref(), Some("beleg_coverage"));
+        assert_eq!(declaration.declare[0].title.as_deref(), Some("Beleg coverage"));
+        assert_eq!(declaration.declare[0].unit.as_deref(), Some("ratio"));
+        assert_eq!(declaration.declare[0].better.as_deref(), Some("higher"));
+        assert_eq!(declaration.declare[1].better.as_deref(), Some("lower"));
 
         let reparsed: Scope =
             serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&s).unwrap()).unwrap();
         assert_eq!(reparsed.metrics, s.metrics);
+    }
+
+    /// `#278` fix: a `declare[]` entry missing `better` (or `title`/`unit`),
+    /// or a `source` missing `file`, must still parse -- the whole point
+    /// is that a missing value never fails the scope's config file to
+    /// load, only L5's own `reported::validate` turns it into a finding.
+    #[test]
+    fn a_metrics_declaration_missing_optional_fields_still_parses() {
+        let yaml = "id: finance-id\n\
+             name: finance\n\
+             metrics:\n\
+             \x20\x20source:\n\
+             \x20\x20\x20\x20id: finance\n\
+             \x20\x20declare:\n\
+             \x20\x20\x20\x20- { id: beleg_coverage, title: Beleg coverage, unit: ratio }\n";
+        let s: Scope = serde_yaml_ng::from_str(yaml).unwrap();
+        let declaration = s.metrics.as_ref().unwrap();
+        assert_eq!(declaration.source.as_ref().unwrap().file, None);
+        assert_eq!(declaration.declare[0].better, None);
     }
 
     #[test]
