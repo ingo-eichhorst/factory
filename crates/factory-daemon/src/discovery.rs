@@ -418,6 +418,32 @@ mod tests {
         assert!(f.config.scopes[0].roles.contains_key("reviewer"));
     }
 
+    /// `#279`: an escaping, `secrets/`-rooted or otherwise structurally
+    /// unsafe `backup.include` entry is never refused here -- discovery
+    /// and `Config::validate` only ever look at the shape of the block
+    /// (plain strings), never at whether any entry is safe to archive.
+    /// That is L1's live backup gather's job, resolved fresh on every
+    /// report and snapshot; the daemon must still start either way.
+    #[test]
+    fn a_structurally_unsafe_backup_include_entry_is_never_refused_at_load() {
+        let s = Scratch::new("scope-backup-include");
+        s.write_scope(
+            "projects/finance",
+            "scope:\n  id: finance-id\n  name: finance\n  backup:\n    include: [../../../etc, secrets/dump]\n",
+        );
+        let mut f = factory(&s.path(), None);
+
+        apply(&mut f).unwrap();
+        f.config.validate().unwrap();
+
+        let finance = &f.config.scopes[0];
+        assert_eq!(
+            finance.backup.as_ref().unwrap().include,
+            ["../../../etc", "secrets/dump"],
+            "parsed exactly as written -- resolving or refusing an entry is not discovery's job"
+        );
+    }
+
     #[test]
     fn a_policies_block_beside_the_scope_block_is_refused_with_the_file_named() {
         let s = Scratch::new("misplaced-policies");

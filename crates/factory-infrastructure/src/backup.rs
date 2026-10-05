@@ -21,7 +21,7 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use factory_kernel::{FactoryError, Result};
 
@@ -224,6 +224,147 @@ impl BackupConfig {
     }
 }
 
+// ========================================================== scope data (#279)
+//
+// A scope's own data that lives outside git -- the business-factory `finance`
+// scope's books and source documents are the first case -- falls through
+// both halves of "`.factory/` is backed up" and "source code is backed up by
+// pushing it": nothing in Factory copies it, and nothing says whether
+// anything else does. A scope declares it instead:
+//
+// ```yaml
+// # a scope's own .factory/config.yaml
+// scope:
+//   name: finance
+//   backup:
+//     include: [../data/finance, ../data/invoices]   # relative to the scope directory
+// ```
+//
+// Unlike `infrastructure.backup` above, an invalid declaration here is never
+// a load-time failure: scope configs are read once, at daemon startup, and a
+// directory that does not exist yet is routine -- it is created later,
+// without a restart, and must be picked up on the very next snapshot. So
+// nothing here is "validated" the way `BackupConfig` is; [`resolve_scope_include`]
+// only ever resolves or refuses one declaration, fresh, every time a snapshot
+// or a status read asks -- the same "constructors capture fresh plain
+// declarations per read" rule every other level's live provider follows.
+// Only a declaration that is structurally unsafe -- escapes the instance
+// root, sits under a `secrets/` component, or is a symbolic link -- is
+// refused; refusal just means this one entry is left out and reported,
+// never that the daemon fails to start or that any other entry is affected.
+
+/// A scope's own `scope.backup` block: directories outside `.factory/` that
+/// belong in the instance's snapshots. `deny_unknown_fields`, like every
+/// other scope-level block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeBackupConfig {
+    /// Each entry is relative to this scope's own directory, exactly as
+    /// written -- `../data/finance` for a sibling of the scope. Resolved
+    /// against the scope's directory and checked against the instance root
+    /// by [`resolve_scope_include`], never by this struct itself: a scope
+    /// config is parsed once, at daemon startup, and a directory that does
+    /// not exist yet must not be refused there -- only a structurally
+    /// unsafe declaration ever is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+}
+
+/// Resolve one scope's declared `backup.include` entry to a path relative
+/// to the instance root, or the reason it is refused -- lexically only, so
+/// this never touches a filesystem and never refuses a directory merely
+/// because it does not exist yet (that is for the caller to find out, and
+/// to report as a snapshot-time finding, never a refusal of the
+/// declaration itself). `scope_path` is the scope's own directory, already
+/// relative to the instance root the way `Scope.path` always is.
+///
+/// Refused when the entry:
+/// - is not a relative path (`declared` or `scope_path` names a drive or
+///   starts at the filesystem root);
+/// - escapes the instance root once `..` components are resolved by path
+///   component, never by string prefix;
+/// - resolves to the instance root itself (nothing to archive);
+/// - resolves under `.factory/` -- already backed up whole, and
+///   re-archiving it under a second, scope-declared path would copy a
+///   live file (the database, say) a second time outside the one
+///   consistent `VACUUM INTO` copy `take` itself makes of it;
+/// - sits under, or is named, a `secrets/` component, or any other name
+///   [`is_excluded`] already refuses for a file -- the exact rule a file
+///   two levels under the declared directory would be checked against,
+///   applied once to the declaration itself so the refusal is immediate
+///   rather than silently archiving an empty shell.
+pub fn resolve_scope_include(scope_path: &Path, declared: &str) -> std::result::Result<PathBuf, &'static str> {
+    let mut stack: Vec<std::ffi::OsString> = Vec::new();
+    for component in scope_path.join(declared).components() {
+        match component {
+            Component::Normal(part) => stack.push(part.to_os_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if stack.pop().is_none() {
+                    return Err("escapes the instance root");
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return Err("must be a relative path"),
+        }
+    }
+    if stack.is_empty() {
+        return Err("names the instance root itself");
+    }
+    if stack[0] == ".factory" {
+        return Err("already backed up: .factory is included whole");
+    }
+    let relative = PathBuf::from_iter(stack);
+    let relative_str = relative.to_string_lossy().replace('\\', "/");
+    if let Some(reason) = is_excluded(&relative_str) {
+        return Err(reason);
+    }
+    Ok(relative)
+}
+
+/// One scope's declared `backup.include` entry, as the L1 Backup page and
+/// `factory backup status` show it -- resolved fresh from the live config
+/// on every report, never cached across a config reload, so a directory
+/// created after the daemon started needs no restart to appear.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeIncludeRow {
+    pub scope: String,
+    /// As the scope wrote it, relative to its own directory.
+    pub declared: String,
+    /// Relative to the instance root, `/`-separated. `None` when the
+    /// declaration could not even be resolved to a path -- it escapes the
+    /// root, or is not a relative path at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Why this entry would not be archived right now: it does not exist
+    /// yet, or [`resolve_scope_include`]'s own refusal, or a symbolic link
+    /// found when the live directory itself was probed. `None` means it is
+    /// safe to archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+    /// From the newest snapshot this daemon took, when there is one and it
+    /// held this exact declaration. `None` before any snapshot has, even
+    /// when the directory is `Ready` right now.
+    pub files: Option<u64>,
+    pub bytes: Option<u64>,
+}
+
+/// The same declaration, as a snapshot actually found and archived it --
+/// kept on [`Snapshot`] at take time, like [`GroupTotal`], so a status read
+/// never has to reopen an archive to answer the include table's numbers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeIncludeTotal {
+    pub scope: String,
+    pub declared: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Why nothing was archived for it in this snapshot -- `None` means
+    /// `files`/`bytes` below count real archived files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+    pub files: u64,
+    pub bytes: u64,
+}
+
 // ================================================================ the files
 
 /// Which part of the instance a file in a snapshot belongs to. The include
@@ -244,6 +385,12 @@ pub enum Group {
     Budgets,
     Guides,
     Logs,
+    /// A scope's own declared `backup.include` directories (`#279`) --
+    /// every scope's data outside `.factory/` shares this one group, since
+    /// there can be any number of them; [`ScopeIncludeTotal`] is the finer
+    /// breakdown the include table actually shows, one row per declared
+    /// directory rather than one for the whole group.
+    ScopeData,
 }
 
 impl Group {
@@ -262,6 +409,7 @@ impl Group {
             Self::Budgets => "budgets",
             Self::Guides => "guides",
             Self::Logs => "logs",
+            Self::ScopeData => "scope_data",
         }
     }
 }
@@ -1060,6 +1208,14 @@ pub struct BackupReport {
     /// and failed.
     #[serde(default)]
     pub time_machine: Option<TimeMachineFact>,
+    /// `#279`: every scope's own declared `backup.include` directories,
+    /// resolved fresh from the live config -- filled whether or not a
+    /// backup is even configured, the same as `code` and `time_machine`
+    /// above, so a refused or missing declaration is visible before there
+    /// is anywhere to put a snapshot at all. `#[serde(default)]` so a
+    /// daemon built before this exists still parses to a CLI built after.
+    #[serde(default)]
+    pub scope_includes: Vec<ScopeIncludeRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1161,6 +1317,13 @@ pub struct Snapshot {
     /// exists still parses to a CLI built after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypted_to: Option<String>,
+    /// `#279`: every scope's declared `backup.include` entry this snapshot
+    /// held, archived or not -- `groups` above's own reasoning, one level
+    /// finer, since several scopes' directories all share `Group::ScopeData`.
+    /// `#[serde(default)]` so a daemon built before this exists still
+    /// parses to a CLI built after.
+    #[serde(default)]
+    pub scope_includes: Vec<ScopeIncludeTotal>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1320,6 +1483,32 @@ mod tests {
         let report: BackupReport = serde_json::from_str(json).unwrap();
         assert_eq!(report.next_verify, None);
         assert_eq!(report.verify_skipped, None);
+    }
+
+    #[test]
+    fn a_report_from_before_279_still_deserializes_with_no_declared_scope_includes() {
+        let json = r#"{
+            "now": "2026-01-01T00:00:00Z", "config": null, "destination": null, "age": "none",
+            "due_by": null, "next_run": null, "running": false, "last_verified": null,
+            "last_failure": null, "warnings": [], "snapshots": [], "include": [], "exclude": []
+        }"#;
+        let report: BackupReport = serde_json::from_str(json).unwrap();
+        assert_eq!(report.scope_includes, Vec::new());
+    }
+
+    #[test]
+    fn a_snapshot_recorded_before_279_still_deserializes_with_no_scope_includes() {
+        // `backup_events` holds append-only JSON by `Recorded::Completed`;
+        // a row written before this field existed has no `scope_includes`
+        // key at all, and must still read back as an empty list, not fail
+        // to parse the whole history.
+        let json = r#"{
+            "name": "s", "path": "/b/s", "at": "2026-01-01T00:00:00Z", "trigger": "manual",
+            "by": "owner", "size_bytes": 1, "files": 1, "database_bytes": 1, "duration_ms": 1,
+            "groups": []
+        }"#;
+        let snapshot: Snapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snapshot.scope_includes, Vec::new());
     }
 
     #[test]
@@ -2081,5 +2270,84 @@ mod tests {
             serde_json::to_value(&TimeMachineFact::NotConfigured).unwrap(),
             serde_json::json!({ "state": "not_configured" })
         );
+    }
+
+    // ============================================================= #279
+
+    #[test]
+    fn a_sibling_directory_resolves_relative_to_the_instance_root() {
+        // The issue's own example: a `finance` scope declared directly at
+        // the instance root (`finance/.factory/config.yaml`), naming a
+        // sibling directory.
+        let resolved = resolve_scope_include(Path::new("finance"), "../data/finance").unwrap();
+        assert_eq!(resolved, PathBuf::from("data/finance"));
+    }
+
+    #[test]
+    fn a_nested_scope_s_sibling_directory_resolves_under_its_own_parent() {
+        // `projects/finance`'s `..` only ever removes `finance`, never
+        // `projects` too -- a nested scope's sibling data stays nested.
+        let resolved = resolve_scope_include(Path::new("projects/finance"), "../data/finance").unwrap();
+        assert_eq!(resolved, PathBuf::from("projects/data/finance"));
+    }
+
+    #[test]
+    fn a_directory_under_the_scope_itself_resolves_under_it() {
+        let resolved = resolve_scope_include(Path::new("projects/finance"), "exports").unwrap();
+        assert_eq!(resolved, PathBuf::from("projects/finance/exports"));
+    }
+
+    #[test]
+    fn a_root_scope_declaration_resolves_relative_to_the_root_itself() {
+        let resolved = resolve_scope_include(Path::new("."), "data/finance").unwrap();
+        assert_eq!(resolved, PathBuf::from("data/finance"));
+    }
+
+    #[test]
+    fn escaping_the_instance_root_is_refused_by_path_component_not_string_prefix() {
+        // `finance-data` would be a sibling that merely starts with the
+        // same string as `finance`; `..` from the scope directory must
+        // still only ever remove exactly one real component, so a second
+        // `..` here escapes the root rather than landing on a look-alike.
+        let reason = resolve_scope_include(Path::new("finance"), "../../etc").unwrap_err();
+        assert_eq!(reason, "escapes the instance root");
+    }
+
+    #[test]
+    fn a_declaration_resolving_to_the_instance_root_itself_is_refused() {
+        let reason = resolve_scope_include(Path::new("finance"), "..").unwrap_err();
+        assert_eq!(reason, "names the instance root itself");
+    }
+
+    #[test]
+    fn an_absolute_declaration_is_refused_as_not_relative() {
+        let reason = resolve_scope_include(Path::new("projects/finance"), "/etc/passwd").unwrap_err();
+        assert_eq!(reason, "must be a relative path");
+    }
+
+    #[test]
+    fn a_declaration_under_a_secrets_component_is_refused_by_is_excluded() {
+        let reason = resolve_scope_include(Path::new("projects/finance"), "secrets/dump").unwrap_err();
+        assert_eq!(reason, "a secret: never read, never copied");
+    }
+
+    #[test]
+    fn a_declaration_resolving_under_factory_is_refused_as_already_backed_up() {
+        // Already a whole, consistent copy -- declaring it again as scope
+        // data would archive a live file (the database, say) a second time
+        // under a path that collides with `DATABASE_ENTRY`.
+        let reason = resolve_scope_include(Path::new("."), ".factory/factory.sqlite").unwrap_err();
+        assert_eq!(reason, "already backed up: .factory is included whole");
+        let reason = resolve_scope_include(Path::new("finance"), "../.factory").unwrap_err();
+        assert_eq!(reason, "already backed up: .factory is included whole");
+    }
+
+    #[test]
+    fn a_scope_whose_own_directory_sits_under_secrets_is_refused_too() {
+        // The `secrets/` check runs on the fully resolved path, never on
+        // `declared` alone, so a scope nested under a `secrets/` directory
+        // is caught exactly the same way.
+        let reason = resolve_scope_include(Path::new("secrets/finance"), "exports").unwrap_err();
+        assert_eq!(reason, "a secret: never read, never copied");
     }
 }

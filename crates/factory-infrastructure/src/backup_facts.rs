@@ -193,6 +193,69 @@ pub fn destination_facts(root: &Path, destination: &Path) -> DestinationFacts {
     }
 }
 
+/// `#279`: every scope's own declared `backup.include` entries, resolved
+/// fresh against the instance root and probed on disk -- never cached
+/// across a config reload, so a directory created after the daemon started
+/// needs no restart to appear in the next snapshot. `declarations` is
+/// `(scope name, the scope's own directory relative to the root, its raw
+/// `backup.include` strings)` -- the plain projection `Config::backup_includes`
+/// supplies, so this crate never has to depend on the composition layer
+/// that owns `Scope` itself to read it.
+pub fn resolve_scope_includes(
+    root: &Path,
+    declarations: &[(String, PathBuf, Vec<String>)],
+) -> Vec<crate::backup::ScopeIncludeRow> {
+    use crate::backup::{resolve_scope_include, ScopeIncludeRow};
+    let mut out = Vec::new();
+    for (scope, scope_path, raw) in declarations {
+        for declared in raw {
+            let row = match resolve_scope_include(scope_path, declared) {
+                Err(reason) => ScopeIncludeRow {
+                    scope: scope.clone(),
+                    declared: declared.clone(),
+                    path: None,
+                    unavailable: Some(reason.into()),
+                    files: None,
+                    bytes: None,
+                },
+                Ok(relative) => ScopeIncludeRow {
+                    scope: scope.clone(),
+                    declared: declared.clone(),
+                    path: Some(relative.to_string_lossy().replace('\\', "/")),
+                    unavailable: probe_include(root, &relative),
+                    files: None,
+                    bytes: None,
+                },
+            };
+            out.push(row);
+        }
+    }
+    out
+}
+
+/// Whether `relative` (already resolved, instance-root relative) is safe to
+/// archive right now. Every path component from the root down is checked
+/// for a symbolic link -- not only the final directory, so a link partway
+/// down (`data` itself a symlink elsewhere, declared `data/finance`) cannot
+/// smuggle an archive outside the root either. A component that does not
+/// exist yet is not refused -- `None` would claim more than is known, so
+/// this reads as a plain "not there", the fact [`resolve_scope_includes`]
+/// resolves fresh on every call rather than ever caching across a restart.
+fn probe_include(root: &Path, relative: &Path) -> Option<String> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Some("a symbolic link: not followed".into());
+            }
+            Ok(_) => {}
+            Err(_) => return Some("declared, but does not exist yet".into()),
+        }
+    }
+    None
+}
+
 /// `(due_by, overdue_by)` for the newest backup: the schedule's next slot
 /// after it, and the one after that, each plus grace; or, unscheduled, the
 /// fixed yardsticks.
@@ -303,4 +366,96 @@ pub fn fact(state: &Captured) -> BackupFact {
         age,
         last_verified,
     )
+}
+
+#[cfg(test)]
+mod scope_include_tests {
+    use super::*;
+
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("factory-backup-facts-{tag}-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_declared_directory_that_exists_is_ready() {
+        let s = Scratch::new("ready");
+        std::fs::create_dir_all(s.0.join("data/finance")).unwrap();
+        let rows = resolve_scope_includes(
+            &s.0,
+            &[("finance".into(), PathBuf::from("finance"), vec!["../data/finance".into()])],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path.as_deref(), Some("data/finance"));
+        assert_eq!(rows[0].unavailable, None);
+    }
+
+    #[test]
+    fn a_declared_directory_that_does_not_exist_yet_is_not_refused() {
+        let s = Scratch::new("missing");
+        let rows = resolve_scope_includes(
+            &s.0,
+            &[("finance".into(), PathBuf::from("finance"), vec!["../data/finance".into()])],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path.as_deref(), Some("data/finance"));
+        assert_eq!(rows[0].unavailable.as_deref(), Some("declared, but does not exist yet"));
+
+        // Created later, with no restart: a fresh resolve (there is no
+        // cache to invalidate) now finds it ready.
+        std::fs::create_dir_all(s.0.join("data/finance")).unwrap();
+        let rows = resolve_scope_includes(
+            &s.0,
+            &[("finance".into(), PathBuf::from("finance"), vec!["../data/finance".into()])],
+        );
+        assert_eq!(rows[0].unavailable, None);
+    }
+
+    #[test]
+    fn a_declared_directory_that_is_itself_a_symlink_is_refused() {
+        let s = Scratch::new("symlink-final");
+        std::fs::create_dir_all(s.0.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(s.0.join("elsewhere"), s.0.join("data")).unwrap();
+        let rows = resolve_scope_includes(
+            &s.0,
+            &[("finance".into(), PathBuf::from("finance"), vec!["../data".into()])],
+        );
+        assert_eq!(rows[0].unavailable.as_deref(), Some("a symbolic link: not followed"));
+    }
+
+    #[test]
+    fn a_symlink_in_an_intermediate_component_is_also_refused() {
+        // `data` itself is a symlink elsewhere; the declared directory is
+        // `data/finance`, two components deep. The link must be caught
+        // walking down to it, not only when it is the final component.
+        let s = Scratch::new("symlink-intermediate");
+        std::fs::create_dir_all(s.0.join("elsewhere/finance")).unwrap();
+        std::os::unix::fs::symlink(s.0.join("elsewhere"), s.0.join("data")).unwrap();
+        let rows = resolve_scope_includes(
+            &s.0,
+            &[("finance".into(), PathBuf::from("finance"), vec!["../data/finance".into()])],
+        );
+        assert_eq!(rows[0].unavailable.as_deref(), Some("a symbolic link: not followed"));
+    }
+
+    #[test]
+    fn a_declaration_refused_before_resolution_never_touches_the_filesystem() {
+        // No scratch directory backs this path at all; an escaping
+        // declaration is refused on the string alone.
+        let rows = resolve_scope_includes(
+            Path::new("/does/not/exist"),
+            &[("finance".into(), PathBuf::from("finance"), vec!["../../etc".into()])],
+        );
+        assert_eq!(rows[0].path, None);
+        assert_eq!(rows[0].unavailable.as_deref(), Some("escapes the instance root"));
+    }
 }

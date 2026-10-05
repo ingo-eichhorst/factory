@@ -194,6 +194,32 @@ export function includeCount(row) {
   return `${row.files} file${row.files === 1 ? "" : "s"} · ${fmtBytes(row.bytes)}`;
 }
 
+// -------------------------------------------------------------------- #279
+//
+// A scope's own declared `backup.include` directories: resolved fresh by
+// the daemon on every report, so this never guesses whether one exists or
+// is safe to archive -- only shapes what the daemon already decided.
+
+/// One row per declared directory, whatever a backup has or has not done
+/// with it yet. `level` is the page's usual three colours: `ok` (green,
+/// archived in the newest snapshot), `warn` (amber, refused, or declared
+/// but never yet backed up), `none` (grey, simply not created on disk
+/// yet -- routine, not a problem).
+export function scopeIncludeRows(report) {
+  const rows = (report && report.scope_includes) || [];
+  return rows.map(r => {
+    const path = r.path || r.declared;
+    if (r.unavailable) {
+      const level = r.unavailable === "declared, but does not exist yet" ? "none" : "warn";
+      return { scope: r.scope, path, level, text: r.unavailable };
+    }
+    if (typeof r.files === "number") {
+      return { scope: r.scope, path, level: "ok", text: `${r.files} file${r.files === 1 ? "" : "s"} · ${fmtBytes(r.bytes)}` };
+    }
+    return { scope: r.scope, path, level: "warn", text: "not backed up yet" };
+  });
+}
+
 /// What the two buttons may do right now, and why not when they may not.
 /// The hero's Verify targets the newest snapshot, so an encrypted newest
 /// (`#152`) disables it with the CLI hint, the same as its row would be.

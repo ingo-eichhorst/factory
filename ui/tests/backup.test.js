@@ -26,6 +26,7 @@ import {
   nextDrillText,
   rowVerifyState,
   scheduleText,
+  scopeIncludeRows,
   timeMachineText,
   verifiedCell,
 } from "../js/backup-model.js";
@@ -110,6 +111,26 @@ const REPORT = {
     },
   ],
   time_machine: { state: "not_configured" },
+  // `#279`: a scope's own declared `backup.include`, resolved fresh by the
+  // daemon on every report -- one archived, one not yet created.
+  scope_includes: [
+    {
+      scope: "finance",
+      declared: "../data/finance",
+      path: "data/finance",
+      unavailable: null,
+      files: 12,
+      bytes: 34000,
+    },
+    {
+      scope: "finance",
+      declared: "../data/invoices",
+      path: "data/invoices",
+      unavailable: "declared, but does not exist yet",
+      files: null,
+      bytes: null,
+    },
+  ],
 };
 
 // ------------------------------------------------------------------ the tab
@@ -365,8 +386,45 @@ test("time machine reads observed, unknown or unsupported -- never asserted from
 
 test("the Code section renders for every report, not gated on report.config the way history and contents are", () => {
   assert.match(view, /function codeSection\(report\)/);
-  assert.match(
-    view,
-    /\[hero\(report\), warningStrip\(report\.warnings\), codeSection\(report\), history\(report\), contents\(report\)\]/
-  );
+  assert.match(view, /codeSection\(report\),\s*\n\s*scopeDataSection\(report\),\s*\n\s*history\(report\)/);
+});
+
+// -------------------------------------------------------------------- #279
+
+test("a scope's own declared backup.include is one row per declaration, resolved fresh by the daemon", () => {
+  const rows = scopeIncludeRows(REPORT);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0], { scope: "finance", path: "data/finance", level: "ok", text: "12 files · 33 KB" });
+  assert.deepEqual(rows[1], {
+    scope: "finance",
+    path: "data/invoices",
+    level: "none",
+    text: "declared, but does not exist yet",
+  });
+});
+
+test("a refused declaration (escaping the root, under secrets, a symlink) reads as a warning, not grey", () => {
+  const refused = scopeIncludeRows({
+    scope_includes: [{ scope: "finance", declared: "secrets/dump", path: null, unavailable: "a secret: never read, never copied", files: null, bytes: null }],
+  });
+  assert.deepEqual(refused[0], { scope: "finance", path: "secrets/dump", level: "warn", text: "a secret: never read, never copied" });
+});
+
+test("declared and resolved but never yet backed up reads as a warning with an honest word, not a guess", () => {
+  const pending = scopeIncludeRows({
+    scope_includes: [{ scope: "finance", declared: "../data/finance", path: "data/finance", unavailable: null, files: null, bytes: null }],
+  });
+  assert.deepEqual(pending[0], { scope: "finance", path: "data/finance", level: "warn", text: "not backed up yet" });
+});
+
+test("no declared includes is an empty list, never a guess at a path nobody wrote", () => {
+  assert.deepEqual(scopeIncludeRows({ scope_includes: [] }), []);
+  assert.deepEqual(scopeIncludeRows({}), []);
+  assert.deepEqual(scopeIncludeRows(null), []);
+});
+
+test("the Scope data section escapes every server string and is absent when nothing is declared", () => {
+  assert.match(view, /function scopeDataSection\(report\)/);
+  assert.match(view, /scopeDataSection[\s\S]{0,400}esc\(r\.scope\)[\s\S]{0,200}esc\(r\.path\)[\s\S]{0,200}esc\(r\.text\)/);
+  assert.match(view, /if \(!rows\.length\) return "";/);
 });

@@ -27,7 +27,7 @@ use chrono::Duration;
 use factory_core::backup::{
     age_level, refuse_bad_snapshot_name, retain, warnings,
     AgeLevel, BackupConfig, BackupFailure, BackupReport, BackupTrigger, CheckStatus,
-    ExcludeRow, Group, IncludeRow, KeptBy, ManifestInstance, RepositoryFact, Restoration, Snapshot,
+    ExcludeRow, Group, IncludeRow, KeptBy, ManifestInstance, RepositoryFact, Restoration, ScopeIncludeRow, Snapshot,
     SnapshotRow, TimeMachineFact, Verification, VerifyCheck, WarningFacts, AUTHORED,
     EXCLUDED, OPTIONAL,
 };
@@ -47,7 +47,7 @@ use store::Recorded;
 const JOB_TICK: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(crate) use factory_infrastructure::backup_facts::{
-    Captured, Found, completed_of, deadlines,
+    resolve_scope_includes, Captured, Found, completed_of, deadlines,
     last_verified_of_present, list_archives, verifications_of,
 };
 
@@ -167,7 +167,25 @@ impl Engine {
             repos::time_machine_fact(),
         );
         let state = self.capture(now).await?;
-        Ok(report(&state, code, time_machine))
+        let scope_includes = self.scope_include_rows(&factory).await;
+        Ok(report(&state, code, time_machine, scope_includes))
+    }
+
+    /// `#279`: every scope's own declared `backup.include`, resolved and
+    /// probed fresh off-thread -- filled whether or not a backup is even
+    /// configured, the same as `code` and `time_machine` above, so a
+    /// refused or missing declaration is visible before there is anywhere
+    /// to put a snapshot at all. `report` joins this against the newest
+    /// snapshot's own cached numbers; this never reopens an archive.
+    async fn scope_include_rows(&self, factory: &Factory) -> Vec<ScopeIncludeRow> {
+        let declarations = factory.config.backup_includes();
+        if declarations.is_empty() {
+            return Vec::new();
+        }
+        let root = factory.root.clone();
+        tokio::task::spawn_blocking(move || resolve_scope_includes(&root, &declarations))
+            .await
+            .unwrap_or_default()
     }
 
     /// The one gather behind both `backup_report` and `backup_fact`: the
@@ -248,6 +266,7 @@ impl Engine {
                 .collect(),
             include_logs: config.include_logs,
             encrypt_to: config.encrypt_to.clone(),
+            scope_includes: factory.config.backup_includes(),
         };
         let name = factory_core::backup::archive_name(&factory.config.instance.name, at, config.encrypt_to.is_some());
         let destination = config.destination.clone();
@@ -290,6 +309,7 @@ impl Engine {
             pruned,
             groups: taken.groups,
             encrypted_to,
+            scope_includes: taken.scope_includes,
         })
     }
 
@@ -518,7 +538,15 @@ impl Engine {
 /// code and Time Machine facts (gathered separately, never part of
 /// `capture`). Byte-identical to the pre-`#154` `backup_report` for every
 /// existing case -- the split changed nothing about what the page shows.
-fn report(state: &Captured, code: Vec<RepositoryFact>, time_machine: TimeMachineFact) -> BackupReport {
+/// `scope_includes` is `#279`'s live resolution (gathered separately too,
+/// for the same reason): this only ever joins it against the newest
+/// snapshot's own cached numbers, never reopening an archive.
+fn report(
+    state: &Captured,
+    code: Vec<RepositoryFact>,
+    time_machine: TimeMachineFact,
+    scope_includes: Vec<ScopeIncludeRow>,
+) -> BackupReport {
     let Some(config) = &state.config else {
         return BackupReport {
             now: state.now,
@@ -542,6 +570,7 @@ fn report(state: &Captured, code: Vec<RepositoryFact>, time_machine: TimeMachine
             exclude: exclude_rows(false),
             code,
             time_machine: Some(time_machine),
+            scope_includes: join_scope_includes(scope_includes, None),
         };
     };
     let destination = state
@@ -625,7 +654,23 @@ fn report(state: &Captured, code: Vec<RepositoryFact>, time_machine: TimeMachine
         snapshots,
         code,
         time_machine: Some(time_machine),
+        scope_includes: join_scope_includes(scope_includes, newest_taken),
     }
+}
+
+/// `#279`: fill in each live-resolved row's `files`/`bytes` from the
+/// newest snapshot this daemon took, when there is one and it held this
+/// exact declaration -- `None` for a declaration newer than that snapshot,
+/// exactly as `include_rows` leaves a directory it has not written to yet.
+fn join_scope_includes(mut live: Vec<ScopeIncludeRow>, newest: Option<&Snapshot>) -> Vec<ScopeIncludeRow> {
+    let Some(newest) = newest else { return live };
+    for row in &mut live {
+        if let Some(cached) = newest.scope_includes.iter().find(|t| t.scope == row.scope && t.declared == row.declared) {
+            row.files = Some(cached.files);
+            row.bytes = Some(cached.bytes);
+        }
+    }
+    live
 }
 
 
@@ -828,6 +873,87 @@ mod tests {
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
             .with_backup_store(BackupStore::open(&database).unwrap());
         (Arc::new(engine), base)
+    }
+
+    /// `engine_backing_up`, with the root scope also declaring
+    /// `backup.include: [data/finance]` (`#279`) -- for the engine-level
+    /// round trip through `backup_report`/`backup_run`, not just
+    /// `archive.rs`'s own unit tests of `take` itself.
+    fn engine_backing_up_with_scope_include(keep: &str, destination: &str) -> (Arc<Engine>, PathBuf) {
+        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_plugins::{Registry, SqliteStore};
+        let base = std::env::temp_dir().join(format!("factory-backup-engine-scope-include-{}", uuid::Uuid::new_v4()));
+        let root = base.join("instance");
+        std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
+        std::fs::write(root.join(".factory/config.yaml"), "version: 1\ninstance:\n  id: test\n  name: test\n").unwrap();
+        std::fs::write(root.join(".factory/knowledge/page.md"), "# A page\n").unwrap();
+        let database = root.join(".factory/factory.sqlite");
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
+        let mut company: factory_core::config::Scope =
+            serde_yaml_ng::from_str("id: company-id\nname: company\nbackup:\n  include: [data/finance]\n").unwrap();
+        company.path = PathBuf::from(".");
+        let destination = base.join(destination);
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Default::default(),
+            infrastructure: serde_yaml_ng::from_str(&format!(
+                "backup:\n  destination: {}\n  keep: {keep}\n",
+                destination.display()
+            ))
+            .unwrap(),
+            secrets: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let factory = Factory { root, config };
+        let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
+            .with_backup_store(BackupStore::open(&database).unwrap());
+        (Arc::new(engine), base)
+    }
+
+    /// `#279`: the live report shows a declared directory before any
+    /// backup has ever run (and before the directory even exists, as a
+    /// finding rather than a refusal), then the newest snapshot's own
+    /// count once one is taken -- the exact "declared, missing, created,
+    /// included with no restart" path `resolve_scope_includes` itself
+    /// already covers in isolation, now through the whole report.
+    #[tokio::test]
+    async fn an_engine_report_resolves_a_declared_directory_live_and_counts_it_once_backed_up() {
+        let (engine, base) = engine_backing_up_with_scope_include("{ daily: 1, weekly: 0, monthly: 0 }", "destination");
+
+        let before = engine.backup_report().await.unwrap();
+        assert_eq!(before.scope_includes.len(), 1);
+        assert_eq!(before.scope_includes[0].scope, "company");
+        assert_eq!(before.scope_includes[0].declared, "data/finance");
+        assert_eq!(before.scope_includes[0].path.as_deref(), Some("data/finance"));
+        assert_eq!(before.scope_includes[0].unavailable.as_deref(), Some("declared, but does not exist yet"));
+        assert_eq!(before.scope_includes[0].files, None);
+
+        std::fs::create_dir_all(base.join("instance/data/finance")).unwrap();
+        std::fs::write(base.join("instance/data/finance/ledger.csv"), "ok\n").unwrap();
+
+        let taken = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
+        assert!(
+            taken.scope_includes.iter().any(|t| t.path.as_deref() == Some("data/finance") && t.files == 1),
+            "{:?}",
+            taken.scope_includes
+        );
+
+        let report = engine.backup_report().await.unwrap();
+        let row = report.scope_includes.iter().find(|r| r.scope == "company").unwrap();
+        assert_eq!(row.unavailable, None, "the directory exists now, with no restart");
+        assert_eq!(row.files, Some(1));
+        assert_eq!(row.bytes, Some(3));
+
+        std::fs::remove_dir_all(base).ok();
     }
 
     /// `engine_backing_up`, with `infrastructure.backup.encrypt_to` set to
@@ -1594,6 +1720,7 @@ mod tests {
             pruned: vec![],
             groups: vec![factory_core::backup::GroupTotal { group: Group::Knowledge, files: 3, bytes: 30 }],
             encrypted_to: None,
+            scope_includes: vec![],
         };
         let after = include_rows(false, Some(&snapshot));
         let knowledge = after.iter().find(|r| r.path == ".factory/knowledge/").unwrap();
