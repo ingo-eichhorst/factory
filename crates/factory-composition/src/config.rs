@@ -1383,6 +1383,16 @@ pub struct Scope {
     /// This scope's authored important-date metadata, kept in its own config.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub renewals: Vec<factory_infrastructure::renewals::RenewalDecl>,
+    /// `#278`: this scope's own reported-metrics source -- a file the
+    /// scope's own tooling writes, and the metrics it declares through it
+    /// (`reported.<source.id>.<declare[].id>`). Own-scope data, not a
+    /// chained declaration like `policies`/`quality` above: nothing here
+    /// inherits down, and nothing is validated at parse time -- an id
+    /// shape, a duplicate source id or a path that escapes the instance is
+    /// a finding L5's `reported::validate` raises on read, never a reason
+    /// this config fails to load. See `reported.rs`'s own doc comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<ScopeMetricsDeclaration>,
     /// Directories outside `.factory/` that belong in the instance's backup
     /// snapshots (`#279`) -- see `factory_infrastructure::backup::ScopeBackupConfig`.
     /// Parsed permissively, like `environments` above: whether a declared
@@ -1396,6 +1406,58 @@ pub struct Scope {
     pub backup: Option<factory_infrastructure::backup::ScopeBackupConfig>,
 }
 
+/// `scope.metrics`, exactly as written -- plain strings, no validation.
+/// `source` is the one file this scope reports through; `declare` names
+/// every metric id that file may report, with the title and unit L5's
+/// registry listing shows for it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeMetricsDeclaration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ScopeMetricsSource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declare: Vec<ScopeMetricsDeclared>,
+}
+
+/// Every field is optional here on purpose: a *missing* `id`/`file` is an
+/// authoring mistake the same as an invalid one (a bad slug, a path that
+/// escapes the instance), and L5's `reported::validate` turns either into
+/// the same kind of finding -- never a parse failure that would abort
+/// `discovery::apply` and take the whole daemon down with it on the next
+/// restart. Unknown keys are still refused (`deny_unknown_fields`), the
+/// same convention every neighbouring scope block already follows.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeMetricsSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+/// See [`ScopeMetricsSource`]'s doc comment: every field is optional for
+/// the same reason. A missing `better` is handled exactly like an unknown
+/// spelling of it -- the same `UnknownBetter` finding, this one declared
+/// metric left out -- never a reason the scope's whole config file fails
+/// to parse.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeMetricsDeclared {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// `higher` or `lower`. `metrics::resolve` is pure and has no access
+    /// to this declaration, so a missing direction can never be guessed at
+    /// `higher` without risking exactly the wrong-direction Goals finding
+    /// this field exists to prevent for a metric that is actually
+    /// lower-is-better -- a missing value here is a finding
+    /// (`UnknownBetter`), not a guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub better: Option<String>,
+}
 
 impl Scope {
     fn validate_dependencies(&self) -> Result<()> {
@@ -2955,6 +3017,65 @@ mod tests {
     fn a_scope_binding_no_intake_round_trips_with_no_intake_key() {
         let s: Scope = serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap();
         assert!(!serde_yaml_ng::to_string(&s).unwrap().contains("intake"));
+    }
+
+    /// `#278`: the exact `scope.metrics` shape the issue proposes -- plain
+    /// strings, no validation here (L5's `reported::validate` owns that on
+    /// read). Own-scope data like `dependencies`/`environments` above, not
+    /// a chained declaration like `policies`/`quality`: there is no
+    /// root-level `metrics:` this would collide with, so nothing refuses
+    /// it at the instance root either.
+    #[test]
+    fn a_metrics_source_declaration_round_trips_through_yaml_on_a_scope() {
+        let yaml = "id: finance-id\n\
+             name: finance\n\
+             metrics:\n\
+             \x20\x20source:\n\
+             \x20\x20\x20\x20id: finance\n\
+             \x20\x20\x20\x20file: ../data/finance/metrics.json\n\
+             \x20\x20declare:\n\
+             \x20\x20\x20\x20- { id: beleg_coverage, title: Beleg coverage, unit: ratio, better: higher }\n\
+             \x20\x20\x20\x20- { id: unresolved_transactions, title: Unresolved transactions, unit: count, better: lower }\n";
+        let s: Scope = serde_yaml_ng::from_str(yaml).unwrap();
+        let declaration = s.metrics.as_ref().unwrap();
+        let source = declaration.source.as_ref().unwrap();
+        assert_eq!(source.id.as_deref(), Some("finance"));
+        assert_eq!(source.file.as_deref(), Some("../data/finance/metrics.json"));
+        assert_eq!(declaration.declare.len(), 2);
+        assert_eq!(declaration.declare[0].id.as_deref(), Some("beleg_coverage"));
+        assert_eq!(declaration.declare[0].title.as_deref(), Some("Beleg coverage"));
+        assert_eq!(declaration.declare[0].unit.as_deref(), Some("ratio"));
+        assert_eq!(declaration.declare[0].better.as_deref(), Some("higher"));
+        assert_eq!(declaration.declare[1].better.as_deref(), Some("lower"));
+
+        let reparsed: Scope =
+            serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&s).unwrap()).unwrap();
+        assert_eq!(reparsed.metrics, s.metrics);
+    }
+
+    /// `#278` fix: a `declare[]` entry missing `better` (or `title`/`unit`),
+    /// or a `source` missing `file`, must still parse -- the whole point
+    /// is that a missing value never fails the scope's config file to
+    /// load, only L5's own `reported::validate` turns it into a finding.
+    #[test]
+    fn a_metrics_declaration_missing_optional_fields_still_parses() {
+        let yaml = "id: finance-id\n\
+             name: finance\n\
+             metrics:\n\
+             \x20\x20source:\n\
+             \x20\x20\x20\x20id: finance\n\
+             \x20\x20declare:\n\
+             \x20\x20\x20\x20- { id: beleg_coverage, title: Beleg coverage, unit: ratio }\n";
+        let s: Scope = serde_yaml_ng::from_str(yaml).unwrap();
+        let declaration = s.metrics.as_ref().unwrap();
+        assert_eq!(declaration.source.as_ref().unwrap().file, None);
+        assert_eq!(declaration.declare[0].better, None);
+    }
+
+    #[test]
+    fn a_scope_declaring_no_metrics_source_round_trips_with_no_metrics_key() {
+        let s: Scope = serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap();
+        assert!(!serde_yaml_ng::to_string(&s).unwrap().contains("metrics"));
     }
 
     #[test]

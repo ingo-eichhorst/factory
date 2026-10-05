@@ -28,6 +28,7 @@ pub mod knowledge_provider;
 pub mod metrics;
 pub mod metrics_service;
 pub mod metric_values;
+pub mod reported;
 pub mod signposts;
 pub mod quality;
 pub mod quality_inputs;

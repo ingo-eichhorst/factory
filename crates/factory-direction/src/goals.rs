@@ -340,6 +340,27 @@ pub struct GoalsCatalogue {
 /// two-pass shape (parse, then cross-cutting checks) this shares with
 /// `policy::load_all`.
 pub fn load(dir: &Path) -> GoalsCatalogue {
+    load_with_reported_directions(dir, &BTreeMap::new())
+}
+
+/// [`load`], plus `#278`'s own live input: every scope's own declared
+/// `reported.<source>.<metric>` direction (`reported::directions`), keyed
+/// the same way, for the one check that needs it -- a key result's
+/// wrong-direction finding. `metrics::resolve`'s own placeholder `better`
+/// for this family cannot know a scope's declaration, so `load` above
+/// (every caller that has not built this map) never judges a reported key
+/// result's direction wrong either way; a caller that has live data --
+/// `factory-daemon`'s own live `goals_report`, through
+/// `goals_service::Service` -- passes it here instead, and gets the same
+/// check a built-in metric already has. This is a plain value handed in,
+/// not a fact port or a callback: L6 already depends on L5's pure
+/// `factory_assurance::metrics` vocabulary, and `reported::Catalogue`'s
+/// own validation (findings for a bad declaration) is unaffected either
+/// way -- it ran before this map was ever built.
+pub fn load_with_reported_directions(
+    dir: &Path,
+    reported: &BTreeMap<String, metrics::Better>,
+) -> GoalsCatalogue {
     let mut findings = Vec::new();
     let mut direction: Option<Direction> = None;
     let mut cycles: Vec<Cycle> = Vec::new();
@@ -418,7 +439,7 @@ pub fn load(dir: &Path) -> GoalsCatalogue {
         validate_direction(d, &mut findings);
     }
     for cycle in &cycles {
-        validate_cycle(cycle, &mut findings);
+        validate_cycle(cycle, reported, &mut findings);
     }
     validate_no_overlap(&cycles, &mut findings);
 
@@ -491,7 +512,11 @@ fn validate_direction(direction: &Direction, findings: &mut Vec<Finding>) {
     }
 }
 
-fn validate_cycle(cycle: &Cycle, findings: &mut Vec<Finding>) {
+fn validate_cycle(
+    cycle: &Cycle,
+    reported: &BTreeMap<String, metrics::Better>,
+    findings: &mut Vec<Finding>,
+) {
     let subject = format!("{}.yaml", cycle.id());
 
     check_id_shape(cycle.id(), &subject, "cycle id", findings);
@@ -595,19 +620,37 @@ fn validate_cycle(cycle: &Cycle, findings: &mut Vec<Finding>) {
                             // contradict -- a manual key result (excluded
                             // by the `kr.metric.is_some()` guard above) has
                             // none, so it is never checked here.
-                            let wrong_direction = match def.better {
-                                metrics::Better::Higher => kr.target < kr.baseline,
-                                metrics::Better::Lower => kr.target > kr.baseline,
+                            //
+                            // `#278`: `resolve`'s own placeholder `better`
+                            // for a `reported.<source>.<metric>` id is a
+                            // generic `Higher` with no access to the
+                            // scope's own declaration, so it is never used
+                            // to judge this family -- `reported` (the live
+                            // declared direction, empty for every caller
+                            // through plain `load`) is read instead; an id
+                            // this map has nothing for is never judged
+                            // wrong either way, an honest "cannot tell"
+                            // rather than a guess.
+                            let better = if bound.as_str().starts_with("reported.") {
+                                reported.get(bound.as_str()).copied()
+                            } else {
+                                Some(def.better)
                             };
-                            if wrong_direction {
-                                findings.push(finding(
-                                    FindingKind::WrongDirection,
-                                    &subject,
-                                    format!(
-                                        "{what}'s baseline {} -> target {} moves the wrong way for {bound} (better: {:?})",
-                                        kr.baseline, kr.target, def.better
-                                    ),
-                                ));
+                            if let Some(better) = better {
+                                let wrong_direction = match better {
+                                    metrics::Better::Higher => kr.target < kr.baseline,
+                                    metrics::Better::Lower => kr.target > kr.baseline,
+                                };
+                                if wrong_direction {
+                                    findings.push(finding(
+                                        FindingKind::WrongDirection,
+                                        &subject,
+                                        format!(
+                                            "{what}'s baseline {} -> target {} moves the wrong way for {bound} (better: {:?})",
+                                            kr.baseline, kr.target, better
+                                        ),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1565,6 +1608,146 @@ mod tests {
         );
         cleanup(&dir);
     }
+
+    // -- reported metrics' own declared direction (`#278`) ------------------
+
+    /// `12 -> 0` is the right direction for a lower-is-better reported
+    /// metric (`unresolved_transactions`'s own shape) -- no finding.
+    #[test]
+    fn a_lower_declared_reported_metric_falling_toward_its_target_has_no_wrong_direction_finding() {
+        let dir = tempdir("reported-lower-ok");
+        write(
+            &dir,
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives:\n\
+             \x20\x20- id: obj\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20key_results:\n\
+             \x20\x20\x20\x20\x20\x20- {id: kr, title: K, kind: committed, metric: reported.finance.unresolved_transactions, baseline: 12, target: 0}\n",
+        );
+        let mut reported = BTreeMap::new();
+        reported.insert(
+            "reported.finance.unresolved_transactions".to_string(),
+            metrics::Better::Lower,
+        );
+        let catalogue = load_with_reported_directions(&dir, &reported);
+        assert!(
+            !catalogue
+                .findings
+                .iter()
+                .any(|f| f.kind == FindingKind::WrongDirection),
+            "{:?}",
+            catalogue.findings
+        );
+        cleanup(&dir);
+    }
+
+    /// The same metric, baseline and target reversed (`0 -> 12`), asks to
+    /// make unresolved transactions *rise* -- the wrong way for a
+    /// lower-is-better metric.
+    #[test]
+    fn a_lower_declared_reported_metric_rising_away_from_its_target_has_a_wrong_direction_finding()
+    {
+        let dir = tempdir("reported-lower-bad");
+        write(
+            &dir,
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives:\n\
+             \x20\x20- id: obj\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20key_results:\n\
+             \x20\x20\x20\x20\x20\x20- {id: kr, title: K, kind: committed, metric: reported.finance.unresolved_transactions, baseline: 0, target: 12}\n",
+        );
+        let mut reported = BTreeMap::new();
+        reported.insert(
+            "reported.finance.unresolved_transactions".to_string(),
+            metrics::Better::Lower,
+        );
+        let catalogue = load_with_reported_directions(&dir, &reported);
+        let f = catalogue
+            .findings
+            .iter()
+            .find(|f| f.kind == FindingKind::WrongDirection)
+            .unwrap();
+        assert!(f.detail.contains("obj/kr"), "{}", f.detail);
+        cleanup(&dir);
+    }
+
+    /// A higher-declared reported metric behaves the reverse way: rising
+    /// toward its target is right, falling away from it is wrong.
+    #[test]
+    fn a_higher_declared_reported_metric_behaves_the_reverse_way() {
+        let cycle_rising = |baseline: f64, target: f64| {
+            format!(
+                "cycle: {{ id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }}\n\
+                 objectives:\n\
+                 \x20\x20- id: obj\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20key_results:\n\
+                 \x20\x20\x20\x20\x20\x20- {{id: kr, title: K, kind: committed, metric: reported.finance.beleg_coverage, baseline: {baseline}, target: {target}}}\n"
+            )
+        };
+        let mut reported = BTreeMap::new();
+        reported.insert(
+            "reported.finance.beleg_coverage".to_string(),
+            metrics::Better::Higher,
+        );
+
+        let dir = tempdir("reported-higher-ok");
+        write(&dir, "2026-q4.yaml", &cycle_rising(0.5, 0.9));
+        let catalogue = load_with_reported_directions(&dir, &reported);
+        assert!(
+            !catalogue
+                .findings
+                .iter()
+                .any(|f| f.kind == FindingKind::WrongDirection),
+            "a rising target is right for a higher-is-better metric: {:?}",
+            catalogue.findings
+        );
+        cleanup(&dir);
+
+        let dir = tempdir("reported-higher-bad");
+        write(&dir, "2026-q4.yaml", &cycle_rising(0.9, 0.5));
+        let catalogue = load_with_reported_directions(&dir, &reported);
+        assert!(
+            catalogue
+                .findings
+                .iter()
+                .any(|f| f.kind == FindingKind::WrongDirection),
+            "a falling target is wrong for a higher-is-better metric: {:?}",
+            catalogue.findings
+        );
+        cleanup(&dir);
+    }
+
+    /// Plain `load` (no live declaration available -- every caller except
+    /// the one daemon path that built one) never judges a reported key
+    /// result's direction either way, in either direction of travel.
+    #[test]
+    fn a_reported_metric_with_no_known_direction_is_never_judged_wrong_either_way() {
+        let dir = tempdir("reported-unknown-direction");
+        write(
+            &dir,
+            "2026-q4.yaml",
+            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+             objectives:\n\
+             \x20\x20- id: obj\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20key_results:\n\
+             \x20\x20\x20\x20\x20\x20- {id: falls, title: F, kind: committed, metric: reported.finance.unresolved_transactions, baseline: 12, target: 0}\n\
+             \x20\x20\x20\x20\x20\x20- {id: rises, title: R, kind: committed, metric: reported.finance.unresolved_transactions, baseline: 0, target: 12}\n",
+        );
+        let catalogue = load(&dir);
+        assert!(
+            !catalogue
+                .findings
+                .iter()
+                .any(|f| f.kind == FindingKind::WrongDirection),
+            "{:?}",
+            catalogue.findings
+        );
+        cleanup(&dir);
+    }
+
+    /// `factory metrics`/`GET /api/metrics`'s own listing is covered at
+    /// the daemon level
+    /// (`crates/factory-daemon/src/metrics.rs`'s
+    /// `the_listing_shows_each_reported_metrics_own_declared_direction_not_a_fixed_default`):
+    /// this module has no registry listing of its own to assert against.
 
     // -- vanity / conflicting key results -----------------------------------
 

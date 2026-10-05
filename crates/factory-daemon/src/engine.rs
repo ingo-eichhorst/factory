@@ -1053,6 +1053,7 @@ impl Engine {
                     values: metrics.values,
                     series: metrics.series,
                     registry: metrics.registry,
+                    findings: metrics.findings,
                 })
             }
             Request::Dashboard { scope } => {
@@ -5604,6 +5605,7 @@ mod tests {
                 dependencies: Default::default(),
                 environments: Vec::new(),
                 renewals: Vec::new(),
+                metrics: None,
                 backup: None,
             }],
             infrastructure: Default::default(),
@@ -5777,6 +5779,7 @@ mod tests {
                     dependencies: Default::default(),
                     environments: Vec::new(),
                     renewals: Vec::new(),
+                    metrics: None,
                     backup: None,
                 }],
                 infrastructure: Default::default(),
@@ -9004,6 +9007,7 @@ mod tests {
                     dependencies: Default::default(),
                     environments: Vec::new(),
                     renewals: Vec::new(),
+                    metrics: None,
                     backup: None,
                 }],
                 infrastructure: Default::default(),
@@ -9061,6 +9065,7 @@ mod tests {
                     environments: Vec::new(),
                     renewals: Vec::new(),
                     backup: None,
+                    metrics: None,
                 }],
                 infrastructure: Default::default(),
                 secrets: Vec::new(),

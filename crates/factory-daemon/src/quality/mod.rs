@@ -603,6 +603,92 @@ mod tests {
         assert_eq!(series, vec!["first_pass_yield"], "the metric a scenario reads carries its sparkline");
     }
 
+    /// `#278`: a scope's own `reported.<source>.<metric>` is judged by a
+    /// quality `MetricMeasure` exactly like a built-in metric -- same
+    /// `evaluate_metric`, no special case anywhere in this module. A
+    /// dedicated one-scope engine, not `test_engine()`'s shared fixture,
+    /// since this declares its own profile and metrics source.
+    #[tokio::test]
+    async fn a_reported_metric_measure_reads_met_not_met_stale_and_no_data_exactly_like_a_built_in_metric()
+    {
+        let root = std::env::temp_dir()
+            .join(format!("factory-quality-reported-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut demo = scope_at("demo-id", "demo", ".", &["reported-profile"]);
+        demo.metrics = Some(factory_core::config::ScopeMetricsDeclaration {
+            source: Some(factory_core::config::ScopeMetricsSource {
+                id: Some("demo".into()),
+                file: Some("metrics.json".into()),
+            }),
+            declare: vec![factory_core::config::ScopeMetricsDeclared {
+                id: Some("x".into()),
+                title: Some("Demo X".into()),
+                unit: Some("ratio".into()),
+                better: Some("higher".into()),
+            }],
+        });
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(demo.clone()),
+            scopes: vec![demo],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: vec!["reported-profile".into()],
+            infrastructure: Default::default(),
+            secrets: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(
+            Factory { root: root.clone(), config },
+            registry,
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
+        write_profile(
+            &engine,
+            "reported-profile",
+            "attributes:\n\
+             \x20 - id: functional-suitability.functional-completeness\n    importance: H\n    difficulty: M\n    scenarios:\n\
+             \x20     - { id: beleg-coverage, measure: { metric: reported.demo.x, above: 0.98, max_age: 35d } }\n",
+        );
+        let write_fixture = |as_of: &str, value_json: &str| {
+            std::fs::write(
+                root.join("metrics.json"),
+                format!(r#"{{"as_of":"{as_of}","metrics":[{{"id":"x","value":{value_json}}}]}}"#),
+            )
+            .unwrap();
+        };
+        let attribute = "functional-suitability.functional-completeness";
+
+        // no_data: the scope's own tooling has not written the file yet.
+        let report = engine.quality_report(None).await.unwrap();
+        assert_eq!(status(&report, "demo", attribute, "beleg-coverage"), ScenarioStatus::NoData);
+
+        // met: 0.99 is above the 0.98 bound, fresh.
+        write_fixture(&Utc::now().to_rfc3339(), "0.99");
+        let report = engine.quality_report(None).await.unwrap();
+        assert_eq!(status(&report, "demo", attribute, "beleg-coverage"), ScenarioStatus::Met);
+
+        // not_met: 0.5 is below the bound.
+        write_fixture(&Utc::now().to_rfc3339(), "0.5");
+        let report = engine.quality_report(None).await.unwrap();
+        assert_eq!(status(&report, "demo", attribute, "beleg-coverage"), ScenarioStatus::NotMet);
+
+        // stale: a met value older than the scenario's own 35d max_age.
+        let old = (Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+        write_fixture(&old, "0.99");
+        let report = engine.quality_report(None).await.unwrap();
+        assert_eq!(status(&report, "demo", attribute, "beleg-coverage"), ScenarioStatus::Stale);
+    }
+
     #[tokio::test]
     async fn an_ambiguous_task_name_is_a_finding() {
         let engine = test_engine();

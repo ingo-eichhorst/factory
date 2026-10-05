@@ -22,6 +22,11 @@ rusqlite.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+# Not a factory-* crate, so the level-dependency ladder does not apply to it
+# -- used only to open a scope-declared metrics source with O_NOFOLLOW
+# (`reported.rs`), the same way factory-environment already opens sandbox
+# evidence.
+libc = "0.2"
 
 [dev-dependencies]
 uuid.workspace = true

@@ -195,6 +195,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         dependencies: Default::default(),
         environments: Vec::new(),
         renewals: Vec::new(),
+        metrics: None,
         backup: None,
     };
     let config = Config {

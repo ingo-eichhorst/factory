@@ -427,6 +427,7 @@ mod tests {
             environments: Vec::new(),
             renewals: Vec::new(),
             backup: None,
+            metrics: None,
         };
         let root = Scope {
             id: "root-id".into(),
@@ -462,6 +463,7 @@ mod tests {
             environments: Vec::new(),
             renewals: Vec::new(),
             backup: None,
+            metrics: None,
         };
         let config = Config {
             version: 1,

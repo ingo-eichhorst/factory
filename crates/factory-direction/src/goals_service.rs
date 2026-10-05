@@ -19,6 +19,15 @@ pub struct Service<'a> {
     scopes: ScopeTree,
     root_name: Option<String>,
     store: &'a GoalsStore,
+    /// `#278`: every scope's own declared `reported.<source>.<metric>`
+    /// direction, keyed the same way `reported::directions` returns it --
+    /// a plain value the outside router builds fresh from the live config
+    /// snapshot, the same shape `quality_configuration`/`reported_
+    /// configuration` already use elsewhere. Empty for a caller that does
+    /// not have (or does not need) live data -- see `goals::
+    /// load_with_reported_directions`'s own doc comment for what that
+    /// means for the wrong-direction check.
+    reported_directions: BTreeMap<String, metrics::Better>,
 }
 pub struct Plan {
     catalogue: goals::GoalsCatalogue,
@@ -54,12 +63,14 @@ impl<'a> Service<'a> {
         scopes: ScopeTree,
         root_name: Option<String>,
         store: &'a GoalsStore,
+        reported_directions: BTreeMap<String, metrics::Better>,
     ) -> Self {
         Self {
             root,
             scopes,
             root_name,
             store,
+            reported_directions,
         }
     }
     pub async fn prepare(
@@ -69,9 +80,12 @@ impl<'a> Service<'a> {
         now: DateTime<Utc>,
     ) -> Result<Plan> {
         let goals_path = goals::goals_dir(&self.root);
-        let catalogue = tokio::task::spawn_blocking(move || goals::load(&goals_path))
-            .await
-            .map_err(|e| FactoryError::Other(anyhow::anyhow!("goals catalogue walk: {e}")))?;
+        let reported_directions = self.reported_directions.clone();
+        let catalogue = tokio::task::spawn_blocking(move || {
+            goals::load_with_reported_directions(&goals_path, &reported_directions)
+        })
+        .await
+        .map_err(|e| FactoryError::Other(anyhow::anyhow!("goals catalogue walk: {e}")))?;
         let asked = scope
             .map(|name| self.scopes.scope(name))
             .transpose()?
@@ -426,7 +440,13 @@ mod tests {
         }
     }
     fn service<'a>(root: &Root, store: &'a GoalsStore) -> Service<'a> {
-        Service::new(root.0.clone(), scopes(), Some("company".into()), store)
+        Service::new(
+            root.0.clone(),
+            scopes(),
+            Some("company".into()),
+            store,
+            BTreeMap::new(),
+        )
     }
     const CYCLE: &str = "cycle: { id: current, from: 2026-10-01, to: 2026-12-31 }\nobjectives:\n  - id: ship\n    title: Ship\n    scope: work\n    key_results:\n      - {id: manual, title: Manual, kind: committed, manual: true, baseline: 0, target: 10}\n      - {id: computed, title: Computed, kind: committed, metric: first_pass_yield, baseline: 0, target: 10}\n";
     async fn report(

@@ -862,6 +862,7 @@ mod tests {
             std::env::temp_dir(),
             &evidence.scopes,
             &crate::quality_inputs::Configuration::default(),
+            &crate::reported::Configuration::default(),
             scope,
         )
         .await
@@ -1006,6 +1007,78 @@ mod tests {
         );
     }
 
+    /// `#278`'s own "computed on read" promise, proven directly against the
+    /// real two-step `gather`/`finish` pipeline rather than inferred from a
+    /// counter: the source's file is read once inside `gather`, before
+    /// `finish` ever runs. Deleting the file in between still leaves both of
+    /// its ids answered from what `gather` already read.
+    #[tokio::test]
+    async fn metrics_owner_reads_a_reported_source_at_most_once_per_call_shared_across_its_ids() {
+        let recorder = Arc::new(Recorder::default());
+        let bench = BenchStore::in_memory().unwrap();
+        let evidence = service(&recorder, &bench);
+        let root = std::env::temp_dir()
+            .join(format!("factory-reported-once-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("projects/work")).unwrap();
+        std::fs::write(
+            root.join("metrics.json"),
+            r#"{"as_of":"2026-10-05T09:00:00Z","metrics":[{"id":"a","value":1.0},{"id":"b","value":2.0}]}"#,
+        )
+        .unwrap();
+        let reported_config = crate::reported::Configuration {
+            scopes: vec![crate::reported::ScopeDeclaration {
+                scope: ScopeNode { name: "parent".into(), path: "projects/work".into() },
+                source: Some(crate::reported::RawSource {
+                    id: Some("demo".into()),
+                    file: Some("../../metrics.json".into()),
+                    declare: vec![
+                        crate::reported::RawDeclared {
+                            id: Some("a".into()),
+                            title: Some("A".into()),
+                            unit: Some("count".into()),
+                            better: Some("higher".into()),
+                        },
+                        crate::reported::RawDeclared {
+                            id: Some("b".into()),
+                            title: Some("B".into()),
+                            unit: Some("count".into()),
+                            better: Some("higher".into()),
+                        },
+                    ],
+                }),
+            }],
+        };
+        let ids = [
+            metrics::MetricId::new("reported.demo.a").unwrap(),
+            metrics::MetricId::new("reported.demo.b").unwrap(),
+        ];
+        let plan = crate::metrics_service::Plan::prepare(
+            &ids,
+            root.clone(),
+            &evidence.scopes,
+            &crate::quality_inputs::Configuration::default(),
+            &reported_config,
+            Some("parent"),
+        )
+        .await
+        .unwrap();
+        let metrics = crate::metrics_service::Service::new(evidence);
+        let gathered = metrics.gather(&plan, None, time(), None).await.unwrap();
+
+        // Delete the file *after* gather, *before* finish: a second read
+        // would turn both ids `None`, so this proves the read happened
+        // exactly once, inside `gather`, shared by both.
+        std::fs::remove_file(root.join("metrics.json")).unwrap();
+
+        let output = metrics
+            .finish(&plan, gathered, &Ok(BTreeMap::new()), time(), None)
+            .await
+            .unwrap();
+        let value = |id: &str| output.values.iter().find(|v| v.id.as_str() == id).unwrap().value;
+        assert_eq!(value("reported.demo.a"), Some(1.0));
+        assert_eq!(value("reported.demo.b"), Some(2.0));
+    }
+
     #[tokio::test]
     async fn metrics_owner_evaluates_raw_policy_inputs_and_keeps_best_practice_only_framework_unknown(
     ) {
@@ -1098,6 +1171,7 @@ mod tests {
             scratch.0.clone(),
             &evidence.scopes,
             &config,
+            &crate::reported::Configuration::default(),
             Some("parent"),
         )
         .await
