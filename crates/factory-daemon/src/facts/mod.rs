@@ -716,10 +716,14 @@ mod tests {
         let producer = include_str!("../../../factory-assurance/src/check_evaluation.rs");
         for required in [
             "Provide<CheckEvaluationFact>",
-            "self.evidence.shared",
+            // `#278`: the evidence seam moved behind `metrics_service::Service`
+            // (so a `Check::Metric` can share its own lazy metric read with
+            // it), never behind an Engine callback or a precomputed report.
+            "self.metrics.evidence.shared",
             ".for_scope(",
             "checks::evaluate",
             "checks::evidence_findings",
+            "metric_values",
         ] {
             assert!(producer.contains(required), "provider lost {required}");
         }

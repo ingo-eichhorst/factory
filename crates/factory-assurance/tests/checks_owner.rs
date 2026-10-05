@@ -1,6 +1,7 @@
 //! Owner-side contracts: these cannot import the upper compatibility facade.
 use chrono::{DateTime, Utc};
 use factory_assurance::checks::*;
+use factory_assurance::metrics::{MetricId, MetricValue};
 use factory_kernel::{Attestation, AttestedRun, BenchVerdict, DependenciesFact, Withdrawal};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -130,12 +131,21 @@ fn complete_evidence() -> Evidence {
                 },
             }],
         }),
+        metrics: BTreeMap::from([(
+            MetricId::new("reported.demo.x").unwrap(),
+            MetricValue {
+                id: MetricId::new("reported.demo.x").unwrap(),
+                value: Some(1.0),
+                as_of: now(),
+                reason: None,
+            },
+        )]),
         ..Default::default()
     }
 }
 
 #[test]
-fn all_twelve_check_kinds_are_evaluated_by_the_owner() {
+fn all_thirteen_check_kinds_are_evaluated_by_the_owner() {
     let checks = [
         Check::Knowledge { tag: None },
         Check::Attestation,
@@ -170,6 +180,12 @@ fn all_twelve_check_kinds_are_evaluated_by_the_owner() {
             max_age: "1d".parse().unwrap(),
         },
         Check::BudgetWithin,
+        Check::Metric {
+            metric: MetricId::new("reported.demo.x").unwrap(),
+            above: Some(0.5),
+            below: None,
+            max_age: None,
+        },
     ];
     for check in checks {
         let empty = result(check.clone(), &Evidence::default());
@@ -193,6 +209,108 @@ fn all_twelve_check_kinds_are_evaluated_by_the_owner() {
             complete.status
         );
     }
+}
+
+/// `#278`: a `Check::Metric`'s own `max_age` field is folded into the
+/// control's effective window at `applicable` time, exactly like
+/// `task`/`workflow`/`gate` -- `direct_status` must never read the
+/// variant's own field. And unlike those three, a stale metric reads
+/// `open`, never `StatusKind::Stale`: ADR 0004's "status is only what
+/// evidence says" has no pass for a value that used to be current.
+#[test]
+fn a_metric_checks_own_max_age_is_ignored_and_stale_is_open_not_a_pass() {
+    let metric = MetricId::new("reported.demo.x").unwrap();
+    let check = Check::Metric {
+        metric: metric.clone(),
+        above: Some(0.5),
+        below: None,
+        max_age: Some("30d".parse().unwrap()),
+    };
+    let mut evidence = complete_evidence();
+    evidence.metrics.get_mut(&metric).unwrap().as_of = now() - chrono::Duration::days(2);
+    assert_eq!(
+        result(check.clone(), &evidence).status.kind(),
+        StatusKind::Open,
+        "the effective 1d (the subject's own), not the check's authored 30d"
+    );
+    let mut applied = subject("a", vec![check]);
+    applied.max_age = None;
+    assert_eq!(
+        evaluate(&[applied], &evidence, now())[0].status.kind(),
+        StatusKind::Satisfied,
+        "with no effective window at all, a 2-day-old value is still current"
+    );
+}
+
+/// `#278`: `compliance.*`, `open_controls.*` and `quality.*` are refused on
+/// a `check: metric` as circular -- the same reasoning
+/// `quality::is_quality_metric` already applies to a Quality measure -- and
+/// an id this build has never heard of is a finding too, the same as
+/// `daemon`'s and `secrets`' own fixed vocabularies. Checked at parse time,
+/// before any evidence is gathered.
+#[test]
+fn check_vocabulary_refuses_a_circular_metric_an_unknown_one_and_a_bound_less_one() {
+    let metric_check = |metric: &str| Check::Metric {
+        metric: MetricId::new(metric).unwrap(),
+        above: Some(0.5),
+        below: None,
+        max_age: None,
+    };
+    for metric in ["compliance.cra", "open_controls.cra", "quality.reliability"] {
+        let found = check_vocabulary(&metric_check(metric));
+        assert_eq!(found.len(), 1, "{metric}: {found:?}");
+        assert_eq!(found[0].0, VocabularyFinding::CircularMetric, "{metric}");
+    }
+    let found = check_vocabulary(&metric_check("not_a_metric"));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].0, VocabularyFinding::UnknownMetric);
+
+    assert!(check_vocabulary(&metric_check("reported.demo.x")).is_empty());
+
+    let found = check_vocabulary(&Check::Metric {
+        metric: MetricId::new("reported.demo.x").unwrap(),
+        above: None,
+        below: None,
+        max_age: None,
+    });
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].0, VocabularyFinding::BadCheckTarget);
+}
+
+/// `#278`: `.nan` compares false both ways, so an unguarded bound would
+/// read every value as meeting it -- the one correctness trap
+/// `metrics::judge_metric` guards against up front, for every caller.
+#[test]
+fn a_non_finite_bound_never_reads_as_met() {
+    let check = Check::Metric {
+        metric: MetricId::new("reported.demo.x").unwrap(),
+        above: Some(f64::NAN),
+        below: None,
+        max_age: None,
+    };
+    assert_eq!(
+        result(check, &complete_evidence()).status.kind(),
+        StatusKind::Open,
+        "a non-finite bound must never read as satisfied"
+    );
+}
+
+/// `#278`: `met` is `satisfied`; `not_met` (a value outside its bound) is
+/// `open` -- there is no `not_met` bucket of its own in `Status`, the same
+/// way a failing `dependencies` breach reads `open`, never a distinct
+/// "failed" status.
+#[test]
+fn a_metric_outside_its_bound_is_open_not_met_reads_the_same_as_no_evidence() {
+    let check = Check::Metric {
+        metric: MetricId::new("reported.demo.x").unwrap(),
+        above: Some(5.0),
+        below: None,
+        max_age: None,
+    };
+    assert_eq!(
+        result(check, &complete_evidence()).status.kind(),
+        StatusKind::Open
+    );
 }
 
 #[test]

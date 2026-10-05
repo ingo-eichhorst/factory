@@ -54,7 +54,8 @@
 //! (`throughput_week`, `goal_tasks_done`) still reads as snake_case by
 //! convention; nothing here enforces that convention specifically.
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
+use factory_kernel::Duration;
 use serde::{Deserialize, Serialize};
 
 // =========================================================== MetricsWindow
@@ -841,6 +842,133 @@ pub fn resolve(id: &MetricId) -> std::result::Result<MetricDef, MetricError> {
 
 // ================================================================ computed
 pub use factory_kernel::MetricValue;
+
+// ============================================================== judgement
+
+/// What [`judge_metric`] decided about a value already in hand. `met` and
+/// `not_met` only ever come from a finite value within `max_age`; `stale` is
+/// a `met` value whose `as_of` fell outside it; `no_data` covers every value
+/// this module could not judge at all -- never computed, `null`, or not a
+/// finite number. `#278`: the caller's own status vocabulary decides what
+/// each of these means for it -- Quality's `ScenarioStatus` keeps all four
+/// apart (`quality::evaluate_metric`); a policy `check: metric`
+/// (`checks::direct_status`) folds `not_met`, `stale` and `no_data` into
+/// `open`, since nothing closes a control the way a draft closes a
+/// scenario (ADR 0004's "status is only what evidence says").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricJudgement {
+    Met,
+    NotMet,
+    Stale,
+    NoData,
+}
+
+/// Inclusive bounds and a freshness window -- the shape a Quality
+/// `MetricMeasure` and a policy `Check::Metric` (`#278`) both carry, judged
+/// identically by [`judge_metric`]. `max_age` here must be the caller's own
+/// *effective* window (a policy control's `max_age` after every layer's
+/// `tighten` and every check's own `max_age` are folded in -- never a
+/// `Check` variant's own field alone), the same rule `within_max_age`
+/// already documents for `task`/`workflow`/`gate`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MetricBounds {
+    pub above: Option<f64>,
+    pub below: Option<f64>,
+    pub max_age: Option<Duration>,
+}
+
+/// `{metric} >= {above} <= {below} (max_age {w})"` -- whichever parts
+/// `bounds` actually carries, space-joined. The one place this wording is
+/// built, so a Quality `MetricMeasure`'s own `describe_measure` and a
+/// policy `Check::Metric`'s own `describe` read identically for the same
+/// bounds.
+pub fn describe_bounds(metric: &MetricId, bounds: MetricBounds) -> String {
+    let mut parts = vec![metric.to_string()];
+    if let Some(a) = bounds.above {
+        parts.push(format!(">= {a}"));
+    }
+    if let Some(b) = bounds.below {
+        parts.push(format!("<= {b}"));
+    }
+    if let Some(w) = bounds.max_age {
+        parts.push(format!("(max_age {w})"));
+    }
+    parts.join(" ")
+}
+
+/// The judgement `quality::evaluate_metric` and `checks::direct_status`'s
+/// `Check::Metric` arm (`#278`) both apply to an already-resolved value:
+/// a non-finite bound never reads as met (`.nan` compares false both ways,
+/// so leaving it unchecked would read every value as satisfying it); then
+/// `as_of` against `max_age` (older is `stale`); then both inclusive
+/// bounds against the value (either failing is `not_met`); `met` otherwise.
+/// A `None`/non-finite value is `no_data`, with the metric's own reason
+/// when it gave one. Returns the judgement, the reason line(s) that
+/// explain it (worded the same regardless of caller), and the finite value
+/// read -- `Some` for every outcome but `no_data`, exactly mirroring what
+/// `quality::ScenarioResult::value` already carries.
+pub fn judge_metric(
+    metric: &MetricId,
+    bounds: MetricBounds,
+    mv: &MetricValue,
+    now: DateTime<Utc>,
+) -> (MetricJudgement, Vec<String>, Option<f64>) {
+    if bounds.above.is_some_and(|a| !a.is_finite()) || bounds.below.is_some_and(|b| !b.is_finite())
+    {
+        return (
+            MetricJudgement::NoData,
+            vec![format!("{metric}'s bound is not a finite number")],
+            None,
+        );
+    }
+    let Some(v) = mv.value.filter(|v| v.is_finite()) else {
+        let why = match mv.value {
+            Some(v) => format!("{v} is not a finite number"),
+            None => mv
+                .reason
+                .clone()
+                .unwrap_or_else(|| "no reason given".to_string()),
+        };
+        return (
+            MetricJudgement::NoData,
+            vec![format!("{metric} could not be computed: {why}")],
+            None,
+        );
+    };
+    if let Some(max_age) = bounds.max_age {
+        if now - mv.as_of > max_age.as_time_delta() {
+            return (
+                MetricJudgement::Stale,
+                vec![format!(
+                    "{metric} = {v} as of {}, older than {max_age}",
+                    mv.as_of
+                )],
+                Some(v),
+            );
+        }
+    }
+    let mut failed = Vec::new();
+    if let Some(a) = bounds.above {
+        if v < a {
+            failed.push(format!("{metric} = {v}, below the required {a}"));
+        }
+    }
+    if let Some(b) = bounds.below {
+        if v > b {
+            failed.push(format!("{metric} = {v}, above the allowed {b}"));
+        }
+    }
+    if failed.is_empty() {
+        (
+            MetricJudgement::Met,
+            vec![format!("{metric} = {v}, meets {}", describe_bounds(metric, bounds))],
+            Some(v),
+        )
+    } else {
+        (MetricJudgement::NotMet, failed, Some(v))
+    }
+}
+
 /// One metric's history, one point per day -- L5's output.
 /// A `NaiveDate` rather than a `DateTime<Utc>` per point: every v1 metric
 /// this backs (production's daily grid, a bench run's settle date) is

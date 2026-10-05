@@ -57,7 +57,7 @@ impl Engine {
         let mut gathered = service.gather_measurements(&plan, now, window).await?;
         if plan.needs_policy() {
             let policy = self.metric_policy_inputs(&snapshot, plan.scope()).await?;
-            service.gather_policy(&mut gathered, &policy).await?;
+            service.gather_policy(&mut gathered, &policy, &plan).await?;
             self.metric_policy_preflight(&snapshot, plan.scope(), !policy.scopes.is_empty())
                 .await?;
         }
@@ -1346,6 +1346,127 @@ mod tests {
         let computed = engine.metrics(&[MetricId::new("compliance.nope").unwrap()], now).await.unwrap();
         assert_eq!(computed.values[0].value, None);
         assert!(computed.values[0].reason.as_deref().unwrap().contains("nope"));
+    }
+
+    /// `#278` phase 2: `compliance.<framework>`/`open_controls.<framework>`
+    /// (`policy_measurements`) and the Policy tab itself
+    /// (`check_evaluation::Provider`) must agree on a `check: metric`
+    /// control's status -- one gatherer, per `AGENTS.md`, not two. This
+    /// also proves the recursion the issue worried about is impossible:
+    /// computing `compliance.gobd` here reads `reported.finance.beleg_coverage`
+    /// through the very same nested `metric_values` call `policy_measurements`
+    /// now makes, and a `check: metric` already refuses `compliance.*`/
+    /// `open_controls.*`/`quality.*` ids, so that nested read can never
+    /// loop back into `gather_policy` again. If it could, this test would
+    /// hang rather than return.
+    #[tokio::test]
+    async fn a_metric_checks_satisfied_status_matches_in_compliance_and_the_policy_tab() {
+        let root = std::env::temp_dir()
+            .join(format!("factory-metrics-policy-metric-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(
+            root.join(".factory/policies/gobd.yaml"),
+            "framework: gobd\ntitle: GoBD\nkind: regulation\ncontrols:\n\
+             \x20\x20- id: belegprinzip\n\x20\x20\x20\x20title: Belegprinzip\n\x20\x20\x20\x20evidence:\n\
+             \x20\x20\x20\x20\x20\x20- check: metric\n\x20\x20\x20\x20\x20\x20\x20\x20metric: reported.finance.beleg_coverage\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20above: 0.98\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("metrics.json"),
+            r#"{"as_of":"2026-10-05T09:00:00Z","metrics":[{"id":"beleg_coverage","value":0.99}]}"#,
+        )
+        .unwrap();
+
+        let mut finance = scope_at("finance-id", "finance", ".");
+        finance.metrics = Some(factory_core::config::ScopeMetricsDeclaration {
+            source: Some(factory_core::config::ScopeMetricsSource {
+                id: Some("finance".into()),
+                file: Some("metrics.json".into()),
+            }),
+            declare: vec![factory_core::config::ScopeMetricsDeclared {
+                id: Some("beleg_coverage".into()),
+                title: Some("Beleg coverage".into()),
+                unit: Some("ratio".into()),
+                better: Some("higher".into()),
+            }],
+        });
+        let config = Config {
+            version: 1,
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
+            daemon: DaemonConfig::default(),
+            scope: Some(finance.clone()),
+            scopes: vec![finance],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration {
+                frameworks: vec!["gobd".to_string()],
+                ..Default::default()
+            },
+            quality: Default::default(),
+            infrastructure: Default::default(),
+            secrets: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let registry = Registry::with_builtins();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(
+            Factory {
+                root: root.clone(),
+                config,
+            },
+            registry,
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
+
+        let ids = vec![
+            MetricId::new("compliance.gobd").unwrap(),
+            MetricId::new("open_controls.gobd").unwrap(),
+        ];
+        let computed = engine
+            .metrics_for(&ids, Utc::now(), Some("finance"), None)
+            .await
+            .unwrap();
+        let compliance = computed
+            .values
+            .iter()
+            .find(|v| v.id.as_str() == "compliance.gobd")
+            .unwrap();
+        let open = computed
+            .values
+            .iter()
+            .find(|v| v.id.as_str() == "open_controls.gobd")
+            .unwrap();
+        assert_eq!(
+            compliance.value,
+            Some(1.0),
+            "the control is satisfied, not stuck open because policy_measurements never read the real metric"
+        );
+        assert_eq!(
+            open.value,
+            Some(0.0),
+            "and so is absent from open_controls, same as the Policy tab"
+        );
+
+        // Consistent with what the Policy tab itself shows for the same fixture.
+        let report = engine.policy_report(Some("finance")).await.unwrap();
+        let status = report.rows[0]
+            .statuses
+            .iter()
+            .find(|s| s.control.id == "belegprinzip")
+            .unwrap()
+            .status
+            .kind();
+        assert_eq!(status, factory_core::policy::StatusKind::Satisfied);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // ------------------------------------------------------- reported metrics (#278)

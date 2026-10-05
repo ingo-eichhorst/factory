@@ -39,9 +39,10 @@
 //! Factory already has lying around, and `now`, and produces a
 //! [`ControlStatus`] per control -- pure, so a caller passes `now` in rather
 //! than this module reading the clock. `evaluate` now understands all
-//! eleven of `Check`'s kinds: `knowledge` and `attestation` (v1), `task`,
+//! thirteen of `Check`'s kinds: `knowledge` and `attestation` (v1), `task`,
 //! `workflow` and `gate` (`#81`), and `roles`, `sandbox`, `secrets` and
-//! `daemon` (`#82`), plus `dependencies` (`#123`) and `attested` (`#158`).
+//! `daemon` (`#82`), plus `dependencies` (`#123`), `attested` (`#158`) and
+//! `metric` (`#278`).
 //! The four config checks read facts the engine resolves once,
 //! synchronously, from the live config snapshot rather than a store --
 //! `Evidence::agents` (`Engine::agent_facts_for`, `Scope::agents_with` and
@@ -71,6 +72,22 @@
 //! `Evidence` grows a field per check kind as each ticket teaches `evaluate`
 //! to read it; every field it has is `#[serde(default)]` so an older caller
 //! building one is still a valid, if incomplete, bundle.
+//!
+//! **`check: metric` (`#278`).** A control can also be judged by a plain
+//! metric: `{ check: metric, metric: <id>, above|below: <n>, max_age: <d> }`,
+//! judged by the exact same arithmetic as a Quality `MetricMeasure`
+//! (inclusive bounds, `stale` beyond `max_age`, a `None`/non-finite value is
+//! `no_data`) -- see `factory_assurance::metrics::judge_metric`, the one
+//! place both share. Unlike Quality's four-way status, a control has only
+//! two: `met` is `satisfied`; `not_met`, `stale` and no value at all are all
+//! `open`, with the reason -- the status vocabulary above has no bucket for
+//! "used to be current" or "found but wrong" that `open` does not already
+//! cover. `compliance.<framework>`, `open_controls.<framework>` and
+//! `quality.<characteristic>` are refused as circular -- a control judged by
+//! a number this same evaluation produces would never be a measurement --
+//! the same reasoning Quality already applies to a `quality.*` measure.
+//! Without it, a scope's own reported metrics (`#278`'s first phase) could
+//! show progress at L5 but never close an L6 control.
 //!
 //! `maps_to` lets one piece of evidence satisfy more than one control: two
 //! frameworks that both require, say, an SBOM should not need separate proof
@@ -150,7 +167,11 @@ pub use factory_kernel::{KNOWN_DAEMON_FACTS, KNOWN_SECRETS_LOCATIONS};
 
 /// One control within a framework: something that is either currently
 /// evidenced or is not.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `#278`: no `Eq` -- `evidence: Vec<Check>` can carry a `Check::Metric`,
+// whose `above`/`below` are `Option<f64>`, and `f64` has no `Eq`. Quality's
+// own `MetricMeasure`/`Measure`/`QualityScenario` already dropped `Eq` for
+// exactly this reason.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Control {
     /// `[a-z0-9][a-z0-9-]*`, referenced elsewhere as `<framework>/<id>`.
@@ -184,7 +205,8 @@ pub struct Control {
 
 /// One framework's whole catalogue, exactly as authored at
 /// `<root>/.factory/policies/<framework>.yaml`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `#278`: no `Eq`, for the same reason as `Control` -- `controls: Vec<Control>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Catalogue {
     /// Must equal the file's stem -- checked by `load_all`, not here, since
@@ -229,8 +251,19 @@ pub enum FindingKind {
     /// An `attested` check's `category` or `step` is not a name
     /// (`control_plan::is_name`) -- it could never match a run's own
     /// `category`/`RequiredStep::step`, so the check can never be
-    /// satisfied. `#158`.
+    /// satisfied. `#158`. `#278` reuses this same kind for a `metric`
+    /// check with neither `above` nor `below`: another check that could
+    /// never be satisfied as written.
     BadCheckTarget,
+    /// `#278`: a `metric` check names `compliance.*`, `open_controls.*` or
+    /// `quality.*` -- computed from this same evaluation's own output, so
+    /// judging a control by it would be circular.
+    CircularMetric,
+    /// `#278`: a `metric` check names an id this build has never heard of.
+    UnknownMetric,
+    /// `#278`: a `metric` check names an id this build knows but cannot
+    /// compute yet.
+    UnavailableMetric,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,6 +298,9 @@ pub fn check_vocabulary(check: &Check) -> Vec<(FindingKind, String)> {
                 VocabularyFinding::UnknownDaemonFact => FindingKind::UnknownDaemonFact,
                 VocabularyFinding::UnknownSecretsLocation => FindingKind::UnknownSecretsLocation,
                 VocabularyFinding::BadCheckTarget => FindingKind::BadCheckTarget,
+                VocabularyFinding::CircularMetric => FindingKind::CircularMetric,
+                VocabularyFinding::UnknownMetric => FindingKind::UnknownMetric,
+                VocabularyFinding::UnavailableMetric => FindingKind::UnavailableMetric,
             };
             (kind, detail)
         })
@@ -466,7 +502,8 @@ pub struct AppliedNotApplicable {
 /// its evidence checks exactly as the catalogue wrote them, and the
 /// freshness window and `n/a` status after folding in every layer of the
 /// chain.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `#278`: no `Eq`, for the same reason as `Control` -- `evidence: Vec<Check>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Applied {
     pub control: ControlRef,
     pub title: String,
@@ -1312,6 +1349,93 @@ mod tests {
             json, "{\"check\":\"secrets\"}",
             "an empty `absent` is not written out"
         );
+    }
+
+    // --------------------------------------------------------- check: metric (#278)
+
+    #[test]
+    fn a_check_metric_parses_with_above_below_and_max_age_and_round_trips() {
+        let check: Check = serde_yaml_ng::from_str(
+            "check: metric\nmetric: reported.finance.beleg_coverage\nabove: 0.98\nmax_age: 30d\n",
+        )
+        .unwrap();
+        assert_eq!(check.kind_name(), "metric");
+        assert_eq!(check.own_max_age(), Some("30d".parse().unwrap()));
+        let json = serde_json::to_string(&check).unwrap();
+        assert_eq!(
+            json,
+            "{\"check\":\"metric\",\"metric\":\"reported.finance.beleg_coverage\",\"above\":0.98,\"max_age\":\"30d\"}"
+        );
+    }
+
+    #[test]
+    fn a_metric_check_naming_compliance_open_controls_or_quality_is_a_circular_finding_at_parse_time()
+    {
+        for metric in ["compliance.cra", "open_controls.cra", "quality.reliability"] {
+            let dir = tempdir(&format!("circular-metric-{}", metric.replace('.', "-")));
+            write(
+                &dir,
+                "cra.yaml",
+                &format!(
+                    "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n\
+                     \x20\x20- id: a\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20evidence:\n\
+                     \x20\x20\x20\x20\x20\x20- check: metric\n\x20\x20\x20\x20\x20\x20\x20\x20metric: {metric}\n\x20\x20\x20\x20\x20\x20\x20\x20above: 0.5\n"
+                ),
+            );
+            let (catalogues, findings) = load_all(&dir);
+            assert_eq!(
+                catalogues[0].controls.len(),
+                1,
+                "{metric}: the control still loads"
+            );
+            assert_eq!(findings.len(), 1, "{metric}: {findings:?}");
+            assert_eq!(findings[0].kind, FindingKind::CircularMetric, "{metric}");
+            assert!(
+                findings[0].detail.contains(metric),
+                "{metric}: {}",
+                findings[0].detail
+            );
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn a_metric_check_naming_an_unknown_metric_is_a_finding_at_parse_time() {
+        let dir = tempdir("unknown-metric");
+        write(
+            &dir,
+            "cra.yaml",
+            "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n\
+             \x20\x20- id: a\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20evidence:\n\
+             \x20\x20\x20\x20\x20\x20- check: metric\n\x20\x20\x20\x20\x20\x20\x20\x20metric: not_a_real_metric\n\x20\x20\x20\x20\x20\x20\x20\x20above: 0.5\n",
+        );
+        let (catalogues, findings) = load_all(&dir);
+        assert_eq!(catalogues[0].controls.len(), 1, "the control still loads");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].kind, FindingKind::UnknownMetric);
+        assert!(
+            findings[0].detail.contains("not_a_real_metric"),
+            "{}",
+            findings[0].detail
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_metric_check_with_neither_above_nor_below_is_a_finding_at_parse_time() {
+        let dir = tempdir("bound-less-metric");
+        write(
+            &dir,
+            "cra.yaml",
+            "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n\
+             \x20\x20- id: a\n\x20\x20\x20\x20title: A\n\x20\x20\x20\x20evidence:\n\
+             \x20\x20\x20\x20\x20\x20- check: metric\n\x20\x20\x20\x20\x20\x20\x20\x20metric: fail_rate\n",
+        );
+        let (catalogues, findings) = load_all(&dir);
+        assert_eq!(catalogues[0].controls.len(), 1, "the control still loads");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].kind, FindingKind::BadCheckTarget);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

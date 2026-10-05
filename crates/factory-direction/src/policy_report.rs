@@ -84,7 +84,9 @@ pub use factory_kernel::{WorkflowEnforcement, WorkflowEnforcementFinding};
 /// asked about, its status there, and its whole attestation history --
 /// including withdrawn and expired ones -- for that scope and its ancestors.
 /// `Request::PolicyControl`'s answer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `#278`: no `Eq` -- `checks: Vec<Check>` can carry a `Check::Metric`,
+// whose `above`/`below` are `Option<f64>`, and `f64` has no `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PolicyControlDetail {
     pub control: crate::policy::ControlRef,
     pub title: String,
