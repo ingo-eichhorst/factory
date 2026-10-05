@@ -159,6 +159,37 @@ impl<'a> Service<'a> {
             .map_err(|error| FactoryError::Other(anyhow::anyhow!("policy catalogue walk: {error}")))
     }
 
+    /// Select current authored requirements in L6, then read the actual L5
+    /// plan compiler. Preserve category/scope/catalogue/Quality failure order.
+    pub async fn control_plan<P>(
+        &self,
+        scope: &str,
+        category: &str,
+        provider: &P,
+    ) -> Result<factory_kernel::ControlPlan>
+    where
+        P: Provide<factory_kernel::CompiledPlanFact,
+            Query = factory_assurance::plan_service::Read,
+            Value = factory_kernel::CompiledPlanFact, Error = FactoryError>,
+    {
+        let read = self.plan_input(scope, category).await?;
+        Ok(Facts::<L6>::new()
+            .get::<factory_kernel::CompiledPlanFact, _>(provider, &read).await?.plan)
+    }
+
+    /// Own authored sources only; L5 still loads Quality and compiles live.
+    pub async fn plan_input(&self, scope: &str, category: &str) -> Result<factory_assurance::plan_service::Read> {
+        factory_kernel::check_category(category).map_err(FactoryError::BadRequest)?;
+        let scope = factory_kernel::resolve_scope(&self.config.scopes, scope)?.name.clone();
+        let (catalogues, _) = self.catalogues().await?;
+        let (applied, _) = policy::applicable(&catalogues, &self.config.chain(&scope));
+        Ok(factory_assurance::plan_service::Read {
+            scope,
+            category: category.to_owned(),
+            policy: policy::plan_sources(&applied),
+        })
+    }
+
     /// Same-level authored read followed by the actual L5 fact capability.
     /// A failed fact read remains a failure; nothing is cached or published.
     pub async fn catalogues_with_tags<P>(

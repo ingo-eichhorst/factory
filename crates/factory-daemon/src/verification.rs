@@ -29,12 +29,10 @@ use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
 #[cfg(test)]
 use factory_core::operations::Window;
-use factory_core::policy;
-use factory_core::quality;
 use factory_core::run::{BlockSource, Run, RunPatch, RunStatus};
 use factory_core::task::{NewTask, Task, TaskEntry, TaskFilter, WorkflowOrigin};
 use factory_core::workflow::{
-    WorkflowDefinition, WorkflowLint, WorkflowNodeKind, WorkflowNodeStatus, IMPLICIT_NODE,
+    WorkflowDefinition, WorkflowLint, WorkflowNodeStatus, IMPLICIT_NODE,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -540,17 +538,10 @@ impl Engine {
     /// quality chain folded by `quality::applicable`. Read fresh off disk
     /// every time, like every other L6 read.
     pub(crate) async fn control_plan(&self, scope: &str, category: &str) -> Result<ControlPlan> {
-        control_plan::check_category(category).map_err(FactoryError::BadRequest)?;
         let snapshot = self.factory_snapshot();
-        let scope = snapshot.scope(scope)?.name.clone();
-        let policies_dir = snapshot.policies_dir();
-        let (catalogues, _) = tokio::task::spawn_blocking(move || policy::load_all(&policies_dir))
-            .await
-            .map_err(|e| FactoryError::Other(anyhow::anyhow!("policy catalogue walk: {e}")))?;
-        let (applied, _) = policy::applicable(&catalogues, &self.policy_chain(&scope));
-        let inputs = self.quality_inputs(Some(&scope), true).await?;
-        let quality: Vec<_> = inputs.trees.iter().flat_map(|(_, tree)| quality::requirements_of(tree)).collect();
-        Ok(control_plan::resolve(&scope, category, &applied, &quality))
+        let provider = factory_assurance::plan_service::Provider::new(
+            snapshot.root.clone(), crate::quality::quality_configuration(&snapshot));
+        self.policy_intent_service(&snapshot).control_plan(scope, category, &provider).await
     }
 
     /// One plan per category `definition`'s task nodes are planned as.
@@ -636,7 +627,7 @@ impl Engine {
         let definition = WorkflowDefinition::implicit(task);
         let plans = self.control_plans(&definition).await?;
         let (mut injected, _) = definition.inject(&plans);
-        self.bind_functionaries(&mut injected)?;
+        self.bind_functionaries(&mut injected).await?;
         let mut steps = injected.required_steps_for(IMPLICIT_NODE);
         for step in &mut steps {
             if step.kind == control_plan::StepKind::Review
@@ -651,48 +642,9 @@ impl Engine {
     /// Freeze review and approval functionaries into an immutable workflow
     /// snapshot. Scope declaration order is stable and deliberate; the first
     /// concrete agent different from the subject executor is the checker.
-    pub(crate) fn bind_functionaries(&self, definition: &mut WorkflowDefinition) -> Result<()> {
-        let factory = self.factory_snapshot();
-        let scope = factory.scope(&definition.scope)?;
-        let roster = scope.agents_with(&factory.config.daemon.foreman);
-        let subjects: Vec<(String, String)> = definition
-            .nodes
-            .iter()
-            .filter(|n| n.kind == factory_core::workflow::WorkflowNodeKind::Task)
-            .map(|n| {
-                let requested = n
-                    .task
-                    .agent
-                    .clone()
-                    .or_else(|| scope.agent_adapter().map(str::to_string))
-                    .unwrap_or_else(|| factory.config.daemon.default_agent.clone());
-                let executor = self
-                    .resolve_agent(&definition.scope, &requested)
-                    .map(|v| v.0)
-                    .unwrap_or(requested);
-                (n.id.clone(), executor)
-            })
-            .collect();
-        for node in &mut definition.nodes {
-            let Some(spec) = node.gate.as_mut() else {
-                continue;
-            };
-            let Some((_, executor)) = subjects
-                .iter()
-                .find(|(id, _)| spec.subject.as_deref() == Some(id))
-            else {
-                continue;
-            };
-            spec.actor = match node.kind {
-                factory_core::workflow::WorkflowNodeKind::Review => roster
-                    .iter()
-                    .map(|a| a.name())
-                    .find(|name| name != executor),
-                factory_core::workflow::WorkflowNodeKind::Approval => Some("owner".into()),
-                _ => spec.actor.clone(),
-            };
-        }
-        Ok(())
+    pub(crate) async fn bind_functionaries(&self, definition: &mut WorkflowDefinition) -> Result<()> {
+        use crate::facts::Port;
+        factory_kernel::WorkflowTargetsFact::provider(self).bind_functionaries(definition).await
     }
 
     /// The agent reported `done` on a run with required steps: hold it in
@@ -1373,81 +1325,20 @@ impl Engine {
         scope: Option<String>,
         category: Option<String>,
     ) -> Result<WorkflowLint> {
-        let definition = match (workflow, task) {
-            (Some(_), Some(_)) => {
-                return Err(FactoryError::BadRequest("lint a workflow or a task, not both".into()));
-            }
-            (Some(id), None) => {
-                let mut definition = self.workflow_definition(&id).await?;
-                if category.is_some() {
-                    definition.category = category.clone();
-                }
-                Some(definition)
-            }
-            (None, Some(id)) => {
-                let mut task = self.require(&id).await?;
-                if category.is_some() {
-                    task.category = category.clone();
-                }
-                Some(WorkflowDefinition::implicit(&task))
-            }
-            (None, None) => None,
-        };
-        let Some(definition) = definition else {
-            let scope = scope.ok_or_else(|| {
-                FactoryError::BadRequest("name a workflow, a task, or a scope to lint".into())
-            })?;
-            let category = control_plan::effective_category(category.as_deref()).to_string();
-            let plan = self.control_plan(&scope, &category).await?;
-            return Ok(WorkflowLint {
-                subject: String::new(),
-                scope: plan.scope.clone(),
-                plans: vec![plan],
-                injections: Vec::new(),
-                violations: Vec::new(),
-                injected: None,
-                part: None,
-            });
-        };
-        definition.validate().map_err(FactoryError::BadRequest)?;
-        // `#235`: a part workflow never runs as itself, only copied once per
-        // part into a decomposition run -- so that is what is injected and
-        // shown, over two sample parts.
-        let part = match &definition.part {
-            Some(_) => Some(definition.part_shape().map_err(FactoryError::BadRequest)?),
-            None => None,
-        };
-        let subject = definition.id.clone();
-        let scope = definition.scope.clone();
-        let definition = match &part {
-            Some(shape) => definition.part_preview(shape),
-            None => definition,
-        };
-        let plans = self.control_plans(&definition).await?;
-        let (mut injected, injections) = definition.inject(&plans);
-        self.bind_functionaries(&mut injected)?;
-        let mut violations = injected.ordering_violations(&plans);
-        for node in injected
-            .nodes
-            .iter()
-            .filter(|n| n.kind == WorkflowNodeKind::Review)
-        {
-            if node.gate.as_ref().and_then(|g| g.actor.as_ref()).is_none() {
-                violations.push(format!(
-                    "review {} has no independent functionary: declare another concrete task agent in scope {}",
-                    node.id, injected.scope
-                ));
-            }
+        use crate::facts::Port;
+        let blueprints = factory_kernel::WorkflowBlueprintFact::provider(self);
+        let preview = factory_kernel::WorkflowTargetsFact::provider(self);
+        let prepared = preview.prepare(
+            factory_assurance::workflow_preview::Subject { workflow, task, scope, category },
+            &blueprints,
+        ).await?;
+        let snapshot = self.factory_snapshot();
+        let intent = self.policy_intent_service(&snapshot);
+        let mut requirements = Vec::new();
+        for category in prepared.categories() {
+            requirements.push(intent.plan_input(prepared.scope(), category).await);
         }
-        Ok(WorkflowLint {
-            subject,
-            scope,
-            plans: plans.into_values().collect(),
-            injections,
-            violations,
-            injected: Some(injected),
-            part,
-        })
+        preview.finish(prepared, requirements).await
     }
 }
 

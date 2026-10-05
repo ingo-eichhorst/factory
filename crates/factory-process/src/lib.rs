@@ -28,4 +28,5 @@ pub mod task;
 pub mod usage;
 pub mod window;
 pub mod workflow;
+pub mod workflow_blueprints;
 pub mod workflow_store;

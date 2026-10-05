@@ -3,7 +3,8 @@
 //! and behavior. Provide defines live ports; Below enforces reader direction.
 
 use crate::fact_vocabulary::*;
-use crate::{ArtifactProvenance, CostReport, ProductionFact, ProcessMetricFact, BenchResolutionFact, MetricValuesFact, CheckEvaluationFact, CheckComparisonFact, SandboxServiceEvidenceFact};
+use crate::{ArtifactProvenance, CostReport, ProductionFact, ProcessMetricFact, BenchResolutionFact, MetricValuesFact, CheckEvaluationFact, CheckComparisonFact, CompiledPlanFact, WorkflowBlueprintFact, SandboxServiceEvidenceFact};
+use crate::{WorkflowPreviewFact, WorkflowTargetsFact};
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,22 @@ impl Fact for CheckEvaluationFact {
 impl Fact for CheckComparisonFact {
     type Producer = L5;
 }
+impl Fact for CompiledPlanFact {
+    type Producer = L5;
+}
+impl Fact for WorkflowBlueprintFact { type Producer = L4; }
+impl Fact for WorkflowTargetsFact { type Producer = L5; }
+impl Fact for WorkflowPreviewFact { type Producer = L5; }
+
+/// Current declaration-order functionary candidates, not a selected actor
+/// or permission verdict. L3 alone derives the roster from raw declarations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FunctionaryRosterFact {
+    pub scope: String,
+    pub default_agent: Option<String>,
+    pub names: Vec<String>,
+}
+impl Fact for FunctionaryRosterFact { type Producer = L3; }
 
 impl Fact for SandboxServiceEvidenceFact {
     type Producer = L2;
@@ -707,12 +724,32 @@ pub struct FactCatalogueEntry {
 /// and their nested vocabulary now live in L0.
 pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
     FactCatalogueEntry {
+        fact: "WorkflowTargetsFact", producer: "L5", readers: &["L6 workflow enforcement"],
+        lives_in_kernel: true, note: "validated post-part-preview authored scope and categories",
+    },
+    FactCatalogueEntry {
+        fact: "WorkflowPreviewFact", producer: "L5", readers: &["L6 workflow enforcement"],
+        lives_in_kernel: true, note: "live generic gate/review/approval observations and preview gaps, never a workflow report",
+    },
+    FactCatalogueEntry {
         fact: "CheckEvaluationFact", producer: "L5", readers: &["L6 Policy", "L6 Scenarios"],
         lives_in_kernel: true, note: "live kindless check judgments and findings from the sole L5 evaluator",
     },
     FactCatalogueEntry {
         fact: "CheckComparisonFact", producer: "L5", readers: &["L6 Scenarios promotion"],
         lives_in_kernel: true, note: "kindless dual judgments against one primary-set live evidence gather",
+    },
+    FactCatalogueEntry {
+        fact: "CompiledPlanFact", producer: "L5", readers: &["L6 execution requirements"],
+        lives_in_kernel: true, note: "fresh generic plan compiled from authored policy and own live Quality requirements",
+    },
+    FactCatalogueEntry {
+        fact: "WorkflowBlueprintFact", producer: "L4", readers: &["L5 workflow preview", "L6 workflow enforcement"],
+        lives_in_kernel: true, note: "plain authored blueprint and category identities with no task/run lifecycle",
+    },
+    FactCatalogueEntry {
+        fact: "FunctionaryRosterFact", producer: "L3", readers: &["L5 independent preview binding"],
+        lives_in_kernel: true, note: "declaration-order checker names and raw scope default; no arguments, role verdict or selection",
     },
     FactCatalogueEntry {
         fact: "MetricValuesFact", producer: "L5", readers: &["L6 Goals", "L6 Scenarios"],

@@ -29,6 +29,31 @@ fn provider(scopes: Vec<RosterScope>) -> Provider {
     }
 }
 
+#[tokio::test]
+async fn functionary_fact_keeps_raw_default_and_declaration_order_without_arguments_or_grants() {
+    use factory_kernel::{FunctionaryRosterFact, L5};
+    let mut declared = scope("team/demo", "projects/demo");
+    declared.agent = Some(serde_yaml_ng::from_str(
+        "harness: pi\nname: worker\nargs: [private-fixture-argument]\nrole: reviewer"
+    ).unwrap());
+    declared.agents.push(serde_yaml_ng::from_str("name: third\nharness: shell").unwrap());
+    let mut provider = provider(vec![declared]);
+    provider.foreman.enabled = true;
+    let facts = Facts::<L5>::new();
+    let first = facts.get::<FunctionaryRosterFact, _>(&provider, &"demo".into()).await.unwrap();
+    assert_eq!(first.scope, "team/demo");
+    assert_eq!(first.default_agent.as_deref(), Some("pi"));
+    assert_eq!(first.names, ["worker", "critic", "third", "foreman"]);
+    let value = serde_json::to_value(&first).unwrap();
+    assert_eq!(value.as_object().unwrap().len(), 3);
+    assert!(!value.to_string().contains("private-fixture-argument"));
+    provider.scopes[0].agents.remove(0);
+    provider.foreman.exclude = vec!["demo".into()];
+    let next = facts.get::<FunctionaryRosterFact, _>(&provider, &"projects/demo".into()).await.unwrap();
+    assert_eq!(next.names, ["worker", "third"]);
+    assert_eq!(facts.get::<FunctionaryRosterFact, _>(&provider, &"missing".into()).await.unwrap_err().code(), "no_such_scope");
+}
+
 #[test]
 fn declaration_wire_defaults_strictness_and_roster_order_are_preserved() {
     let primary: AgentRef = serde_yaml_ng::from_str(
@@ -178,7 +203,7 @@ async fn actual_l3_port_reads_live_aliases_grants_sandboxes_and_foremen() {
     assert!(!edited[1].has_sandbox && !edited[1].sandbox_enforced);
     owner.scopes[0].agents[0].sandbox = Sandbox::Openshell;
     owner.root_roles.clear();
-    let unknown = owner.get(&"team/demo".into()).await.unwrap();
+    let unknown = Provide::<AgentFact>::get(&owner, &"team/demo".into()).await.unwrap();
     assert!(unknown[0].has_sandbox && unknown[0].sandbox_enforced);
     assert_eq!(unknown[0].grants, None);
     // Invalid programmatic config follows the original built-in-role fallback.
@@ -186,7 +211,7 @@ async fn actual_l3_port_reads_live_aliases_grants_sandboxes_and_foremen() {
         .root_roles
         .insert("worker".into(), spec(&["task.run"]));
     owner.scopes[0].agents[0].role = Role::worker();
-    let fallback = owner.get(&"demo".into()).await.unwrap();
+    let fallback = Provide::<AgentFact>::get(&owner, &"demo".into()).await.unwrap();
     assert_eq!(
         fallback[0].grants,
         Some(
@@ -199,12 +224,12 @@ async fn actual_l3_port_reads_live_aliases_grants_sandboxes_and_foremen() {
     );
     owner.scopes.push(scope("ops/demo", "projects/ops/demo"));
     assert!(matches!(
-        owner.get(&"demo".into()).await,
+        Provide::<AgentFact>::get(&owner, &"demo".into()).await,
         Err(FactoryError::BadRequest(_))
     ));
     assert!(matches!(
-        owner.get(&"gone".into()).await,
+        Provide::<AgentFact>::get(&owner, &"gone".into()).await,
         Err(FactoryError::NoSuchScope(_))
     ));
-    assert_eq!(owner.get(&"projects/demo".into()).await.unwrap().len(), 2);
+    assert_eq!(Provide::<AgentFact>::get(&owner, &"projects/demo".into()).await.unwrap().len(), 2);
 }

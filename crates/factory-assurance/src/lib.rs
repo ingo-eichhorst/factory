@@ -17,6 +17,8 @@ pub mod checks;
 pub mod check_evaluation;
 pub mod conformance;
 pub mod control_plan;
+pub mod plan_service;
+pub mod workflow_preview;
 pub mod dataset;
 pub mod evidence;
 pub mod evaluation_rollup;

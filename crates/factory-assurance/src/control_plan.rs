@@ -1,6 +1,8 @@
 //! L5 is the sole compiler of policy and quality requirements into a plan.
 use factory_kernel::StepKind;
 use factory_process::control_plan::{is_name, ControlPlan, PlanStep, Waiver, ANY_CATEGORY};
+#[cfg(test)]
+use factory_process::control_plan::ControlPlanExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 

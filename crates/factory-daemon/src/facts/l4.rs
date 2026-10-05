@@ -2,6 +2,10 @@
 use crate::engine::Engine;
 use factory_core::error::Result;
 
+pub(super) fn blueprint_provider(engine: &Engine) -> factory_process::workflow_blueprints::Provider<'_> {
+    factory_process::workflow_blueprints::Provider {tasks: engine.store.as_ref(), workflows: &engine.workflows}
+}
+
 pub(super) fn mirror_provider(engine: &Engine) -> factory_process::workflow_store::WorkflowStore {
     engine.workflows.clone()
 }

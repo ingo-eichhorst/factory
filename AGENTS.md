@@ -343,8 +343,23 @@ something impossible.
   one overlay-selected gather via the L5 CheckComparisonFact, then calls its
   same-level remediation service and adjacent command chain. Legacy task
   hydration remains outside; Scenarios response data canonically belongs to
-  L6 with unchanged wire re-exports. Outside workflow preview decorations
-  and remaining command paths still need migration.
+  L6 with unchanged wire re-exports. Remaining command paths still need migration.
+  L6's own authored plan inputs feed the actual L5 plan provider, which loads
+  fresh Quality profiles and invokes the sole compiler. L0 holds plain generic
+  plan data; enforcement and evaluation methods remain outside it. L4's live
+  blueprint provider exposes strongly typed authored fields, normalizing legacy
+  rows without exposing task/run lifecycle. Preserve every authored field in
+  both directions; the schema and projection tests guard against silent drops.
+  L5's preview service reads those blueprints and L3's declaration-order roster
+  through Facts<L5>, owning validation, part preview, injection, binding and gap
+  judgement with the canonical process algorithms. The roster contains only
+  raw default/name metadata, never arguments, resolved actors or role verdicts.
+  L6 Policy selects workflows and folds typed L5 targets/preview observations;
+  whole-store errors are fatal, individual refusals are findings. Preserve
+  category overrides, original author labels and deferred failure order.
+  Dispatch binds through that same L5 owner, but still compiles plans fresh;
+  an advisory preview never becomes execution evidence. No Engine callback,
+  precompiled plan or upper report enters the preview service.
   The complete six-service split still remains.
   L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.

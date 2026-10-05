@@ -19,6 +19,89 @@ impl<'a> Service<'a> {
         Self { intent }
     }
 
+    /// L6 selects authored workflows and requirements; L5 owns every live
+    /// preview judgement. Store-wide failure is fatal, per-subject refusal
+    /// is a finding. Refresh each selected blueprint after the initial list,
+    /// preserving the old list/lint read boundary and original row labels.
+    pub async fn workflow_enforcement<B, P>(
+        &self, scope: Option<&str>, blueprints: &B, preview: &P,
+    ) -> Result<(Vec<WorkflowEnforcement>, Vec<WorkflowEnforcementFinding>)>
+    where
+        B: Provide<factory_kernel::WorkflowBlueprintFact,
+            Query = factory_kernel::WorkflowBlueprintQuery,
+            Value = Vec<factory_kernel::WorkflowBlueprintFact>, Error = FactoryError>,
+        P: Provide<factory_kernel::WorkflowTargetsFact,
+            Query = factory_kernel::WorkflowBlueprintFact,
+            Value = factory_kernel::WorkflowTargetsFact, Error = FactoryError>
+            + Provide<factory_kernel::WorkflowPreviewFact,
+                Query = factory_assurance::workflow_preview::Read,
+                Value = factory_kernel::WorkflowPreviewFact, Error = FactoryError>,
+    {
+        use factory_kernel::{WorkflowBlueprintFact, WorkflowBlueprintQuery, WorkflowTargetsFact, WorkflowPreviewFact};
+        let (_, targets) = scope_subtree(&self.intent.config.scopes, scope)?;
+        let names: BTreeSet<_> = targets.iter().map(|target| target.name.as_str()).collect();
+        let facts = Facts::<L6>::new();
+        let mut enforcement = Vec::new();
+        let mut findings = Vec::new();
+        for initial in facts.get::<WorkflowBlueprintFact, _>(blueprints, &WorkflowBlueprintQuery::All).await? {
+            let authored = &initial.blueprint;
+            if !names.contains(authored.scope.as_str()) { continue }
+            let result = async {
+                let blueprint = facts.get::<WorkflowBlueprintFact, _>(blueprints,
+                    &WorkflowBlueprintQuery::Workflow(authored.id.clone())).await?
+                    .into_iter().next().ok_or_else(|| FactoryError::Other(anyhow::anyhow!("workflow blueprint provider returned no subject")))?;
+                let targets = facts.get::<WorkflowTargetsFact, _>(preview, &blueprint).await?;
+                let mut requirements = Vec::new();
+                for category in targets.categories {
+                    requirements.push(self.intent.plan_input(&targets.scope, &category).await);
+                }
+                let read = factory_assurance::workflow_preview::Read { blueprint, requirements };
+                facts.get::<WorkflowPreviewFact, _>(preview, &read).await
+            }.await;
+            match result {
+                Ok(observed) => {
+                    // Names/scope came from the initial list in the old fold,
+                    // even when the authored definition changed during lint.
+                    enforcement.extend(observed.enforcement.into_iter().map(|mut row| {
+                        row.workflow = authored.id.clone(); row.name = authored.name.clone();
+                        row.scope = authored.scope.clone(); row
+                    }));
+                    findings.extend(observed.findings.into_iter().map(|mut row| {
+                        row.workflow = authored.id.clone(); row.name = authored.name.clone();
+                        row.scope = authored.scope.clone(); row
+                    }));
+                }
+                Err(error) => findings.push(WorkflowEnforcementFinding {
+                    workflow: authored.id.clone(), name: authored.name.clone(),
+                    scope: authored.scope.clone(), detail: error.to_string(),
+                }),
+            }
+        }
+        Ok((enforcement, findings))
+    }
+
+    pub async fn report_with_workflows<K, C, I, B, P>(
+        &self, scope: Option<&str>, knowledge: &K, checks: &C, inventory: &I,
+        blueprints: &B, preview: &P,
+    ) -> Result<PolicyReport>
+    where
+        K: Provide<KnowledgeTags, Query = (), Value = KnowledgeTags, Error = FactoryError>,
+        C: Provide<CheckEvaluationFact, Query = check_evaluation::Read, Value = CheckEvaluationFact, Error = FactoryError>,
+        I: Provide<TaskInventoryFact, Query = TaskInventoryQuery, Value = Vec<TaskInventoryFact>, Error = FactoryError>,
+        B: Provide<factory_kernel::WorkflowBlueprintFact, Query = factory_kernel::WorkflowBlueprintQuery,
+            Value = Vec<factory_kernel::WorkflowBlueprintFact>, Error = FactoryError>,
+        P: Provide<factory_kernel::WorkflowTargetsFact, Query = factory_kernel::WorkflowBlueprintFact,
+            Value = factory_kernel::WorkflowTargetsFact, Error = FactoryError>
+            + Provide<factory_kernel::WorkflowPreviewFact, Query = factory_assurance::workflow_preview::Read,
+                Value = factory_kernel::WorkflowPreviewFact, Error = FactoryError>,
+    {
+        let mut report = self.report(scope, knowledge, checks, inventory).await?;
+        let (enforcement, findings) = self.workflow_enforcement(scope, blueprints, preview).await?;
+        report.workflow_enforcement = enforcement;
+        report.workflow_findings = findings;
+        Ok(report)
+    }
+
     async fn budgets(
         &self,
         applied: &[(&policy_intent::Scope, Vec<policy::Applied>)],

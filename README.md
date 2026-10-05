@@ -5146,7 +5146,7 @@ complete TaskStore seam. Dispatch projection into L3 is owned by L4 too.
 Core keeps identical canonical paths; existing workflow/compiler integration
 tests stay outside the ladder, without an upper-level dev dependency.
 
-L4 keeps generic execution plans and gate verification. L5's
+L0 holds plain generic execution-plan data; L4 keeps gate verification. L5's
 `factory-assurance` owns requirement validation and the sole compiler of
 policy and quality sources into that plan; L4 imports no declaration or
 compiler from above. The old core `resolve` path is only the adaptation
@@ -5363,7 +5363,8 @@ to its existing append-only store too, preserving error priority, exact item
 scope, corrective anchors and submission deduplication. The router supplies
 only raw caller/request inputs and physical providers; it retains its one
 authorization check and existing receipt-change events. Workflow preview
-decorations remain outside. These paths do not complete the six-service split.
+decorations now use the live L5 preview fact described below. These paths do
+not complete the six-service split.
 
 The live Scenarios service now belongs to L6 too: authored real/draft
 catalogues, overlays, goal changes, backlog, forecasts and promotion deltas
@@ -5376,8 +5377,24 @@ evaluated against one overlay-selected evidence gather, preserving the
 original lazy reads. L6 submits the selected work through its same-level
 remediation service and the L6→L5→L4 command chain; only ids return, with
 legacy task payload hydration outside. Scenarios response data is canonical
-L6 vocabulary with unchanged wire re-exports. Workflow preview, remaining
-command paths and complete six-service isolation are still unfinished.
+L6 vocabulary with unchanged wire re-exports. Remaining command paths and
+complete six-service isolation are still unfinished.
+
+Execution plans and workflow previews now have physical live owners too.
+L6 loads its own applicable authored policy requirements; the L5 plan provider
+loads current Quality profiles and invokes the sole unchanged compiler. L0
+holds only generic plan data. L4 supplies strongly typed authored workflow
+blueprints, normalizing legacy rows without exposing task/run lifecycle.
+The L5 preview service reads those facts, validates and expands part previews
+with the canonical process algorithms, compiles live plans, injects generic
+steps, and binds functionaries from L3's declaration-order roster fact. The
+same binding is used when dispatch freezes a run; preview results never replace
+fresh dispatch-time compilation. No Engine callback or upper report enters L5.
+L6 Policy owns workflow selection and failure folds through `WorkflowTargetsFact`
+and `WorkflowPreviewFact`; neither port returns a lower-level report. Store-wide
+failures remain fatal and individual lint refusals remain findings. The router
+only prepares raw authored inputs and hydrates the unchanged people-side lint
+response. These services do not finish every timer or adjacent command path.
 
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),

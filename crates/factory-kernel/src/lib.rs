@@ -27,6 +27,12 @@
 
 mod duration;
 mod check_results;
+mod execution_plan;
+mod workflow_preview;
+pub use workflow_preview::{WorkflowTargetsFact, WorkflowPreviewFact, WorkflowEnforcement, WorkflowEnforcementFinding};
+pub mod workflow_blueprint;
+pub use workflow_blueprint::{WorkflowBlueprintFact, WorkflowBlueprintQuery};
+pub use execution_plan::{CompiledPlanFact, ControlPlan, PlanStep, Waiver, DEFAULT_CATEGORY, ANY_CATEGORY, effective_category, is_name, check_category};
 pub use check_results::{
     CheckEvaluationFact, CheckObservation, EvidenceFinding, EvidenceRef, EvidenceRefKind, EvaluationResult,
     ScopeCheckEvaluation, CheckComparisonFact, ScopeCheckComparison, Status, StatusKind,
@@ -75,7 +81,7 @@ mod stats;
 mod workspace;
 pub use facts::DeploymentPublicationFact;
 pub use facts::{DeploymentMirrorFact, DeploymentMirrorPhase, DeploymentMirrorPlan};
-pub use facts::{EnvironmentMetricFact, KnowledgeTags, ScopeCapacityFact};
+pub use facts::{EnvironmentMetricFact, FunctionaryRosterFact, KnowledgeTags, ScopeCapacityFact};
 pub use facts::{
     EnvironmentRecoveryFact, RECOVERY_COMMIT_LABEL, RECOVERY_ENVIRONMENT_LABEL,
     RECOVERY_REASON_LABEL,

@@ -54,6 +54,8 @@ mod stores;
 mod storage_owner_tests;
 #[cfg(test)]
 mod provider_owner_tests;
+#[cfg(test)]
+mod workflow_preview_tests;
 mod ui;
 mod verification;
 mod waiting;

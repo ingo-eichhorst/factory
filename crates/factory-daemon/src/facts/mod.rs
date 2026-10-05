@@ -159,6 +159,41 @@ port!(
     l5::check_provider
 );
 port!(
+    CompiledPlanFact,
+    factory_assurance::plan_service::Provider,
+    factory_assurance::plan_service::Read,
+    CompiledPlanFact,
+    l5::plan_provider
+);
+port!(
+    WorkflowBlueprintFact,
+    factory_process::workflow_blueprints::Provider<'a>,
+    factory_kernel::WorkflowBlueprintQuery,
+    Vec<WorkflowBlueprintFact>,
+    l4::blueprint_provider
+);
+port!(
+    FunctionaryRosterFact,
+    factory_agents::roster::Provider,
+    String,
+    FunctionaryRosterFact,
+    l3::provider
+);
+port!(
+    WorkflowTargetsFact,
+    factory_assurance::workflow_preview::Provider<factory_agents::roster::Provider>,
+    WorkflowBlueprintFact,
+    WorkflowTargetsFact,
+    l5::preview_provider
+);
+port!(
+    WorkflowPreviewFact,
+    factory_assurance::workflow_preview::Provider<factory_agents::roster::Provider>,
+    factory_assurance::workflow_preview::Read,
+    WorkflowPreviewFact,
+    l5::preview_provider
+);
+port!(
     BackupFact,
     factory_infrastructure::backup_facts::Provider<'a>,
     DateTime<Utc>,
@@ -610,6 +645,11 @@ mod tests {
         registered::<MetricValuesFact>();
         registered::<CheckEvaluationFact>();
         registered::<CheckComparisonFact>();
+        registered::<CompiledPlanFact>();
+        registered::<WorkflowBlueprintFact>();
+        registered::<FunctionaryRosterFact>();
+        registered::<WorkflowTargetsFact>();
+        registered::<WorkflowPreviewFact>();
         registered::<DaemonConfigFact>();
         registered::<BackupFact>();
         registered::<ScopeCapacityFact>();

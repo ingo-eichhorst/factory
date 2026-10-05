@@ -20,6 +20,11 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<MetricValuesFact, L5>("MetricValuesFact", "L5");
     assert_producer::<CheckEvaluationFact, L5>("CheckEvaluationFact", "L5");
     assert_producer::<CheckComparisonFact, L5>("CheckComparisonFact", "L5");
+    assert_producer::<CompiledPlanFact, L5>("CompiledPlanFact", "L5");
+    assert_producer::<WorkflowBlueprintFact, L4>("WorkflowBlueprintFact", "L4");
+    assert_producer::<FunctionaryRosterFact, L3>("FunctionaryRosterFact", "L3");
+    assert_producer::<WorkflowTargetsFact, L5>("WorkflowTargetsFact", "L5");
+    assert_producer::<WorkflowPreviewFact, L5>("WorkflowPreviewFact", "L5");
     assert_producer::<InfrastructureExpiryFact, L1>("InfrastructureExpiryFact", "L1");
     assert_producer::<RenewalDeclarationsFact, L1>("RenewalDeclarationsFact", "L1");
     assert_producer::<CredentialExpiryFact, L2>("CredentialExpiryFact", "L2");
@@ -49,6 +54,21 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<CostReport, L4>("CostReport", "L4");
     assert_producer::<GateFact, L5>("GateFact", "L5");
     assert_producer::<KnowledgeTags, L5>("KnowledgeTags", "L5");
+}
+
+#[test]
+fn compiled_plan_and_preview_observations_are_plain_kernel_json() {
+    let wire = serde_json::json!({"plan":{"scope":"demo","category":"feature","steps":[{
+        "id":"tests","step":"tests","kind":"gate","command":"true","timeout_seconds":5,
+        "required_by":["house/tested","quality/reliability"],"enforced":true
+    }]}});
+    let fact: CompiledPlanFact = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&fact).unwrap(), wire);
+    let preview = serde_json::json!({"enforcement":[{"workflow":"w","name":"Name","scope":"demo",
+        "node":"work","step":"review","kind":"review","required_by":["house/review"],"actor":"critic"}],
+        "findings":[{"workflow":"w","name":"Name","scope":"demo","detail":"ordering gap"}]});
+    let fact: WorkflowPreviewFact = serde_json::from_value(preview.clone()).unwrap();
+    assert_eq!(serde_json::to_value(fact).unwrap(), preview);
 }
 
 #[test]
@@ -189,6 +209,11 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "MetricValuesFact",
         "CheckEvaluationFact",
         "CheckComparisonFact",
+        "CompiledPlanFact",
+        "WorkflowBlueprintFact",
+        "FunctionaryRosterFact",
+        "WorkflowTargetsFact",
+        "WorkflowPreviewFact",
         "InfrastructureExpiryFact", "CredentialExpiryFact", "ScheduledRunDatesFact",
         "RenewalDeclarationsFact",
         "DaemonConfigFact",

@@ -4,7 +4,7 @@
 //! own), re-read on every request. L6 supplies resolved declarations,
 //! receipts and budget intent; the physical L5 evidence service performs
 //! every live lower check read. L6 owns report/detail/link composition;
-//! only transport wiring, workflow previews and remaining commands stay here.
+//! only transport wiring and remaining commands stay here.
 //!
 //! The one piece of state this module owns is the attestations themselves,
 //! kept in `PolicyStore` (`store.rs`), append-only.
@@ -139,8 +139,7 @@ impl Engine {
                 .get::<TaskInventoryFact>(&TaskInventoryQuery::All)
                 .await?;
         }
-        let (_, targets) = snapshot.subtree_scopes(scope)?;
-        Box::pin(self.policy_workflow_enforcement(&targets)).await?;
+        self.policy_workflow_enforcement(snapshot, scope).await?;
         Ok(())
     }
 
@@ -164,58 +163,12 @@ impl Engine {
     }
 
     async fn policy_workflow_enforcement(
-        &self,
-        target_scopes: &[factory_core::config::Scope],
+        &self, snapshot: &Factory, scope: Option<&str>,
     ) -> Result<(Vec<WorkflowEnforcement>, Vec<WorkflowEnforcementFinding>)> {
-        let target_names: BTreeSet<_> = target_scopes.iter().map(|scope| scope.name.as_str()).collect();
-        let mut enforcement = Vec::new();
-        let mut findings = Vec::new();
-        for definition in self.workflows.definitions(None).await? {
-            if !target_names.contains(definition.scope.as_str()) {
-                continue;
-            }
-            let lint = match self.workflow_lint(Some(definition.id.clone()), None, None, None).await {
-                Ok(lint) => lint,
-                Err(error) => {
-                    findings.push(WorkflowEnforcementFinding {
-                        workflow: definition.id.clone(),
-                        name: definition.name.clone(),
-                        scope: definition.scope.clone(),
-                        detail: error.to_string(),
-                    });
-                    continue;
-                }
-            };
-            if let Some(injected) = lint.injected.as_ref() {
-                for injection in &lint.injections {
-                    let Some(control) = injected.nodes.iter().find(|node| node.id == injection.gate_node_id) else { continue };
-                    let Some(spec) = control.gate.as_ref() else { continue };
-                    let kind = match control.kind {
-                        factory_core::workflow::WorkflowNodeKind::Gate => factory_core::control_plan::StepKind::Gate,
-                        factory_core::workflow::WorkflowNodeKind::Review => factory_core::control_plan::StepKind::Review,
-                        factory_core::workflow::WorkflowNodeKind::Approval => factory_core::control_plan::StepKind::Approval,
-                        factory_core::workflow::WorkflowNodeKind::Task | factory_core::workflow::WorkflowNodeKind::Expand => continue,
-                    };
-                    enforcement.push(WorkflowEnforcement {
-                        workflow: definition.id.clone(),
-                        name: definition.name.clone(),
-                        scope: definition.scope.clone(),
-                        node: injection.node_id.clone(),
-                        step: injection.step.clone(),
-                        kind,
-                        required_by: injection.required_by.clone(),
-                        actor: spec.actor.clone(),
-                    });
-                }
-            }
-            findings.extend(lint.violations.into_iter().map(|detail| WorkflowEnforcementFinding {
-                workflow: definition.id.clone(),
-                name: definition.name.clone(),
-                scope: definition.scope.clone(),
-                detail,
-            }));
-        }
-        Ok((enforcement, findings))
+        use crate::facts::Port;
+        let blueprints = factory_kernel::WorkflowBlueprintFact::provider(self);
+        let preview = factory_kernel::WorkflowPreviewFact::provider(self);
+        self.policy_service(snapshot).workflow_enforcement(scope, &blueprints, &preview).await
     }
 
     pub(crate) fn policy_service<'a>(
@@ -225,23 +178,20 @@ impl Engine {
         factory_direction::policy_service::Service::new(self.policy_intent_service(snapshot))
     }
 
-    /// Outside transport wiring; L6 owns the actual Policy read. Workflow
-    /// preview decorations keep their historical final failure precedence.
+    /// Outside transport wiring; L6 owns the complete Policy read, including
+    /// typed L5 previews at their historical final failure precedence.
     pub(crate) async fn policy_report(&self, scope: Option<&str>) -> Result<PolicyReport> {
         use crate::facts::Port;
         let snapshot = self.factory_snapshot();
         let knowledge = factory_kernel::KnowledgeTags::provider(self);
         let checks = factory_kernel::CheckEvaluationFact::provider(self);
         let inventory = TaskInventoryFact::provider(self);
-        let mut report = self
+        let blueprints = factory_kernel::WorkflowBlueprintFact::provider(self);
+        let preview = factory_kernel::WorkflowPreviewFact::provider(self);
+        self
             .policy_service(&snapshot)
-            .report(scope, &knowledge, &checks, &inventory)
-            .await?;
-        let (_, targets) = snapshot.subtree_scopes(scope)?;
-        let (enforcement, findings) = Box::pin(self.policy_workflow_enforcement(&targets)).await?;
-        report.workflow_enforcement = enforcement;
-        report.workflow_findings = findings;
-        Ok(report)
+            .report_with_workflows(scope, &knowledge, &checks, &inventory, &blueprints, &preview)
+            .await
     }
 
     pub(crate) async fn policy_control(

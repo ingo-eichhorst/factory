@@ -2539,3 +2539,76 @@ fn scenarios_owner_reads_live_files_metrics_and_promotes_id_only_work_through_tw
         task["labels"]
     );
 }
+
+#[test]
+fn workflow_preview_owners_read_live_requirements_but_dispatch_freezes_its_own_plan() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision(); daemon.sigterm();
+    let path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["policies"] = serde_yaml_ng::from_str("frameworks: [house]").unwrap();
+    config["quality"] = serde_yaml_ng::from_str("[base]").unwrap();
+    config["scope"]["agents"] = serde_yaml_ng::from_str("[{name: critic, harness: shell, lifetime: task}]").unwrap();
+    std::fs::write(path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    for arguments in [vec!["config", "user.email", "preview@example.invalid"], vec!["config", "user.name", "Preview QA"],
+        vec!["commit", "-q", "--allow-empty", "-m", "preview fixture"]] {
+        let output = Command::new("git").current_dir(&daemon.root).args(arguments).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let policies = daemon.root.join(".factory/policies"); let quality = daemon.root.join(".factory/quality");
+    std::fs::create_dir_all(&policies).unwrap(); std::fs::create_dir_all(&quality).unwrap();
+    let catalogue = |extra: &str| format!("framework: house\ntitle: House\nkind: best-practice\ncontrols:\n  - id: tested\n    title: Tested\n    requires:\n      - {{applies_to: [feature], step: tests, gate: 'true', timeout_seconds: 90}}\n{extra}");
+    let profile = |seconds: u64| format!("attributes:\n  - id: reliability\n    importance: H\n    difficulty: M\n    requires:\n      - {{applies_to: [feature], step: tests, gate: 'true', timeout_seconds: {seconds}}}\n    scenarios: [{{id: availability}}]\n");
+    std::fs::write(policies.join("house.yaml"), catalogue("      - {applies_to: [feature], step: review, by: independent}\n      - {applies_to: [feature], step: approval, by: person}\n")).unwrap();
+    std::fs::write(quality.join("base.yaml"), profile(30)).unwrap(); daemon.spawn();
+    let base = daemon.base_url(); let workflows = format!("{base}/api/workflows");
+    let mut node = task_node("work", "printf 'preview-owner-work\\n'"); node["task"]["worktree"] = json!(true);
+    let created = expect_ok(&workflows, &post(&workflows, &json!({"name":"Preview owner", "scope":"demo", "category":"feature", "nodes":[node], "edges":[]})));
+    let workflow = created["workflow"]["id"].as_str().unwrap();
+    let lint_url = format!("{base}/api/workflow-lint?workflow={workflow}");
+    let lint = || expect_ok(&lint_url, &get(&lint_url))["lint"].clone();
+    let first = lint();
+    assert_eq!(first["plans"][0]["steps"].as_array().unwrap().len(), 3);
+    assert_eq!(first["plans"][0]["steps"].as_array().unwrap().iter().find(|step| step["step"] == "tests").unwrap()["timeout_seconds"], 30);
+    let controls = first["injected"]["nodes"].as_array().unwrap();
+    assert_eq!(controls.iter().find(|node| node["kind"] == "review").unwrap()["gate"]["actor"], "critic");
+    assert_eq!(controls.iter().find(|node| node["kind"] == "approval").unwrap()["gate"]["actor"], "owner");
+    let report_url = format!("{base}/api/policy?scope=demo");
+    let first_report = expect_ok(&report_url, &get(&report_url))["report"].clone();
+    assert_eq!(first_report["workflow_enforcement"].as_array().unwrap().len(), 3);
+    assert!(first_report.get("workflow_findings").is_none());
+    let tasks_url = format!("{base}/api/tasks");
+    let task = expect_ok(&tasks_url, &post(&tasks_url, &json!({"title":"Fresh dispatch", "scope":"demo", "agent":"shell",
+        "category":"feature", "worktree":true, "instructions":"printf 'fresh dispatch proof\\n'"})))["task"].clone();
+    let task_id = task["id"].as_str().unwrap();
+    // Authored requirements change after task creation and the first preview.
+    std::fs::write(policies.join("house.yaml"), catalogue("")).unwrap();
+    std::fs::write(quality.join("base.yaml"), profile(5)).unwrap();
+    let updated = lint(); assert_eq!(updated["plans"][0]["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(updated["plans"][0]["steps"][0]["timeout_seconds"], 5);
+    let start = format!("{base}/api/tasks/{task_id}/run"); expect_ok(&start, &post(&start, &json!({})));
+    let runs_url = format!("{base}/api/tasks/{task_id}/runs");
+    let run = wait_for("shell-reported work and its live compiled gate", Duration::from_secs(30), || {
+        let history = expect_ok(&runs_url, &get(&runs_url));
+        history["runs"].as_array().unwrap().first().filter(|run| run["status"] == "done").cloned()
+    });
+    assert_eq!(run["required_steps"].as_array().unwrap().len(), 1);
+    assert_eq!(run["required_steps"][0]["timeout_seconds"], 5);
+    assert_eq!(run["required_steps"][0]["required_by"], json!(["house/tested", "quality/reliability"]));
+    let completed = tasks(&base).into_iter().find(|row| row["id"] == task_id).unwrap();
+    assert!(completed["result"].as_str().unwrap().contains("fresh dispatch proof"));
+    let evidence_url = format!("{base}/api/runs/{}/attestations", run["id"].as_str().unwrap());
+    let evidence = expect_ok(&evidence_url, &get(&evidence_url));
+    assert_eq!(evidence["attestations"][0]["verdict"], "pass");
+    // A later read is live; the execution snapshot and append-only receipt
+    // remain the exact plan actually used, including after a daemon restart.
+    std::fs::write(quality.join("base.yaml"), profile(2)).unwrap();
+    assert_eq!(lint()["plans"][0]["steps"][0]["timeout_seconds"], 2);
+    daemon.sigterm(); daemon.spawn();
+    let restarted = expect_ok(&runs_url, &get(&runs_url))["runs"][0].clone();
+    assert_eq!(restarted["required_steps"], run["required_steps"]); assert_eq!(restarted["status"], "done");
+    assert_eq!(expect_ok(&evidence_url, &get(&evidence_url)), evidence);
+    assert_eq!(lint()["plans"][0]["steps"][0]["timeout_seconds"], 2);
+    let final_report = expect_ok(&report_url, &get(&report_url))["report"].clone();
+    assert_eq!(final_report["workflow_enforcement"].as_array().unwrap().len(), 1);
+}
