@@ -1,22 +1,27 @@
 //! L6 monthly budget views over the single L4 spend fact port. Authored
 //! intent is re-read, not copied into a mutable aggregate or provider plan.
 use crate::engine::Engine;
+#[cfg(test)]
 use crate::facts::Facts;
 use chrono::{DateTime, Utc};
-use factory_core::{
-    budget,
-    config::Scope,
-    error::{FactoryError, Result},
-    usage::SpendQuery,
-};
-use factory_kernel::{CostGroupBy, CostReport, CostRow, L6};
+use factory_core::{budget, config::Scope, error::Result};
+use factory_kernel::{CostGroupBy, CostReport};
+#[cfg(test)]
+use factory_kernel::{SpendQuery, L6};
 
 /// Outside-stack projection of the current scope chain. L6 compiles raw
 /// limits; assurance gathers spend and judges them through its own ports.
-pub(crate) fn check_budget_intent(snapshot: &factory_core::config::Factory, scope: &Scope, config: &budget::PolicyConfig) -> factory_assurance::evidence::BudgetIntent {
+pub(crate) fn check_budget_intent(
+    snapshot: &factory_core::config::Factory,
+    scope: &Scope,
+    config: &budget::PolicyConfig,
+) -> factory_assurance::evidence::BudgetIntent {
     let mut chain = snapshot.config.ancestors_of(scope);
     chain.push(scope);
-    budget::check_intent(config, chain.into_iter().map(|s| (s.id.clone(), s.name.clone())))
+    budget::check_intent(
+        config,
+        chain.into_iter().map(|s| (s.id.clone(), s.name.clone())),
+    )
 }
 
 impl Engine {
@@ -27,127 +32,22 @@ impl Engine {
         now: DateTime<Utc>,
     ) -> Result<budget::Report> {
         let snapshot = self.factory_snapshot();
-        let root = snapshot.root.clone();
-        let catalogue = tokio::task::spawn_blocking(move || budget::load(&root))
-            .await
-            .map_err(|e| FactoryError::Other(anyhow::anyhow!("budget catalogue read: {e}")))?
-            .map_err(FactoryError::BadRequest)?;
-        let month = budget::Month::at(now).map_err(FactoryError::BadRequest)?;
-        let asked = scope.map(|name| snapshot.scope(name)).transpose()?;
-        let mut scopes: Vec<&Scope> = snapshot
-            .config
-            .scopes
-            .iter()
-            .filter(|candidate| {
-                asked.is_none_or(|asked| {
-                    candidate.path == asked.path
-                        || snapshot
-                            .config
-                            .ancestors_of(candidate)
-                            .iter()
-                            .any(|parent| parent.path == asked.path)
-                        || (catalogue.scopes.contains_key(&candidate.id)
-                            && snapshot
-                                .config
-                                .ancestors_of(asked)
-                                .iter()
-                                .any(|parent| parent.path == candidate.path))
-                })
-            })
-            .collect();
-        if let Some(asked) = asked {
-            if !scopes.iter().any(|s| s.id == asked.id) {
-                scopes.push(asked);
-            }
-        } else if let Some(root) = snapshot.config.scope.as_ref() {
-            if !scopes.iter().any(|s| s.id == root.id) {
-                scopes.push(root);
-            }
-        }
-        scopes.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.id.cmp(&b.id)));
-        let spend = self
-            .month_spend(asked.map(|s| s.name.clone()), group_by, &month)
-            .await?;
-        let mut budgets = Vec::new();
-        for target in scopes {
-            let scoped =
-                if spend.scope.as_deref() == Some(&target.name) && group_by == CostGroupBy::Scope {
-                    spend.clone()
-                } else {
-                    self.month_spend(Some(target.name.clone()), CostGroupBy::Scope, &month)
-                        .await?
-                };
-            let limit = catalogue.scopes.get(&target.id).map(|b| b.monthly_usd);
-            let relation = match asked {
-                Some(asked) if target.path == asked.path => "selected",
-                Some(asked)
-                    if snapshot
-                        .config
-                        .ancestors_of(asked)
-                        .iter()
-                        .any(|parent| parent.path == target.path) =>
-                {
-                    "ancestor"
-                }
-                Some(_) => "descendant",
-                None => "instance",
-            };
-            budgets.push(budget::ScopeBudget {
-                id: target.id.clone(),
-                scope: target.name.clone(),
-                path: target.path.display().to_string(),
-                relation: relation.into(),
-                monthly_usd: limit,
-                assessment: budget::assess(limit, &scoped.total, scoped.unattributed_runs, &month),
-                spent: scoped.total,
-                unattributed_runs: scoped.unattributed_runs,
-                daily: scoped.daily,
-            });
-        }
-        let findings = catalogue.scopes.keys().filter(|id| !snapshot.config.scopes.iter().any(|s| &s.id == *id)
-            && !snapshot.config.scope.as_ref().is_some_and(|s| &s.id == *id)
-            && !asked.is_some_and(|s| &s.id == *id))
-            .map(|id| format!("Budget scope id {id:?} is not a configured scope; authored intent was preserved")).collect();
-        Ok(budget::Report {
-            catalogue: budget::catalogue_path(&snapshot.root).display().to_string(),
-            month,
-            group_by,
-            spend,
-            budgets,
-            findings,
-        })
+        let provider = <CostReport as crate::facts::Port>::provider(self);
+        factory_direction::budget_service::Service::new(
+            snapshot.root.clone(),
+            snapshot.config.scopes.iter().map(budget_scope).collect(),
+            snapshot.config.scope.as_ref().map(budget_scope),
+            &provider,
+        )
+        .report(scope, group_by, now)
+        .await
     }
-
-    /// At the exact first instant of a month the logical window is empty.
-    /// This is known empty spend, not a failed/missing observation.
-    pub(crate) async fn month_spend(
-        &self,
-        scope: Option<String>,
-        group_by: CostGroupBy,
-        month: &budget::Month,
-    ) -> Result<CostReport> {
-        if month.from == month.as_of {
-            return Ok(CostReport {
-                basis: factory_kernel::SpendBasis::Started, finished: None,
-                group_by,
-                from: month.from,
-                to: month.as_of,
-                scope,
-                rows: Vec::new(),
-                total: CostRow::new("total", None),
-                unattributed_runs: 0,
-                daily: Vec::new(),
-            });
-        }
-        Facts::<L6>::new(self)
-            .get::<CostReport>(&SpendQuery {
-                scope,
-                from: Some(month.from),
-                to: Some(month.as_of),
-                group_by,
-                ..Default::default()
-            })
-            .await
+}
+fn budget_scope(scope: &Scope) -> factory_direction::budget_service::Scope {
+    factory_direction::budget_service::Scope {
+        id: scope.id.clone(),
+        name: scope.name.clone(),
+        path: scope.path.clone(),
     }
 }
 
@@ -282,6 +182,43 @@ mod tests {
     }
     fn card<'a>(report: &'a budget::Report, id: &str) -> &'a budget::ScopeBudget {
         report.budgets.iter().find(|c| c.id == id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn budget_service_constructor_uses_fresh_scope_identity_and_stable_limit_ids() {
+        let i = Instance::new();
+        i.limits("version: 1\nscopes: {work-id: {monthly_usd: 50}}\n");
+        let now = time("2026-10-16T12:00:00Z");
+        let first = i
+            .engine
+            .budget_report(Some("work"), CostGroupBy::Scope, now)
+            .await
+            .unwrap();
+        assert_eq!(card(&first, "work-id").scope, "work");
+        let mut scope = i.engine.factory_snapshot().scope("work").unwrap().clone();
+        let id = scope.id.clone();
+        scope.name = "renamed".into();
+        scope.path = "projects/new-home".into();
+        i.engine.replace_scope(&id, scope);
+        let next = i
+            .engine
+            .budget_report(Some("projects/new-home"), CostGroupBy::Scope, now)
+            .await
+            .unwrap();
+        let target = card(&next, "work-id");
+        assert_eq!(target.scope, "renamed");
+        assert_eq!(target.path, "projects/new-home");
+        assert_eq!(target.monthly_usd, Some(50.0));
+        assert_eq!(target.relation, "selected");
+        assert!(
+            !next.budgets.iter().any(|b| b.id == "nested-id"),
+            "old path child no longer belongs below the moved scope"
+        );
+        assert!(i
+            .engine
+            .budget_report(Some("work"), CostGroupBy::Scope, now)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

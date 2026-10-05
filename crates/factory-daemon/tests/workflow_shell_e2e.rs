@@ -1659,3 +1659,87 @@ fn a_shell_instruction_over_eleven_hundred_bytes_still_reaches_done() {
         result.len()
     );
 }
+
+/// Exercise the live L6 service through both public transports with actual
+/// process evidence. Shell runs have unknown usage, never guessed free cost.
+#[test]
+fn budget_service_rereads_intent_after_shell_completion_and_restart() {
+    if missing_prerequisites() {
+        return;
+    }
+    let mut daemon = provision();
+    let base = daemon.base_url();
+    let config: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+        &std::fs::read_to_string(daemon.root.join(".factory/config.yaml")).unwrap(),
+    )
+    .unwrap();
+    let scope_id = config["scope"]["id"].as_str().unwrap();
+    let limits = daemon.root.join(".factory/budgets/limits.yaml");
+    std::fs::create_dir_all(limits.parent().unwrap()).unwrap();
+    let write_limit = |cap: u32| {
+        let catalogue = json!({"version": 1, "scopes": {scope_id: {"monthly_usd": cap}}});
+        std::fs::write(&limits, serde_yaml_ng::to_string(&catalogue).unwrap()).unwrap();
+    };
+    write_limit(10);
+    let url = format!("{base}/api/budget?scope=demo");
+    let report = || expect_ok(&url, &get(&url))["report"].clone();
+    let before = report();
+    assert_eq!(before["budgets"][0]["id"], scope_id);
+    assert_eq!(before["budgets"][0]["monthly_usd"], 10.0);
+    assert_eq!(before["spend"]["total"]["runs"], 0);
+
+    let workflow_url = format!("{base}/api/workflows");
+    let created = expect_ok(
+        &workflow_url,
+        &post(
+            &workflow_url,
+            &json!({"name": "budget-smoke", "scope": "demo",
+                "nodes": [task_node("budget", "printf 'budget smoke\\n'")], "edges": []}),
+        ),
+    );
+    let workflow_id = created["workflow"]["id"].as_str().unwrap();
+    let start_url = format!("{workflow_url}/{workflow_id}/run");
+    let started = expect_ok(&start_url, &post(&start_url, &json!({})));
+    let run_id = started["run"]["id"].as_str().unwrap();
+    let finished = wait_for("budget shell run to settle", Duration::from_secs(30), || {
+        let run = run_status(&base, run_id);
+        matches!(run["status"].as_str(), Some("done" | "failed" | "cancelled"))
+            .then_some(run)
+    });
+    assert_eq!(finished["status"], "done", "{finished}");
+    let after = report();
+    assert_eq!(after["spend"]["total"]["runs"], 1);
+    assert_eq!(after["spend"]["total"]["runs_unknown"], 1);
+    assert_eq!(after["budgets"][0]["assessment"]["state"], "unknown");
+
+    write_limit(20);
+    assert_eq!(report()["budgets"][0]["monthly_usd"], 20.0);
+    daemon.sigterm();
+    daemon.spawn();
+    let recovered = report();
+    assert_eq!(recovered["budgets"][0]["monthly_usd"], 20.0);
+    assert_eq!(recovered["spend"]["total"], after["spend"]["total"]);
+    assert_eq!(recovered["budgets"][0]["assessment"]["state"], "unknown");
+    let output = Command::new(&daemon.factory_bin)
+        .arg("--root")
+        .arg(&daemon.root)
+        .arg("--url")
+        .arg(&base)
+        .args(["--json", "budget", "--scope", "demo"])
+        .env_remove("FACTORY_TOKEN")
+        .env_remove("FACTORY_TASK_TOKEN")
+        .env_remove("FACTORY_RUN_TOKEN")
+        .env_remove("FACTORY_SOCKET")
+        .env_remove("FACTORY_URL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(cli["report"]["budgets"][0]["monthly_usd"], 20.0);
+    assert_eq!(cli["report"]["spend"]["total"], recovered["spend"]["total"]);
+    assert_eq!(cli["report"]["budgets"][0]["assessment"]["state"], "unknown");
+}

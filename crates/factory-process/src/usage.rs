@@ -1170,24 +1170,7 @@ impl CostRowExt for CostRow {
     }
 }
 
-/// What `Engine::spend` reads (#164): runs that started in `[from, to)`
-/// (`from` defaults to thirty days before `to`, `to` to now), narrowed to
-/// `scope`'s own subtree when given, summed per `group_by`. Plain serde
-/// data -- the same shape whether it comes off the wire (`Request::Costs`)
-/// or is built in-process (`cost_week`).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SpendQuery {
-    #[serde(default)]
-    pub basis: factory_kernel::SpendBasis,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub to: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub group_by: CostGroupBy,
-}
+pub use factory_kernel::SpendQuery;
 
 /// Ordering is read-side behavior, not L0 vocabulary.
 pub trait CostReportExt {

@@ -450,3 +450,23 @@ fn benchmark_knowledge_and_provider_paths_are_the_canonical_l5_owners() {
     let store: Option<factory_core::bench_store::BenchStore> = None;
     let _: Option<factory_assurance::bench_store::BenchStore> = store;
 }
+
+#[test]
+fn spend_query_is_canonical_plain_kernel_vocabulary_with_unchanged_legacy_json() {
+    let query = factory_kernel::SpendQuery {
+        scope: Some("work".into()),
+        group_by: factory_kernel::CostGroupBy::Scope,
+        ..Default::default()
+    };
+    let old: factory_core::usage::SpendQuery = query.clone();
+    let process: factory_process::usage::SpendQuery = old.clone();
+    assert_eq!(process, query);
+    assert_eq!(
+        serde_json::to_value(old).unwrap(),
+        json!({"basis":"started", "scope":"work", "group_by":"scope"})
+    );
+    let empty: factory_kernel::SpendQuery = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(empty.basis, factory_kernel::SpendBasis::Started);
+    assert_eq!(empty.group_by, factory_kernel::CostGroupBy::Task);
+    assert!(empty.scope.is_none() && empty.from.is_none() && empty.to.is_none());
+}

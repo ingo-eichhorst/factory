@@ -76,7 +76,8 @@ pub use facts::{
 pub use facts::{RecoveryJournalFact, ScriptRecoveryAction, ScriptRecoveryFinish};
 pub use facts::{ReleaseBuildFact, ReleaseSbomFact};
 pub use spend::{
-    CostGroupBy, CostReport, CostRow, DailySpend, FinishedSpend, SpendBasis, SpendFigure, TokenSums,
+    CostGroupBy, CostReport, CostRow, DailySpend, FinishedSpend, SpendBasis, SpendFigure, SpendQuery,
+    TokenSums,
 };
 pub use workspace::{WorkspaceLifetime, WorkspaceSpec};
 pub mod renewals;

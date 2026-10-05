@@ -5315,6 +5315,14 @@ and Inbox read the people-side fact directly; Operations never gathers it.
 Authored scenario intent remains in L6, which re-exports the canonical L5
 threshold/evaluator types for unchanged scenario projections.
 
+L6's live Budget service owns catalogue rereads, path-based scope selection,
+UTC-month windows and independent-cap assessment. Outside wiring supplies
+only fresh plain scope identities and the physical L4 spend provider; L6
+reads it through `Facts<L6>`, never an Engine callback or precomputed spend.
+The plain `SpendQuery` is shared L0 data with canonical legacy re-exports.
+At the exact month boundary, an empty window remains known empty without a
+provider read. This completes Budget's request path, not the six-service split.
+
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),
 with ADR 0004 amended to name the evidence channel. Every registered fact

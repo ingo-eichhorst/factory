@@ -295,6 +295,12 @@ something impossible.
   attention. Cache only successful snapshots for a minute, invalidating on
   scenario metadata changes; never cache failed reads or invent task actions.
   L6 retains authored scenario intent and canonical compatibility exports.
+  L6's live Budget service owns authored catalogue loading, month windows,
+  scope selection and independent-cap assessment. It receives only fresh
+  plain scope identities and the actual L4 spend fact capability, reading it
+  through `Facts<L6>` with the canonical L0 `SpendQuery`. Never pass Engine
+  callbacks, precomputed spend or a budget verdict into the service. The exact
+  first instant of a month is known empty and does not read the provider.
   The complete six-service split still remains.
   L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.

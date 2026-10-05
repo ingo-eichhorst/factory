@@ -662,11 +662,36 @@ mod tests {
     #[test]
     fn spend_consumers_have_no_second_aggregation_or_upward_l6_helper() {
         let budget = include_str!("../budgets.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert!(budget.contains("check_budget_intent"));
+        assert!(budget.contains("factory_direction::budget_service::Service::new"));
+        assert!(!budget.contains("get::<CostReport>") && !budget.contains("month_spend"));
+        let direction = include_str!("../../../factory-direction/src/budget_service.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
-        assert!(budget.contains("get::<CostReport>"));
-        assert!(budget.contains("check_budget_intent") && budget.contains("month_spend"));
+        let compact: String = direction.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("Facts::<L6>::new().get::<CostReport,_>"));
+        assert!(direction.contains("budget::load") && direction.contains("budget::assess"));
+        assert!(direction.contains("scope_ancestors") && direction.contains("resolve_scope"));
+        for forbidden in [
+            "factory_core",
+            "factory_process",
+            "factory_composition",
+            "factory_daemon",
+            "TaskStore",
+            "Engine",
+            "dyn Fn",
+            "BoxFuture",
+        ] {
+            assert!(
+                !direction.contains(forbidden),
+                "Budget owner gained a backedge/callback: {forbidden}"
+            );
+        }
+        assert!(!direction.contains("runs_between") && !direction.contains("CostRowExt"));
         assert!(!budget.contains("async fn budget_policy_input"));
         let evidence = include_str!("../../../factory-assurance/src/evidence.rs")
             .split("\nmod tests")

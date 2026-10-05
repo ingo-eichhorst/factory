@@ -1,4 +1,4 @@
-//! Plain L4 spend schema (#164/#193). Aggregation and evaluation stay in core.
+//! Plain L4 spend schema (#164/#193). Aggregation and evaluation stay in their owners.
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -132,6 +132,25 @@ pub enum SpendBasis {
 
 fn is_started(basis: &SpendBasis) -> bool {
     *basis == SpendBasis::Started
+}
+
+/// Plain shared spend query (#164/#193): runs that started in `[from, to)`
+/// (`from` defaults to thirty days before `to`, `to` to now), narrowed to
+/// `scope`'s own subtree when given, summed per `group_by`. Plain serde
+/// data -- the same shape whether it comes off the wire (`Request::Costs`)
+/// or is built in-process (`cost_week`). Evaluation stays with each owner.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpendQuery {
+    #[serde(default)]
+    pub basis: SpendBasis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub group_by: CostGroupBy,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
