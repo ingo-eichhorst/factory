@@ -117,5 +117,31 @@ scope:
               - { host: herdr.dev, port: 443 }
               - { host: www.herdr.dev, port: 443 }
             binaries: [{ path: /usr/bin/curl }]
+          # The open web, read-only: the articles, blogs and HN threads the
+          # audit verifies and the new ones it finds (#218). `**.*.*` is any
+          # name of three or more labels (hn.algolia.com, *.substack.com,
+          # blog.*); OpenShell rejects a bare `*`, and no wildcard can match
+          # a two-label name, so those are listed -- the non-forge hosts of
+          # the ledger's listed, probation and candidate entries as of
+          # 2026-10-05, plus dev.to and substack.com. A new article on any
+          # other two-label host stays a recorded gap until it is added
+          # here. Inspected, so only GET/HEAD/OPTIONS go out, and curl only.
+          # Credentials are never resolved here: a provider's placeholder
+          # resolves only at that provider's own endpoints.
+          web_read:
+            endpoints:
+              - { host: "**.*.*", port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: andrew.ooo, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: coles.codes, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: dev.to, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: farmdev.com, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: flaviocopes.com, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: intertwingly.net, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: madflex.de, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: medium.com, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: portablecode.info, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: substack.com, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+              - { host: zenn.dev, port: 443, protocol: rest, access: read-only, enforcement: enforce }
+            binaries: [{ path: /usr/bin/curl }]
           # factory_callback is added by Factory: /usr/local/bin/factory to
           # the daemon's http interface. Declare it here only to override it.

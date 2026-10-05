@@ -67,5 +67,16 @@ mod integration_tests {
             policy["network_policies"][CALLBACK_RULE]["endpoints"][0]["host"],
             serde_yaml_ng::Value::from("192.168.188.92")
         );
+        // The open web is read-only, inspected, and curl's alone (#218):
+        // the audit verifies articles and finds new ones, but may write
+        // nowhere but its own repository.
+        let web = &policy["network_policies"]["web_read"];
+        assert_eq!(web["endpoints"][0]["host"], serde_yaml_ng::Value::from("**.*.*"));
+        for endpoint in web["endpoints"].as_sequence().unwrap() {
+            assert_eq!(endpoint["access"], serde_yaml_ng::Value::from("read-only"), "{endpoint:?}");
+            assert_eq!(endpoint["enforcement"], serde_yaml_ng::Value::from("enforce"), "{endpoint:?}");
+        }
+        assert_eq!(web["binaries"].as_sequence().unwrap().len(), 1);
+        assert_eq!(web["binaries"][0]["path"], serde_yaml_ng::Value::from("/usr/bin/curl"));
     }
 }
