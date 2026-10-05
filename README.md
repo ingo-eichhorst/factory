@@ -2234,6 +2234,92 @@ open tasks; the findings; the nine-characteristic catalogue (every column a
 heatmap draws); and the history of any metric a scenario reads, for a
 sparkline.
 
+## Suggestions
+
+L5 Improvement's fourth tab (`#275`): what an agent *suffers* on the way to
+done, failed or blocked -- a blocked web call, a missing grant, secret, tool
+or dependency; stale or misleading documentation; task instructions or a
+spec that sent it the wrong way; a workflow, gate or intake step that asked
+for the impossible or the pointless -- collected rather than lost in a
+transcript nobody reads.
+
+**Filing needs no grant.** `factory task suggest <task> --kind
+capability|docs|spec|process|entity|other --target "<what should change>"
+--summary "<one line>" [--detail "<more>"] [--wasted-tokens <n>]`, run any
+number of times during an active run, authenticated the same way `report`
+is -- by the run token, checked by `Engine::check_run_token` exactly as
+`report`'s own belt-and-suspenders check is. It is the one write in this
+whole area that needs no grant: triager (which never holds `task.report`
+either) can still use it, and so could a role an instance wrote with an
+empty `grants:` list. Factory fills in the run, task, scope, agent, harness,
+the harness's own session id and the run's usage so far itself; the agent
+states only `kind`, `target`, `summary`, `detail` and `wasted-tokens`. A
+suggestion never contains a secret -- the contract and the guide both say
+so, and Factory does not redact, because there is nothing here to redact.
+Filing is not a substitute for `--status blocked` when the agent genuinely
+cannot continue, and it is not the filing agent's to act on: see "The
+improvement agent" below.
+
+**L5 owns the store.** `factory_assurance::suggestion` is the domain model
+and state machine; `suggestion_store.rs` keeps one row per suggestion, its
+whole history (who, when, what) embedded and append-only -- nothing is ever
+deleted. A suggestion's state only ever moves forward: `open` to `tasked`,
+`dismissed` or `done`; `tasked` on to `dismissed` or `done` too; `dismissed`
+and `done` are both terminal.
+
+**Listing and grouping.** `factory suggestion list [--scope S] [--kind K]
+[--target T] [--state S]` and `GET /api/suggestions?scope=&kind=&target=&state=`
+answer the same report: every matching suggestion, newest first, folded by
+target with a count, how many are still open, and the summed claimed tokens
+and recorded cost -- "web access to X blocked" reported by ten runs reads as
+one line, not ten, which is the prioritisation signal. `factory suggestion
+show <id>` prints one in full, history included.
+
+**The improvement agent.** Nothing here ever becomes work on its own
+(`#275`'s "Factory never creates a task from a suggestion"). A person
+presses "Create improvement task" in the Suggestions tab, or runs `factory
+suggestion task --id <id> [--id <id> ...]` (one suggestion, or a whole
+group's ids) -- the only door. It creates one task through L5's existing
+adjacent L4 creation port (`factory_assurance::remediation::Service`, the
+same one `quality remediate` and `policy remediate` use), linked back to
+every named suggestion, and addressed to a dedicated, Business-Factory-wide
+improvement agent in the *root* scope -- never the project agent that
+complained, which cannot reach what the complaint is usually about (sandbox
+policy, roles, the secrets catalogue, docs, specs, workflows). An instance
+declares that agent the ordinary way, as a standing agent in the root
+scope's own `agents:`, and names it in the root config's `daemon:` block:
+
+```yaml
+daemon:
+  improvement_agent: improver   # must match a standing agent declared below
+agents:
+  - name: improver
+    harness: pi
+    lifetime: permanent
+    role: foreman                # needs whatever grants fixing the complaint takes
+```
+
+With no `daemon.improvement_agent` set, or one naming an agent the root
+scope does not declare, `suggestion task` refuses clearly, naming the
+field -- it never silently falls back to the complaining agent's own scope.
+
+**Dismiss and done.** `factory suggestion dismiss <id> --reason "..."` and
+`factory suggestion done <id>` (`POST /api/suggestions/{id}/dismiss` and
+`.../done`) move a suggestion to a terminal state; both are refused, saying
+so, once it has already reached one.
+
+**Ask the agent.** Because a suggestion records the agent and its harness
+session, `factory suggestion ask <id> "<question>"`
+(`POST /api/suggestions/{id}/ask`) lets a person ask a follow-up straight
+from it. Factory starts a continuation run of the originating task that
+resumes the recorded session with the question -- the same resumption
+`factory task run --continue` uses (`#178`), down to the same
+`resolve_continue` check -- and the answer is recorded on the suggestion
+once that run reports. Refused outright, never silently falling back to a
+fresh conversation, when the task has a run in progress or the harness
+cannot resume (no session recorded, the adapter declares no resume, the
+previous session is not confirmed gone).
+
 ## Intake
 
 L4 Process's second tab (`#119`), next to Tasks: the inbound quality gate
@@ -4632,6 +4718,7 @@ A snapshot is one `factory-backup-<instance>-<utc>.tar.zst` holding:
   `PRAGMA integrity_check` before anything is archived;
 - the root `.factory/config.yaml` and every registered scope's own;
 - `.factory/{knowledge,datasets,policies,goals,scenarios,quality,vex,intake,budgets}/`, whole;
+- every scope's own declared `backup.include` directories (`#279`, below);
 - a `manifest.json`, written last: instance, daemon version (there is no
   build commit compiled in, so none is claimed), the database's
   `user_version`, tables and integrity result, and the path, size and sha256
@@ -4645,6 +4732,53 @@ it to its git remote. Each file is read once and hashed and archived from the
 same bytes, so the manifest cannot disagree with the archive. The archive is
 written as a hidden `.partial` and renamed into place only when complete and
 synced.
+
+**A scope's own data outside git (`#279`).** `.factory/` is backed up, and
+source code is backed up by pushing it to its git remote -- but a scope's
+data that lives in neither, gitignored on purpose (business records, personal
+data, anything too large or too sensitive for a repository), falls through
+both. A scope declares it in its own `.factory/config.yaml`:
+
+```yaml
+# a scope's own .factory/config.yaml
+scope:
+  name: finance
+  backup:
+    include: [../data/finance, ../data/invoices]   # relative to the scope directory
+```
+
+Each entry is resolved against the scope's own directory and must stay
+inside the instance root once every `..` is resolved by path component, never
+by string prefix. Snapshots archive every file found there -- in the
+manifest with its path, size and sha256, exactly like `.factory/` above --
+at its path relative to the instance root, the same convention every other
+archived file already follows, so an unpacked snapshot is laid out exactly
+like the instance it came from. `verify` checks these files by checksum
+exactly like any other, failing on one missing, changed or unlisted; `restore
+--into <new-root>` puts them back at the same relative paths, never over the
+live instance. The same exclusions hold inside a declared directory without
+exception: anything under a `secrets/` component is never opened, `.env`
+files are never archived, and a symbolic link is never followed (named in
+the manifest instead, like any other excluded file).
+
+A declaration is never a load-time failure -- scope configs are read once, at
+daemon startup, and a directory that does not exist *yet* is routine: it is
+created later, without a restart, and is included starting with the very
+next snapshot with no further action. Only a declaration that is
+structurally unsafe is refused: it escapes the instance root, sits under (or
+is itself) a `secrets/` component, or is itself a symbolic link. A refusal is
+a finding, reported wherever the directory would otherwise be shown --
+`factory backup status`'s and the L1 Backup page's own "Scope data" section
+-- never a reason the daemon fails to start or any other scope's backup is
+affected. The same section shows, per declared directory, its file count and
+total size in the newest snapshot, resolved fresh from the live config on
+every read -- so a missing directory shows as missing right up until it is
+created, and a refused one keeps showing why for as long as the declaration
+stays that way.
+
+Such data is typically the most sensitive a snapshot holds -- personal data,
+business records -- so `encrypt_to` (below) is strongly recommended whenever
+a scope declares one.
 
 **Encryption (`#152`).** `infrastructure.backup.encrypt_to` names a single
 native X25519 recipient (`age1…`, from `age-keygen` or an equivalent); an SSH
@@ -4800,7 +4934,11 @@ shown as unknown -- never claimed as a problem or as fine.
 `factory backup status` prints a `CODE` block and a `TIME MACHINE` line
 alongside the snapshot status; the L1 › Backup page draws the same as a
 "Code" table and a Time Machine fact, regardless of whether a backup is
-configured at all.
+configured at all. When any scope declares `backup.include` (`#279`), the
+same command prints a `SCOPE DATA` block -- one line per declared
+directory, its live status (ready, not yet created, or a refusal) and the
+newest snapshot's own file count and size -- and the page draws the same as
+a "Scope data" table, also regardless of whether a backup is configured.
 
 Every backup and verification is an event -- `backup_completed`,
 `backup_failed`, `backup_verified` -- and a row in an append-only
@@ -4823,6 +4961,19 @@ section the two registry metrics (`backup_age_hours`/
 special case here: an encrypted newest snapshot counts toward
 `backup_verified` only once an owner has actually verified it with its
 identity, exactly as a plaintext one does.
+
+A scope's declared `backup.include` directories (`#279`) need no special
+case here either, for the same reason: `backup_verified` already means "the
+newest snapshot's every listed file checked out by checksum", and a
+declared directory's files are just more entries in that same manifest --
+checked, passed or failed, exactly like `.factory/` itself. The one thing
+`backup_verified` cannot see is a declaration never fed into any snapshot at
+all because it was refused or still missing at every backup since: that is
+the "Scope data" section's own finding, visible on the page and in `factory
+backup status`, never folded into this one fact. A policy control that wants
+coverage of a scope's own data specifically -- `gobd/datensicherung`, say --
+still has to read that finding itself; `backup_verified` only ever answers
+for the snapshot as a whole.
 
 ### The host's power mode (#260)
 

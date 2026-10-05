@@ -17,6 +17,7 @@
 //! that editing your own task is not the same as handing it to somebody else
 //! -- is written out below, in the arm it belongs to.
 
+use factory_assurance::suggestion::Suggestion;
 use factory_core::agent::AgentSession;
 use factory_core::error::{FactoryError, Result};
 use factory_core::protocol::Request;
@@ -224,6 +225,23 @@ impl Engine {
             // everything but who is speaking: same token, same authority.
             Request::TaskReport { .. } | Request::TaskTurnEnded { .. } => Grant::TaskReport,
             Request::TaskAttach { .. } => Grant::TaskAttach,
+            // `#275`: filing a suggestion needs no grant an agent could
+            // lack -- it exists precisely for an agent that lacks one. The
+            // belt-and-suspenders run token in `suggestion.token`, checked
+            // by `Engine::check_run_token` inside `file_suggestion` exactly
+            // as `report` checks its own, is the whole authorization; the
+            // `authorize` arm below still narrows it to the caller's own
+            // run the ordinary way, as a courtesy, not as the gate.
+            Request::TaskSuggest { .. } => return Needs::Nothing,
+            // Create improvement task: the same door `PolicyRemediate` and
+            // `QualityRemediate` open, checked against the scope the named
+            // suggestion(s) were filed from -- never the root scope the
+            // task actually lands in.
+            Request::SuggestionTask { .. } => Grant::TaskCreate,
+            // Closing a suggestion out, like closing a task.
+            Request::SuggestionDismiss { .. } | Request::SuggestionDone { .. } => Grant::TaskClose,
+            // Starting a continuation run, like `task run --continue`.
+            Request::SuggestionAsk { .. } => Grant::TaskRun,
             Request::AgentStart { .. } => Grant::AgentStart,
             Request::AgentConfigure { .. } | Request::AgentDelete { .. } => Grant::AgentConfigure,
             // Saving or resetting a scope's own dashboard layout (`#160`).
@@ -335,6 +353,9 @@ impl Engine {
             // Read like `Goals`: authored profiles and evidence folded
             // fresh, nothing written (`#107`).
             | Request::Quality { .. }
+            // `#275`: read-only, folded fresh on every call, like `Quality`.
+            | Request::Suggestions { .. }
+            | Request::SuggestionGet { .. }
             // Recomputed server-side over authored files and computed
             // metrics alone -- nothing written, whatever `scenario` or
             // `drivers` say (`#100`).
@@ -488,6 +509,16 @@ impl Engine {
             }
         };
 
+        // `#275`: the same idea as `task_in_reach`, for a suggestion rather
+        // than a task -- `Reach::Own` is the agent that filed it.
+        let suggestion_in_reach = |def: &RoleDef, s: &Suggestion| -> Result<()> {
+            match def.reach {
+                Reach::Scope => in_scope(&s.scope),
+                Reach::Own if s.scope == *scope && s.agent == *name => Ok(()),
+                Reach::Own => Err(deny("touch a suggestion that is not its own")),
+            }
+        };
+
         match request {
             Request::TaskCreate(new) => in_scope(new.scope.as_deref().unwrap_or(scope)),
             // The same reach rule as `TaskCreate` -- `scope` is required on
@@ -501,6 +532,23 @@ impl Engine {
             Request::ScenarioPromote { scope: s, .. } => in_scope(s),
             // And for a quality scenario's remediation task (`#107`).
             Request::QualityRemediate { scope: s, .. } => in_scope(s),
+            // `#275`: every named suggestion must be in the caller's own
+            // scope -- the improvement task's own scope is the root's,
+            // never the caller's to hold a grant over.
+            Request::SuggestionTask { ids } => {
+                for id in ids {
+                    if let Ok(Some(suggestion)) = self.suggestions.get(id).await {
+                        in_scope(&suggestion.scope)?;
+                    }
+                }
+                Ok(())
+            }
+            Request::SuggestionDismiss { id, .. } | Request::SuggestionDone { id, .. } | Request::SuggestionAsk { id, .. } => {
+                match self.suggestions.get(id).await {
+                    Ok(Some(suggestion)) => suggestion_in_reach(def, &suggestion),
+                    _ => Ok(()), // let the engine report "no such suggestion"
+                }
+            }
 
             Request::TaskUpdate { id, patch, .. } => {
                 // Handing a task to somebody else is not editing it. A role
@@ -1565,6 +1613,86 @@ mod tests {
         assert!(
             allowed(&e, &Caller::Owner, request("demo")).await,
             "the owner is never subject to any of this"
+        );
+    }
+
+    /// A tiny open suggestion, seeded straight into the store so these
+    /// tests need neither an active run nor `file_suggestion` itself.
+    async fn seed_suggestion(e: &Engine, id: &str, scope: &str, agent: &str) {
+        let s = factory_assurance::suggestion::Filing {
+            run_id: "r".into(),
+            task_id: "t".into(),
+            scope: scope.into(),
+            agent: agent.into(),
+            harness: "shell".into(),
+            session_id: None,
+            usage: None,
+            kind: factory_assurance::suggestion::SuggestionKind::Capability,
+            target: "x".into(),
+            summary: "y".into(),
+            detail: None,
+            wasted_tokens: None,
+        }
+        .file(id.into(), chrono::Utc::now());
+        e.suggestions.put(&s).await.unwrap();
+    }
+
+    /// `#275`: `suggestion.task` is the same door `scenario.promote` and
+    /// `quality.remediate` open -- `Grant::TaskCreate`, checked against the
+    /// scope the *suggestion* was filed from (never the root scope the
+    /// improvement task actually lands in, which is the improver's to
+    /// hold, not the caller's).
+    #[tokio::test]
+    async fn suggestion_task_needs_task_create_in_the_scope_the_suggestion_was_filed_from() {
+        let e = engine_with_roles("roles:\n  remediator:\n    grants: [task.create]\n    reach: scope\n");
+        seed_suggestion(&e, "s-demo", "demo", "w").await;
+        seed_suggestion(&e, "s-other", "other", "w").await;
+
+        let in_scope = Caller::Agent { scope: "demo".into(), name: "w".into(), role: Role::new("remediator"), run_id: None };
+        assert!(
+            allowed(&e, &in_scope, Request::SuggestionTask { ids: vec!["s-demo".into()] }).await,
+            "a role holding task.create may escalate a suggestion filed in its own scope"
+        );
+        assert!(
+            !allowed(&e, &in_scope, Request::SuggestionTask { ids: vec!["s-other".into()] }).await,
+            "the same grant does not reach a suggestion filed in a scope this caller does not work in"
+        );
+        assert!(
+            !allowed(&e, &worker("w"), Request::SuggestionTask { ids: vec!["s-demo".into()] }).await,
+            "a role without task.create is refused"
+        );
+        assert!(allowed(&e, &Caller::Owner, Request::SuggestionTask { ids: vec!["s-other".into()] }).await);
+    }
+
+    /// `suggestion.dismiss`/`suggestion.done` need `task.close`, with the
+    /// same reach rule a task's own close/reopen gets: `scope` reaches any
+    /// suggestion in it, `own` only the one the caller itself filed.
+    #[tokio::test]
+    async fn suggestion_dismiss_and_done_need_task_close_and_respect_own_reach() {
+        let e = engine_with_roles(
+            "roles:\n  closer:\n    grants: [task.close]\n    reach: own\n  scope-closer:\n    grants: [task.close]\n    reach: scope\n",
+        );
+        seed_suggestion(&e, "s-own", "demo", "w").await;
+
+        let filed_it = Caller::Agent { scope: "demo".into(), name: "w".into(), role: Role::new("closer"), run_id: None };
+        let someone_else = Caller::Agent { scope: "demo".into(), name: "not-w".into(), role: Role::new("closer"), run_id: None };
+        let scoped = Caller::Agent { scope: "demo".into(), name: "not-w".into(), role: Role::new("scope-closer"), run_id: None };
+
+        assert!(
+            allowed(&e, &filed_it, Request::SuggestionDismiss { id: "s-own".into(), reason: "r".into() }).await,
+            "own reach covers the suggestion this exact agent filed"
+        );
+        assert!(
+            !allowed(&e, &someone_else, Request::SuggestionDone { id: "s-own".into() }).await,
+            "own reach does not cover a suggestion filed by somebody else"
+        );
+        assert!(
+            allowed(&e, &scoped, Request::SuggestionDone { id: "s-own".into() }).await,
+            "scope reach covers any suggestion filed in the caller's own scope"
+        );
+        assert!(
+            !allowed(&e, &worker("w"), Request::SuggestionDismiss { id: "s-own".into(), reason: "r".into() }).await,
+            "a role without task.close is refused"
         );
     }
 

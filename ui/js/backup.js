@@ -37,6 +37,7 @@ import {
   nextDrillText,
   rowVerifyState,
   scheduleText,
+  scopeIncludeRows,
   timeMachineText,
   verifiedCell,
 } from "./backup-model.js";
@@ -144,6 +145,22 @@ function codeSection(report) {
   </section>`;
 }
 
+/// `#279`: a scope's own declared `backup.include` directories -- never
+/// shown when nothing declares one, the same as the Code table never
+/// claiming a scope it was not told about.
+function scopeDataSection(report) {
+  const rows = scopeIncludeRows(report);
+  if (!rows.length) return "";
+  const body = rows.map(r => `<tr>
+      <td>${esc(r.scope)}</td>
+      <td class="bk-path"><code>${esc(r.path)}</code></td>
+      <td class="bk-${r.level}">${esc(r.text)}</td>
+    </tr>`).join("");
+  return `<section class="bk-section"><h3>Scope data <span class="sub">a scope's own data outside git, resolved fresh on every report</span></h3>
+    <div class="bk-scroll"><table><thead><tr><th>Scope</th><th>Path</th><th>Newest snapshot</th></tr></thead><tbody>${body}</tbody></table></div>
+  </section>`;
+}
+
 function history(report) {
   const rows = report.snapshots || [];
   if (!report.config) return "";
@@ -211,7 +228,14 @@ export function renderBackup() {
     return;
   }
   page.hidden = false;
-  page.innerHTML = [hero(report), warningStrip(report.warnings), codeSection(report), history(report), contents(report)].join("");
+  page.innerHTML = [
+    hero(report),
+    warningStrip(report.warnings),
+    codeSection(report),
+    scopeDataSection(report),
+    history(report),
+    contents(report),
+  ].join("");
   for (const b of page.querySelectorAll("[data-verify]")) {
     b.onclick = () => confirmVerify(b.dataset.verify);
   }

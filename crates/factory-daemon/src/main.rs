@@ -50,6 +50,7 @@ mod service_observations;
 mod schedule;
 mod site;
 mod stores;
+mod suggestions;
 #[cfg(test)]
 mod storage_owner_tests;
 #[cfg(test)]
@@ -195,6 +196,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         environments: Vec::new(),
         renewals: Vec::new(),
         metrics: None,
+        backup: None,
     };
     let config = Config {
         version: 1,
@@ -324,6 +326,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let workflow_store = workflows::WorkflowStore::open(&factory.database_path())?;
     let bench_store = bench::BenchStore::open(&factory.database_path())?;
     let policy_store = policies::PolicyStore::open(&factory.database_path())?;
+    let suggestion_store = suggestions::SuggestionStore::open(&factory.database_path())?;
     let run_evidence_store =
         factory_process::evidence_store::RunEvidenceStore::open(&factory.database_path())?;
     let goals_store = goals::GoalsStore::open(&factory.database_path())?;
@@ -337,6 +340,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
             .with_workflow_store(workflow_store)
             .with_bench_store(bench_store)
             .with_policy_store(policy_store)
+            .with_suggestion_store(suggestion_store)
             .with_run_evidence_store(run_evidence_store)
             .with_goals_store(goals_store)
             .with_backup_store(backup_store)

@@ -23,7 +23,7 @@ test("L5 Improvement's Quality tab follows Knowledge, and the level's sub-label 
   assert.ok(knowledge < quality, "Knowledge, then Quality");
   assert.match(page, /<span class="lv-sub">Benchmarks, knowledge and quality<\/span>/);
   assert.match(page, /<span class="lv-sub">Goals, budget, policy, scenarios<\/span>/);
-  assert.match(wiring, /imp:\s*\["benchmarks",\s*"knowledge",\s*"quality"\]/);
+  assert.match(wiring, /imp:\s*\["benchmarks",\s*"knowledge",\s*"quality",\s*"suggestions"\]/);
   assert.doesNotMatch(wiring, /dir:\s*\[[^\]]*"quality"/, "Quality left Direction");
   assert.match(wiring, /quality:\s*\{\s*onShow:\s*loadQuality\s*\}/);
 });

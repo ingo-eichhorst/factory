@@ -8,6 +8,14 @@ use factory_agents::role::{RoleOrigin, RoleSpec};
 use factory_agents::runtime::{RuntimeConnectionDiagnostic, Screen};
 use factory_assurance::benchmark::Configuration;
 use factory_assurance::knowledge::{Document, Finding, Gap, Page, Refusal, Tag};
+// `pub use`, unlike the plain knowledge/benchmark imports above: CLI value
+// parsers (`factory task suggest --kind`, `factory suggestion list --state`)
+// need `SuggestionKind`/`SuggestionState` nameable through
+// `factory_core::protocol::*`'s glob re-export, the same canonical path
+// `QualityReport` is reachable through.
+pub use factory_assurance::suggestion::{
+    self, Suggestion, SuggestionKind, SuggestionReport, SuggestionState,
+};
 use factory_composition::building::{Activity, Cues, RepoMetrics, Shape};
 use factory_composition::config::ScopeAgent;
 use factory_environment::dependencies::{
@@ -231,6 +239,17 @@ pub enum Request {
         kind: AttachmentKind,
         filename: String,
         bytes: Vec<u8>,
+    },
+    /// `#275`: file a suggestion -- friction or an improvement idea -- on
+    /// this task's active run. Authenticated the same way `TaskReport` is,
+    /// by the run token carried in `suggestion.token`, and needs no grant:
+    /// see `access::needs`'s comment on this one non-read `Needs::Nothing`
+    /// arm. Factory fills in run, task, scope, agent, harness, session and
+    /// usage itself; the agent states only `suggestion`'s own fields.
+    #[serde(rename = "task.suggest")]
+    TaskSuggest {
+        id: String,
+        suggestion: SuggestionReport,
     },
     /// A harness's lifecycle hook saying the agent's turn ended. Its own
     /// request rather than a kind of `TaskReport`, so nothing can mistake the
@@ -915,6 +934,61 @@ pub enum Request {
         #[serde(default)]
         agent: Option<String>,
     },
+    /// `#275`: the L5 Improvement Suggestions tab and `factory suggestion
+    /// list`. Every filed suggestion matching the filters, newest first,
+    /// plus the same set folded by target -- `scope: None` is the whole
+    /// instance, a scope narrows to it and its descendants, the same
+    /// subtree rule `Request::Quality` follows. Read-only, computed fresh.
+    #[serde(rename = "suggestions")]
+    Suggestions {
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        kind: Option<SuggestionKind>,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        state: Option<SuggestionState>,
+    },
+    /// One suggestion by id.
+    #[serde(rename = "suggestion.get")]
+    SuggestionGet { id: String },
+    /// Create the improvement task that answers one suggestion, or a whole
+    /// target group -- the only way a suggestion becomes work
+    /// (`AGENTS.md`'s "Factory never creates a task from a suggestion on
+    /// its own"). Needs `task.create`, the same door `Request::
+    /// QualityRemediate` and `Request::PolicyRemediate` open, checked
+    /// against the scope the suggestion(s) were filed from -- never the
+    /// root scope the task actually lands in, which is the improver's, not
+    /// the caller's to hold a grant over. Refused, naming it, when the
+    /// instance declares no improvement agent (`daemon.improvement_agent`)
+    /// or that agent is not in the root scope's roster -- never silently
+    /// assigned to whichever agent complained.
+    #[serde(rename = "suggestion.task")]
+    SuggestionTask {
+        /// One suggestion, or every id in a group -- `SuggestionGroup::ids`.
+        ids: Vec<String>,
+    },
+    /// Dismiss a suggestion with a reason. Refused once it is already
+    /// `dismissed` or `done`.
+    #[serde(rename = "suggestion.dismiss")]
+    SuggestionDismiss { id: String, reason: String },
+    /// Mark a suggestion done. Refused once it is already `dismissed` or
+    /// `done`.
+    #[serde(rename = "suggestion.done")]
+    SuggestionDone { id: String },
+    /// Ask the agent that filed a suggestion a follow-up question
+    /// (`#275`'s "Ask the agent", building on session resumption, `#178`):
+    /// Factory starts a continuation run of the originating task that
+    /// resumes its recorded session with the question, the same way
+    /// `factory task run --continue` would, and the answer is recorded on
+    /// the suggestion once that run reports. Refused -- never silently
+    /// falling back to a fresh session -- when the task has a run in
+    /// progress, or the harness cannot resume (no session was recorded, the
+    /// adapter declares no resume, or the previous session is not confirmed
+    /// gone).
+    #[serde(rename = "suggestion.ask")]
+    SuggestionAsk { id: String, question: String },
     /// `#106`: the L4 Line tab and `factory stats` -- what needs a
     /// human now, where work is stuck, and how the line has been running
     /// over `window`. A read projection over tasks, runs, standing agents
@@ -1421,6 +1495,23 @@ pub enum Payload {
     /// The answer to `Request::QualityRemediate` -- see `QualityRemediation`.
     QualityRemediate {
         result: QualityRemediation,
+    },
+    /// `#275`: the answer to `Request::Suggestions` -- see
+    /// `suggestion::Report`.
+    Suggestions {
+        report: suggestion::Report,
+    },
+    /// One suggestion by itself: `Request::SuggestionGet`'s answer, and
+    /// what `Request::SuggestionDismiss`, `Request::SuggestionDone` and
+    /// `Request::SuggestionAsk` answer with too, each already carrying the
+    /// state change (or the recorded question) it just made.
+    Suggestion {
+        suggestion: Suggestion,
+    },
+    /// The answer to `Request::SuggestionTask`: the created improvement
+    /// task, already linked back to every suggestion named in `ids`.
+    SuggestionTask {
+        task: Task,
     },
     /// The L4 Line tab -- see `factory_core::operations::OperationsReport`.
     /// Boxed: the report is several times the size of every other payload,

@@ -33,3 +33,5 @@ pub mod signposts;
 pub mod quality;
 pub mod quality_inputs;
 pub mod remediation;
+pub mod suggestion;
+pub mod suggestion_store;

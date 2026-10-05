@@ -92,6 +92,7 @@
   <button id="tab-benchmarks" hidden>Benchmarks</button>
   <button id="tab-knowledge" hidden>Knowledge</button>
   <button id="tab-quality" hidden>Quality</button>
+  <button id="tab-suggestions" hidden>Suggestions</button>
   <button id="tab-infrastructure" hidden>Infrastructure</button>
   <button id="tab-doctor" hidden>Doctor</button>
   <button id="tab-environments" hidden>Operations</button>
@@ -985,6 +986,39 @@
       <div id="knowledge-findings"></div>
       <div class="empty" id="knowledge-no-findings" hidden>No findings.</div>
     </section>
+  </div>
+
+  <div id="view-suggestions" hidden>
+    <div class="bar">
+      <h2>Suggestions</h2>
+      <span class="sub" id="suggestions-count"></span>
+      <span class="sp"></span>
+      <label class="sub">Kind
+        <select id="suggestions-kind" aria-label="Filter by kind">
+          <option value="">any</option>
+          <option value="capability">capability</option>
+          <option value="docs">docs</option>
+          <option value="spec">spec</option>
+          <option value="process">process</option>
+          <option value="entity">entity</option>
+          <option value="other">other</option>
+        </select>
+      </label>
+      <label class="sub">State
+        <select id="suggestions-state" aria-label="Filter by state">
+          <option value="">any</option>
+          <option value="open">open</option>
+          <option value="tasked">tasked</option>
+          <option value="dismissed">dismissed</option>
+          <option value="done">done</option>
+        </select>
+      </label>
+      <input type="search" id="suggestions-query" placeholder="Search target, summary, scope…" aria-label="Filter suggestions by text">
+      <button class="btn" id="suggestions-refresh">Refresh</button>
+    </div>
+    <p class="env-note bad" id="suggestions-error" hidden></p>
+    <div class="empty" id="suggestions-empty" hidden>No suggestions. An agent files one with <code>factory task suggest</code> while a run is active.</div>
+    <div id="suggestions-groups"></div>
   </div>
 
   <div id="view-infrastructure" hidden>
