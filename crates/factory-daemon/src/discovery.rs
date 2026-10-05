@@ -8,7 +8,9 @@
 //! `DEPTH_LIMIT` prevents an unfamiliar tree from becoming unbounded. A
 //! `.factory` directory is inspected as a marker but never traversed: the
 //! instance root's runtime state and a scope's configuration are not scopes
-//! beneath that scope.
+//! beneath that scope. A linked git worktree is not traversed either: it is a
+//! second checkout of a repository the walk already covers, so any scope
+//! config inside it is a copy with the same stable id.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -74,12 +76,31 @@ pub fn walk(root: &Path, entry_cap: usize) -> Vec<PathBuf> {
             let Ok(meta) = entry.metadata() else {
                 continue;
             };
-            if meta.is_dir() {
+            if meta.is_dir() && !is_linked_worktree(&entry.path()) {
                 queue.push_back((entry.path(), depth + 1));
             }
         }
     }
     found
+}
+
+/// A linked git worktree -- `git worktree add`, or a tool that makes one for
+/// an agent, such as Claude Code's `.claude/worktrees/<agent>` -- is a second
+/// checkout of a repository, never a scope of its own. "Git worktrees are
+/// workspaces, not scopes." Its `.factory/config.yaml` is a copy carrying the
+/// same stable id, and walking into it refuses the daemon's start as a
+/// duplicate scope. Git marks one with a `.git` *file* whose `gitdir:` names
+/// `<repo>/.git/worktrees/<name>`. A submodule's names `.git/modules/<name>`
+/// instead, and a clone's `.git` is a directory; both are still walked.
+fn is_linked_worktree(dir: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(dir.join(".git")) else {
+        return false;
+    };
+    text.lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))
+        .and_then(|gitdir| Path::new(gitdir.trim()).parent())
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "worktrees")
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -320,6 +341,57 @@ mod tests {
 
         let found = rel(&s.path(), &walk(&s.path(), ENTRY_CAP));
         assert_eq!(found, vec!["real"]);
+    }
+
+    /// A linked worktree holds copies of the scopes it checks out. Walking
+    /// into one refused the company daemon's start on 2026-10-05 as a
+    /// duplicate scope id (`.claude/worktrees/<agent>/finance`).
+    fn link_worktree(s: &Scratch, rel: &str) {
+        let dir = s.path().join(rel);
+        fs::create_dir_all(&dir).unwrap();
+        let gitdir = s.path().join(".git/worktrees").join(dir.file_name().unwrap());
+        fs::write(dir.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+    }
+
+    #[test]
+    fn the_walk_skips_linked_worktrees_but_not_submodules_or_clones() {
+        let s = Scratch::new("worktrees");
+        s.write_scope("finance", "scope: { id: finance-id, name: finance }");
+        link_worktree(&s, ".claude/worktrees/agent-a13db78e");
+        s.write_scope(
+            ".claude/worktrees/agent-a13db78e/finance",
+            "scope: { id: finance-id, name: finance }",
+        );
+        link_worktree(&s, "worktrees/topic");
+        s.write_scope("worktrees/topic", "scope: { id: topic-copy, name: topic }");
+        // A submodule's `.git` file names `.git/modules/<name>`, and a
+        // clone's `.git` is a directory: both are real checkouts and walked.
+        fs::create_dir_all(s.path().join("sub")).unwrap();
+        fs::write(s.path().join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
+        s.write_scope("sub", "scope: { id: sub-id, name: sub }");
+        fs::create_dir_all(s.path().join("clone/.git")).unwrap();
+        s.write_scope("clone", "scope: { id: clone-id, name: clone }");
+
+        assert_eq!(
+            rel(&s.path(), &walk(&s.path(), ENTRY_CAP)),
+            vec!["clone", "finance", "sub"]
+        );
+    }
+
+    #[test]
+    fn a_scope_copied_into_a_linked_worktree_does_not_refuse_the_start() {
+        let s = Scratch::new("worktree-duplicate");
+        s.write_scope("finance", "scope: { id: finance-id, name: finance }");
+        link_worktree(&s, ".claude/worktrees/agent-a13db78e");
+        s.write_scope(
+            ".claude/worktrees/agent-a13db78e/finance",
+            "scope: { id: finance-id, name: finance }",
+        );
+
+        let mut f = factory(&s.path(), None);
+        apply(&mut f).unwrap();
+        let names: Vec<&str> = f.config.scopes.iter().map(|scope| scope.name.as_str()).collect();
+        assert_eq!(names, vec!["finance"]);
     }
 
     #[test]
