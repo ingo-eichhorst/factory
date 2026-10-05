@@ -2,7 +2,7 @@
 //! compliance/Quality evaluation and numeric projection. The outside router
 //! supplies raw authored L6 subjects/limits, never reports or computed values.
 use crate::{
-    checks::{self, EvaluationSubject},
+    checks::{self, Check, CheckSource, EvaluationSubject, MetricEvidence},
     evaluation_rollup::{self, StatusCounts},
     evidence::{self, BudgetIntent},
     metrics::{
@@ -78,6 +78,16 @@ pub struct PolicyInputs {
 }
 pub type QualityBudgets = std::result::Result<BTreeMap<String, BudgetIntent>, String>;
 
+/// `#278` phase 2: what a policy `check: metric` needs to read a value --
+/// the instance root and every scope's plain `scope.metrics` declaration,
+/// the same raw pair [`Plan::prepare`] takes. Authored input only, never a
+/// computed value; see [`Service::check_metrics`].
+#[derive(Debug, Clone, Default)]
+pub struct CheckMetricInputs {
+    pub root: PathBuf,
+    pub reported: reported::Configuration,
+}
+
 pub struct Plan {
     resolved: Vec<(MetricId, std::result::Result<MetricDef, &'static str>)>,
     computing: Vec<(MetricId, std::result::Result<MetricDef, &'static str>)>,
@@ -86,6 +96,10 @@ pub struct Plan {
     /// -- computed fresh in [`Plan::prepare`] from the plain input handed
     /// in, never cached across calls.
     catalogue: reported::Catalogue,
+    /// `#278` phase 2: the raw inputs this plan was prepared from, kept so
+    /// a `compliance.*`/`open_controls.*` read can hand a policy control's
+    /// `check: metric` the same declarations ([`Service::check_metrics`]).
+    check_inputs: CheckMetricInputs,
     scope: Option<String>,
     members: BTreeSet<String>,
 }
@@ -133,7 +147,7 @@ impl Plan {
         let quality = if needs_quality {
             Some(
                 quality
-                    .read(root, canonical_scope.as_deref(), false)
+                    .read(root.clone(), canonical_scope.as_deref(), false)
                     .await
                     .map_err(|e| e.to_string()),
             )
@@ -164,6 +178,10 @@ impl Plan {
             computing,
             quality,
             catalogue,
+            check_inputs: CheckMetricInputs {
+                root,
+                reported: reported.clone(),
+            },
             scope: canonical_scope,
             members,
         })
@@ -224,6 +242,12 @@ impl<'a, P: Ports> Service<'a, P> {
     pub fn new(evidence: evidence::Service<'a, P>) -> Self {
         Self { evidence }
     }
+    /// The evidence service this one wraps -- `check_evaluation` gathers a
+    /// control's other evidence through it, and its metric values through
+    /// [`Service::check_metrics`].
+    pub(crate) fn evidence(&self) -> &evidence::Service<'a, P> {
+        &self.evidence
+    }
     pub async fn gather(
         &self,
         plan: &Plan,
@@ -234,6 +258,7 @@ impl<'a, P: Ports> Service<'a, P> {
         let mut gathered = self.gather_measurements(plan, now, window).await?;
         if plan.needs_policy() {
             self.gather_policy(
+                plan,
                 &mut gathered,
                 policy.ok_or_else(|| {
                     FactoryError::BadRequest("policy metric declarations were not resolved".into())
@@ -377,13 +402,98 @@ impl<'a, P: Ports> Service<'a, P> {
     }
     pub async fn gather_policy(
         &self,
+        plan: &Plan,
         gathered: &mut Gathered,
         inputs: &PolicyInputs,
     ) -> Result<()> {
-        gathered.policy = Some(self.policy_measurements(inputs).await?);
+        gathered.policy = Some(
+            self.policy_measurements(&plan.check_inputs, inputs)
+                .await?,
+        );
         Ok(())
     }
-    async fn policy_measurements(&self, inputs: &PolicyInputs) -> Result<PolicyMeasurements> {
+
+    /// `#278` phase 2: every metric an applicable `check: metric` in
+    /// `applied` names, read live for `scope`'s own subtree -- the same
+    /// rule every other check kind follows, so a control's status at a
+    /// scope never depends on which report asked. `None` when no check
+    /// names one: never gathered, like every other lazy fact.
+    ///
+    /// Only an id `metrics::resolve` knows that is not circular
+    /// (`checks::is_circular_metric`) is asked for -- a refused or unknown
+    /// one reads `open` in `checks::direct_status` without any read, and an
+    /// unknown id would fail `Plan::prepare`, and with it the whole report.
+    /// Since nothing circular is ever asked for, this never evaluates a
+    /// policy control or a quality scenario itself. A `reported.*` source's
+    /// file is read once per call, and only when its declaring scope is in
+    /// `scope`'s subtree (`gather_measurements`).
+    pub async fn check_metrics(
+        &self,
+        inputs: &CheckMetricInputs,
+        scope: &ScopeNode,
+        applied: &[impl CheckSource],
+        now: DateTime<Utc>,
+    ) -> Result<Option<BTreeMap<MetricId, MetricEvidence>>> {
+        let named: BTreeSet<&MetricId> = applied
+            .iter()
+            .flat_map(CheckSource::checks)
+            .filter_map(|check| match check {
+                Check::Metric { metric, .. } => Some(metric),
+                _ => None,
+            })
+            .collect();
+        if named.is_empty() {
+            return Ok(None);
+        }
+        let ids: Vec<MetricId> = named
+            .into_iter()
+            .filter(|id| {
+                !checks::is_circular_metric(id)
+                    && !matches!(metrics::resolve(id), Err(MetricError::Unknown(_)))
+            })
+            .cloned()
+            .collect();
+        if ids.is_empty() {
+            return Ok(Some(BTreeMap::new()));
+        }
+        let plan = Plan::prepare(
+            &ids,
+            inputs.root.clone(),
+            &self.evidence.scopes,
+            &quality_inputs::Configuration::default(),
+            &inputs.reported,
+            Some(&scope.name),
+        )
+        .await?;
+        let gathered = self.gather_measurements(&plan, now, None).await?;
+        let computed = self
+            .finish(&plan, gathered, &Ok(BTreeMap::new()), now, None)
+            .await?;
+        // `resolve`'s own `better` for a `reported.*` id is a placeholder;
+        // the scope's declaration is the only real answer, and an id no
+        // scope declares has none.
+        let declared = reported::directions(&plan.catalogue);
+        Ok(Some(
+            computed
+                .values
+                .into_iter()
+                .map(|value| {
+                    let better = if value.id.as_str().starts_with("reported.") {
+                        declared.get(value.id.as_str()).copied()
+                    } else {
+                        metrics::resolve(&value.id).ok().map(|def| def.better)
+                    };
+                    (value.id.clone(), MetricEvidence { value, better })
+                })
+                .collect(),
+        ))
+    }
+
+    async fn policy_measurements(
+        &self,
+        check_inputs: &CheckMetricInputs,
+        inputs: &PolicyInputs,
+    ) -> Result<PolicyMeasurements> {
         let tags = Provide::<KnowledgeTags>::get(&self.evidence.own, &())
             .await?
             .tags;
@@ -396,7 +506,7 @@ impl<'a, P: Ports> Service<'a, P> {
         let shared = self.evidence.shared(&targets).await?;
         let mut per_scope = Vec::new();
         for scope in &inputs.scopes {
-            let evidence = self
+            let mut evidence = self
                 .evidence
                 .for_scope(
                     &scope.scope,
@@ -407,6 +517,9 @@ impl<'a, P: Ports> Service<'a, P> {
                     scope.budget.as_ref(),
                     now,
                 )
+                .await?;
+            evidence.metrics = self
+                .check_metrics(check_inputs, &scope.scope, &scope.subjects, now)
                 .await?;
             per_scope.push(checks::evaluate(&scope.subjects, &evidence, now));
         }

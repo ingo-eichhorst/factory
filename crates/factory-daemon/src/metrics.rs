@@ -57,7 +57,7 @@ impl Engine {
         let mut gathered = service.gather_measurements(&plan, now, window).await?;
         if plan.needs_policy() {
             let policy = self.metric_policy_inputs(&snapshot, plan.scope()).await?;
-            service.gather_policy(&mut gathered, &policy).await?;
+            service.gather_policy(&plan, &mut gathered, &policy).await?;
             self.metric_policy_preflight(&snapshot, plan.scope(), !policy.scopes.is_empty())
                 .await?;
         }
@@ -198,6 +198,18 @@ impl Engine {
     }
 }
 pub(crate) use factory_direction::goals_service::metric_ids as goals_metric_ids;
+
+/// `#278` phase 2: what a policy `check: metric` reads its value with --
+/// the instance root and [`reported_configuration`], fresh per call, the
+/// same raw pair `metrics_service::Plan::prepare` is handed.
+pub(crate) fn check_metric_inputs(
+    snapshot: &factory_core::config::Factory,
+) -> factory_assurance::metrics_service::CheckMetricInputs {
+    factory_assurance::metrics_service::CheckMetricInputs {
+        root: snapshot.root.clone(),
+        reported: reported_configuration(snapshot),
+    }
+}
 
 /// `#278`: outside-stack projection of every scope's current plain
 /// `scope.metrics` declaration -- the `quality_configuration` shape for

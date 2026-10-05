@@ -330,6 +330,19 @@ impl<'de> Deserialize<'de> for Measure {
                 .as_mapping()
                 .is_some_and(|m| m.contains_key(serde_yaml_ng::Value::String(key.into())))
         };
+        // `check: metric` is a policy control's evidence kind (`#278`); a
+        // quality measure already names a metric directly, and a second
+        // spelling of the same thing would only be two ways to drift.
+        let check_metric = value
+            .as_mapping()
+            .and_then(|m| m.get(serde_yaml_ng::Value::String("check".into())))
+            .and_then(serde_yaml_ng::Value::as_str)
+            == Some("metric");
+        if check_metric {
+            return Err(D::Error::custom(
+                "`check: metric` is a policy control's evidence kind; a quality measure names the metric itself: `{ metric: <id>, above: <n> }`",
+            ));
+        }
         match (has("metric"), has("check")) {
             (true, false) => serde_yaml_ng::from_value(value).map(Measure::Metric).map_err(D::Error::custom),
             (false, true) => serde_yaml_ng::from_value(value).map(Measure::Check).map_err(D::Error::custom),
@@ -1662,6 +1675,14 @@ pub fn gathered(check: &Check, evidence: &Evidence) -> bool {
         }),
         Check::Dependencies { .. } => evidence.dependencies.is_some(),
         Check::Attested { .. } => evidence.attested.is_some(),
+        // A quality measure never parses as one (`Measure`'s own
+        // deserializer refuses `check: metric`); a value that could not be
+        // computed is missing evidence, not a failing product.
+        Check::Metric { metric, .. } => evidence
+            .metrics
+            .as_ref()
+            .and_then(|read| read.get(metric))
+            .is_some_and(|found| found.value.value.is_some_and(f64::is_finite)),
     }
 }
 

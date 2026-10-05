@@ -464,6 +464,7 @@ mod tests {
                 root_policies: serde_yaml_ng::from_str("frameworks: [cra, practices]").unwrap(),
                 root_name: Some("company".into()),
                 instance_name: "instance".into(),
+                reported_directions: Default::default(),
             };
             Service::new(policy_intent::Service::new(
                 self.root.clone(),

@@ -1,6 +1,7 @@
 //! L5's sole live check evaluator. Inputs are command declarations and
 //! current L0 facts; no status table or persisted evidence log is introduced.
 use crate::conformance::{AttestedRun, ConformanceEvidence, StepEvidence};
+use crate::metrics::{self, Better, MetricError, MetricId, MetricValue};
 use chrono::{DateTime, Utc};
 use factory_kernel::BenchVerdict as Verdict;
 pub use factory_kernel::DaemonConfigFact as DaemonFact;
@@ -112,6 +113,72 @@ pub enum Check {
         step: String,
         max_age: Duration,
     },
+    /// `#278` phase 2: a registry metric (`crate::metrics`, the one Goals,
+    /// Quality and Scenarios read) held to one threshold, judged exactly
+    /// like a quality `MetricMeasure` -- the bound is inclusive, a value
+    /// whose `as_of` is older than the control's effective `max_age` is
+    /// `stale`, and a value of `None` is `open` with the metric's own
+    /// reason. Exactly one of `above`/`below`, and it has to agree with the
+    /// metric's direction: `above` where higher is better, `below` where
+    /// lower is -- for a `reported.*` metric, the `better` its scope
+    /// declared. Values are read live for the evaluated scope's own subtree
+    /// ([`Evidence::metrics`]). A metric computed from L6 verdicts is
+    /// refused as circular ([`is_circular_metric`]).
+    Metric {
+        metric: MetricId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        above: Option<Threshold>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        below: Option<Threshold>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_age: Option<Duration>,
+    },
+}
+
+/// A `metric` check's bound. `Check` -- and every catalogue type holding
+/// one -- derives `Eq`, which a plain `f64` cannot; this compares bit
+/// patterns, so equality stays reflexive even for a `.nan` an author wrote
+/// (which [`check_vocabulary`] reports and `direct_status` reads as `open`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Threshold(pub f64);
+
+impl PartialEq for Threshold {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+impl Eq for Threshold {}
+
+impl std::fmt::Display for Threshold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Whether `metric` is computed from L6 verdicts -- `compliance.<framework>`
+/// and `open_controls.<framework>` from policy controls' own statuses,
+/// `quality.<characteristic>` from quality scenarios' -- and so can never be
+/// a `metric` check's evidence. `compliance.*`/`open_controls.*` would
+/// evaluate the very control being judged; `quality.*` is a verdict
+/// rollup, not a measurement, and is already refused for quality's own
+/// measures (`quality::is_quality_metric`) for the same reason.
+pub fn is_circular_metric(metric: &MetricId) -> bool {
+    matches!(
+        metric.as_str().split('.').next(),
+        Some("compliance" | "open_controls" | "quality")
+    )
+}
+
+/// What a `metric` check found about its own metric: the value read for the
+/// evaluated scope, and which way is better -- `None` when nothing
+/// declares one (a `reported.*` id no scope declares), so that check never
+/// guesses a direction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricEvidence {
+    pub value: MetricValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub better: Option<Better>,
 }
 
 /// The `daemon` check's fixed vocabulary -- everything else `DaemonConfig`
@@ -152,6 +219,7 @@ impl Check {
             Check::Daemon { .. } => "daemon",
             Check::BudgetWithin => "budget_within",
             Check::Attested { .. } => "attested",
+            Check::Metric { .. } => "metric",
         }
     }
 
@@ -163,7 +231,8 @@ impl Check {
         match self {
             Check::Task { max_age, .. }
             | Check::Workflow { max_age, .. }
-            | Check::Gate { max_age, .. } => *max_age,
+            | Check::Gate { max_age, .. }
+            | Check::Metric { max_age, .. } => *max_age,
             Check::Dependencies { sbom_max_age, .. } => *sbom_max_age,
             Check::Attested { max_age, .. } => Some(*max_age),
             _ => None,
@@ -251,6 +320,24 @@ impl Check {
             } => {
                 format!("attested: {category}/{step} (max_age {max_age})")
             }
+            Check::Metric {
+                metric,
+                above,
+                below,
+                max_age,
+            } => {
+                let mut parts = vec![format!("metric {metric}")];
+                if let Some(a) = above {
+                    parts.push(format!(">= {a}"));
+                }
+                if let Some(b) = below {
+                    parts.push(format!("<= {b}"));
+                }
+                if let Some(age) = max_age {
+                    parts.push(format!("(max_age {age})"));
+                }
+                parts.join(" ")
+            }
         }
     }
 }
@@ -294,6 +381,18 @@ pub enum VocabularyFinding {
     UnknownDaemonFact,
     UnknownSecretsLocation,
     BadCheckTarget,
+    /// A `metric` check names a metric computed from L6 verdicts
+    /// ([`is_circular_metric`]).
+    CircularMetric,
+    /// A `metric` check names a metric `metrics::resolve` does not know, or
+    /// one it knows but cannot compute yet.
+    UnknownMetric,
+    /// A `metric` check without exactly one of `above`/`below`, or with a
+    /// bound that is not a finite number.
+    BadThreshold,
+    /// A `metric` check's bound runs against its metric's direction:
+    /// `above` where lower is better, `below` where higher is.
+    WrongDirection,
 }
 
 pub use factory_kernel::EvidenceFinding;
@@ -336,7 +435,96 @@ pub fn check_vocabulary(check: &Check) -> Vec<(VocabularyFinding, String)> {
             }
             findings
         }
+        Check::Metric {
+            metric,
+            above,
+            below,
+            ..
+        } => metric_check_vocabulary(metric, *above, *below),
         _ => Vec::new(),
+    }
+}
+
+/// A `metric` check's own load-time findings. The direction is checked
+/// here only for a built-in metric: `metrics::resolve`'s `better` for a
+/// `reported.*` id is a placeholder with no access to the scope's own
+/// declaration, so that one is judged by whoever holds the live
+/// declaration (L6's catalogue read) and, always, by `direct_status`.
+fn metric_check_vocabulary(
+    metric: &MetricId,
+    above: Option<Threshold>,
+    below: Option<Threshold>,
+) -> Vec<(VocabularyFinding, String)> {
+    if is_circular_metric(metric) {
+        return vec![(
+            VocabularyFinding::CircularMetric,
+            format!("names metric {metric}, which is computed from policy or quality verdicts and so cannot be evidence for a control"),
+        )];
+    }
+    let mut findings = Vec::new();
+    let better = match metrics::resolve(metric) {
+        Ok(def) => (!metric.as_str().starts_with("reported.")).then_some(def.better),
+        Err(MetricError::Unknown(_)) => {
+            findings.push((
+                VocabularyFinding::UnknownMetric,
+                format!("names unknown metric {metric}"),
+            ));
+            None
+        }
+        Err(MetricError::Unavailable { reason, .. }) => {
+            findings.push((
+                VocabularyFinding::UnknownMetric,
+                format!("names metric {metric}, which is not available yet: {reason}"),
+            ));
+            None
+        }
+    };
+    match threshold_problem(metric, above, below) {
+        Some(problem) => findings.push((VocabularyFinding::BadThreshold, problem)),
+        None => {
+            if let Some(problem) = better.and_then(|b| direction_problem(metric, above, below, b)) {
+                findings.push((VocabularyFinding::WrongDirection, problem));
+            }
+        }
+    }
+    findings
+}
+
+/// Why a `metric` check's bounds cannot judge anything, if they cannot:
+/// not exactly one bound, or one that is not a finite number (`.nan`
+/// compares false both ways and would read as met every time).
+fn threshold_problem(
+    metric: &MetricId,
+    above: Option<Threshold>,
+    below: Option<Threshold>,
+) -> Option<String> {
+    match (above, below) {
+        (None, None) => Some(format!("measures {metric} with neither `above` nor `below`")),
+        (Some(_), Some(_)) => Some(format!(
+            "measures {metric} with both `above` and `below`; a control's threshold names exactly one"
+        )),
+        (Some(t), None) | (None, Some(t)) if !t.0.is_finite() => Some(format!(
+            "measures {metric} with a bound that is not a finite number"
+        )),
+        _ => None,
+    }
+}
+
+/// Why a `metric` check's one bound runs against `better`, if it does.
+fn direction_problem(
+    metric: &MetricId,
+    above: Option<Threshold>,
+    below: Option<Threshold>,
+    better: Better,
+) -> Option<String> {
+    match (better, above, below) {
+        (Better::Lower, Some(a), _) => Some(format!(
+            "holds {metric} `above: {a}`, but lower is better for it -- use `below`"
+        )),
+        (Better::Higher, _, Some(b)) => Some(format!(
+            "holds {metric} `below: {b}`, but higher is better for it -- use `above`"
+        )),
+        _ => None,
     }
 }
 
@@ -434,6 +622,14 @@ pub struct Evidence {
     /// Authored configuration goes down; raw spend stays an L4 fact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<crate::budget::PolicyInput>,
+    /// `#278` phase 2: every metric an applicable `metric` check names,
+    /// read live for the evaluated scope's own subtree by
+    /// `metrics_service::Service::check_metrics` -- see [`Check::Metric`].
+    /// `None` means "never gathered", the same as `daemon`/`attested`;
+    /// gathered lazily, only when some applicable control names one. A
+    /// circular or unknown id is never asked for, so it is never a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<BTreeMap<MetricId, MetricEvidence>>,
 }
 
 // =============================================================== evaluate
@@ -1075,6 +1271,16 @@ fn direct_status<K>(
                     }
                 }
             }
+            Check::Metric {
+                metric,
+                above,
+                below,
+                ..
+            } => match metric_status(metric, *above, *below, evidence, applied.max_age, now) {
+                (StatusKind::Satisfied, reason) => satisfied.push(reason),
+                (StatusKind::Stale, reason) => stale.push(reason),
+                (_, reason) => open.push(reason),
+            },
         }
     }
 
@@ -1093,6 +1299,85 @@ fn direct_status<K>(
         )
     } else {
         (Status::Open { reasons: open }, open_refs)
+    }
+}
+
+/// One `metric` check's verdict -- `Satisfied`, `Stale` or `Open` -- and
+/// its reason, in the order a quality `MetricMeasure` is judged in
+/// (`quality::evaluate`), with a control's own refusals ahead of it: a
+/// circular metric, a bound that cannot judge, an unknown metric, and a
+/// bound against the metric's direction are each `open` whatever the value
+/// says. Then `value: None` is `open` with the metric's own reason; an
+/// `as_of` older than `max_age` -- the control's effective window -- is
+/// `stale` before the bound is even looked at; and the bound is inclusive.
+fn metric_status(
+    metric: &MetricId,
+    above: Option<Threshold>,
+    below: Option<Threshold>,
+    evidence: &Evidence,
+    max_age: Option<Duration>,
+    now: DateTime<Utc>,
+) -> (StatusKind, String) {
+    let open = |reason: String| (StatusKind::Open, format!("metric: {reason}"));
+    if is_circular_metric(metric) {
+        return open(format!(
+            "{metric} is computed from policy or quality verdicts, so it cannot be evidence for a control"
+        ));
+    }
+    if let Some(problem) = threshold_problem(metric, above, below) {
+        return open(problem);
+    }
+    match metrics::resolve(metric) {
+        Err(MetricError::Unknown(_)) => return open(format!("{metric} is not a known metric")),
+        Err(MetricError::Unavailable { reason, .. }) => {
+            return open(format!("{metric} is not available yet: {reason}"))
+        }
+        Ok(_) => {}
+    }
+    let Some(read) = evidence.metrics.as_ref() else {
+        return open(format!("not resolved for {metric}"));
+    };
+    let Some(found) = read.get(metric) else {
+        return open(format!("no value for {metric}"));
+    };
+    if let Some(problem) = found
+        .better
+        .and_then(|better| direction_problem(metric, above, below, better))
+    {
+        return open(problem);
+    }
+    let as_of = found.value.as_of;
+    let v = match found.value.value {
+        Some(v) if v.is_finite() => v,
+        Some(v) => return open(format!("{metric} could not be computed: {v} is not a finite number")),
+        None => {
+            return open(format!(
+                "{metric} could not be computed: {}",
+                found.value.reason.as_deref().unwrap_or("no reason given")
+            ))
+        }
+    };
+    if !within_max_age(max_age, as_of, now) {
+        return (
+            StatusKind::Stale,
+            format!(
+                "metric: {metric} = {v} as of {as_of}, older than {}",
+                max_age.expect("stale only ever follows a max_age")
+            ),
+        );
+    }
+    match (above, below) {
+        (Some(a), _) if v < a.0 => open(format!("{metric} = {v} as of {as_of}, below the required {a}")),
+        (_, Some(b)) if v > b.0 => open(format!("{metric} = {v} as of {as_of}, above the allowed {b}")),
+        (Some(a), _) => (
+            StatusKind::Satisfied,
+            format!("metric: {metric} = {v} as of {as_of}, at or above {a}"),
+        ),
+        (_, Some(b)) => (
+            StatusKind::Satisfied,
+            format!("metric: {metric} = {v} as of {as_of}, at or below {b}"),
+        ),
+        (None, None) => unreachable!("threshold_problem refuses a check with no bound"),
     }
 }
 

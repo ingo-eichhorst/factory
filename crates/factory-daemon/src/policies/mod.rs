@@ -75,6 +75,16 @@ impl Engine {
                     .as_ref()
                     .map(|scope| scope.name.clone()),
                 instance_name: snapshot.config.instance.name.clone(),
+                // `#278` phase 2: the direction each scope declared for its
+                // own reported metrics, so a `check: metric`'s bound is
+                // judged against it when the catalogues load -- the same
+                // fresh read Goals' wrong-direction check makes.
+                reported_directions: factory_assurance::reported::directions(
+                    &factory_assurance::reported::validate(
+                        &snapshot.root,
+                        &crate::metrics::reported_configuration(snapshot),
+                    ),
+                ),
             },
             &self.policies,
         )

@@ -457,6 +457,10 @@ impl<'a, P: Ports> Service<'a, P> {
             backup: shared.backup.clone(),
             attested,
             budget,
+            // Metric values come from the metrics service, which wraps this
+            // one -- `metrics_service::Service::check_metrics` fills this in
+            // after `for_scope` returns, only when a check names a metric.
+            metrics: None,
         })
     }
 
@@ -1821,7 +1825,10 @@ mod tests {
             budgets: Ok(vec![None, None]),
             now: Some(time()),
         };
-        let provider = Provider::new(owner);
+        let provider = Provider::new(
+            crate::metrics_service::Service::new(owner),
+            Default::default(),
+        );
         let facts = Facts::<L6>::new();
         let first = facts
             .get::<CheckEvaluationFact, _>(&provider, &read)
@@ -1886,7 +1893,10 @@ mod tests {
             )),
             now: None,
         };
-        let provider = Provider::new(owner);
+        let provider = Provider::new(
+            crate::metrics_service::Service::new(owner),
+            Default::default(),
+        );
         let facts = Facts::<L6>::new();
         *recorder.failing.lock().unwrap() = Some("daemon");
         assert_eq!(
@@ -1940,7 +1950,10 @@ mod tests {
         let host = subject(vec![Check::Daemon {
             fact: "foreman_enabled".into(),
         }]);
-        let provider = Provider::new(owner);
+        let provider = Provider::new(
+            crate::metrics_service::Service::new(owner),
+            Default::default(),
+        );
         let mut read = ComparisonRead {
             primary: Read {
                 scopes: vec![ScopeInput {

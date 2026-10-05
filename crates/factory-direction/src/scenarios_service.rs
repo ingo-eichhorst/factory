@@ -1305,6 +1305,7 @@ mod tests {
                 root_policies: serde_yaml_ng::from_str("frameworks: [house]").unwrap(),
                 root_name: Some("root".into()),
                 instance_name: "example".into(),
+                reported_directions: Default::default(),
             };
             Service::new(
                 policy_intent::Service::new(self.root.clone(), config, &self.receipts),

@@ -107,6 +107,12 @@ pub struct Configuration {
     pub root_policies: PolicyDeclaration,
     pub root_name: Option<String>,
     pub instance_name: String,
+    /// `#278` phase 2: every `reported.<source>.<metric>` id a scope
+    /// declares, with the direction it declared -- the plain input
+    /// [`Service::catalogues`] judges a `check: metric`'s bound against
+    /// (`policy::reported_direction_findings`). Empty means nothing is
+    /// judged, never that everything is wrong.
+    pub reported_directions: BTreeMap<String, factory_assurance::metrics::Better>,
 }
 impl Configuration {
     fn root_layer(&self) -> Option<policy::PolicyLayer> {
@@ -154,9 +160,17 @@ impl<'a> Service<'a> {
 
     pub async fn catalogues(&self) -> Result<(Vec<policy::Catalogue>, Vec<policy::Finding>)> {
         let directory = policy::policies_dir(&self.root);
-        tokio::task::spawn_blocking(move || policy::load_all(&directory))
-            .await
-            .map_err(|error| FactoryError::Other(anyhow::anyhow!("policy catalogue walk: {error}")))
+        let (catalogues, mut findings) =
+            tokio::task::spawn_blocking(move || policy::load_all(&directory))
+                .await
+                .map_err(|error| {
+                    FactoryError::Other(anyhow::anyhow!("policy catalogue walk: {error}"))
+                })?;
+        findings.extend(policy::reported_direction_findings(
+            &catalogues,
+            &self.config.reported_directions,
+        ));
+        Ok((catalogues, findings))
     }
 
     /// Select current authored requirements in L6, then read the actual L5
@@ -365,6 +379,7 @@ mod tests {
             root_policies: declaration("frameworks: [cra]"),
             root_name: Some("company".into()),
             instance_name: "instance".into(),
+            reported_directions: Default::default(),
         }
     }
     const CATALOGUE: &str = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: a\n    title: A\n    max_age: 30d\n    evidence: [{check: attestation}]\n";

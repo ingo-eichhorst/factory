@@ -231,6 +231,20 @@ pub enum FindingKind {
     /// `category`/`RequiredStep::step`, so the check can never be
     /// satisfied. `#158`.
     BadCheckTarget,
+    /// A `metric` check names `compliance.*`, `open_controls.*` or
+    /// `quality.*` -- a metric computed from policy or quality verdicts,
+    /// which can never be a control's evidence (`#278`). Always `open`.
+    CircularMetric,
+    /// A `metric` check names a metric the registry does not know, or one
+    /// it cannot compute yet. Always `open`.
+    UnknownMetric,
+    /// A `metric` check without exactly one of `above`/`below`, or with a
+    /// bound that is not a finite number. Always `open`.
+    BadThreshold,
+    /// A `metric` check's bound runs against its metric's direction --
+    /// `above` where lower is better, `below` where higher is; for a
+    /// `reported.*` metric, the `better` its scope declared. Always `open`.
+    WrongDirection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,10 +279,67 @@ pub fn check_vocabulary(check: &Check) -> Vec<(FindingKind, String)> {
                 VocabularyFinding::UnknownDaemonFact => FindingKind::UnknownDaemonFact,
                 VocabularyFinding::UnknownSecretsLocation => FindingKind::UnknownSecretsLocation,
                 VocabularyFinding::BadCheckTarget => FindingKind::BadCheckTarget,
+                VocabularyFinding::CircularMetric => FindingKind::CircularMetric,
+                VocabularyFinding::UnknownMetric => FindingKind::UnknownMetric,
+                VocabularyFinding::BadThreshold => FindingKind::BadThreshold,
+                VocabularyFinding::WrongDirection => FindingKind::WrongDirection,
             };
             (kind, detail)
         })
         .collect()
+}
+
+/// `#278` phase 2: every `metric` check on a `reported.<source>.<metric>`
+/// id whose bound runs against the direction its scope declared --
+/// `above` where lower is better, `below` where higher is. [`load_all`]
+/// cannot tell (`check_vocabulary` only knows a built-in metric's
+/// direction; `metrics::resolve` has no access to a live declaration), so
+/// a caller holding one (`policy_intent::Service::catalogues`) adds these.
+/// An id `declared` has nothing for is never judged either way, the same
+/// rule Goals' own wrong-direction check keeps
+/// (`goals::load_with_reported_directions`). Evaluation refuses such a
+/// check `open` regardless (`checks::direct_status`).
+pub fn reported_direction_findings(
+    catalogues: &[Catalogue],
+    declared: &BTreeMap<String, factory_assurance::metrics::Better>,
+) -> Vec<Finding> {
+    use factory_assurance::metrics::Better;
+    let mut findings = Vec::new();
+    for catalogue in catalogues {
+        for control in &catalogue.controls {
+            for check in &control.evidence {
+                let Check::Metric {
+                    metric,
+                    above,
+                    below,
+                    ..
+                } = check
+                else {
+                    continue;
+                };
+                let wrong = match (declared.get(metric.as_str()), above, below) {
+                    (Some(Better::Lower), Some(a), None) => {
+                        Some(format!("`above: {a}`, but its scope declares lower is better -- use `below`"))
+                    }
+                    (Some(Better::Higher), None, Some(b)) => {
+                        Some(format!("`below: {b}`, but its scope declares higher is better -- use `above`"))
+                    }
+                    _ => None,
+                };
+                if let Some(wrong) = wrong {
+                    findings.push(Finding {
+                        kind: FindingKind::WrongDirection,
+                        subject: format!("{}.yaml", catalogue.framework),
+                        detail: format!(
+                            "{}/{} holds {metric} {wrong}",
+                            catalogue.framework, control.id
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    findings
 }
 
 /// Load every `<framework>.yaml` in `dir`. A missing directory is empty, not

@@ -716,8 +716,9 @@ mod tests {
         let producer = include_str!("../../../factory-assurance/src/check_evaluation.rs");
         for required in [
             "Provide<CheckEvaluationFact>",
-            "self.evidence.shared",
+            "evidence().shared",
             ".for_scope(",
+            ".check_metrics(",
             "checks::evaluate",
             "checks::evidence_findings",
         ] {

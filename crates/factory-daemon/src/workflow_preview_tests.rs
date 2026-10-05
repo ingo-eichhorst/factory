@@ -52,6 +52,7 @@ impl Fixture {
                 root_policies: Default::default(),
                 root_name: None,
                 instance_name: "instance".into(),
+                reported_directions: Default::default(),
             },
             &self.receipts,
         ))
