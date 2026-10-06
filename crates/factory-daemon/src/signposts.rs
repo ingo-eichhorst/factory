@@ -60,11 +60,11 @@ impl Engine {
         )
         .await?;
         let policy = if plan.needs_policy() {
-            Some(self.metric_policy_inputs(&snapshot, None).await?)
+            Some(self.l6_service().metric_policy_inputs(&snapshot, None).await?)
         } else {
             None
         };
-        let budgets = self.metric_quality_budgets(&snapshot, &plan).await;
+        let budgets = self.l6_service().metric_quality_budgets(&snapshot, &plan).await;
         Facts::<People>::new(self)
             .get::<SignpostFact>(&Read {
                 now,

@@ -85,7 +85,7 @@ pub(crate) async fn task_snapshot(engine: &Engine, id: String) -> Result<Task> {
 type Process<'a> = factory_process::creation::Service<'a, factory_agents::selection::Service<'a>>;
 type Inventory<'a> = factory_process::facts::Provider<'a>;
 type Assurance<'a> = factory_assurance::remediation::Service<Process<'a>, Inventory<'a>>;
-type Direction<'a> = factory_direction::remediation::Service<Assurance<'a>, Inventory<'a>>;
+pub(crate) type Direction<'a> = factory_direction::remediation::Service<Assurance<'a>, Inventory<'a>>;
 
 pub(crate) fn assurance<'a>(engine: &'a Engine, observer: &'a CreationObserver) -> Assurance<'a> {
     Assurance {

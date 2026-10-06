@@ -68,6 +68,60 @@ impl<'a, R: Reader> Facts<'a, R> {
     }
 }
 
+/// What a level service is handed to reach the rest of the daemon while provider
+/// construction still takes `&Engine` (#193 phase 6; S12 replaces this with the
+/// services' own handles). The `Engine` is private to this type: a service holding a
+/// `Wiring` can read the configuration, build the typed fact providers and the
+/// adjacent command services, and publish events, but it cannot name another
+/// level's state.
+#[derive(Clone, Copy)]
+pub(crate) struct Wiring<'a> {
+    engine: &'a Engine,
+}
+impl<'a> Wiring<'a> {
+    pub(crate) fn new(engine: &'a Engine) -> Self {
+        Self { engine }
+    }
+    /// The live configuration snapshot (shared by every level).
+    pub(crate) fn snapshot(&self) -> factory_core::config::Factory {
+        self.engine.factory_snapshot()
+    }
+    /// The observer bus: events are published here, never read as evidence.
+    pub(crate) fn bus(&self) -> &'a factory_core::event::EventBus {
+        &self.engine.shared.bus
+    }
+    /// The producing level's live provider for `F`.
+    pub(crate) fn provider<F: Port>(&self) -> F::Provider<'a> {
+        F::provider(self.engine)
+    }
+    /// The checked fact read for a reader.
+    pub(crate) fn facts<R: Reader>(&self) -> Facts<'a, R> {
+        Facts::new(self.engine)
+    }
+    /// The command chain below L6 (L6 -> L5 -> L4 -> L3).
+    pub(crate) fn direction<'o>(
+        &self,
+        observer: &'o crate::commands::CreationObserver,
+    ) -> crate::commands::Direction<'o>
+    where
+        'a: 'o,
+    {
+        crate::commands::direction(self.engine, observer)
+    }
+    /// A created task as the legacy wire payload, composed beside the ladder.
+    pub(crate) async fn task_snapshot(&self, id: String) -> Result<factory_core::task::Task> {
+        crate::commands::task_snapshot(self.engine, id).await
+    }
+    /// The L5 check-evidence service over this wiring's providers (tests only).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn check_service(
+        &self,
+        scopes: factory_kernel::ScopeTree,
+    ) -> factory_assurance::evidence::Service<'a, checks::Ports<'a>> {
+        checks::service(self.engine, scopes)
+    }
+}
+
 macro_rules! port {
     ($fact:ty, $provider:ty, $query:ty, $value:ty, $construct:path) => {
         impl Port for $fact {
@@ -1308,7 +1362,7 @@ mod tests {
                 "Scenarios logic remains outside: {forbidden}"
             );
         }
-        assert!(compact_wiring.contains("crate::commands::task_snapshot(self,entry.task.id)"));
+        assert!(compact_wiring.contains("self.wiring.task_snapshot(entry.task.id)"));
         assert!(compact_wiring.contains("ifprovider.policy_was_gathered()"));
         let provider = include_str!("../../../factory-assurance/src/check_evaluation.rs");
         let _: fn(

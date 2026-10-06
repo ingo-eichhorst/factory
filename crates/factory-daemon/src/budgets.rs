@@ -1,5 +1,7 @@
 //! L6 monthly budget views over the single L4 spend fact port. Authored
 //! intent is re-read, not copied into a mutable aggregate or provider plan.
+use crate::l6_service::L6Service;
+#[cfg(test)]
 use crate::engine::Engine;
 #[cfg(test)]
 use crate::facts::Facts;
@@ -24,15 +26,15 @@ pub(crate) fn check_budget_intent(
     )
 }
 
-impl Engine {
+impl L6Service<'_> {
     pub(crate) async fn budget_report(
         &self,
         scope: Option<&str>,
         group_by: CostGroupBy,
         now: DateTime<Utc>,
     ) -> Result<budget::Report> {
-        let snapshot = self.factory_snapshot();
-        let provider = <CostReport as crate::facts::Port>::provider(self);
+        let snapshot = self.wiring.snapshot();
+        let provider = self.wiring.provider::<CostReport>();
         factory_direction::budget_service::Service::new(
             snapshot.root.clone(),
             snapshot.config.scopes.iter().map(budget_scope).collect(),

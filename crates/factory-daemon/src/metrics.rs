@@ -56,23 +56,13 @@ impl Engine {
         );
         let mut gathered = service.gather_measurements(&plan, now, window).await?;
         if plan.needs_policy() {
-            let policy = self.metric_policy_inputs(&snapshot, plan.scope()).await?;
+            let policy = self.l6_service().metric_policy_inputs(&snapshot, plan.scope()).await?;
             service.gather_policy(&mut gathered, &policy, &plan).await?;
-            self.metric_policy_preflight(&snapshot, plan.scope(), !policy.scopes.is_empty())
+            self.l6_service().metric_policy_preflight(&snapshot, plan.scope(), !policy.scopes.is_empty())
                 .await?;
         }
-        let budgets = self.metric_quality_budgets(&snapshot, &plan).await;
+        let budgets = self.l6_service().metric_quality_budgets(&snapshot, &plan).await;
         service.finish(&plan, gathered, &budgets, now, window).await
-    }
-
-    pub(crate) async fn metric_quality_budgets(
-        &self,
-        snapshot: &factory_core::config::Factory,
-        plan: &factory_assurance::metrics_service::Plan,
-    ) -> factory_assurance::metrics_service::QualityBudgets {
-        self.policy_intent_service(snapshot)
-            .quality_budgets(&plan.quality_budget_ids())
-            .await
     }
 
     /// The default `ids` for `Request::Metrics` when a caller's own list is
@@ -3088,7 +3078,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let budgets = engine.metric_quality_budgets(&snapshot, &plan).await;
+        let budgets = engine.l6_service().metric_quality_budgets(&snapshot, &plan).await;
         let query = factory_assurance::metric_values::Read {
             plan,
             policy: Ok(policy),

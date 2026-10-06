@@ -1806,7 +1806,7 @@ impl Engine {
         let role_name = self.effective_role(&task.scope, &agent_name).await;
         let role = self.roles_for(&task.scope).get(&role_name).cloned();
         let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.policy_chain(&task.scope));
-        let goal = self.goal_context(factory.root.clone(), task.labels.get("goal").cloned()).await;
+        let goal = self.l6_service().goal_context(factory.root.clone(), task.labels.get("goal").cloned()).await;
         let quality = self.quality_context(&task.scope).await;
         let probe = agent.health_probe();
         let version = probe.as_ref().and_then(|probe| self.l3.harness.rows(
