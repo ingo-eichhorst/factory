@@ -5,7 +5,8 @@
 //! some do; those are listed in `BASELINE`, and that list may only shrink: a new
 //! violation fails the test, and so does a fixed one that is still listed (lower
 //! the number or delete the line). The same count applies to `Facts::<People>`,
-//! which belongs to the router and page composition, not to a level.
+//! which belongs to the router and page composition, not to a level (the
+//! `router/` files are that side, so they are exempt).
 //!
 //! This is textual, deliberately: the daemon is one crate, so cargo cannot
 //! enforce what the level crates already enforce between themselves. Test code
@@ -94,6 +95,14 @@ const OWNERS: &[(&str, Owner)] = &[
     ("scenarios/", L6),
     ("budgets.rs", L6),
     // The entry point, wiring and shared page-side code.
+    ("router/l1.rs", L1),
+    ("router/l2.rs", L2),
+    ("router/l3.rs", L3),
+    ("router/l4.rs", L4),
+    ("router/l5.rs", L5),
+    ("router/l6.rs", L6),
+    ("router/mod.rs", Wiring),
+    ("router/own.rs", Wiring),
     ("engine.rs", Wiring),
     ("access.rs", Wiring),
     ("main.rs", Wiring),
@@ -263,7 +272,8 @@ fn scan() -> Scan {
                 result.reach.insert((relative.clone(), group), count);
             }
         }
-        let people = people_reach(&code);
+        // The routers are the people-side of the entry point: they may read `Facts<People>`.
+        let people = if relative.starts_with("router/") { 0 } else { people_reach(&code) };
         if people > 0 {
             result.people.insert(relative.clone(), people);
         }
