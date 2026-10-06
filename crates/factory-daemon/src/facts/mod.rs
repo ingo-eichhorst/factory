@@ -999,7 +999,7 @@ mod tests {
         let compact: String = wiring.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(compact.contains("factory_kernel::Facts::<R>::new().get::<F,_>"));
         assert!(!compact.contains("F::provider(self.engine).get(query)"));
-        let router = include_str!("../engine.rs")
+        let router = include_str!("../router/l4.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
@@ -1428,8 +1428,8 @@ mod tests {
 
     #[test]
     fn sandbox_service_evidence_uses_l2_ownership_and_people_composition() {
-        let engine = include_str!("../engine.rs");
-        let branch = engine
+        let l2_router = include_str!("../router/l2.rs");
+        let branch = l2_router
             .split("Request::Dependencies { scope } =>")
             .nth(1)
             .unwrap()
