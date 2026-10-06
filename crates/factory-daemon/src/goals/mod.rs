@@ -2,7 +2,11 @@
 //! Current raw identities and actual L5 providers are constructed here;
 //! authored catalogue interpretation, scoring and check-ins stay in L6.
 mod store;
-use crate::{access::Caller, engine::Engine};
+use crate::{access::Caller, l6_service::L6Service};
+#[cfg(test)]
+use crate::engine::Engine;
+#[cfg(test)]
+use std::sync::Arc;
 use chrono::Utc;
 #[cfg(test)]
 use factory_core::{
@@ -14,17 +18,16 @@ use factory_core::{
     goals::{CheckIn, KrRef},
     protocol::GoalsReport,
 };
-use std::sync::Arc;
 pub use store::GoalsStore;
 
-impl Engine {
+impl L6Service<'_> {
     pub(crate) async fn goals_report(
-        self: &Arc<Self>,
+        &self,
         scope: Option<&str>,
         cycle_id: Option<&str>,
     ) -> Result<GoalsReport> {
         let now = Utc::now();
-        let snapshot = self.factory_snapshot();
+        let snapshot = self.wiring.snapshot();
         // `#278`: every scope's own declared `reported.*` direction, so
         // the WrongDirection check judges a reported key result the same
         // way it already judges a built-in one. `metrics::resolve` cannot
@@ -40,7 +43,7 @@ impl Engine {
             snapshot.root.clone(),
             snapshot.scope_tree(),
             snapshot.config.scope.as_ref().map(|s| s.name.clone()),
-            &self.l6.goals,
+            &self.state.goals,
             reported_directions,
         );
         let plan = service.prepare(scope, cycle_id, now).await?;
@@ -72,7 +75,7 @@ impl Engine {
             now,
             window: None,
         };
-        let provider = <factory_kernel::MetricValuesFact as crate::facts::Port>::provider(self);
+        let provider = self.wiring.provider::<factory_kernel::MetricValuesFact>();
         let measured = plan.read_metrics(&provider, &query).await;
         // The old request ran these outside-only checks after policy gather
         // and before final metrics. Preserve their priority over a final-read
@@ -84,19 +87,19 @@ impl Engine {
         service.finish(measured?).await
     }
     pub(crate) async fn goals_checkin(
-        self: &Arc<Self>,
+        &self,
         caller: &Caller,
         kr: KrRef,
         value: f64,
         confidence: u8,
         note: Option<String>,
     ) -> Result<CheckIn> {
-        let snapshot = self.factory_snapshot();
+        let snapshot = self.wiring.snapshot();
         factory_direction::goals_service::Service::new(
             snapshot.root.clone(),
             snapshot.scope_tree(),
             snapshot.config.scope.as_ref().map(|s| s.name.clone()),
-            &self.l6.goals,
+            &self.state.goals,
             // A check-in only needs to find the key result and confirm it
             // is manual -- it never reads WrongDirection, so there is
             // nothing for a live direction map to change here.

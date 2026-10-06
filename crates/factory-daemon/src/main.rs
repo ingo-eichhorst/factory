@@ -3,6 +3,7 @@
 
 mod access;
 mod state;
+mod l6_service;
 #[cfg(test)]
 mod level_ownership_tests;
 mod artifacts;

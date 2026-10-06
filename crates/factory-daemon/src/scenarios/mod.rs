@@ -1,7 +1,11 @@
 //! Outside request wiring for the live L6 Scenarios owner. Only fresh raw
 //! declarations, physical providers, legacy metric error preflights and
 //! final task payload hydration remain beside the ladder.
-use crate::{engine::Engine, facts::Port};
+use crate::l6_service::L6Service;
+#[cfg(test)]
+use crate::engine::Engine;
+#[cfg(test)]
+use std::sync::Arc;
 use chrono::{DateTime, Utc};
 #[cfg(test)]
 use factory_core::protocol::ScenarioResult;
@@ -25,16 +29,16 @@ use factory_direction::scenarios_service::{
 use factory_kernel::TaskInventoryFact;
 #[cfg(test)]
 use std::collections::BTreeSet;
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 
-impl Engine {
-    fn scenarios_service<'a>(
-        &'a self,
+impl<'s> L6Service<'s> {
+    fn scenarios_service(
+        &self,
         snapshot: &Factory,
-    ) -> factory_direction::scenarios_service::Service<'a> {
+    ) -> factory_direction::scenarios_service::Service<'s> {
         factory_direction::scenarios_service::Service::new(
             self.policy_intent_service(snapshot),
-            &self.l6.goals,
+            &self.state.goals,
         )
     }
 
@@ -82,14 +86,14 @@ impl Engine {
     }
 
     pub(crate) async fn scenarios_report(
-        self: &Arc<Self>,
+        &self,
         scope: Option<&str>,
     ) -> Result<ScenariosReport> {
         let now = Utc::now();
-        let snapshot = self.factory_snapshot();
+        let snapshot = self.wiring.snapshot();
         let service = self.scenarios_service(&snapshot);
-        let knowledge = factory_kernel::KnowledgeTags::provider(self);
-        let inventory = factory_kernel::TaskInventoryFact::provider(self);
+        let knowledge = self.wiring.provider::<factory_kernel::KnowledgeTags>();
+        let inventory = self.wiring.provider::<factory_kernel::TaskInventoryFact>();
         let plan = service
             .prepare_report(scope, &knowledge, &inventory, now)
             .await?;
@@ -97,29 +101,29 @@ impl Engine {
         let (query, has_rows) = self
             .scenario_metric_query(&snapshot, plan.metric_ids(), now, plan.scope())
             .await?;
-        let provider = factory_kernel::MetricValuesFact::provider(self);
+        let provider = self.wiring.provider::<factory_kernel::MetricValuesFact>();
         let measured = plan.read_metrics(&provider, &query).await;
         if provider.policy_was_gathered() {
             self.metric_policy_preflight(&snapshot, selected_scope.as_deref(), has_rows)
                 .await?;
         }
-        let checks = factory_kernel::CheckEvaluationFact::provider(self);
-        let production = factory_kernel::ProductionFact::provider(self);
+        let checks = self.wiring.provider::<factory_kernel::CheckEvaluationFact>();
+        let production = self.wiring.provider::<factory_kernel::ProductionFact>();
         service.finish_report(measured?, &checks, &production).await
     }
 
     pub(crate) async fn scenario_whatif(
-        self: &Arc<Self>,
+        &self,
         scenario_name: Option<String>,
         raw_drivers: BTreeMap<DriverId, String>,
         scope: Option<&str>,
     ) -> Result<ScenarioWhatIfResult> {
         let now = Utc::now();
-        let snapshot = self.factory_snapshot();
+        let snapshot = self.wiring.snapshot();
         let service = self.scenarios_service(&snapshot);
-        let knowledge = factory_kernel::KnowledgeTags::provider(self);
-        let checks = factory_kernel::CheckEvaluationFact::provider(self);
-        let inventory = factory_kernel::TaskInventoryFact::provider(self);
+        let knowledge = self.wiring.provider::<factory_kernel::KnowledgeTags>();
+        let checks = self.wiring.provider::<factory_kernel::CheckEvaluationFact>();
+        let inventory = self.wiring.provider::<factory_kernel::TaskInventoryFact>();
         let plan = service
             .prepare_whatif(
                 scenario_name,
@@ -135,13 +139,13 @@ impl Engine {
         let (query, has_rows) = self
             .scenario_metric_query(&snapshot, plan.metric_ids(), now, plan.scope())
             .await?;
-        let provider = factory_kernel::MetricValuesFact::provider(self);
+        let provider = self.wiring.provider::<factory_kernel::MetricValuesFact>();
         let measured = plan.read_metrics(&provider, &query).await;
         if provider.policy_was_gathered() {
             self.metric_policy_preflight(&snapshot, selected_scope.as_deref(), has_rows)
                 .await?;
         }
-        let production = factory_kernel::ProductionFact::provider(self);
+        let production = self.wiring.provider::<factory_kernel::ProductionFact>();
         service.finish_whatif(measured?, &production).await
     }
 
@@ -152,11 +156,11 @@ impl Engine {
         agent: Option<String>,
     ) -> Result<ScenarioPromoteResult> {
         let now = Utc::now();
-        let snapshot = self.factory_snapshot();
-        let knowledge = factory_kernel::KnowledgeTags::provider(self);
-        let comparisons = factory_kernel::CheckComparisonFact::provider(self);
-        let observer = crate::commands::CreationObserver(self.shared.bus.clone());
-        let commands = crate::commands::direction(self, &observer);
+        let snapshot = self.wiring.snapshot();
+        let knowledge = self.wiring.provider::<factory_kernel::KnowledgeTags>();
+        let comparisons = self.wiring.provider::<factory_kernel::CheckComparisonFact>();
+        let observer = crate::commands::CreationObserver(self.wiring.bus().clone());
+        let commands = self.wiring.direction(&observer);
         let receipt = self
             .scenarios_service(&snapshot)
             .promote(
@@ -173,7 +177,7 @@ impl Engine {
         for entry in receipt.created {
             created.push(PromotedControl {
                 control: entry.control,
-                task: crate::commands::task_snapshot(self, entry.task.id).await?,
+                task: self.wiring.task_snapshot(entry.task.id).await?,
             });
         }
         Ok(ScenarioPromoteResult {
@@ -192,13 +196,13 @@ impl Engine {
     }
 
     #[cfg(test)]
-    async fn subtree_daily(
+    pub(crate) async fn subtree_daily(
         &self,
         asked: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<Vec<factory_core::protocol::ProductionBucket>> {
-        let snapshot = self.factory_snapshot();
-        let production = factory_kernel::ProductionFact::provider(self);
+        let snapshot = self.wiring.snapshot();
+        let production = self.wiring.provider::<factory_kernel::ProductionFact>();
         self.scenarios_service(&snapshot)
             .subtree_daily(&production, asked, now)
             .await

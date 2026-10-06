@@ -32,10 +32,14 @@ use factory_core::task::Task;
 use factory_kernel::SecretsPresence;
 #[cfg(test)]
 use factory_kernel::L6;
-use crate::facts::{Facts, TaskInventoryQuery};
+#[cfg(test)]
+use crate::facts::Facts;
+use crate::facts::TaskInventoryQuery;
 use factory_kernel::TaskInventoryFact;
 
 use crate::access::Caller;
+use crate::l6_service::L6Service;
+#[cfg(test)]
 use crate::engine::Engine;
 
 #[cfg(test)]
@@ -46,13 +50,13 @@ use factory_kernel::{TaskFact, DaemonConfigFact};
 use crate::facts::NamedQuery;
 
 
-impl Engine {
+impl<'s> L6Service<'s> {
     /// Outside-only construction from the current raw declarations and own
     /// L6 receipt store. No resolved chain, status or callback enters L6.
-    pub(crate) fn policy_intent_service<'a>(
-        &'a self,
+    pub(crate) fn policy_intent_service(
+        &self,
         snapshot: &Factory,
-    ) -> factory_direction::policy_intent::Service<'a> {
+    ) -> factory_direction::policy_intent::Service<'s> {
         use factory_direction::policy_intent::{Configuration, Scope, Service};
         Service::new(
             snapshot.root.clone(),
@@ -76,9 +80,20 @@ impl Engine {
                     .map(|scope| scope.name.clone()),
                 instance_name: snapshot.config.instance.name.clone(),
             },
-            &self.l6.policies,
+            &self.state.policies,
         )
     }
+    /// The authored budget caps a metric plan needs, as plain L5 input.
+    pub(crate) async fn metric_quality_budgets(
+        &self,
+        snapshot: &Factory,
+        plan: &factory_assurance::metrics_service::Plan,
+    ) -> factory_assurance::metrics_service::QualityBudgets {
+        self.policy_intent_service(snapshot)
+            .quality_budgets(&plan.quality_budget_ids())
+            .await
+    }
+
     /// Own catalogue read plus the L5 knowledge-tag port. Both filesystem
     /// walks stay off the async executor; providers own their fact reads.
     #[cfg(test)]
@@ -89,8 +104,8 @@ impl Engine {
         Vec<policy::Finding>,
         BTreeSet<String>,
     )> {
-        let snapshot = self.factory_snapshot();
-        let provider = <factory_kernel::KnowledgeTags as crate::facts::Port>::provider(self);
+        let snapshot = self.wiring.snapshot();
+        let provider = self.wiring.provider::<factory_kernel::KnowledgeTags>();
         self.policy_intent_service(&snapshot)
             .catalogues_with_tags(&provider)
             .await
@@ -102,7 +117,7 @@ impl Engine {
         &self,
         per_scope: &[(&Scope, Vec<S>)],
     ) -> Result<Option<factory_core::budget::PolicyConfig>> {
-        let snapshot = self.factory_snapshot();
+        let snapshot = self.wiring.snapshot();
         self.policy_intent_service(&snapshot)
             .budget_for(
                 &per_scope
@@ -135,7 +150,7 @@ impl Engine {
         has_rows: bool,
     ) -> Result<()> {
         if has_rows {
-            Facts::<factory_kernel::People>::new(self)
+            self.wiring.facts::<factory_kernel::People>()
                 .get::<TaskInventoryFact>(&TaskInventoryQuery::All)
                 .await?;
         }
@@ -157,7 +172,7 @@ impl Engine {
         Option<factory_core::budget::PolicyConfig>,
     )> {
         let targets: Vec<_> = per_scope_applied.iter().map(|(scope, applied)| (scope.name.as_str(), applied.as_slice())).collect();
-        let shared = crate::facts::checks::service(self, self.factory_snapshot().scope_tree()).shared(&targets).await?;
+        let shared = self.wiring.check_service(self.wiring.snapshot().scope_tree()).shared(&targets).await?;
         let budget = self.check_budget_config(per_scope_applied).await?;
         Ok((shared.gates, shared.daemon, shared.credentials, shared.backup, budget))
     }
@@ -165,29 +180,27 @@ impl Engine {
     async fn policy_workflow_enforcement(
         &self, snapshot: &Factory, scope: Option<&str>,
     ) -> Result<(Vec<WorkflowEnforcement>, Vec<WorkflowEnforcementFinding>)> {
-        use crate::facts::Port;
-        let blueprints = factory_kernel::WorkflowBlueprintFact::provider(self);
-        let preview = factory_kernel::WorkflowPreviewFact::provider(self);
+        let blueprints = self.wiring.provider::<factory_kernel::WorkflowBlueprintFact>();
+        let preview = self.wiring.provider::<factory_kernel::WorkflowPreviewFact>();
         self.policy_service(snapshot).workflow_enforcement(scope, &blueprints, &preview).await
     }
 
-    pub(crate) fn policy_service<'a>(
-        &'a self,
+    pub(crate) fn policy_service(
+        &self,
         snapshot: &Factory,
-    ) -> factory_direction::policy_service::Service<'a> {
+    ) -> factory_direction::policy_service::Service<'s> {
         factory_direction::policy_service::Service::new(self.policy_intent_service(snapshot))
     }
 
     /// Outside transport wiring; L6 owns the complete Policy read, including
     /// typed L5 previews at their historical final failure precedence.
     pub(crate) async fn policy_report(&self, scope: Option<&str>) -> Result<PolicyReport> {
-        use crate::facts::Port;
-        let snapshot = self.factory_snapshot();
-        let knowledge = factory_kernel::KnowledgeTags::provider(self);
-        let checks = factory_kernel::CheckEvaluationFact::provider(self);
-        let inventory = TaskInventoryFact::provider(self);
-        let blueprints = factory_kernel::WorkflowBlueprintFact::provider(self);
-        let preview = factory_kernel::WorkflowPreviewFact::provider(self);
+        let snapshot = self.wiring.snapshot();
+        let knowledge = self.wiring.provider::<factory_kernel::KnowledgeTags>();
+        let checks = self.wiring.provider::<factory_kernel::CheckEvaluationFact>();
+        let inventory = self.wiring.provider::<TaskInventoryFact>();
+        let blueprints = self.wiring.provider::<factory_kernel::WorkflowBlueprintFact>();
+        let preview = self.wiring.provider::<factory_kernel::WorkflowPreviewFact>();
         self
             .policy_service(&snapshot)
             .report_with_workflows(scope, &knowledge, &checks, &inventory, &blueprints, &preview)
@@ -199,11 +212,10 @@ impl Engine {
         control: ControlRef,
         scope: &str,
     ) -> Result<PolicyControlDetail> {
-        use crate::facts::Port;
-        let snapshot = self.factory_snapshot();
-        let knowledge = factory_kernel::KnowledgeTags::provider(self);
-        let checks = factory_kernel::CheckEvaluationFact::provider(self);
-        let inventory = TaskInventoryFact::provider(self);
+        let snapshot = self.wiring.snapshot();
+        let knowledge = self.wiring.provider::<factory_kernel::KnowledgeTags>();
+        let checks = self.wiring.provider::<factory_kernel::CheckEvaluationFact>();
+        let inventory = self.wiring.provider::<TaskInventoryFact>();
         self.policy_service(&snapshot)
             .detail(control, scope, &knowledge, &checks, &inventory)
             .await
@@ -232,11 +244,10 @@ impl Engine {
         clock: Option<ClockMark>,
         corrective: Option<reporting_clock::CorrectiveMeasureMark>,
     ) -> Result<Attestation> {
-        use crate::facts::Port;
-        let snapshot = self.factory_snapshot();
-        let knowledge = factory_kernel::KnowledgeTags::provider(self);
-        let findings = factory_kernel::ExploitedFinding::provider(self);
-        let reports = factory_kernel::ConfirmedSecurityReport::provider(self);
+        let snapshot = self.wiring.snapshot();
+        let knowledge = self.wiring.provider::<factory_kernel::KnowledgeTags>();
+        let findings = self.wiring.provider::<factory_kernel::ExploitedFinding>();
+        let reports = self.wiring.provider::<factory_kernel::ConfirmedSecurityReport>();
         self.policy_service(&snapshot)
             .attest(
                 &caller_name(caller),
@@ -261,7 +272,7 @@ impl Engine {
         id: String,
         reason: Option<String>,
     ) -> Result<Attestation> {
-        let snapshot = self.factory_snapshot();
+        let snapshot = self.wiring.snapshot();
         self.policy_service(&snapshot)
             .withdraw(&caller_name(caller), id, reason)
             .await
@@ -283,7 +294,7 @@ impl Engine {
     /// match against `control`'s own `framework/id` spelling, never a
     /// title guess the way `task`/`workflow` checks have to fall back to.
     pub(crate) async fn policy_remediate(&self, control: ControlRef, scope: String, agent: Option<String>) -> Result<Task> {
-        let snapshot = self.factory_snapshot();
+        let snapshot = self.wiring.snapshot();
         let scope = snapshot.scope(&scope)?.name.clone();
         // Reuses the same evaluation `Request::PolicyControl` itself
         // answers with -- status, reasons, refs, the catalogue's own
@@ -291,11 +302,11 @@ impl Engine {
         // the catalogue and the evidence stores.
         let detail = self.policy_control(control.clone(), &scope).await?;
 
-        let observer = crate::commands::CreationObserver(self.shared.bus.clone());
-        let receipt = crate::commands::direction(self, &observer)
+        let observer = crate::commands::CreationObserver(self.wiring.bus().clone());
+        let receipt = self.wiring.direction(&observer)
             .policy(control, &scope, agent, &detail)
             .await?;
-        crate::commands::task_snapshot(self, receipt.id).await
+        self.wiring.task_snapshot(receipt.id).await
     }
 
     /// The non-terminal task in `scope` labelled `policy=<control>`, if one
@@ -303,9 +314,9 @@ impl Engine {
     /// `policy_control` reports as `open_task` (`#98`). An exact match on
     /// the label, never a title guess.
     #[cfg(test)]
-    async fn open_policy_task(&self, control: &ControlRef, scope: &str) -> Result<Option<TaskInventoryFact>> {
+    pub(crate) async fn open_policy_task(&self, control: &ControlRef, scope: &str) -> Result<Option<TaskInventoryFact>> {
         let label = control.to_string();
-        Ok(Facts::<L6>::new(self)
+        Ok(self.wiring.facts::<L6>()
             .get::<TaskInventoryFact>(&TaskInventoryQuery::Exact(scope.to_string()))
             .await?
             .into_iter()
@@ -321,9 +332,9 @@ impl Engine {
     /// only whichever one currently decides its status the way
     /// `ControlStatus.refs` does.
     pub(crate) async fn policy_export(&self, scope: Option<&str>) -> Result<policy_export::PolicyExport> {
-        let snapshot = self.factory_snapshot();
+        let snapshot = self.wiring.snapshot();
         let report = self.policy_report(scope).await?;
-        let all_attestations = self.l6.policies.all().await?;
+        let all_attestations = self.state.policies.all().await?;
 
         let mut attestations: BTreeMap<String, Vec<Attestation>> = BTreeMap::new();
         for row in &report.rows {

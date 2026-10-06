@@ -240,7 +240,7 @@ impl Engine {
         now: DateTime<Utc>,
     ) -> Result<(Vec<ScopeReport>, Vec<quality::Finding>)> {
         let per_scope_applied: Vec<_> = inputs.trees.iter().map(|(scope, tree)| (scope, quality::check_subjects(tree))).collect();
-        let budget = self.check_budget_config(&per_scope_applied).await?;
+        let budget = self.l6_service().check_budget_config(&per_scope_applied).await?;
         let scopes: Vec<_> = inputs.trees.iter().map(|(scope, tree)| factory_assurance::evidence::QualityScope {
             scope: factory_kernel::ScopeNode { name: scope.name.clone(), path: scope.path.clone() },
             tree,

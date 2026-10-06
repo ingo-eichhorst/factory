@@ -94,6 +94,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("goals/", L6),
     ("scenarios/", L6),
     ("budgets.rs", L6),
+    ("l6_service.rs", L6),
     // The entry point, wiring and shared page-side code.
     ("router/l1.rs", L1),
     ("router/l2.rs", L2),
@@ -134,6 +135,23 @@ const BASELINE: &[(&str, &str, usize)] = &[
     ("roles.rs", "l4", 1),
     ("secrets.rs", "l4", 2),
     ("suggestions.rs", "l4", 3),
+];
+
+/// A level service and the accessor that enters it (`engine.l6_service()`).
+struct ServiceEntry {
+    owner: Owner,
+    accessor: &'static str,
+}
+const SERVICES: &[ServiceEntry] = &[ServiceEntry { owner: L6, accessor: ".l6_service()" }];
+
+/// (file -> accessor, count): modules that reach into a level service from
+/// another level. Each is a pull the owning slice has to replace. May only shrink.
+const PULLS_BASELINE: &[(&str, usize)] = &[
+    ("metrics.rs -> .l6_service()", 3),
+    ("quality/mod.rs -> .l6_service()", 1),
+    ("renewals/mod.rs -> .l6_service()", 1),
+    ("signposts.rs -> .l6_service()", 2),
+    ("verification.rs -> .l6_service()", 2),
 ];
 
 /// Files that name `Facts::<People>` today (count). May only shrink.
@@ -227,7 +245,10 @@ fn group_reach(code: &str) -> BTreeMap<&'static str, usize> {
 }
 
 fn people_reach(code: &str) -> usize {
-    code.matches("Facts::<People>").count() + code.matches("Facts::<factory_kernel::People>").count()
+    ["Facts::<People>", "Facts::<factory_kernel::People>", ".facts::<People>", ".facts::<factory_kernel::People>"]
+        .iter()
+        .map(|needle| code.matches(needle).count())
+        .sum::<usize>()
 }
 
 fn level_group(owner: Owner) -> Option<&'static str> {
@@ -246,6 +267,7 @@ struct Scan {
     unplaced: Vec<String>,
     reach: BTreeMap<(String, &'static str), usize>,
     people: BTreeMap<String, usize>,
+    pulls: BTreeMap<String, usize>,
 }
 
 fn scan() -> Scan {
@@ -253,7 +275,7 @@ fn scan() -> Scan {
     let mut files = Vec::new();
     rust_files(&root, &mut files);
     files.sort();
-    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new() };
+    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new() };
     for file in files {
         let relative = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
         if is_test_file(&relative) {
@@ -267,6 +289,16 @@ fn scan() -> Scan {
             continue; // wiring and the entry point may reach any group
         };
         let code = production_code(&std::fs::read_to_string(&file).unwrap());
+        // A level service is entered by its router and by wiring. A lower level's
+        // module calling into it is a pull against the ladder.
+        for service in SERVICES {
+            if service.owner != owner {
+                let pulls = code.matches(service.accessor).count();
+                if pulls > 0 {
+                    result.pulls.insert(format!("{relative} -> {}", service.accessor), pulls);
+                }
+            }
+        }
         for (group, count) in group_reach(&code) {
             if group != own_group {
                 result.reach.insert((relative.clone(), group), count);
@@ -285,6 +317,10 @@ fn describe(scan: &Scan) -> String {
     let mut out = String::from("const BASELINE: &[(&str, &str, usize)] = &[\n");
     for ((file, group), count) in &scan.reach {
         out.push_str(&format!("    ({file:?}, {group:?}, {count}),\n"));
+    }
+    out.push_str("];\nconst PULLS_BASELINE: &[(&str, usize)] = &[\n");
+    for (file, count) in &scan.pulls {
+        out.push_str(&format!("    ({file:?}, {count}),\n"));
     }
     out.push_str("];\nconst PEOPLE_BASELINE: &[(&str, usize)] = &[\n");
     for (file, count) in &scan.people {
@@ -352,6 +388,26 @@ fn people_reads_stay_with_the_router_and_only_shrink() {
     for file in baseline.keys() {
         if !scan.people.contains_key(*file) {
             bad.push(format!("{file}: no longer reads Facts::<People>, remove it from PEOPLE_BASELINE"));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}\ncurrent state:\n{}", describe(&scan));
+}
+
+#[test]
+fn pulls_into_a_level_service_from_other_levels_only_shrink() {
+    let scan = scan();
+    let baseline: BTreeMap<&str, usize> = PULLS_BASELINE.iter().copied().collect();
+    let mut bad = Vec::new();
+    for (key, count) in &scan.pulls {
+        match baseline.get(key.as_str()) {
+            None => bad.push(format!("{key}: {count} calls, new")),
+            Some(allowed) if count != allowed => bad.push(format!("{key}: {count} calls, baseline {allowed}")),
+            _ => {}
+        }
+    }
+    for key in baseline.keys() {
+        if !scan.pulls.contains_key(*key) {
+            bad.push(format!("{key}: no longer called, remove it from PULLS_BASELINE"));
         }
     }
     assert!(bad.is_empty(), "{bad:#?}\ncurrent state:\n{}", describe(&scan));

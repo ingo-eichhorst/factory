@@ -102,7 +102,7 @@ impl Engine {
                     }));
             entries.push(date);
         }
-        let clock = self.policy_clock(scope).await?;
+        let clock = self.l6_service().policy_clock(scope).await?;
         for item in clock.items {
             for deadline in item.deadlines {
                 let mut observed = probes::observation(
