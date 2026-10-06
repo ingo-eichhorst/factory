@@ -56,9 +56,15 @@ daemon that cannot be reached is a warning. Set `FACTORY_RELEASE_SCOPE` if the
 scope is not called `factory`.
 
 `RELEASED` still holds the latest release for these scripts; the history is
-the daemon's. Once a daemon that reads `environments:` is installed, declare
-the two standing environments in the `factory` scope's
-`.factory/config.yaml`, so they are health-checked and carry an SLO:
+the daemon's. The two standing environments are declared in the `factory`
+scope's `.factory/config.yaml` (`~/business-factory/projects/factory/.factory/`,
+which is untracked: it is the company's config, not build output), so the
+company daemon health-checks them and they carry an SLO. A scope config is read
+only at daemon start: after editing it, restart the company daemon
+(`launchctl kickstart -k gui/$(id -u)/com.business-factory.daemon`) once no
+run is `running`. `envs.conf` stays the scripts' own table of port, release
+policy and mode; the daemon does not read it, so a new standing environment
+needs a line in both. The declaration in use:
 
 ```yaml
   environments:
@@ -66,14 +72,14 @@ the two standing environments in the `factory` scope's
       tier: production
       url: https://factory.taile2330c.ts.net:8790
       checks:
-        - { kind: http, path: /api/status, expect: 200, every: 60s, timeout: 5s }
+        - { name: status, kind: http, path: /api/status, expect: 200, body: '"instance":"production"', every: 60s, timeout: 5s, slow_after_ms: 2000 }
       slo: { availability: 99.5%, window: 28d }
     - name: staging
       tier: staging
       promotes_to: production
       url: https://factory.taile2330c.ts.net:8791
       checks:
-        - { kind: http, path: /api/status, expect: 200, every: 60s, timeout: 5s }
+        - { name: status, kind: http, path: /api/status, expect: 200, body: '"instance":"business-factory"', every: 60s, timeout: 5s, slow_after_ms: 2000 }
       slo: { availability: 99%, window: 28d }
 ```
 
