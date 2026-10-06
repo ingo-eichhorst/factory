@@ -722,7 +722,16 @@ impl HerdrRuntime {
     async fn close_tab_or_pane(&self, tab: &str, pane: &str) -> Result<()> {
         let _guard = self.workspace_lock.lock().await;
         if !tab.is_empty() {
-            self.run(&[s("tab"), s("close"), tab.to_string()]).await?;
+            // `tab_not_found` while closing means the tab is already gone
+            // (a sandboxed run's pane exits with its sandbox, and herdr
+            // drops the tab with it): the state `stop` asks for already
+            // holds, so it is a success, not a `stop_failed` (#274).
+            match self.run(&[s("tab"), s("close"), tab.to_string()]).await {
+                Err(e) if e.to_string().contains("tab_not_found") => {}
+                other => {
+                    other?;
+                }
+            }
         } else {
             self.run(&[s("pane"), s("close"), pane.to_string()]).await?;
         }
@@ -1758,6 +1767,30 @@ esac
 "#, dir = dir.display())).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
         (bin, dir)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_a_session_whose_tab_is_already_gone_succeeds() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("factory-herdr-gone-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("fake-herdr");
+        std::fs::write(&bin, r#"#!/bin/sh
+case "$1 $2" in
+  'tab close') if [ "$3" = w9:t9 ]; then printf '%s\n' '{"error":{"code":"other_failure"}}'; else printf '%s\n' '{"error":{"code":"tab_not_found","message":"no tab"}}'; fi; exit 1 ;;
+  *) exit 9 ;;
+esac
+"#).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+        let session = |tab: &str| SessionRef {
+            runtime: "herdr".into(), handle: "w1:p1".into(), meta: BTreeMap::from([("tab_id".to_string(), tab.to_string())]),
+        };
+        runtime.stop(&session("w1:t1")).await.expect("an already-closed tab is a successful stop");
+        let err = runtime.stop(&session("w9:t9")).await.expect_err("any other close failure still fails");
+        assert!(err.to_string().contains("other_failure"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[cfg(unix)]

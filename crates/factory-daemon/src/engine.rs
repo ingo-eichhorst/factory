@@ -115,12 +115,25 @@ pub(crate) struct ResumePlan {
     /// `Some` only when the task uses a worktree of its own and the previous
     /// run's is still there to reuse.
     workspace: Option<(PathBuf, String)>,
+    /// `#274`: the session id was read off the preserved sandbox
+    /// conversation, because the run itself never recorded one.
+    from_preserved: bool,
     /// `#274`: `Some` only for a sandboxed claude-code run whose preserved
     /// conversation `resolve_continue` matched against this dispatch --
     /// `preserved_dir` for the task, which `prepare_sandbox` uploads into
     /// the new sandbox before launch. `None` for every other resume, and
     /// for a sandboxed one that already fell back to fresh.
     sandbox_restore: Option<PathBuf>,
+}
+
+/// Whether a preserved conversation tree really holds `<session_id>.jsonl`
+/// (`projects/<cwd-dir>/<id>.jsonl`, the depth the preserve step reads).
+fn preserved_conversation_has(preserved_dir: &Path, session_id: &str) -> bool {
+    if session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.contains("..") {
+        return false;
+    }
+    let Ok(dirs) = std::fs::read_dir(preserved_dir.join("projects")) else { return false };
+    dirs.flatten().any(|dir| dir.path().join(format!("{session_id}.jsonl")).is_file())
 }
 
 /// Why a `schedule_skipped` entry's slots passed -- `data.reason` on the
@@ -1973,6 +1986,20 @@ impl Engine {
             initial_patch.resumed_session = Some(plan.session_id.clone());
         }
         let run = self.l4.store.update_run(&run.id, &initial_patch).await?;
+        if let Some(ContinueOutcome::Resume(plan)) = &continue_outcome {
+            if plan.from_preserved {
+                self.entry(
+                    task_id,
+                    TaskEntry::new(
+                        "daemon",
+                        "continue_session_source",
+                        format!("resuming session {}: session id from the preserved sandbox conversation (the previous run recorded none)", plan.session_id),
+                    )
+                    .in_run(&run.id),
+                )
+                .await;
+            }
+        }
         if let Some(ContinueOutcome::Fresh { reason }) = &continue_outcome {
             self.entry(
                 task_id,
@@ -2458,8 +2485,27 @@ impl Engine {
         // or -- failing that -- the session id a `turn-ended` hook recorded
         // on it. Never "the latest session in this directory" (rule 6).
         let snapshots = self.l4.store.usage_snapshots(&prev.id).await.unwrap_or_default();
-        let session_id = factory_core::usage::newest_session_id_for_adapter(&snapshots, adapter_name)
+        let mut session_id = factory_core::usage::newest_session_id_for_adapter(&snapshots, adapter_name)
             .or_else(|| prev.turn_ended_session_id.clone());
+        // `#274`: a sandboxed herdr run has no usage snapshots, and a run
+        // that timed out mid-turn never fired its `turn-ended` hook -- yet
+        // that is exactly the infrastructure failure `--continue` exists
+        // for. The preserve step did read the id off the conversation it
+        // saved, so take it from there, but only when that copy provably
+        // belongs to `prev`: the record names this run, and the
+        // `<session_id>.jsonl` it names is really in the preserved tree.
+        // This is not rule 6's "latest session in this directory": a run's
+        // sandbox HOME belongs to that run alone, so the one conversation
+        // in it is that run's, never another's.
+        let mut from_preserved = false;
+        if session_id.is_none() && sandboxed.is_some() {
+            let sessions_root = self.factory_snapshot().factory_dir().join("openshell").join("sessions");
+            session_id = crate::openshell::load_preserved(&sessions_root, &task.id)
+                .filter(|preserved| preserved.run == prev.id)
+                .and_then(|preserved| preserved.session_id)
+                .filter(|id| preserved_conversation_has(&crate::openshell::preserved_dir(&sessions_root, &task.id), id));
+            from_preserved = session_id.is_some();
+        }
         let Some(session_id) = session_id else {
             return ContinueOutcome::Fresh { reason: "no session id was recorded for the previous run".into() };
         };
@@ -2557,7 +2603,7 @@ impl Engine {
             None
         };
 
-        ContinueOutcome::Resume(ResumePlan { session_id, resume_args: resume.args, workspace, sandbox_restore })
+        ContinueOutcome::Resume(ResumePlan { session_id, resume_args: resume.args, workspace, sandbox_restore, from_preserved })
     }
 
     /// Where a run actually works: its own worktree, or the scope directly.
@@ -9382,6 +9428,75 @@ edges: [{id: next, from: implement, to: review}]
             let teardown = crate::openshell::Teardown::from_meta(&second.session.as_ref().unwrap().meta).unwrap();
             let launcher = std::fs::read_to_string(teardown.state_dir.join(".factory-run/launch.sh")).unwrap();
             assert!(!launcher.contains("--resume"), "{launcher}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
+        }
+
+        /// `#274`: a sandboxed run that timed out mid-turn recorded no
+        /// session id (no usage snapshot, no `turn-ended` hook). Ends the
+        /// first run that way, lets `finish` preserve its conversation, and
+        /// lets `tamper` change the preserved copy before the continue.
+        async fn continue_after_unrecorded_run(
+            name: &str,
+            tamper: impl FnOnce(&Path, &crate::openshell::PreservedRecord),
+        ) -> (Arc<Engine>, Run, Vec<String>, PathBuf, PathBuf) {
+            let scope_dir = temp_dir(&format!("openshell-{name}"));
+            let tools = temp_dir(&format!("openshell-{name}-cli"));
+            let cli = fake_cli(&tools);
+            let (engine, _runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
+            let task = boxed_claude_task(&engine).await;
+            let first = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            let sandbox = format!("factory-{}", &first.id[..8]);
+            end_and_wait_for_teardown(&engine, &task.id, &first, &tools, &sandbox).await;
+            let root = sessions_root(&engine);
+            let record = crate::openshell::load_preserved(&root, &task.id).expect("preserved");
+            assert_eq!(record.session_id.as_deref(), Some("resumed-session"));
+            tamper(&crate::openshell::preserved_dir(&root, &task.id), &record);
+            let first = engine.l4.store.get_run(&first.id).await.unwrap().unwrap();
+            assert!(first.turn_ended_session_id.is_none());
+            let second = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(first)).await.unwrap();
+            let reasons = continue_fallback_reasons_openshell(&engine, &task.id).await;
+            (engine, second, reasons, scope_dir, tools)
+        }
+
+        #[tokio::test]
+        async fn continuing_a_sandboxed_run_with_no_recorded_session_id_resumes_from_its_preserved_record() {
+            let (engine, second, reasons, scope_dir, tools) = continue_after_unrecorded_run("resume-unrecorded", |_, _| {}).await;
+            assert_eq!(second.resumed_session.as_deref(), Some("resumed-session"));
+            assert!(reasons.is_empty(), "{reasons:?}");
+            let teardown = crate::openshell::Teardown::from_meta(&second.session.as_ref().unwrap().meta).unwrap();
+            let launcher = std::fs::read_to_string(teardown.state_dir.join(".factory-run/launch.sh")).unwrap();
+            assert!(launcher.contains("--resume") && launcher.contains("resumed-session"), "{launcher}");
+            let journal = engine.l4.store.entries(&second.task_id, 50).await.unwrap();
+            assert!(
+                journal.iter().any(|e| e.kind == "continue_session_source" && e.message.contains("preserved sandbox conversation")),
+                "the source of the id is journaled"
+            );
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
+        }
+
+        #[tokio::test]
+        async fn a_preserved_record_for_another_run_does_not_supply_the_session_id() {
+            let (_engine, second, reasons, scope_dir, tools) = continue_after_unrecorded_run("resume-other-run", |dir, record| {
+                let other = crate::openshell::PreservedRecord { run: "some-earlier-run".into(), ..record.clone() };
+                std::fs::write(dir.join("record.json"), serde_json::to_vec(&other).unwrap()).unwrap();
+            })
+            .await;
+            assert!(second.resumed_session.is_none());
+            assert!(reasons.iter().any(|r| r.contains("no session id was recorded")), "{reasons:?}");
+            std::fs::remove_dir_all(&scope_dir).ok();
+            std::fs::remove_dir_all(&tools).ok();
+        }
+
+        #[tokio::test]
+        async fn a_preserved_record_whose_jsonl_is_missing_does_not_supply_the_session_id() {
+            let (_engine, second, reasons, scope_dir, tools) = continue_after_unrecorded_run("resume-no-jsonl", |dir, _| {
+                std::fs::remove_dir_all(dir.join("projects")).unwrap();
+            })
+            .await;
+            assert!(second.resumed_session.is_none());
+            assert!(reasons.iter().any(|r| r.contains("no session id was recorded")), "{reasons:?}");
             std::fs::remove_dir_all(&scope_dir).ok();
             std::fs::remove_dir_all(&tools).ok();
         }
