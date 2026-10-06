@@ -771,7 +771,7 @@ mod tests {
         let calls = calls_in(&log);
         assert!(!calls.iter().any(|c| c.starts_with("issue edit")), "no label call at all when nothing exists to add or remove: {calls:?}");
 
-        let entries = engine.store.entries(&item.id, 200).await.unwrap();
+        let entries = engine.l4.store.entries(&item.id, 200).await.unwrap();
         assert!(entries.iter().any(|e| e.kind == "outbound_completed"));
     }
 
@@ -789,10 +789,10 @@ mod tests {
         assert_eq!(outbound.state, OutboundState::Failed);
         assert!(outbound.last_error.is_some());
 
-        let entries = engine.store.entries(&item.id, 200).await.unwrap();
+        let entries = engine.l4.store.entries(&item.id, 200).await.unwrap();
         assert!(entries.iter().any(|e| e.kind == "outbound_failed"));
         // The engine is still there to ask.
-        assert!(engine.store.list(&Default::default()).await.is_ok());
+        assert!(engine.l4.store.list(&Default::default()).await.is_ok());
     }
 
     #[tokio::test]

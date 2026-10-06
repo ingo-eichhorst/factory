@@ -2,6 +2,7 @@
 //! runs until it is told to stop.
 
 mod access;
+mod state;
 mod artifacts;
 mod assignments;
 mod agents;
@@ -447,7 +448,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let recovery_receipts = tokio::spawn(recovery_journal::run(engine.clone(), shutdown_rx.clone()));
     let important_dates = tokio::spawn(renewals::run(engine.clone(), shutdown_rx.clone()));
 
-    engine.bus.publish(Event::DaemonStarted {
+    engine.shared.bus.publish(Event::DaemonStarted {
         at: chrono::Utc::now(),
         instance: factory.config.instance.name.clone(),
     });
@@ -489,7 +490,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     provisioning.abort();
     recovery_receipts.abort();
     important_dates.abort();
-    engine.registry.shutdown().await;
+    engine.shared.registry.shutdown().await;
     Ok(())
 }
 

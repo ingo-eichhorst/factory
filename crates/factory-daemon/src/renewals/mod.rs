@@ -19,9 +19,9 @@ impl Engine {
         credentials: store::CredentialExpiryStore,
         alerts: store::AlertStore,
     ) -> Self {
-        self.infrastructure_expiries = infrastructure;
-        self.credential_expiries = credentials;
-        self.renewal_alerts = alerts;
+        self.l1.infrastructure_expiries = infrastructure;
+        self.l2.credential_expiries = credentials;
+        self.l6.renewal_alerts = alerts;
         self
     }
     /// Fast metadata cache read, never a credential/TLS probe on page GET.
@@ -60,7 +60,7 @@ impl Engine {
             }
         }
         // Same-level native state, projected on read, not copied to a ledger.
-        let attestations = self.policies.all().await?;
+        let attestations = self.l6.policies.all().await?;
         for attestation in &attestations {
             if attestation.clock.is_some() || attestation.corrective.is_some() {
                 continue;
@@ -409,14 +409,14 @@ async fn observe_loop(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Rec
             .await;
             let observed = observed.unwrap_or_else(|_| probes::Observed::unavailable(Utc::now()));
             if let Err(error) = engine
-                .infrastructure_expiries
+                .l1.infrastructure_expiries
                 .replace(observed.infrastructure, observed.infrastructure_complete)
                 .await
             {
                 tracing::warn!("infrastructure expiry cache: {error}");
             }
             if let Err(error) = engine
-                .credential_expiries
+                .l2.credential_expiries
                 .replace(observed.credentials, observed.credentials_complete)
                 .await
             {
@@ -424,7 +424,7 @@ async fn observe_loop(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Rec
             }
             last = Some((fingerprint, std::time::Instant::now()));
             engine
-                .bus
+                .shared.bus
                 .publish(Event::ImportantDatesUpdated { at: Utc::now() });
         }
         tokio::select! { _ = tick.tick() => {}, _ = shutdown.changed() => { if *shutdown.borrow() { return; } } }
@@ -449,7 +449,7 @@ async fn push(engine: &Engine, report: &ImportantDatesReport) -> Result<()> {
         ))
         .expect("plain push identity serializes");
         if !engine
-            .renewal_alerts
+            .l6.renewal_alerts
             .claim(identity.clone(), report.at)
             .await?
         {
@@ -492,7 +492,7 @@ async fn push(engine: &Engine, report: &ImportantDatesReport) -> Result<()> {
             }
             Err(_) => false,
         };
-        engine.renewal_alerts.finish(identity, delivered).await?;
+        engine.l6.renewal_alerts.finish(identity, delivered).await?;
         if !delivered {
             tracing::warn!("important-date push was attempted but did not report delivery; command output discarded");
         }
@@ -511,7 +511,7 @@ pub(crate) async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::R
         }
     }
     let _stop = StopObserver(observer.abort_handle());
-    let mut bus = engine.bus.subscribe();
+    let mut bus = engine.shared.bus.subscribe();
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {

@@ -166,13 +166,13 @@ impl Engine {
     /// `Request::Environment`'s catalogue half.
     pub(crate) async fn secrets_view(&self) -> (Vec<SecretRow>, Vec<UndeclaredCredential>, Vec<SecretChange>) {
         let factory = self.factory_snapshot();
-        let (secrets, undeclared) = rows(&factory, &self.provision.source_checks(), Utc::now().date_naive());
+        let (secrets, undeclared) = rows(&factory, &self.l2.provision.source_checks(), Utc::now().date_naive());
         (secrets, undeclared, self.secret_changes().await)
     }
 
     /// The newest metadata changes, oldest first.
     async fn secret_changes(&self) -> Vec<SecretChange> {
-        let entries = self.store.entries(SECRETS_JOURNAL, CHANGES_SHOWN).await.unwrap_or_default();
+        let entries = self.l4.store.entries(SECRETS_JOURNAL, CHANGES_SHOWN).await.unwrap_or_default();
         entries
             .into_iter()
             .filter(|e| e.kind == SECRET_CHANGED)
@@ -203,12 +203,12 @@ impl Engine {
                 message,
                 serde_json::json!({ "secret": name, "before": before, "after": metadata }),
             );
-            if let Err(e) = self.store.append_entry(SECRETS_JOURNAL, &entry).await {
+            if let Err(e) = self.l4.store.append_entry(SECRETS_JOURNAL, &entry).await {
                 tracing::warn!(secret = %name, "the secret's metadata was written but not journaled: {e}");
             }
             tracing::info!(secret = %name, "secret metadata changed: {}", change_words(&before, &metadata));
             // The ledger, its Inbox items and its push hook read the new date now.
-            self.bus.publish(factory_core::event::Event::ImportantDatesUpdated { at: Utc::now() });
+            self.shared.bus.publish(factory_core::event::Event::ImportantDatesUpdated { at: Utc::now() });
         }
         let (rows, _, _) = self.secrets_view().await;
         rows.into_iter()

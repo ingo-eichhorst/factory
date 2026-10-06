@@ -29,11 +29,11 @@ mod tests {
                 Engine::new(
                     factory,
                     factory_plugins::Registry::with_builtins(),
-                    source.store.clone(),
+                    source.l4.store.clone(),
                     PathBuf::from("factory"),
                     Vec::new(),
                 )
-                .with_environment_store(source.environments.clone()),
+                .with_environment_store(source.l1.environments.clone()),
             ),
             root,
         )
@@ -48,7 +48,7 @@ mod tests {
         assert!(matches!(engine.recover_environment(&agent, request("restart")).await, Err(FactoryError::Denied(_))));
         assert!(engine.recover_environment(&Caller::Owner, request(" \n ")).await.is_err());
         assert!(engine.recover_environment(&Caller::Owner, request(&"x".repeat(4001))).await.is_err());
-        assert!(engine.store.list(&factory_core::TaskFilter::default()).await.unwrap().is_empty());
+        assert!(engine.l4.store.list(&factory_core::TaskFilter::default()).await.unwrap().is_empty());
         assert!(engine.check_environment("missing").await.is_err());
         assert!(engine.check_environment("prod").await.unwrap().ok);
         std::fs::remove_dir_all(root).ok();
@@ -75,11 +75,11 @@ mod tests {
         let narrowed = Engine::new(
             factory,
             factory_plugins::Registry::with_builtins(),
-            engine.store.clone(),
+            engine.l4.store.clone(),
             PathBuf::from("factory"),
             Vec::new(),
         )
-        .with_environment_store(engine.environments.clone());
+        .with_environment_store(engine.l1.environments.clone());
         assert!(narrowed
             .environment_samples(SampleQuery { scope: Some("other".into()), ..query.clone() })
             .await
@@ -132,7 +132,7 @@ mod tests {
                 scope: "company".into(),
                 ..Default::default()
             });
-            engine.workflows.put_run(&WorkflowRun::new(definition, Default::default())).await.unwrap();
+            engine.l4.workflows.put_run(&WorkflowRun::new(definition, Default::default())).await.unwrap();
         }
         let facts = Facts::<factory_kernel::L6>::new(&engine)
             .get::<factory_kernel::EnvironmentRecoveryFact>(&RecoveryQuery { scopes: None, limit: 1 })
@@ -195,7 +195,7 @@ impl Engine {
         if reason.is_empty() || reason.len() > 4000 {
             return Err(bad("recovery needs a nonempty reason of at most 4000 bytes"));
         }
-        let _guard = self.promotion_lock.lock().await;
+        let _guard = self.l1.promotion_lock.lock().await;
         let (scope, environment) = self
             .factory_snapshot()
             .config
@@ -205,10 +205,10 @@ impl Engine {
             .ok_or_else(|| bad("the environment is not declared"))?;
         let recipe = self.recovery_recipe(&scope, &environment).await?;
         let timeout = recipe.timeout_seconds();
-        if self.workflows.active_runs().await?.iter().any(|run| operation_targets(run, &environment.name)) {
+        if self.l4.workflows.active_runs().await?.iter().any(|run| operation_targets(run, &environment.name)) {
             return Err(bad("an environment operation is already pending; finish or cancel it first"));
         }
-        let deployments = self.environments.deployments().await?;
+        let deployments = self.l1.environments.deployments().await?;
         if deployments
             .iter()
             .any(|deployment| deployment.environment == environment.name && deployment.status == DeployStatus::Running)
@@ -230,7 +230,7 @@ impl Engine {
         }
         let instructions = format!(
             "set -eu\nexport FACTORY_ENVIRONMENT={}\nexport FACTORY_RECOVERY_REASON={}\nexport FACTORY_EXPECTED_RELEASE_COMMIT={}\nsh -c {}\n{} environment-check {}\n",
-            word(&environment.name), word(reason), word(expected.as_deref().unwrap_or("")), word(&recipe.command), word(&self.factory_bin.to_string_lossy()), word(&environment.name),
+            word(&environment.name), word(reason), word(expected.as_deref().unwrap_or("")), word(&recipe.command), word(&self.shared.factory_bin.to_string_lossy()), word(&environment.name),
         );
         let definition = self
             .create_workflow(WorkflowDraft {
@@ -328,6 +328,6 @@ impl Engine {
         if !(1..=500).contains(&limit) || query.before.is_some_and(|cursor| cursor <= 0) {
             return Err(bad("sample limit is 1..500 and the before cursor must be positive"));
         }
-        self.environments.sample_page(query.environment, query.check, from, to, query.before, limit).await
+        self.l1.environments.sample_page(query.environment, query.check, from, to, query.before, limit).await
     }
 }

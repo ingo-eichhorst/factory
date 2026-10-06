@@ -292,7 +292,7 @@ impl Engine {
                 &instance,
                 finished_at,
             );
-            self.run_evidence.append_provenance(&record).await?;
+            self.l4.run_evidence.append_provenance(&record).await?;
         }
         Ok(())
     }
@@ -303,7 +303,7 @@ impl Engine {
         id: &str,
     ) -> Result<Vec<factory_kernel::ArtifactProvenance>> {
         factory_kernel::Provide::<factory_kernel::ArtifactProvenance>::get(
-            &factory_process::facts::ProvenanceProvider::new(self.store.as_ref(), &self.run_evidence),
+            &factory_process::facts::ProvenanceProvider::new(self.l4.store.as_ref(), &self.l4.run_evidence),
             &id.to_owned(),
         ).await
     }

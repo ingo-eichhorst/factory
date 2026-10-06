@@ -304,9 +304,9 @@ impl Engine {
         for name in factory.scope_names() {
             let measured = self.measure_scope(&name).await?;
             let activity = activity.get(&name).copied().unwrap_or_default();
-            let previous = self.site_memory.lock().unwrap().get(&name).copied();
+            let previous = self.shared.site_memory.lock().unwrap().get(&name).copied();
             let (shape, cues) = appearance(&measured.metrics, &activity, previous);
-            self.site_memory
+            self.shared.site_memory
                 .lock()
                 .unwrap()
                 .insert(name.clone(), (shape.tier, cues.level));
@@ -325,14 +325,14 @@ impl Engine {
         // neighbours look like, or the memory grows for the life of the daemon.
         let live: std::collections::HashSet<String> =
             scopes.iter().map(|s| s.name.clone()).collect();
-        self.site_memory.lock().unwrap().retain(|k, _| live.contains(k));
+        self.shared.site_memory.lock().unwrap().retain(|k, _| live.contains(k));
         Ok(SiteFootprint { scopes })
     }
 
     /// One scope's size, walked at most every `WALK_TTL`. One
     /// `spawn_blocking` per walk: a bounded traversal, off the reactor.
     async fn measure_scope(self: &Arc<Self>, name: &str) -> Result<Measured> {
-        if let Some((at, measured)) = self.site_walks.lock().unwrap().get(name) {
+        if let Some((at, measured)) = self.shared.site_walks.lock().unwrap().get(name) {
             if at.elapsed() < WALK_TTL {
                 return Ok(measured.clone());
             }
@@ -342,7 +342,7 @@ impl Engine {
             .await
             .unwrap_or(None);
         let measured = Measured::from(walk);
-        self.site_walks
+        self.shared.site_walks
             .lock()
             .unwrap()
             .insert(name.to_string(), (Instant::now(), measured.clone()));
@@ -373,13 +373,13 @@ impl Engine {
             );
         }
 
-        let tasks = self.store.list(&Default::default()).await?;
+        let tasks = self.l4.store.list(&Default::default()).await?;
         let scope_of: HashMap<&str, &str> = tasks
             .iter()
             .map(|t| (t.id.as_str(), t.scope.as_str()))
             .collect();
 
-        for run in self.store.active_runs().await? {
+        for run in self.l4.store.active_runs().await? {
             let Some(scope) = scope_of.get(run.task_id.as_str()) else {
                 continue; // the task is gone; the run has no hall to stand in
             };
@@ -402,7 +402,7 @@ impl Engine {
             }
         }
 
-        for agent in self.store.agents().await? {
+        for agent in self.l4.store.agents().await? {
             let Some(activity) = out.get_mut(&agent.scope) else {
                 continue;
             };
@@ -722,7 +722,7 @@ mod tests {
         assert_eq!(queued.shape, idle.shape, "and does not touch the building");
 
         let run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Manual,
@@ -736,7 +736,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(&run.id, &RunPatch { status: Some(RunStatus::Running), ..Default::default() })
             .await
             .unwrap();
@@ -750,7 +750,7 @@ mod tests {
 
         // And a run that stops to ask for a person is the hall's loudest fact.
         engine
-            .store
+            .l4.store
             .update_run(&run.id, &RunPatch { status: Some(RunStatus::Blocked), ..Default::default() })
             .await
             .unwrap();
@@ -762,12 +762,12 @@ mod tests {
         // Finished: the lights come down on the same poll, with no margin to
         // wait out, and the hall is the size it always was.
         engine
-            .store
+            .l4.store
             .update_run(&run.id, &RunPatch { status: Some(RunStatus::Done), ..Default::default() })
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update(&task.id, &factory_core::task::TaskPatch {
                 status: Some(TaskStatus::Done),
                 ..Default::default()
@@ -800,7 +800,7 @@ mod tests {
         assert_eq!(second.shape, first.shape);
 
         // Force the walk to be stale, and the hall grows.
-        engine.site_walks.lock().unwrap().clear();
+        engine.shared.site_walks.lock().unwrap().clear();
         let third = hall(&engine).await;
         assert!(third.metrics.files > first.metrics.files, "a re-walk sees the new files");
         assert!(third.shape.score > first.shape.score);
@@ -818,17 +818,17 @@ mod tests {
 
         let first = hall(&engine).await;
         assert_eq!(
-            engine.site_memory.lock().unwrap().get("demo").copied(),
+            engine.shared.site_memory.lock().unwrap().get("demo").copied(),
             Some((first.shape.tier, first.cues.level))
         );
         let second = hall(&engine).await;
         assert_eq!(second.shape, first.shape, "the same facts draw the same hall");
         assert_eq!(second.cues, first.cues);
 
-        engine.site_memory.lock().unwrap().insert("gone".into(), (Tier::Plant, ActivityLevel::Peak));
+        engine.shared.site_memory.lock().unwrap().insert("gone".into(), (Tier::Plant, ActivityLevel::Peak));
         hall(&engine).await;
         assert!(
-            !engine.site_memory.lock().unwrap().contains_key("gone"),
+            !engine.shared.site_memory.lock().unwrap().contains_key("gone"),
             "a scope nobody declares any more keeps no memory"
         );
     }

@@ -34,7 +34,7 @@ pub(super) fn signpost_provider(
             engine,
             engine.factory_snapshot().scope_tree(),
         )),
-        &engine.signpost_cache,
+        &engine.l5.signpost_cache,
     )
 }
 
@@ -50,5 +50,5 @@ pub(super) fn preview_provider(engine: &Engine) -> factory_assurance::workflow_p
 }
 
 pub(super) fn provider(engine: &Engine) -> factory_assurance::facts::Provider<'_> {
-    factory_assurance::facts::Provider::new(&engine.bench, engine.factory_snapshot().root)
+    factory_assurance::facts::Provider::new(&engine.l5.bench, engine.factory_snapshot().root)
 }

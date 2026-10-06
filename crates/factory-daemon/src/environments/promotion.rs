@@ -40,11 +40,11 @@ mod tests {
             Engine::new(
                 factory,
                 factory_plugins::Registry::with_builtins(),
-                source.store.clone(),
+                source.l4.store.clone(),
                 PathBuf::from("factory"),
                 Vec::new(),
             )
-            .with_environment_store(source.environments.clone()),
+            .with_environment_store(source.l1.environments.clone()),
         );
         (engine, root)
     }
@@ -118,11 +118,11 @@ mod tests {
         let narrowed = Engine::new(
             factory,
             factory_plugins::Registry::with_builtins(),
-            engine.store.clone(),
+            engine.l4.store.clone(),
             PathBuf::from("factory"),
             Vec::new(),
         )
-        .with_environment_store(engine.environments.clone());
+        .with_environment_store(engine.l1.environments.clone());
         let source = narrowed.environments_report(Some("company".into())).await.unwrap();
         assert_eq!(source.environments.len(), 1);
         assert!(source.environments[0].promotion_ready, "{:?}", source.environments[0].promotion_reason);
@@ -145,8 +145,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("not a commit"), "{error}");
-        assert!(engine.store.list(&factory_core::TaskFilter::default()).await.unwrap().is_empty());
-        assert!(engine.workflows.active_runs().await.unwrap().is_empty());
+        assert!(engine.l4.store.list(&factory_core::TaskFilter::default()).await.unwrap().is_empty());
+        assert!(engine.l4.workflows.active_runs().await.unwrap().is_empty());
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -228,7 +228,7 @@ impl Engine {
         if !matches!(caller, Caller::Owner) {
             return Err(FactoryError::Denied("starting a promotion is the owner's action".into()));
         }
-        let _guard = self.promotion_lock.lock().await;
+        let _guard = self.l1.promotion_lock.lock().await;
         let source = self
             .factory_snapshot()
             .config
@@ -237,7 +237,7 @@ impl Engine {
             .find(|(_, environment)| environment.name == request.environment)
             .map(|(_, environment)| environment)
             .ok_or_else(|| bad("the source environment is not declared"))?;
-        let history = self.environments.deployments().await?;
+        let history = self.l1.environments.deployments().await?;
         let current = history
             .iter()
             .find(|deployment| deployment.environment == source.name && deployment.status == DeployStatus::Succeeded);
@@ -246,7 +246,7 @@ impl Engine {
         }
         let current = current.expect("checked current deployment");
         let (scope, target, recipe) = self.promotion_target(&source, Some(current), &history).await?;
-        let pending = self.workflows.active_runs().await?.into_iter().any(|run| operation_targets(&run, &target.name));
+        let pending = self.l4.workflows.active_runs().await?.into_iter().any(|run| operation_targets(&run, &target.name));
         if pending {
             return Err(bad("a promotion to this target is already pending; finish or cancel it first"));
         }
@@ -258,7 +258,7 @@ impl Engine {
              git diff --quiet HEAD --\n",
             word(commit), word(&target.name), word(&source.name),
         );
-        let binary = word(&self.factory_bin.to_string_lossy());
+        let binary = word(&self.shared.factory_bin.to_string_lossy());
         let mut args = format!(
             "--env {} --scope {} --commit {} --strict-verification --via promotion",
             word(&target.name),
@@ -348,7 +348,7 @@ impl Engine {
         if !run.status.is_terminal() {
             return;
         }
-        let Ok(history) = self.environments.deployments().await else {
+        let Ok(history) = self.l1.environments.deployments().await else {
             return;
         };
         for deployment in history.into_iter().filter(|deployment| {
@@ -371,7 +371,7 @@ impl Engine {
     }
 
     pub(crate) async fn reconcile_run_deployments(&self) {
-        let Ok(history) = self.environments.deployments().await else {
+        let Ok(history) = self.l1.environments.deployments().await else {
             return;
         };
         let runs: BTreeSet<String> = history
@@ -380,7 +380,7 @@ impl Engine {
             .filter_map(|deployment| deployment.actor.run_id)
             .collect();
         for id in runs {
-            if let Ok(Some(run)) = self.store.get_run(&id).await {
+            if let Ok(Some(run)) = self.l4.store.get_run(&id).await {
                 self.settle_run_deployments(&run).await;
             }
         }

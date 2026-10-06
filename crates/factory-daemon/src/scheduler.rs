@@ -35,7 +35,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                     // task whose slot changed since `due_now` read it is
                     // somebody else's decision now, and waits for the next
                     // tick to be looked at again.
-                    let _slot = engine.schedule_lock.lock().await;
+                    let _slot = engine.l4.schedule_lock.lock().await;
                     let Some(task) = engine.still_due(&task).await else {
                         continue;
                     };
@@ -140,7 +140,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
             // A task may set its own patience. Read it per run rather than
             // once before the loop, or an override would only take effect
             // after the daemon was restarted.
-            let task = engine.store.get(&run.task_id).await.ok().flatten();
+            let task = engine.l4.store.get(&run.task_id).await.ok().flatten();
             let ack_secs = task
                 .as_ref()
                 .and_then(|t| t.ack_timeout_seconds)

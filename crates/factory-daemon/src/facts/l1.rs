@@ -5,7 +5,7 @@ use crate::engine::Engine;
 pub(super) fn expiry_provider(
     engine: &Engine,
 ) -> factory_infrastructure::expiry_store::ObservationStore {
-    engine.infrastructure_expiries.clone()
+    engine.l1.infrastructure_expiries.clone()
 }
 pub(super) fn settings_provider(
     engine: &Engine,
@@ -30,12 +30,12 @@ pub(crate) fn backup_provider(
 ) -> factory_infrastructure::backup_facts::Provider<'_> {
     let snapshot = engine.factory_snapshot();
     factory_infrastructure::backup_facts::Provider {
-        store: &engine.backups,
-        busy: &engine.backup_busy,
+        store: &engine.l1.backups,
+        busy: &engine.l1.backup_busy,
         root: snapshot.root.clone(),
         instance: snapshot.config.instance.name.clone(),
         config: snapshot.config.infrastructure.backup.clone(),
-        booted_at: engine.booted_at,
+        booted_at: engine.shared.booted_at,
     }
 }
 pub(crate) fn environment_provider(
@@ -43,7 +43,7 @@ pub(crate) fn environment_provider(
 ) -> factory_infrastructure::environment_facts::Provider<'_> {
     let snapshot = engine.factory_snapshot();
     factory_infrastructure::environment_facts::Provider {
-        store: &engine.environments,
+        store: &engine.l1.environments,
         scopes: snapshot.scope_tree(),
         declarations: snapshot.config.environments(),
     }
@@ -53,7 +53,7 @@ pub(super) fn renewal_provider(
 ) -> factory_infrastructure::renewal_declarations::Provider<'_> {
     let snapshot = engine.factory_snapshot();
     factory_infrastructure::renewal_declarations::Provider {
-        cache: &engine.renewal_declaration_cache,
+        cache: &engine.l1.renewal_declaration_cache,
         instance_path: snapshot.factory_dir().join("config.yaml"),
         declarations: snapshot.config.renewals.clone(),
         scopes: snapshot

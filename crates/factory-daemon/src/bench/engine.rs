@@ -191,14 +191,14 @@ impl Engine {
             started_at: Utc::now(),
             ended_at: None,
         };
-        self.bench.put_run(&run).await?;
+        self.l5.bench.put_run(&run).await?;
         for attempt in &run.attempts {
-            self.bench.put_attempt(&run.id, attempt).await?;
+            self.l5.bench.put_attempt(&run.id, attempt).await?;
         }
-        self.bus.publish(Event::BenchRunUpdated { run: run.clone() });
+        self.shared.bus.publish(Event::BenchRunUpdated { run: run.clone() });
 
         self.advance_bench_run(&run.id).await?;
-        self.bench
+        self.l5.bench
             .get_run(&run.id)
             .await?
             .ok_or_else(|| missing("bench run", &run.id))
@@ -211,8 +211,8 @@ impl Engine {
     pub(crate) async fn advance_bench_run(self: &Arc<Self>, run_id: &str) -> Result<()> {
         let mut to_start = Vec::new();
         {
-            let _guard = self.bench_edit.lock().await;
-            let Some(mut run) = self.bench.get_run(run_id).await? else {
+            let _guard = self.l5.bench_edit.lock().await;
+            let Some(mut run) = self.l5.bench.get_run(run_id).await? else {
                 return Ok(());
             };
             if run.status != BenchRunStatus::Running {
@@ -269,14 +269,14 @@ impl Engine {
                 }
             }
             for attempt in &run.attempts {
-                self.bench.put_attempt(run_id, attempt).await?;
+                self.l5.bench.put_attempt(run_id, attempt).await?;
             }
             if run.attempts.iter().all(|a| a.verdict.is_some()) && run.status == BenchRunStatus::Running {
                 run.status = BenchRunStatus::Done;
                 run.ended_at = Some(Utc::now());
             }
-            self.bench.put_run(&run).await?;
-            self.bus.publish(Event::BenchRunUpdated { run: run.clone() });
+            self.l5.bench.put_run(&run).await?;
+            self.shared.bus.publish(Event::BenchRunUpdated { run: run.clone() });
         }
 
         for (task_id, case, agent_name, attempt_n, dataset) in to_start {
@@ -325,8 +325,8 @@ impl Engine {
     /// forward again; this failure is rare enough that waiting one tick for
     /// it is the honest cost of not fighting the type system over it.
     async fn mark_bench_attempt_uncreated(self: &Arc<Self>, run_id: &str, task_id: &str, reason: &str) {
-        let _guard = self.bench_edit.lock().await;
-        let Ok(Some(mut run)) = self.bench.get_run(run_id).await else { return };
+        let _guard = self.l5.bench_edit.lock().await;
+        let Ok(Some(mut run)) = self.l5.bench.get_run(run_id).await else { return };
         if let Some(attempt) = run
             .attempts
             .iter_mut()
@@ -335,8 +335,8 @@ impl Engine {
             attempt.verdict = Some(Verdict::Error);
             attempt.reason = Some(format!("could not create the task: {reason}"));
             attempt.ended_at = Some(Utc::now());
-            let _ = self.bench.put_attempt(run_id, attempt).await;
-            self.bus.publish(Event::BenchRunUpdated { run: run.clone() });
+            let _ = self.l5.bench.put_attempt(run_id, attempt).await;
+            self.shared.bus.publish(Event::BenchRunUpdated { run: run.clone() });
         }
     }
 
@@ -348,7 +348,7 @@ impl Engine {
         let origin = BenchOrigin::try_from(origin).map_err(|error| {
             FactoryError::BadRequest(format!("unsupported or invalid benchmark origin: {error}"))
         })?;
-        let Some(run) = self.bench.get_run(&origin.bench_run_id).await.ok().flatten() else { return Ok(None) };
+        let Some(run) = self.l5.bench.get_run(&origin.bench_run_id).await.ok().flatten() else { return Ok(None) };
         Ok(run.case_bases.get(&origin.case_id).cloned())
     }
 
@@ -358,7 +358,7 @@ impl Engine {
         let origin = BenchOrigin::try_from(origin).map_err(|error| {
             FactoryError::BadRequest(format!("unsupported or invalid benchmark origin: {error}"))
         })?;
-        let Some(run) = self.bench.get_run(&origin.bench_run_id).await.ok().flatten() else { return Ok(None) };
+        let Some(run) = self.l5.bench.get_run(&origin.bench_run_id).await.ok().flatten() else { return Ok(None) };
         Ok(run.cases.iter().find(|c| c.id == origin.case_id).and_then(|c| c.reset.clone()))
     }
 
@@ -406,17 +406,17 @@ impl Engine {
     }
 
     async fn enqueue_bench_judgement(&self, task_id: &str) {
-        let Ok(Some(task)) = self.store.get(task_id).await else { return };
+        let Ok(Some(task)) = self.l4.store.get(task_id).await else { return };
         if task.bench_origin.is_none() {
             return;
         }
         {
-            let mut judging = self.bench_judging.lock().unwrap();
+            let mut judging = self.l5.bench_judging.lock().unwrap();
             if !judging.insert(task_id.to_string()) {
                 return; // already queued, or the worker is on it right now
             }
         }
-        let _ = self.bench_judge_tx.send(task_id.to_string());
+        let _ = self.l5.bench_judge_tx.send(task_id.to_string());
     }
 
     /// The judge worker: the one place a bench attempt's gate actually
@@ -430,19 +430,19 @@ impl Engine {
     /// (there should never be one) is a no-op: the receiver is taken once,
     /// the first time, and `None` after.
     pub fn spawn_bench_judge(self: &Arc<Self>) {
-        let Some(mut rx) = self.bench_judge_rx.lock().unwrap().take() else {
+        let Some(mut rx) = self.l5.bench_judge_rx.lock().unwrap().take() else {
             return;
         };
         let engine = self.clone();
         tokio::spawn(async move {
             while let Some(task_id) = rx.recv().await {
-                if let Ok(Some(task)) = engine.store.get(&task_id).await {
+                if let Ok(Some(task)) = engine.l4.store.get(&task_id).await {
                     if let Some(origin) = task.bench_origin.clone() {
                         let origin = match BenchOrigin::try_from(&origin) {
                             Ok(origin) => origin,
                             Err(error) => {
                                 tracing::warn!(task = %task_id, "could not decode bench origin: {error}");
-                                engine.bench_judging.lock().unwrap().remove(&task_id);
+                                engine.l5.bench_judging.lock().unwrap().remove(&task_id);
                                 continue;
                             }
                         };
@@ -452,13 +452,13 @@ impl Engine {
                         let _ = engine.advance_bench_run(&origin.bench_run_id).await;
                     }
                 }
-                engine.bench_judging.lock().unwrap().remove(&task_id);
+                engine.l5.bench_judging.lock().unwrap().remove(&task_id);
             }
         });
     }
 
     async fn judge_bench_attempt(self: &Arc<Self>, origin: &BenchOrigin, task: &Task) -> Result<()> {
-        let Some(run) = self.bench.get_run(&origin.bench_run_id).await? else {
+        let Some(run) = self.l5.bench.get_run(&origin.bench_run_id).await? else {
             return Ok(());
         };
         let Some(idx) = run.attempts.iter().position(|a| {
@@ -477,7 +477,7 @@ impl Engine {
         let mut attempt = run.attempts[idx].clone();
 
         let now = Utc::now();
-        let task_run = self.store.runs(&task.id, 1).await?.into_iter().next();
+        let task_run = self.l4.store.runs(&task.id, 1).await?.into_iter().next();
 
         let Some(task_run) = task_run else {
             // Dispatch never even created a run row: `resolve_agent`, the
@@ -558,7 +558,7 @@ impl Engine {
     /// entry with `source: "agent"` and `kind` set to the reported status;
     /// nothing the daemon writes on its own behalf ever does.
     async fn was_reported_by_agent(&self, run_id: &str) -> bool {
-        self.store
+        self.l4.store
             .run_entries(run_id, 500)
             .await
             .unwrap_or_default()
@@ -616,8 +616,8 @@ impl Engine {
     /// checks the attempt is still unsettled in the fresh read before
     /// writing anything, and never flips a run that is not still `Running`.
     async fn finish_bench_judgement(self: &Arc<Self>, run_id: &str, task: &Task, attempt: BenchAttempt) -> Result<()> {
-        let _guard = self.bench_edit.lock().await;
-        let Some(mut run) = self.bench.get_run(run_id).await? else {
+        let _guard = self.l5.bench_edit.lock().await;
+        let Some(mut run) = self.l5.bench.get_run(run_id).await? else {
             return Ok(());
         };
         let Some(idx) = run.attempts.iter().position(|a| a.id == attempt.id) else {
@@ -631,7 +631,7 @@ impl Engine {
         }
         run.attempts[idx] = attempt.clone();
 
-        self.bench.put_attempt(run_id, &attempt).await?;
+        self.l5.bench.put_attempt(run_id, &attempt).await?;
         self.entry(
             &task.id,
             TaskEntry::new(
@@ -646,9 +646,9 @@ impl Engine {
         if run.status == BenchRunStatus::Running && run.attempts.iter().all(|a| a.verdict.is_some()) {
             run.status = BenchRunStatus::Done;
             run.ended_at = Some(Utc::now());
-            self.bench.put_run(&run).await?;
+            self.l5.bench.put_run(&run).await?;
         }
-        self.bus.publish(Event::BenchRunUpdated { run });
+        self.shared.bus.publish(Event::BenchRunUpdated { run });
         Ok(())
     }
 
@@ -659,8 +659,8 @@ impl Engine {
     /// task yet to cancel.
     pub(crate) async fn cancel_bench_run(self: &Arc<Self>, run_id: &str) -> Result<BenchRun> {
         let task_ids = {
-            let _guard = self.bench_edit.lock().await;
-            let mut run = self.bench.get_run(run_id).await?.ok_or_else(|| missing("bench run", run_id))?;
+            let _guard = self.l5.bench_edit.lock().await;
+            let mut run = self.l5.bench.get_run(run_id).await?.ok_or_else(|| missing("bench run", run_id))?;
             if run.status != BenchRunStatus::Running {
                 return Ok(run);
             }
@@ -678,14 +678,14 @@ impl Engine {
                 }
             }
             for attempt in &run.attempts {
-                self.bench.put_attempt(run_id, attempt).await?;
+                self.l5.bench.put_attempt(run_id, attempt).await?;
             }
-            self.bus.publish(Event::BenchRunUpdated { run: run.clone() });
+            self.shared.bus.publish(Event::BenchRunUpdated { run: run.clone() });
             task_ids
         };
 
         for task_id in &task_ids {
-            if self.store.active_run(task_id).await.ok().flatten().is_some() {
+            if self.l4.store.active_run(task_id).await.ok().flatten().is_some() {
                 let _ = self
                     .cancel_task_run(task_id, None, factory_core::run::FailKind::CancelledWithParent)
                     .await;
@@ -709,15 +709,15 @@ impl Engine {
         // from the store when it was dispatched -- `clean_bench_run` needs
         // exactly that `run_id` to find this attempt's worktree, and
         // nothing here can assume the worker got to it first.
-        let _guard = self.bench_edit.lock().await;
-        let mut run = self.bench.get_run(run_id).await?.ok_or_else(|| missing("bench run", run_id))?;
+        let _guard = self.l5.bench_edit.lock().await;
+        let mut run = self.l5.bench.get_run(run_id).await?.ok_or_else(|| missing("bench run", run_id))?;
         for idx in 0..run.attempts.len() {
             if run.attempts[idx].verdict.is_some() {
                 continue;
             }
             let now = Utc::now();
             if let Some(task_id) = run.attempts[idx].task_id.clone() {
-                if let Ok(Some(task_run)) = self.store.runs(&task_id, 1).await.map(|mut v| v.pop()) {
+                if let Ok(Some(task_run)) = self.l4.store.runs(&task_id, 1).await.map(|mut v| v.pop()) {
                     let ended_at = task_run.ended_at.unwrap_or(now);
                     run.attempts[idx].run_id = Some(task_run.id.clone());
                     run.attempts[idx].started_at = Some(task_run.started_at);
@@ -731,12 +731,12 @@ impl Engine {
             }
         }
         for attempt in &run.attempts {
-            self.bench.put_attempt(run_id, attempt).await?;
+            self.l5.bench.put_attempt(run_id, attempt).await?;
         }
         run.status = BenchRunStatus::Cancelled;
         run.ended_at = Some(Utc::now());
-        self.bench.put_run(&run).await?;
-        self.bus.publish(Event::BenchRunUpdated { run: run.clone() });
+        self.l5.bench.put_run(&run).await?;
+        self.shared.bus.publish(Event::BenchRunUpdated { run: run.clone() });
         Ok(run)
     }
 
@@ -744,7 +744,7 @@ impl Engine {
     /// and branches. Never automatic, and refused while the run is still
     /// going -- worktrees are evidence until a person asks for them back.
     pub(crate) async fn clean_bench_run(&self, run_id: &str) -> Result<BenchRun> {
-        let run = self.bench.get_run(run_id).await?.ok_or_else(|| missing("bench run", run_id))?;
+        let run = self.l5.bench.get_run(run_id).await?.ok_or_else(|| missing("bench run", run_id))?;
         if run.status == BenchRunStatus::Running {
             return Err(FactoryError::BadRequest(
                 "this bench run is still going; cancel it first".into(),
@@ -753,7 +753,7 @@ impl Engine {
         let factory = self.factory_snapshot();
         for attempt in &run.attempts {
             let Some(task_run_id) = &attempt.run_id else { continue };
-            let Ok(Some(task_run)) = self.store.get_run(task_run_id).await else { continue };
+            let Ok(Some(task_run)) = self.l4.store.get_run(task_run_id).await else { continue };
             let (Some(path), Some(branch)) = (&task_run.worktree_path, &task_run.worktree_branch) else {
                 continue;
             };
@@ -762,7 +762,7 @@ impl Engine {
             if let Err(e) = worktree::remove(&scope_path, Path::new(path), branch).await {
                 tracing::warn!(bench_run = run_id, attempt = attempt.id, "could not remove worktree: {e}");
             } else {
-                let _ = crate::assignments::release(&self.workspaces, &[std::path::PathBuf::from(path)]).await;
+                let _ = crate::assignments::release(&self.l4.workspaces, &[std::path::PathBuf::from(path)]).await;
             }
         }
         Ok(run)
@@ -770,7 +770,7 @@ impl Engine {
 
     /// L5 periodic progress backstop, independent of the process scheduler.
     pub(crate) async fn sweep_bench_runs(self: &Arc<Self>) {
-        match self.bench.active_runs().await {
+        match self.l5.bench.active_runs().await {
             Ok(runs) => {
                 for run in runs {
                     if let Err(e) = self.advance_bench_run(&run.id).await {
@@ -791,7 +791,7 @@ impl Engine {
     /// watchdog (`scheduler.rs`) notices a dead session or a timeout on its
     /// own, and that live path already calls `sync_bench_for_task` too.
     pub(crate) async fn recover_bench_runs(self: &Arc<Self>) {
-        let runs = match self.bench.active_runs().await {
+        let runs = match self.l5.bench.active_runs().await {
             Ok(runs) => runs,
             Err(e) => {
                 tracing::warn!("could not load bench runs: {e}");
@@ -923,14 +923,14 @@ mod tests {
             started_at: Utc::now(),
             ended_at: None,
         };
-        engine.bench.put_run(&run).await.unwrap();
-        engine.bench.put_attempt(&run.id, &attempt).await.unwrap();
+        engine.l5.bench.put_run(&run).await.unwrap();
+        engine.l5.bench.put_attempt(&run.id, &attempt).await.unwrap();
         let (shutdown, rx) = tokio::sync::watch::channel(false);
         // No scheduler::run, startup recovery, or task report can drive this.
         let timer = tokio::spawn(crate::bench::run(engine.clone(), rx));
         let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let observed = engine.bench.get_run(&run.id).await.unwrap().unwrap();
+                let observed = engine.l5.bench.get_run(&run.id).await.unwrap().unwrap();
                 if observed.status != BenchRunStatus::Running {
                     break observed;
                 }
@@ -990,7 +990,7 @@ mod tests {
     async fn wait_for_settled(engine: &Arc<Engine>, run_id: &str) -> BenchRun {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if let Ok(Some(run)) = engine.bench.get_run(run_id).await {
+            if let Ok(Some(run)) = engine.l5.bench.get_run(run_id).await {
                 if run.attempts.iter().all(|a| a.verdict.is_some()) {
                     return run;
                 }
@@ -1027,9 +1027,9 @@ mod tests {
             started_at: Utc::now(),
             ended_at: None,
         };
-        engine.bench.put_run(&run).await.unwrap();
+        engine.l5.bench.put_run(&run).await.unwrap();
         for attempt in &run.attempts {
-            engine.bench.put_attempt(&run.id, attempt).await.unwrap();
+            engine.l5.bench.put_attempt(&run.id, attempt).await.unwrap();
         }
 
         let task = engine
@@ -1073,7 +1073,7 @@ mod tests {
         let (origin, task) = seed(&engine, "run-reset-failure", case, "shell").await;
 
         let task_run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Bench,
@@ -1087,7 +1087,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &task_run.id,
                 &RunPatch {
@@ -1138,7 +1138,7 @@ mod tests {
         let (origin, task) = seed(&engine, "run-give-up", case, "shell").await;
 
         let task_run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Bench,
@@ -1152,7 +1152,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &task_run.id,
                 &RunPatch {
@@ -1192,7 +1192,7 @@ mod tests {
         };
         let (origin, task) = seed(&engine, "refused", case, "shell").await;
         engine
-            .store
+            .l4.store
             .update(
                 &task.id,
                 &factory_core::task::TaskPatch {
@@ -1243,7 +1243,7 @@ mod tests {
         let (origin, task) = seed(&engine, "run-agent-reported", case, "shell").await;
 
         let task_run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Bench,
@@ -1257,7 +1257,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &task_run.id,
                 &RunPatch {
@@ -1271,7 +1271,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .append_entry(
                 &task.id,
                 &TaskEntry::new("agent", "failed", "I could not finish").in_run(task_run.id.clone()),
@@ -1360,16 +1360,16 @@ mod tests {
             started_at: Utc::now(),
             ended_at: None,
         };
-        engine.bench.put_run(&run).await.unwrap();
+        engine.l5.bench.put_run(&run).await.unwrap();
         for a in &run.attempts {
-            engine.bench.put_attempt(&run.id, a).await.unwrap();
+            engine.l5.bench.put_attempt(&run.id, a).await.unwrap();
         }
 
         // A real, still-running `Run` row -- what `cancel_task_run` needs in
         // order to find anything to cancel, and what carries the worktree
         // this attempt would otherwise orphan.
         let task_run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Bench,
@@ -1383,7 +1383,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &task_run.id,
                 &RunPatch {
@@ -1436,7 +1436,7 @@ mod tests {
         let (origin, task) = seed(&engine, "run-cancel-during-gate", case, "shell").await;
 
         let task_run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Bench,
@@ -1450,7 +1450,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &task_run.id,
                 &RunPatch {
@@ -1463,7 +1463,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .append_entry(
                 &task.id,
                 &TaskEntry::new("agent", "done", "finished").in_run(task_run.id.clone()),
@@ -1475,9 +1475,9 @@ mod tests {
         // dispatched and in flight is what this test needs, so it is
         // patched in directly -- this is exactly the shape
         // `cancel_bench_run`'s in-flight branch expects.
-        let mut run = engine.bench.get_run(&origin.bench_run_id).await.unwrap().unwrap();
+        let mut run = engine.l5.bench.get_run(&origin.bench_run_id).await.unwrap().unwrap();
         run.attempts[0].task_id = Some(task.id.clone());
-        engine.bench.put_attempt(&run.id, &run.attempts[0]).await.unwrap();
+        engine.l5.bench.put_attempt(&run.id, &run.attempts[0]).await.unwrap();
 
         // Start judging in the background: its gate sleeps for a second,
         // simulating the window a cancel can land in.
@@ -1536,7 +1536,7 @@ mod tests {
         let (origin, task) = seed(&engine, "run-report-promptly", case, "shell").await;
 
         let task_run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Bench,
@@ -1550,7 +1550,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &task_run.id,
                 &RunPatch {
@@ -1624,7 +1624,7 @@ mod tests {
         let (origin, task) = seed(&engine, "run-fail-run-promptly", case, "shell").await;
 
         let task_run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Bench,
@@ -1638,7 +1638,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &task_run.id,
                 &RunPatch {
@@ -1652,7 +1652,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .append_entry(
                 &task.id,
                 &TaskEntry::new("agent", "done", "finished").in_run(task_run.id.clone()),

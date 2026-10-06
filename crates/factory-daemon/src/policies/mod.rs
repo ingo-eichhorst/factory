@@ -76,7 +76,7 @@ impl Engine {
                     .map(|scope| scope.name.clone()),
                 instance_name: snapshot.config.instance.name.clone(),
             },
-            &self.policies,
+            &self.l6.policies,
         )
     }
     /// Own catalogue read plus the L5 knowledge-tag port. Both filesystem
@@ -291,7 +291,7 @@ impl Engine {
         // the catalogue and the evidence stores.
         let detail = self.policy_control(control.clone(), &scope).await?;
 
-        let observer = crate::commands::CreationObserver(self.bus.clone());
+        let observer = crate::commands::CreationObserver(self.shared.bus.clone());
         let receipt = crate::commands::direction(self, &observer)
             .policy(control, &scope, agent, &detail)
             .await?;
@@ -323,7 +323,7 @@ impl Engine {
     pub(crate) async fn policy_export(&self, scope: Option<&str>) -> Result<policy_export::PolicyExport> {
         let snapshot = self.factory_snapshot();
         let report = self.policy_report(scope).await?;
-        let all_attestations = self.policies.all().await?;
+        let all_attestations = self.l6.policies.all().await?;
 
         let mut attestations: BTreeMap<String, Vec<Attestation>> = BTreeMap::new();
         for row in &report.rows {
@@ -1005,9 +1005,9 @@ mod tests {
             "assistant".to_string(),
             "shell".to_string(),
         );
-        let task = engine.store.create(&new_task).await.unwrap();
+        let task = engine.l4.store.create(&new_task).await.unwrap();
         let run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Manual,
@@ -1021,7 +1021,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -1068,11 +1068,11 @@ mod tests {
             ..Default::default()
         };
         let definition = factory_core::workflow::WorkflowDefinition::from_draft(draft);
-        engine.workflows.put_definition(&definition).await.unwrap();
+        engine.l4.workflows.put_definition(&definition).await.unwrap();
 
         let mut run = factory_core::workflow::WorkflowRun::new(definition, factory_core::workflow::WorkflowActor::Owner);
         run.status = factory_core::workflow::WorkflowRunStatus::Done;
-        engine.workflows.put_run(&run).await.unwrap();
+        engine.l4.workflows.put_run(&run).await.unwrap();
 
         let report = engine.policy_report(Some("engineering")).await.unwrap();
         let engineering = by_id(&report.rows.iter().find(|r| r.scope == "engineering").unwrap().statuses);
@@ -1117,11 +1117,11 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::hours(1),
             ended_at: Some(Utc::now()),
         };
-        engine.bench.put_run(&run).await.unwrap();
+        engine.l5.bench.put_run(&run).await.unwrap();
         let mut attempt =
             factory_core::bench::BenchAttempt::pending("attempt-1".to_string(), "case-1".to_string(), "assistant".to_string(), 1);
         attempt.verdict = Some(factory_core::bench::Verdict::Pass);
-        engine.bench.put_attempt(&run.id, &attempt).await.unwrap();
+        engine.l5.bench.put_attempt(&run.id, &attempt).await.unwrap();
 
         let report = engine.policy_report(None).await.unwrap();
         let engineering = by_id(&report.rows.iter().find(|r| r.scope == "engineering").unwrap().statuses);
@@ -1240,7 +1240,7 @@ mod tests {
         for scope in ["engineering", "engineering", "sibling"] {
             let task = task_from_new(NewTask { title: "shared".into(), ..Default::default() },
                 scope.into(), "shell".into(), "quiet".into());
-            ids.push(engine.store.create(&task).await.unwrap().id);
+            ids.push(engine.l4.store.create(&task).await.unwrap().id);
         }
         let facts = Facts::<L6>::new(&engine).get::<TaskFact>(&NamedQuery {
             scope: "engineering".into(),
@@ -1269,11 +1269,11 @@ mod tests {
                 ..Default::default()
             }, scope.to_string(), "shell".into(), "quiet".into());
             task.created_at = Utc::now() + chrono::Duration::seconds(i as i64);
-            ids.push(engine.store.create(&task).await.unwrap().id);
+            ids.push(engine.l4.store.create(&task).await.unwrap().id);
         }
         let facts = Facts::<L6>::new(&engine);
         let all = facts.get::<TaskInventoryFact>(&TaskInventoryQuery::All).await.unwrap();
-        let stored = engine.store.list(&TaskFilter::default()).await.unwrap();
+        let stored = engine.l4.store.list(&TaskFilter::default()).await.unwrap();
         assert_eq!(all.iter().map(|t| &t.id).collect::<Vec<_>>(), stored.iter().map(|t| &t.id).collect::<Vec<_>>());
         assert!(all.iter().all(|t| t.open && t.labels["policy"] == "cra/b"));
         let json = serde_json::to_value(&all).unwrap();
@@ -1293,9 +1293,9 @@ mod tests {
         assert!(facts.get::<TaskInventoryFact>(&TaskInventoryQuery::Exact("missing".into())).await.is_err());
         assert!(facts.get::<TaskInventoryFact>(&TaskInventoryQuery::Members(["missing".into()].into_iter().collect())).await.is_err());
 
-        engine.store.update(&ids[3], &TaskPatch { status: Some(TaskStatus::Done), ..Default::default() }).await.unwrap();
+        engine.l4.store.update(&ids[3], &TaskPatch { status: Some(TaskStatus::Done), ..Default::default() }).await.unwrap();
         assert_eq!(engine.open_policy_task(&"cra/b".parse().unwrap(), "engineering").await.unwrap().unwrap().id, ids[0]);
-        engine.store.update(&ids[0], &TaskPatch {
+        engine.l4.store.update(&ids[0], &TaskPatch {
             status: Some(TaskStatus::Blocked),
             labels: Some(BTreeMap::from([("goal".into(), "ship/kr1".into())])),
             ..Default::default()
@@ -1320,7 +1320,7 @@ mod tests {
             let mut task = task_from_new(NewTask { title: status.as_str().into(), ..Default::default() },
                 "engineering".into(), "shell".into(), "quiet".into());
             task.status = status;
-            engine.store.create(&task).await.unwrap();
+            engine.l4.store.create(&task).await.unwrap();
         }
         let rows = Facts::<L6>::new(&engine).get::<TaskInventoryFact>(
             &TaskInventoryQuery::Exact("engineering".into())
@@ -1559,7 +1559,7 @@ mod tests {
         assert!(err.to_string().contains("already open"), "{err}");
 
         let tasks = engine
-            .store
+            .l4.store
             .list(&factory_core::task::TaskFilter {
                 scope: Some("engineering".to_string()),
                 ..Default::default()
@@ -1632,7 +1632,7 @@ mod tests {
         // Once the task is terminal it is no longer open: the tab offers
         // "Create task" again, and the daemon lets it.
         engine
-            .store
+            .l4.store
             .update(
                 &task.id,
                 &factory_core::task::TaskPatch {
@@ -2091,9 +2091,9 @@ mod tests {
             ..Default::default()
         };
         let task = task_from_new(new, scope.to_string(), "shell".into(), "quiet".into());
-        let task = engine.store.create(&task).await.unwrap();
+        let task = engine.l4.store.create(&task).await.unwrap();
         let run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Manual,
@@ -2117,7 +2117,7 @@ mod tests {
             by: None,
         }];
         let run = engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -2157,7 +2157,7 @@ mod tests {
             worktree_digest: None,
         };
         engine
-            .run_evidence
+            .l4.run_evidence
             .append_step_attestation(&attestation)
             .await
             .unwrap();
@@ -2193,7 +2193,7 @@ mod tests {
         // Moved back through a `RunPatch` to 10 days: outside 7d, inside
         // 2*7d -- stale, not open.
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -2213,7 +2213,7 @@ mod tests {
 
         // Moved back further, past 2*7d -- open.
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {

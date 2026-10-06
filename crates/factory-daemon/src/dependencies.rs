@@ -36,14 +36,14 @@ impl Engine {
         bytes: Vec<u8>,
         token: Option<&str>,
     ) -> Result<Attachment> {
-        let run = self.store.active_run(task_id).await?.ok_or_else(|| {
+        let run = self.l4.store.active_run(task_id).await?.ok_or_else(|| {
             FactoryError::BadRequest(format!(
                 "task {task_id} has no run in progress; attachments are no longer accepted"
             ))
         })?;
         self.check_run_token(&run, token, task_id)?;
         let task = self
-            .store
+            .l4.store
             .get(task_id)
             .await?
             .ok_or_else(|| FactoryError::BadRequest(format!("no such task: {task_id}")))?;

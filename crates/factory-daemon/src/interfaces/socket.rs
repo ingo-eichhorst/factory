@@ -127,7 +127,7 @@ async fn serve_connection(engine: Arc<Engine>, stream: UnixStream) -> anyhow::Re
             write_half
                 .write_all(format!("{}\n", serde_json::to_string(&ack)?).as_bytes())
                 .await?;
-            let mut events = engine.bus.subscribe();
+            let mut events = engine.shared.bus.subscribe();
             loop {
                 match events.recv().await {
                     Ok(event) => {

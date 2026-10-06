@@ -122,7 +122,7 @@ impl Engine {
     /// The newest attempt, successful or not, and the newest archive in the
     /// destination: whichever is later is when the schedule counts from.
     async fn last_attempt(&self, factory: &Factory, config: &BackupConfig) -> Option<DateTime<Utc>> {
-        let recorded = self.backups.all().await.unwrap_or_default();
+        let recorded = self.l1.backups.all().await.unwrap_or_default();
         let attempted = recorded
             .iter()
             .filter(|r| matches!(r, Recorded::Completed { .. } | Recorded::Failed { .. }))
@@ -142,7 +142,7 @@ impl Engine {
     /// satisfies `last_attempt`'s. `None` before anything has ever been
     /// verified, so the caller falls back to `booted_at`.
     async fn last_verified_at(&self) -> Option<DateTime<Utc>> {
-        let recorded = self.backups.all().await.unwrap_or_default();
+        let recorded = self.l1.backups.all().await.unwrap_or_default();
         recorded
             .iter()
             .filter_map(|r| match r {
@@ -204,7 +204,7 @@ impl Engine {
     /// is recorded and published as `backup_failed` before it is returned.
     pub(crate) async fn backup_run(self: &Arc<Self>, trigger: BackupTrigger, by: String) -> Result<Snapshot> {
         let (factory, config) = self.backup_config()?;
-        let Ok(_busy) = self.backup_busy.try_lock() else {
+        let Ok(_busy) = self.l1.backup_busy.try_lock() else {
             return Err(FactoryError::BadRequest(
                 "another backup operation is already running; try again when it has finished".into(),
             ));
@@ -212,7 +212,7 @@ impl Engine {
         let at = Utc::now();
         match self.take_backup(&factory, &config, trigger, by, at).await {
             Ok(snapshot) => {
-                self.backups.append(Recorded::Completed { snapshot: snapshot.clone() }).await?;
+                self.l1.backups.append(Recorded::Completed { snapshot: snapshot.clone() }).await?;
                 tracing::info!(
                     snapshot = %snapshot.name,
                     size = snapshot.size_bytes,
@@ -221,16 +221,16 @@ impl Engine {
                     trigger = trigger.as_str(),
                     "backup completed"
                 );
-                self.bus.publish(Event::BackupCompleted { snapshot: snapshot.clone() });
+                self.shared.bus.publish(Event::BackupCompleted { snapshot: snapshot.clone() });
                 Ok(snapshot)
             }
             Err(e) => {
                 let failure = BackupFailure { at, trigger, reason: e.to_string() };
                 tracing::warn!(trigger = trigger.as_str(), "backup failed: {}", failure.reason);
-                if let Err(store) = self.backups.append(Recorded::Failed { failure: failure.clone() }).await {
+                if let Err(store) = self.l1.backups.append(Recorded::Failed { failure: failure.clone() }).await {
                     tracing::warn!("could not record the failed backup: {store}");
                 }
-                self.bus.publish(Event::BackupFailed { at, trigger, reason: failure.reason });
+                self.shared.bus.publish(Event::BackupFailed { at, trigger, reason: failure.reason });
                 Err(e)
             }
         }
@@ -345,7 +345,7 @@ impl Engine {
         if let Some(name) = &snapshot {
             refuse_bad_snapshot_name(name)?;
         }
-        let Ok(_busy) = self.backup_busy.try_lock() else {
+        let Ok(_busy) = self.l1.backup_busy.try_lock() else {
             return Err(FactoryError::BadRequest(
                 "another backup operation is already running; try again when it has finished".into(),
             ));
@@ -398,9 +398,9 @@ impl Engine {
             checks,
             duration_ms: started.elapsed().as_millis() as u64,
         };
-        self.backups.append(Recorded::Verified { verification: verification.clone() }).await?;
+        self.l1.backups.append(Recorded::Verified { verification: verification.clone() }).await?;
         tracing::info!(snapshot = %verification.snapshot, ok = verification.ok, "backup verified");
-        self.bus.publish(Event::BackupVerified { verification: verification.summary() });
+        self.shared.bus.publish(Event::BackupVerified { verification: verification.summary() });
         Ok(verification)
     }
 
@@ -419,7 +419,7 @@ impl Engine {
             self.clear_verify_skip();
             return;
         };
-        let base = self.last_verified_at().await.unwrap_or(self.booted_at);
+        let base = self.last_verified_at().await.unwrap_or(self.shared.booted_at);
         let due = match crate::schedule::next_after(&schedule.as_task_schedule(), base) {
             Ok(due) => due,
             Err(e) => {
@@ -455,7 +455,7 @@ impl Engine {
     /// encrypted newest snapshot with no identity would log the same line
     /// on every tick for as long as it stays that way.
     fn log_verify_skip_once(&self, slot: DateTime<Utc>, reason: &str) {
-        let mut state = self.verify_drill_skip.lock().unwrap_or_else(|p| p.into_inner());
+        let mut state = self.l1.verify_drill_skip.lock().unwrap_or_else(|p| p.into_inner());
         let unchanged = state.as_ref().is_some_and(|(s, r)| *s == slot && r == reason);
         if !unchanged {
             tracing::info!("verification drill skipped: {reason}");
@@ -464,7 +464,7 @@ impl Engine {
     }
 
     fn clear_verify_skip(&self) {
-        *self.verify_drill_skip.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.l1.verify_drill_skip.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     /// Restore one named snapshot into a new root. Authorization makes this
@@ -482,7 +482,7 @@ impl Engine {
     ) -> Result<Restoration> {
         let (factory, config) = self.backup_config()?;
         refuse_bad_snapshot_name(&snapshot)?;
-        let Ok(_busy) = self.backup_busy.try_lock() else {
+        let Ok(_busy) = self.l1.backup_busy.try_lock() else {
             return Err(FactoryError::BadRequest(
                 "another backup operation is already running; try again when it has finished".into(),
             ));
@@ -757,12 +757,12 @@ async fn tick(engine: &Arc<Engine>, now: DateTime<Utc>) {
     let Some(config) = factory.config.infrastructure.backup.clone() else { return };
 
     if let Some(schedule) = &config.schedule {
-        let base = engine.last_attempt(&factory, &config).await.unwrap_or(engine.booted_at);
+        let base = engine.last_attempt(&factory, &config).await.unwrap_or(engine.shared.booted_at);
         match crate::schedule::next_after(&schedule.as_task_schedule(), base) {
             Ok(due) if due <= now => {
                 // Busy (a person's backup operation) is not a failure: the
                 // next tick looks again, and the drill waits for it too.
-                if engine.backup_busy.try_lock().is_err() {
+                if engine.l1.backup_busy.try_lock().is_err() {
                     return;
                 }
                 // Its failures are recorded, published and logged inside;
@@ -1070,7 +1070,7 @@ mod tests {
         let factory = Factory { root, config };
         let mut engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
             .with_backup_store(BackupStore::open(&database).unwrap());
-        engine.booted_at = booted_at;
+        engine.shared.booted_at = booted_at;
         (Arc::new(engine), base)
     }
 
@@ -1082,7 +1082,7 @@ mod tests {
         let booted_at = dt(2026, 1, 1, 0, 0);
         let (engine, base) = engine_with_drill("{ daily: 7 }", "destination", "* * * * *", None, booted_at);
         let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
-        let mut events = engine.bus.subscribe();
+        let mut events = engine.shared.bus.subscribe();
         let path = PathBuf::from(&snapshot.path);
         let before_bytes = std::fs::read(&path).unwrap();
         let before_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
@@ -1092,7 +1092,7 @@ mod tests {
 
         assert!(matches!(events.recv().await.unwrap(), Event::BackupVerified { .. }));
         let verified: Vec<Verification> = engine
-            .backups
+            .l1.backups
             .all()
             .await
             .unwrap()
@@ -1121,9 +1121,9 @@ mod tests {
         engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
         let now = booted_at + Duration::minutes(2);
         tick(&engine, now).await;
-        let after_first = engine.backups.all().await.unwrap().len();
+        let after_first = engine.l1.backups.all().await.unwrap().len();
         tick(&engine, now).await;
-        assert_eq!(engine.backups.all().await.unwrap().len(), after_first, "the same due slot drills only once");
+        assert_eq!(engine.l1.backups.all().await.unwrap().len(), after_first, "the same due slot drills only once");
         std::fs::remove_dir_all(base).ok();
     }
 
@@ -1137,7 +1137,7 @@ mod tests {
         let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
         let now = booted_at + Duration::minutes(5);
         engine
-            .backups
+            .l1.backups
             .append(Recorded::Verified {
                 verification: Verification {
                     snapshot: snapshot.name.clone(),
@@ -1153,7 +1153,7 @@ mod tests {
 
         tick(&engine, now).await;
         let verified_count =
-            engine.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
+            engine.l1.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
         assert_eq!(verified_count, 2, "the seeded manual verify, plus exactly one catch-up drill");
         std::fs::remove_dir_all(base).ok();
     }
@@ -1167,17 +1167,17 @@ mod tests {
         engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
         let now = booted_at + Duration::minutes(2);
 
-        let guard = engine.backup_busy.lock().await;
+        let guard = engine.l1.backup_busy.lock().await;
         tick(&engine, now).await;
         assert!(
-            !engine.backups.all().await.unwrap().iter().any(|r| matches!(r, Recorded::Verified { .. })),
+            !engine.l1.backups.all().await.unwrap().iter().any(|r| matches!(r, Recorded::Verified { .. })),
             "busy: nothing recorded"
         );
         drop(guard);
 
         tick(&engine, now).await;
         let verified_count =
-            engine.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
+            engine.l1.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
         assert_eq!(verified_count, 1);
         std::fs::remove_dir_all(base).ok();
     }
@@ -1191,12 +1191,12 @@ mod tests {
         let now = booted_at + Duration::minutes(2);
 
         tick(&engine, now).await;
-        assert!(engine.backups.all().await.unwrap().is_empty(), "no snapshot: nothing recorded");
+        assert!(engine.l1.backups.all().await.unwrap().is_empty(), "no snapshot: nothing recorded");
 
         engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
         tick(&engine, now).await;
         let verified_count =
-            engine.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
+            engine.l1.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
         assert_eq!(verified_count, 1);
         std::fs::remove_dir_all(base).ok();
     }
@@ -1215,7 +1215,7 @@ mod tests {
 
         let now = booted_at + Duration::minutes(2);
         tick(&engine, now).await;
-        let recorded = engine.backups.all().await.unwrap();
+        let recorded = engine.l1.backups.all().await.unwrap();
         let first = recorded
             .iter()
             .find_map(|r| match r { Recorded::Verified { verification } => Some(verification), _ => None })
@@ -1226,7 +1226,7 @@ mod tests {
         // The loop keeps going: the next slot still drills.
         tick(&engine, now + Duration::minutes(1)).await;
         let verified_count =
-            engine.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
+            engine.l1.backups.all().await.unwrap().iter().filter(|r| matches!(r, Recorded::Verified { .. })).count();
         assert_eq!(verified_count, 2);
         std::fs::remove_dir_all(base).ok();
     }
@@ -1251,18 +1251,18 @@ mod tests {
         assert!(report.next_verify.is_some());
 
         let now = booted_at + Duration::minutes(2);
-        assert_eq!(*engine.verify_drill_skip.lock().unwrap(), None);
+        assert_eq!(*engine.l1.verify_drill_skip.lock().unwrap(), None);
         tick(&engine, now).await;
         assert!(
-            !engine.backups.all().await.unwrap().iter().any(|r| matches!(r, Recorded::Verified { .. })),
+            !engine.l1.backups.all().await.unwrap().iter().any(|r| matches!(r, Recorded::Verified { .. })),
             "an encrypted snapshot with no identity is refused, never recorded"
         );
-        let logged = engine.verify_drill_skip.lock().unwrap().clone();
+        let logged = engine.l1.verify_drill_skip.lock().unwrap().clone();
         assert!(logged.is_some(), "the skip is tracked so the job logs it only once per slot");
 
         // Ticking again in the same slot must not move the tracked slot.
         tick(&engine, now).await;
-        assert_eq!(engine.verify_drill_skip.lock().unwrap().clone(), logged);
+        assert_eq!(engine.l1.verify_drill_skip.lock().unwrap().clone(), logged);
 
         std::fs::remove_dir_all(base).ok();
     }
@@ -1441,7 +1441,7 @@ mod tests {
     #[tokio::test]
     async fn a_backup_is_taken_listed_verified_and_pruned_through_the_engine() {
         let (engine, base) = engine_backing_up("{ daily: 1, weekly: 0, monthly: 0 }", "destination");
-        let mut events = engine.bus.subscribe();
+        let mut events = engine.shared.bus.subscribe();
 
         let before = engine.backup_report().await.unwrap();
         assert_eq!(before.age, AgeLevel::None);
@@ -1490,7 +1490,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_backup_is_recorded_published_and_warned_about() {
         let (engine, base) = engine_backing_up("{ daily: 7 }", "unmounted/volume");
-        let mut events = engine.bus.subscribe();
+        let mut events = engine.shared.bus.subscribe();
         let e = engine.backup_run(BackupTrigger::Schedule, "schedule".into()).await.unwrap_err();
         assert!(e.to_string().contains("mounted"), "{e}");
         assert!(matches!(events.recv().await.unwrap(), Event::BackupFailed { .. }));
@@ -1508,7 +1508,7 @@ mod tests {
     async fn a_failed_encrypted_backup_is_recorded_and_leaves_the_destination_empty() {
         let (_, recipient) = generated_identity();
         let (engine, base) = engine_backing_up_encrypted("{ daily: 7 }", "unmounted/volume", &recipient);
-        let mut events = engine.bus.subscribe();
+        let mut events = engine.shared.bus.subscribe();
         let e = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap_err();
         assert!(e.to_string().contains("mounted"), "{e}");
         assert!(matches!(events.recv().await.unwrap(), Event::BackupFailed { .. }));
@@ -1527,7 +1527,7 @@ mod tests {
     async fn an_encrypted_backup_round_trips_through_the_engine_and_never_leaks_its_identity() {
         let (identity_path, recipient) = generated_identity();
         let (engine, base) = engine_backing_up_encrypted("{ daily: 7 }", "destination", &recipient);
-        let mut events = engine.bus.subscribe();
+        let mut events = engine.shared.bus.subscribe();
 
         let snapshot = engine.backup_run(BackupTrigger::Manual, "owner".into()).await.unwrap();
         assert!(snapshot.name.ends_with(".tar.zst.age"), "{}", snapshot.name);
@@ -1553,10 +1553,10 @@ mod tests {
 
         // No identity: refused, and nothing recorded -- neither a store row
         // nor a published event.
-        let before = engine.backups.all().await.unwrap().len();
+        let before = engine.l1.backups.all().await.unwrap().len();
         let refused = engine.backup_verify(None, None, "owner".into()).await.unwrap_err();
         assert!(refused.to_string().contains("--identity"), "{refused}");
-        assert_eq!(engine.backups.all().await.unwrap().len(), before, "a refusal records nothing");
+        assert_eq!(engine.l1.backups.all().await.unwrap().len(), before, "a refusal records nothing");
 
         // The right identity: verifies clean, decrypt named in the checks.
         let verification =

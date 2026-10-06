@@ -381,7 +381,7 @@ fn report_of(response: Response) -> PowerModeReport {
 async fn through_the_engine_a_change_is_journaled_with_who_from_and_to() {
     let engine = engine();
     let host = FakeHost::mac();
-    engine.host_power.replace_runner(host.clone());
+    engine.l1.host_power.replace_runner(host.clone());
 
     let report = report_of(engine.handle_request(Request::HostPowerMode).await);
     assert!(!report.can_change);
@@ -535,7 +535,7 @@ async fn a_write_is_journaled_but_not_reported_successful_if_readback_fails_or_d
         let engine = engine();
         let host = FakeHost::mac();
         host.install_rule();
-        engine.host_power.replace_runner(Arc::new(ReadbackHost {
+        engine.l1.host_power.replace_runner(Arc::new(ReadbackHost {
             host: host.clone(),
             reads: std::sync::Mutex::new([None, Some(out)].into()),
         }));
@@ -546,7 +546,7 @@ async fn a_write_is_journaled_but_not_reported_successful_if_readback_fails_or_d
             .await;
         assert!(matches!(response, Response::Error { .. }), "{response:?}");
         assert_eq!(host.writes().len(), 1);
-        let entries = engine.store.entries(HOST_JOURNAL, 20).await.unwrap();
+        let entries = engine.l4.store.entries(HOST_JOURNAL, 20).await.unwrap();
         assert_eq!(entries.len(), 1);
         let data = entries[0].data.as_ref().unwrap();
         assert_eq!(data["confirmed"], false);

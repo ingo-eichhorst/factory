@@ -397,11 +397,11 @@ mod tests {
         let engine = Engine::new(
             snapshot,
             factory_plugins::Registry::with_builtins(),
-            source.store.clone(),
+            source.l4.store.clone(),
             std::path::PathBuf::from("factory"),
             Vec::new(),
         )
-        .with_environment_store(source.environments.clone());
+        .with_environment_store(source.l1.environments.clone());
         let facts = Facts::<People>::new(&engine);
         let mut scope = engine.factory_snapshot().config.scopes[0].clone();
         let id = scope.id.clone();

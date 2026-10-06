@@ -69,7 +69,7 @@ impl Engine {
             // claim, and the run it came out of is the natural reference.
             Caller::Agent { run_id, .. } => {
                 let from_run = match run_id {
-                    Some(run) => self.store.get_run(run).await?.map(|r| format!("task {}", r.task_id)),
+                    Some(run) => self.l4.store.get_run(run).await?.map(|r| format!("task {}", r.task_id)),
                     None => None,
                 };
                 let requester = match clean(new.requester) {
@@ -212,8 +212,8 @@ impl Engine {
     /// duplicate candidate search, below, is its only signal that a repeat
     /// came in.
     pub(crate) async fn receive_intake(&self, new: NewTask, record: Intake) -> Result<Task> {
-        let _guard = self.intake_receipt_lock.lock().await;
-        let all = self.store.list(&TaskFilter::default()).await?;
+        let _guard = self.l4.intake_receipt_lock.lock().await;
+        let all = self.l4.store.list(&TaskFilter::default()).await?;
         if let Some(identity) = record.source.identity() {
             if let Some(existing) =
                 all.iter().find(|t| t.intake.as_ref().and_then(|i| i.source.identity()) == Some(identity.clone()))
@@ -264,7 +264,7 @@ impl Engine {
                 Some(members)
             }
         };
-        let all = self.store.list(&TaskFilter::default()).await?;
+        let all = self.l4.store.list(&TaskFilter::default()).await?;
         // Items are filtered by scope; a triage task is looked up by id, so
         // it stays in the list whatever scope it ran in.
         let tasks: Vec<Task> = all
@@ -344,7 +344,7 @@ impl Engine {
                 agents.insert(0, AgentOption { name: default_agent.clone(), harness: default_agent.clone(), model: None });
             }
             let workflows = self
-                .workflows
+                .l4.workflows
                 .definitions(Some(&scope.name))
                 .await?
                 .iter()
@@ -376,7 +376,7 @@ impl Engine {
         let item = self.require(id).await?;
         let record = open_record(&item)?.clone();
         if let Some(running) = &record.triage_task {
-            if let Some(t) = self.store.get(running).await? {
+            if let Some(t) = self.l4.store.get(running).await? {
                 // Settled rather than closed: a triage run that failed
                 // leaves its task blocked on the failure (`#122`), and
                 // nothing is working on the item then.
@@ -415,7 +415,7 @@ impl Engine {
         }
         // Search again: fresh candidates for the run's instructions and the
         // record, in case something new has appeared since receipt.
-        let all = self.store.list(&TaskFilter::default()).await?;
+        let all = self.l4.store.list(&TaskFilter::default()).await?;
         let candidates = intake::duplicate_candidates(&item, &all);
         let mut record_now = record.clone();
         record_now.candidates = candidates;
@@ -435,7 +435,7 @@ impl Engine {
                     &record_now,
                     &definition,
                     &routes,
-                    &self.factory_bin.display().to_string(),
+                    &self.shared.factory_bin.display().to_string(),
                 ),
                 scope: Some(item.scope.clone()),
                 agent,
@@ -677,7 +677,7 @@ impl Engine {
     ) -> Result<intake::ReferenceEstimate> {
         let snapshot = self.factory_snapshot();
         let target = snapshot.canonical_scope_name(scope);
-        let tasks = self.store.list(&TaskFilter::default()).await?;
+        let tasks = self.l4.store.list(&TaskFilter::default()).await?;
         let mut sample_tasks = Vec::new();
         let mut sample_runs = Vec::new();
         for task in tasks {
@@ -693,7 +693,7 @@ impl Engine {
             if control_plan::effective_category(task.category.as_deref()) != category {
                 continue;
             }
-            let Ok(runs) = self.store.runs(&task.id, u32::MAX).await else { continue };
+            let Ok(runs) = self.l4.store.runs(&task.id, u32::MAX).await else { continue };
             sample_runs.extend(runs);
             sample_tasks.push(task);
         }
@@ -896,7 +896,7 @@ impl Engine {
             .start_decomposition_workflow(item, &parts, &triage.assessment.routing, caller)
             .await?;
         let children = self
-            .store
+            .l4.store
             .list(&TaskFilter { parent_task_id: Some(item.id.clone()), ..Default::default() })
             .await?;
         // `#235`: which part workflow every part ran through, by name.
@@ -1178,11 +1178,11 @@ impl Engine {
         let Some(triage_task) = item.intake.as_ref().and_then(|i| i.triage_task.as_deref()) else {
             return Ok(false);
         };
-        Ok(self.store.get_run(run_id).await?.is_some_and(|run| run.task_id == triage_task))
+        Ok(self.l4.store.get_run(run_id).await?.is_some_and(|run| run.task_id == triage_task))
     }
 
     pub(crate) async fn find_workflow(&self, scope: &str, wanted: &str) -> Result<factory_core::WorkflowDefinition> {
-        let definitions = self.workflows.definitions(Some(scope)).await?;
+        let definitions = self.l4.workflows.definitions(Some(scope)).await?;
         definitions
             .iter()
             .find(|d| d.id == wanted)
@@ -1203,14 +1203,14 @@ impl Engine {
     /// rather than duplicate the store-write and event-publish it does.
     pub(crate) async fn write_intake(&self, id: &str, record: Intake, mut patch: TaskPatch) -> Result<Task> {
         patch.intake = Some(record);
-        let task = self.store.update(id, &patch).await?;
+        let task = self.l4.store.update(id, &patch).await?;
         if task.intake.is_none() {
             return Err(FactoryError::adapter(
-                self.store.name(),
+                self.l4.store.name(),
                 "the task store did not keep the intake record; it may predate intake",
             ));
         }
-        self.bus.publish(Event::TaskUpdated { task: task.clone() });
+        self.shared.bus.publish(Event::TaskUpdated { task: task.clone() });
         Ok(task)
     }
 
@@ -1487,7 +1487,7 @@ mod tests {
     }
 
     async fn kinds(engine: &Arc<Engine>, id: &str) -> Vec<String> {
-        engine.store.entries(id, 200).await.unwrap().into_iter().map(|e| e.kind).collect()
+        engine.l4.store.entries(id, 200).await.unwrap().into_iter().map(|e| e.kind).collect()
     }
 
     fn refused(response: Response) -> String {
@@ -1510,7 +1510,7 @@ mod tests {
         assert!(kinds(&engine, &item.id).await.contains(&"intake_received".to_string()));
 
         let far = Utc::now() + chrono::Duration::days(365);
-        assert!(engine.store.due(far).await.unwrap().is_empty(), "never due");
+        assert!(engine.l4.store.due(far).await.unwrap().is_empty(), "never due");
         let why = refused(
             engine
                 .handle_request(Request::TaskRun { override_wait: false, id: item.id.clone(), reason: None, continue_run: false })
@@ -1520,7 +1520,7 @@ mod tests {
         engine.start_run(&item.id, Trigger::Manual).await;
         let after = engine.require(&item.id).await.unwrap();
         assert_eq!(after.status, TaskStatus::Intake, "held, not failed");
-        assert!(engine.store.active_run(&item.id).await.unwrap().is_none());
+        assert!(engine.l4.store.active_run(&item.id).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1712,7 +1712,7 @@ mod tests {
         assert_eq!(first.id, second.id);
         let receipts = kinds(&engine, &first.id).await.into_iter().filter(|k| k == "intake_received").count();
         assert_eq!(receipts, 1, "the replay wrote nothing new");
-        let all = engine.store.list(&TaskFilter::default()).await.unwrap();
+        let all = engine.l4.store.list(&TaskFilter::default()).await.unwrap();
         let emails = all.iter().filter(|t| t.intake.as_ref().is_some_and(|i| i.source.kind == SourceKind::Email)).count();
         assert_eq!(emails, 1, "exactly one task exists for the identity");
     }
@@ -1753,7 +1753,7 @@ mod tests {
             ids.push(h.await.unwrap().id);
         }
         assert_eq!(ids[0], ids[1], "both callers land on the same item");
-        let all = engine.store.list(&TaskFilter::default()).await.unwrap();
+        let all = engine.l4.store.list(&TaskFilter::default()).await.unwrap();
         let matching = all
             .iter()
             .filter(|t| {
@@ -1787,7 +1787,7 @@ mod tests {
         assert_eq!(record.stage, IntakeStage::Ready);
         assert!(matches!(record.decision.as_ref().unwrap().decision, Decision::Ready { run: false }));
 
-        let entries = engine.store.entries(&item.id, 200).await.unwrap();
+        let entries = engine.l4.store.entries(&item.id, 200).await.unwrap();
         let verdict = entries.iter().find(|e| e.kind == TRIAGE_VERDICT_KIND).expect("the verdict is journaled");
         let data = verdict.data.as_ref().unwrap();
         assert_eq!(data["attestation"], "triage");
@@ -1841,7 +1841,7 @@ mod tests {
             .await
             .unwrap();
         engine.start_run(&task.id, Trigger::Manual).await;
-        let run = engine.store.active_run(&task.id).await.unwrap().expect("dispatched");
+        let run = engine.l4.store.active_run(&task.id).await.unwrap().expect("dispatched");
         engine
             .report(
                 &task.id,
@@ -1871,7 +1871,7 @@ mod tests {
         let estimate = released.estimate.as_ref().expect("five samples clear the minimum");
         assert_eq!(released.estimate_seconds, Some(estimate.time.expected));
 
-        let entries = engine.store.entries(&item.id, 200).await.unwrap();
+        let entries = engine.l4.store.entries(&item.id, 200).await.unwrap();
         let verdict = entries.iter().find(|e| e.kind == TRIAGE_VERDICT_KIND).expect("the verdict is journaled");
         let basis = &verdict.data.as_ref().unwrap()["triage"]["estimate_basis"];
         assert_eq!(basis["source"], "reference_class");
@@ -2028,7 +2028,7 @@ mod tests {
         let other = add(&engine, "Something else").await;
         let triage = engine.intake_triage(&Caller::Owner, &item.id, Some("shell".into())).await.unwrap();
         let run = loop {
-            if let Some(run) = engine.store.active_run(&triage.id).await.unwrap() {
+            if let Some(run) = engine.l4.store.active_run(&triage.id).await.unwrap() {
                 break run;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -2280,7 +2280,7 @@ mod tests {
         assert_eq!(expanded.intake.as_ref().unwrap().stage, IntakeStage::Split);
         assert!(expanded.result.as_deref().unwrap().starts_with("expanded into 2 tasks"));
 
-        let tasks = engine.store.list(&TaskFilter::default()).await.unwrap();
+        let tasks = engine.l4.store.list(&TaskFilter::default()).await.unwrap();
         let children: Vec<&Task> = tasks.iter().filter(|task| task.parent_task_id.as_deref() == Some(&item.id)).collect();
         assert_eq!(children.len(), 2);
         assert!(children.iter().all(|task| task.intake.is_none()), "children are executable tasks, not GitHub/intake children");
@@ -2305,7 +2305,7 @@ mod tests {
         }
         assert!(kinds(&engine, &foundation.id).await.contains(&"dispatched".to_string()));
         engine
-            .store
+            .l4.store
             .update(
                 &foundation.id,
                 &TaskPatch { status: Some(TaskStatus::Done), ..Default::default() },
@@ -2410,7 +2410,7 @@ mod tests {
         assert_eq!(decision.parts.len(), 4);
 
         let children: Vec<Task> = engine
-            .store
+            .l4.store
             .list(&TaskFilter { parent_task_id: Some(item.id.clone()), ..Default::default() })
             .await
             .unwrap();
@@ -2444,7 +2444,7 @@ mod tests {
         let after = engine.require(&item.id).await.unwrap();
         assert_eq!(after.status, TaskStatus::Intake, "nothing was released");
         assert!(after.intake.as_ref().unwrap().decision.is_none());
-        assert!(engine.workflows.runs(None, None, 10).await.unwrap().is_empty(), "and no workflow started");
+        assert!(engine.l4.workflows.runs(None, None, 10).await.unwrap().is_empty(), "and no workflow started");
     }
 
     #[tokio::test]
@@ -2453,7 +2453,7 @@ mod tests {
         let item = add(&engine, "Everything at once").await;
         let triage = engine.intake_triage(&Caller::Owner, &item.id, Some("shell".into())).await.unwrap();
         let run = loop {
-            if let Some(run) = engine.store.active_run(&triage.id).await.unwrap() {
+            if let Some(run) = engine.l4.store.active_run(&triage.id).await.unwrap() {
                 break run;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;

@@ -95,7 +95,7 @@ async fn poll_once_inner(
     gh: &Path,
     mut etags: Option<&mut HashMap<String, String>>,
 ) {
-    let tasks = match engine.store.list(&TaskFilter::default()).await {
+    let tasks = match engine.l4.store.list(&TaskFilter::default()).await {
         Ok(tasks) => tasks,
         Err(error) => {
             tracing::warn!("could not list intake items before polling GitHub: {error}");
@@ -326,7 +326,7 @@ async fn sync_open_item(
         intake: Some(intake),
         ..Default::default()
     };
-    match engine.store.update(&existing.id, &patch).await {
+    match engine.l4.store.update(&existing.id, &patch).await {
         Ok(_) => {
             engine
                 .entry(

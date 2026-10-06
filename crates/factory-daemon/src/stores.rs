@@ -1,7 +1,7 @@
 //! `ScopedStores`: a `TaskStore` that is really several, chosen by scope.
 //!
 //! One `Arc<dyn TaskStore>` serves the whole instance today. Rather than teach
-//! every one of the ~60 call sites that say `self.store.…` to pick a store for
+//! every one of the ~60 call sites that say `self.l4.store.…` to pick a store for
 //! itself, the *value* behind that `Arc` becomes a router: `Engine.store`
 //! keeps its type, and one project's tasks can live in an issue tracker while
 //! another's stay in the built-in sqlite.
@@ -11,7 +11,7 @@
 //! an issue tracker, and neither does a journal entry or an `AgentSession`.
 //! Those stay on one store for the whole instance, always: that is what keeps
 //! `active_runs()` complete, which is what lets the watchdog and the
-//! scheduler go on reading `self.store` without ever learning this router
+//! scheduler go on reading `self.l4.store` without ever learning this router
 //! exists.
 
 use std::collections::HashMap;
