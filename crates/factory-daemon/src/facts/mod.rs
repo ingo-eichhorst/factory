@@ -10,6 +10,7 @@ mod l5;
 pub(crate) use factory_process::facts::{
     NamedQuery, RecoveryQuery, ReleaseBuildQuery, TaskInventoryQuery,
 };
+pub(crate) use l1::selected_http_bind;
 pub(crate) use l1::{
     backup_provider as infrastructure_backup, environment_provider as infrastructure_environments,
 };
@@ -93,6 +94,10 @@ impl<'a, L: Level> Wiring<'a, L> {
     /// The live configuration snapshot (shared by every level).
     pub(crate) fn snapshot(&self) -> factory_core::config::Factory {
         self.engine.factory_snapshot()
+    }
+    /// The path of the running `factory` binary (instance-wide, not level state).
+    pub(crate) fn factory_bin(&self) -> &'a std::path::Path {
+        &self.engine.shared.factory_bin
     }
     /// The observer bus: events are published here, never read as evidence.
     pub(crate) fn bus(&self) -> &'a factory_core::event::EventBus {

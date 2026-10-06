@@ -51,6 +51,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("renewals/", L1), // also touches L2 and L6 state, see BASELINE
     // L2 Environment
     ("provision.rs", L2),
+    ("l2_service.rs", L2),
     ("provision/", L2),
     ("secrets.rs", L2),
     ("secrets/", L2),
@@ -142,7 +143,10 @@ struct ServiceEntry {
     owner: Owner,
     accessor: &'static str,
 }
-const SERVICES: &[ServiceEntry] = &[ServiceEntry { owner: L6, accessor: ".l6_service()" }];
+const SERVICES: &[ServiceEntry] = &[
+    ServiceEntry { owner: L2, accessor: ".l2_service()" },
+    ServiceEntry { owner: L6, accessor: ".l6_service()" },
+];
 
 /// (file -> accessor, count): modules that reach into a level service from
 /// another level. Each is a pull the owning slice has to replace. May only shrink.
