@@ -32,7 +32,7 @@ impl Fixture {
         ("demo".into(), "boxed".into())
     }
     fn readiness(&self) -> Readiness {
-        self.engine.provision.readiness(&self.key()).expect("the pass judged the agent")
+        self.engine.l2.provision.readiness(&self.key()).expect("the pass judged the agent")
     }
     async fn pass(&self) -> Readiness {
         self.engine.provision_pass().await;
@@ -144,7 +144,7 @@ fn fixture(block: &str, tools: impl FnOnce(&Path) -> Tools) -> Fixture {
     let mut engine = Engine::new(Factory { root: root.clone(), config }, Registry::with_builtins(), store, factory_bin, Vec::new());
     let mut t = tools(&dir);
     t.launchctl = fake_launchctl(&dir);
-    engine.provision = Provisioner::new(t);
+    engine.l2.provision = Provisioner::new(t);
     Fixture { root, dir, engine: Arc::new(engine) }
 }
 
@@ -214,7 +214,7 @@ async fn declared_providers_are_made_from_their_sources_and_the_values_go_only_t
     // or the Inbox shows, not the config the roster writes back.
     for secret in ["file-secret-123", "cmd-secret-456"] {
         assert!(!calls.contains(secret), "{secret} on a command line: {calls}");
-        assert!(!serde_json::to_string(&f.engine.provision.all().values().collect::<Vec<_>>()).unwrap().contains(secret));
+        assert!(!serde_json::to_string(&f.engine.l2.provision.all().values().collect::<Vec<_>>()).unwrap().contains(secret));
         assert!(!serde_json::to_string(&declared(&f.engine)[0].config).unwrap().contains(secret));
     }
 
@@ -301,7 +301,7 @@ async fn a_source_removed_or_rotated_since_the_last_pass_is_found_at_dispatch() 
     let engine = f.engine.clone();
     let looping = tokio::spawn(async move {
         loop {
-            engine.provision.wake.notified().await;
+            engine.l2.provision.wake.notified().await;
             engine.provision_pass().await;
         }
     });
@@ -392,7 +392,7 @@ async fn a_stopped_gateway_is_started_without_restarting_it_and_recorded() {
     let log = f.file("launchctl.log").unwrap();
     assert!(log.contains(&format!("kickstart gui/{}/{GATEWAY_SERVICE}", unsafe { libc::getuid() })), "{log}");
     assert!(!log.contains("-k"), "a restart would take the gateway's sandboxes with it: {log}");
-    let rows = f.engine.provision.gateway_rows();
+    let rows = f.engine.l2.provision.gateway_rows();
     assert_eq!(rows[0].status, "connected");
     assert!(rows[0].started_with.as_deref().unwrap().starts_with("launchctl kickstart"), "{rows:?}");
     assert!(rows[0].started_at.is_some());
@@ -439,7 +439,7 @@ async fn factorys_image_is_built_in_the_background_and_the_previous_one_kept_whi
     assert_eq!(r.state, ReadinessState::Preparing, "{r:?}");
     assert!(r.thing.unwrap().contains("building Factory's sandbox image"));
     // The build tells the loop; here the test asks again once it is done.
-    tokio::time::timeout(Duration::from_secs(10), f.engine.provision.wake.notified()).await.expect("the build finished");
+    tokio::time::timeout(Duration::from_secs(10), f.engine.l2.provision.wake.notified()).await.expect("the build finished");
     let r = f.pass().await;
     assert_eq!(r.state, ReadinessState::Ready, "{r:?}");
     let first = r.image.clone().unwrap();
@@ -456,7 +456,7 @@ async fn factorys_image_is_built_in_the_background_and_the_previous_one_kept_whi
     assert_eq!(r.state, ReadinessState::Ready, "{r:?}");
     assert_eq!(r.image.as_deref(), Some(first.as_str()), "the old image until the new one exists");
     assert!(r.notes.iter().any(|n| n.contains("being built in the background")), "{:?}", r.notes);
-    tokio::time::timeout(Duration::from_secs(10), f.engine.provision.wake.notified()).await.expect("the rebuild finished");
+    tokio::time::timeout(Duration::from_secs(10), f.engine.l2.provision.wake.notified()).await.expect("the rebuild finished");
     let r = f.pass().await;
     let second = r.image.clone().unwrap();
     assert_ne!(second, first);
@@ -491,7 +491,7 @@ async fn failed_rebuild_keeps_old_image_usable_but_is_visible_until_recovery() {
     private_file(&f.root.join("secrets/claude"), "file-secret-123", 0o600);
     private_file(&f.root.join("secrets/gh"), "cmd-secret-456", 0o600);
     assert_eq!(f.pass().await.state, ReadinessState::Preparing);
-    tokio::time::timeout(Duration::from_secs(10), f.engine.provision.wake.notified()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), f.engine.l2.provision.wake.notified()).await.unwrap();
     let ready = f.pass().await;
     assert_eq!(ready.state, ReadinessState::Ready);
     let old_image = ready.image.unwrap();
@@ -500,7 +500,7 @@ async fn failed_rebuild_keeps_old_image_usable_but_is_visible_until_recovery() {
     std::fs::write(f.root.join("factory"), "factory cli v2").unwrap();
     let rebuilding = f.pass().await;
     assert!(rebuilding.image_build_failure.is_none(), "in-progress is not failure");
-    tokio::time::timeout(Duration::from_secs(10), f.engine.provision.wake.notified()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), f.engine.l2.provision.wake.notified()).await.unwrap();
     let stale = f.pass().await;
     assert_eq!(stale.state, ReadinessState::Ready, "the older smoke-tested image can still run");
     assert_eq!(stale.image.as_deref(), Some(old_image.as_str()));
@@ -523,7 +523,7 @@ async fn failed_rebuild_keeps_old_image_usable_but_is_visible_until_recovery() {
     std::fs::remove_file(f.dir.join("fail-build")).unwrap();
     std::fs::write(f.root.join("factory"), "factory cli v3").unwrap();
     assert!(f.pass().await.image_build_failure.is_none(), "a different build is not the old failure");
-    tokio::time::timeout(Duration::from_secs(10), f.engine.provision.wake.notified()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), f.engine.l2.provision.wake.notified()).await.unwrap();
     let recovered = f.pass().await;
     assert_eq!(recovered.state, ReadinessState::Ready);
     assert_ne!(recovered.image.unwrap(), old_image);
@@ -583,7 +583,7 @@ async fn the_gate_waits_briefly_for_a_first_judgement_and_never_lets_a_needs_thr
         notes: vec![],
         expiring: vec![],
     };
-    f.engine.provision.set_for_test(&f.key(), needs);
+    f.engine.l2.provision.set_for_test(&f.key(), needs);
     let e = f.engine.sandbox_gate(&f.key(), &config).await.unwrap_err();
     assert!(e.contains("needs the OpenShell gateway") && e.contains("launchctl kickstart"), "{e}");
 
@@ -593,7 +593,7 @@ async fn the_gate_waits_briefly_for_a_first_judgement_and_never_lets_a_needs_thr
     let engine = f.engine.clone();
     let looping = tokio::spawn(async move {
         loop {
-            engine.provision.wake.notified().await;
+            engine.l2.provision.wake.notified().await;
             engine.provision_pass().await;
         }
     });
@@ -642,7 +642,7 @@ async fn moving_inline_credentials_into_the_catalogue_gives_the_same_digest_and_
     // recreated when its inline sources become `{ secret: }` references.
     let f = managed();
     assert_eq!(f.pass().await.state, ReadinessState::Ready);
-    let given = lock(&f.engine.provision.given).clone();
+    let given = lock(&f.engine.l2.provision.given).clone();
     assert_eq!(given.len(), 2, "{given:?}");
 
     by_reference(&f);
@@ -655,7 +655,7 @@ async fn moving_inline_credentials_into_the_catalogue_gives_the_same_digest_and_
     for verb in ["provider create", "provider update", "provider delete", "sandbox create"] {
         assert!(!calls.contains(verb), "{verb} after moving to the catalogue: {calls}");
     }
-    assert_eq!(*lock(&f.engine.provision.given), given, "the same value digest, per provider");
+    assert_eq!(*lock(&f.engine.l2.provision.given), given, "the same value digest, per provider");
 
     // A dispatch, handed the block as written -- references and all.
     let raw = f.engine.factory_snapshot().scope("demo").unwrap().declared_agents()[0].openshell.clone().unwrap();
@@ -667,7 +667,7 @@ async fn moving_inline_credentials_into_the_catalogue_gives_the_same_digest_and_
     // The secret's expiry is the secret's: no per-provider expiring line.
     assert!(r.expiring.is_empty(), "{:?}", r.expiring);
     // And the catalogue's sources were checked -- whether they resolve, never what they gave.
-    let checks = f.engine.provision.source_checks();
+    let checks = f.engine.l2.provision.source_checks();
     assert!(checks["claude-oauth-token"].resolves && checks["github-gh-login"].resolves, "{checks:?}");
     let shown = serde_json::to_string(&checks).unwrap();
     assert!(!shown.contains("file-secret-123") && !shown.contains("cmd-secret-456"), "{shown}");
@@ -682,7 +682,7 @@ async fn a_referenced_secret_that_will_not_resolve_names_its_renew_line() {
     assert_eq!(r.state, ReadinessState::Needs);
     assert!(r.thing.as_deref().unwrap().contains("cannot be read"), "{r:?}");
     assert_eq!(r.command, Some(format!("claude setup-token, then (umask 077; cat > {}/secrets/claude)", f.root.display())));
-    let check = &f.engine.provision.source_checks()["claude-oauth-token"];
+    let check = &f.engine.l2.provision.source_checks()["claude-oauth-token"];
     assert!(!check.resolves && check.reason.as_deref().unwrap().contains("cannot be read"), "{check:?}");
 }
 

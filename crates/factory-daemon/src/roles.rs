@@ -119,7 +119,7 @@ impl Engine {
                 let agent = declared.name();
                 // The same answer `effective_role` gives: a role somebody gave
                 // wins over the config until it is cleared.
-                let given = match self.store.get_agent(&AgentSession::id_for(name, &agent)).await {
+                let given = match self.l4.store.get_agent(&AgentSession::id_for(name, &agent)).await {
                     Ok(Some(session)) => session.assigned_role,
                     _ => None,
                 };
@@ -283,7 +283,7 @@ mod tests {
     async fn one_scope_shows_every_role_with_where_it_came_from_and_who_holds_it() {
         let e = engine();
         let helper = AgentSession::new("demo-app", "helper", "pi", "herdr", Lifetime::Permanent, Role::worker());
-        e.store.put_agent(&helper).await.unwrap();
+        e.l4.store.put_agent(&helper).await.unwrap();
         e.set_agent_role("demo-app/helper", Some(Role::new("runner"))).await.unwrap();
 
         let board = e.role_board(Some("demo-app")).await.unwrap();

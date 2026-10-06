@@ -13,12 +13,12 @@ use std::collections::BTreeSet;
 
 impl Engine {
     pub(crate) async fn validate_after(&self,task_id:Option<&str>,after:&[String])->Result<()>{
-        factory_process::creation::validate_after(self.store.as_ref(),task_id,after).await
+        factory_process::creation::validate_after(self.l4.store.as_ref(),task_id,after).await
     }
     pub(crate) async fn waiting_description(&self, task: &Task) -> Result<String> {
         let mut names = Vec::new();
         for id in task.after.iter().flatten() {
-            names.push(match self.store.get(id).await? {
+            names.push(match self.l4.store.get(id).await? {
                 Some(parent) => format!("{} ({id})", parent.title),
                 None => format!("{id} (missing)"),
             });
@@ -40,8 +40,8 @@ impl Engine {
         caller: &Caller,
         reason: &str,
     ) -> Result<()> {
-        let _guard = self.workflow_edit.lock().await;
-        let _admission = self.admission_lock.lock().await;
+        let _guard = self.l4.workflow_edit.lock().await;
+        let _admission = self.l4.admission_lock.lock().await;
         let task = self.require(&task.id).await?;
         if task.after.is_none() {
             return Err(FactoryError::BadRequest(
@@ -62,9 +62,9 @@ impl Engine {
             {
                 node.status = WorkflowNodeStatus::Pending;
             }
-            self.workflows.put_run(&workflow).await?;
+            self.l4.workflows.put_run(&workflow).await?;
         }
-        self.store
+        self.l4.store
             .update(
                 &task.id,
                 &TaskPatch {
@@ -107,13 +107,13 @@ impl Engine {
                 node.task_created = false;
             }
         }
-        self.workflows.put_run(run).await?;
+        self.l4.workflows.put_run(run).await?;
         for index in 0..run.nodes.len() {
             let node = run.nodes[index].clone();
             let Some(task_id) = node.task_id.clone() else {
                 continue;
             };
-            let task = self.store.get(&task_id).await?;
+            let task = self.l4.store.get(&task_id).await?;
             let Some(definition) = run
                 .definition
                 .nodes
@@ -134,15 +134,15 @@ impl Engine {
                 run.nodes[index].task_created = true;
                 // A new feedback round waits again, but an explicit early
                 // run or a queued admission is not put back behind its gate.
-                let previous = self.store.runs(&task_id, 1).await?.into_iter().next();
+                let previous = self.l4.store.runs(&task_id, 1).await?.into_iter().next();
                 if node.status == WorkflowNodeStatus::Unstarted
                     && node.round > 0
                     && previous
                         .as_ref()
                         .is_some_and(|previous| previous.workflow_round < node.round)
-                    && self.store.active_run(&task_id).await?.is_none()
+                    && self.l4.store.active_run(&task_id).await?.is_none()
                 {
-                    self.store
+                    self.l4.store
                         .update(
                             &task_id,
                             &TaskPatch {
@@ -179,7 +179,7 @@ impl Engine {
             }
             if let Err(error) = self.authorize_workflow_spawn(&caller, &template).await {
                 fail_materialization(run, index, error.to_string());
-                self.workflows.put_run(run).await?;
+                self.l4.workflows.put_run(run).await?;
                 return Ok(());
             }
             let origin = WorkflowOrigin {
@@ -196,11 +196,11 @@ impl Engine {
             };
             if let Err(error) = created {
                 fail_materialization(run, index, error.to_string());
-                self.workflows.put_run(run).await?;
+                self.l4.workflows.put_run(run).await?;
                 return Ok(());
             }
             run.nodes[index].task_created = true;
-            self.workflows.put_run(run).await?;
+            self.l4.workflows.put_run(run).await?;
         }
         Ok(())
     }
@@ -218,19 +218,19 @@ impl Engine {
                 continue;
             }
             let Some(id) = &node.task_id else { continue };
-            let Some(task) = self.store.get(id).await? else {
+            let Some(task) = self.l4.store.get(id).await? else {
                 continue;
             };
             if (task.after.is_none() && task.status != TaskStatus::Pending)
                 || task.status.is_terminal()
-                || self.store.active_run(id).await?.is_some()
+                || self.l4.store.active_run(id).await?.is_some()
             {
                 continue;
             }
             let note = node.skip_reason.clone().unwrap_or_else(|| {
                 format!("workflow {} ended without admitting this step", run.id)
             });
-            self.store
+            self.l4.store
                 .update(
                     id,
                     &TaskPatch {

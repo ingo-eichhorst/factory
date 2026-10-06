@@ -119,7 +119,7 @@ impl Engine {
             },
         )
         .await?;
-        let _busy = self.deployment_mirror_busy.try_lock().map_err(|_| {
+        let _busy = self.l1.deployment_mirror_busy.try_lock().map_err(|_| {
             bad("another deployment mirror is being published; retry after it finishes")
         })?;
         let plan = self.deployment_mirror_plan(id).await?;
@@ -130,7 +130,7 @@ impl Engine {
         }
         // A retry of a stored successful effect does not issue another write.
         if let Some(prior) = self
-            .workflows
+            .l4.workflows
             .mirror_receipts(id, 200)
             .await?
             .into_iter()
@@ -138,7 +138,7 @@ impl Engine {
         {
             return Ok(prior);
         }
-        self.workflows
+        self.l4.workflows
             .record_mirror(&receipt(&plan, caller, Phase::Approved, None, None, None))
             .await?;
         let mut remote_id = None;
@@ -162,7 +162,7 @@ impl Engine {
                 Some(error.to_string()),
             ),
         };
-        self.workflows.record_mirror(&final_receipt).await?;
+        self.l4.workflows.record_mirror(&final_receipt).await?;
         Ok(final_receipt)
     }
 
@@ -213,7 +213,7 @@ impl Engine {
                 ));
             }
             *remote_id = Some(created.id);
-            self.workflows
+            self.l4.workflows
                 .record_mirror(&receipt(
                     plan,
                     caller,
@@ -437,11 +437,11 @@ mod tests {
             Engine::new(
                 engine.factory_snapshot(),
                 factory_plugins::Registry::with_builtins(),
-                engine.store.clone(),
+                engine.l4.store.clone(),
                 "factory".into(),
                 Vec::new(),
             )
-            .with_environment_store(engine.environments.clone())
+            .with_environment_store(engine.l1.environments.clone())
             .with_workflow_store(workflows),
         );
         (engine, root)
@@ -587,12 +587,12 @@ esac
             published
         );
         assert!(engine
-            .store
+            .l4.store
             .list(&factory_core::TaskFilter::default())
             .await
             .unwrap()
             .is_empty());
-        assert_eq!(engine.environments.deployments().await.unwrap().len(), 1);
+        assert_eq!(engine.l1.environments.deployments().await.unwrap().len(), 1);
         let report = engine.environments_report(None).await.unwrap();
         assert_eq!(report.deployment_mirrors[&id].receipt, Some(published));
         std::fs::remove_dir_all(root).unwrap();
@@ -668,11 +668,11 @@ esac
                 .commit,
             SHA
         );
-        let mut deployment = engine.environments.deployment(&id).await.unwrap().unwrap();
+        let mut deployment = engine.l1.environments.deployment(&id).await.unwrap().unwrap();
         deployment.id = uuid::Uuid::new_v4().to_string();
         deployment.release.commit = SHA.into();
         deployment.release.dirty = true;
-        engine.environments.started(&deployment).await.unwrap();
+        engine.l1.environments.started(&deployment).await.unwrap();
         assert!(engine.deployment_mirror_plan(&deployment.id).await.is_err());
         assert!(!Grant::expand("*").unwrap().contains(&Grant::DeployPublish));
         assert!(!Grant::expand("deploy.*")
@@ -752,11 +752,11 @@ esac
             Engine::new(
                 snapshot,
                 factory_plugins::Registry::with_builtins(),
-                engine.store.clone(),
+                engine.l4.store.clone(),
                 "factory".into(),
                 Vec::new(),
             )
-            .with_environment_store(engine.environments.clone()),
+            .with_environment_store(engine.l1.environments.clone()),
         );
         let request = factory_core::protocol::Request::DeployPublish {
             id,
@@ -856,11 +856,11 @@ esac
                 Engine::new(
                     snapshot,
                     factory_plugins::Registry::with_builtins(),
-                    engine.store.clone(),
+                    engine.l4.store.clone(),
                     "factory".into(),
                     Vec::new(),
                 )
-                .with_environment_store(engine.environments.clone()),
+                .with_environment_store(engine.l1.environments.clone()),
             );
             assert!(changed
                 .publish_deployment_with_gh(&Caller::Owner, &id, &plan.approval, &gh)
@@ -877,7 +877,7 @@ esac
         let id = start(&engine, SHA, false).await;
         let plan = engine.deployment_mirror_plan(&id).await.unwrap();
         let gh = fake_gh(&root, &plan, 81);
-        let guard = engine.deployment_mirror_busy.lock().await;
+        let guard = engine.l1.deployment_mirror_busy.lock().await;
         assert!(engine
             .publish_deployment_with_gh(&Caller::Owner, &id, &plan.approval, &gh)
             .await

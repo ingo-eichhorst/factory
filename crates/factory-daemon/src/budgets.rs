@@ -115,7 +115,7 @@ mod tests {
         async fn run(&self, scope: &str, at: &str, usage: Option<RunUsage>) -> String {
             let task = self
                 .engine
-                .store
+                .l4.store
                 .create(&task_from_new(
                     NewTask {
                         title: "measured".into(),
@@ -129,7 +129,7 @@ mod tests {
                 .unwrap();
             let mut run = self
                 .engine
-                .store
+                .l4.store
                 .create_run(&NewRun {
                     task_id: task.id.clone(),
                     trigger: Trigger::Manual,

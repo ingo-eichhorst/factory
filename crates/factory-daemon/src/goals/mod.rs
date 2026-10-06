@@ -40,7 +40,7 @@ impl Engine {
             snapshot.root.clone(),
             snapshot.scope_tree(),
             snapshot.config.scope.as_ref().map(|s| s.name.clone()),
-            &self.goals,
+            &self.l6.goals,
             reported_directions,
         );
         let plan = service.prepare(scope, cycle_id, now).await?;
@@ -96,7 +96,7 @@ impl Engine {
             snapshot.root.clone(),
             snapshot.scope_tree(),
             snapshot.config.scope.as_ref().map(|s| s.name.clone()),
-            &self.goals,
+            &self.l6.goals,
             // A check-in only needs to find the key result and confirm it
             // is manual -- it never reads WrongDirection, so there is
             // nothing for a live direction map to change here.
@@ -509,7 +509,7 @@ mod tests {
             .await
             .unwrap();
 
-        let all = engine.goals.all().await.unwrap();
+        let all = engine.l6.goals.all().await.unwrap();
         assert_eq!(all.len(), 2, "both rows kept -- append-only, never revised or replaced");
 
         let report = engine.goals_report(None, Some("2026-q4")).await.unwrap();
@@ -569,7 +569,7 @@ mod tests {
         // A held, conforming `feature` run -- built directly through the
         // store, the same shape `metrics::tests::held_run` builds.
         let task = engine
-            .store
+            .l4.store
             .create(&task_from_new(
                 NewTask {
                     title: "t".into(),
@@ -583,7 +583,7 @@ mod tests {
             .await
             .unwrap();
         let run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Manual,
@@ -608,7 +608,7 @@ mod tests {
         }];
         let now = Utc::now();
         let run = engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -621,7 +621,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .run_evidence
+            .l4.run_evidence
             .append_step_attestation(&StepAttestation {
                 id: uuid::Uuid::new_v4().to_string(),
                 run_id: run.id.clone(),

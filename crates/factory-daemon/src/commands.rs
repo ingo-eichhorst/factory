@@ -38,7 +38,7 @@ fn agent_inputs(
 pub(crate) fn agents(engine: &Engine) -> factory_agents::selection::Service<'_> {
     let snapshot = engine.factory_snapshot();
     factory_agents::selection::Service {
-        catalog: &engine.registry,
+        catalog: &engine.shared.registry,
         scopes: agent_inputs(&snapshot),
         foreman: snapshot.config.daemon.foreman.clone(),
     }
@@ -49,12 +49,12 @@ pub(crate) fn process<'a>(
 ) -> factory_process::creation::Service<'a, factory_agents::selection::Service<'a>> {
     let snapshot = engine.factory_snapshot();
     let agents = factory_agents::selection::Service {
-        catalog: &engine.registry,
+        catalog: &engine.shared.registry,
         scopes: agent_inputs(&snapshot),
         foreman: snapshot.config.daemon.foreman.clone(),
     };
     factory_process::creation::Service {
-        store: engine.store.as_ref(),
+        store: engine.l4.store.as_ref(),
         observer,
         agents: Commands::new(agents),
         inputs: factory_process::creation::Inputs {

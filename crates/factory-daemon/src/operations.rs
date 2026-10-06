@@ -169,9 +169,9 @@ impl Engine {
         };
 
         let history = Duration::days(HISTORY_DAYS.max(2 * window.days()));
-        let mut runs = self.store.runs_between(now - history, now).await?;
-        let tasks = self.store.list(&TaskFilter::default()).await?;
-        let agents = self.store.agents().await?;
+        let mut runs = self.l4.store.runs_between(now - history, now).await?;
+        let tasks = self.l4.store.list(&TaskFilter::default()).await?;
+        let agents = self.l4.store.agents().await?;
         let scope_of: BTreeMap<&str, &str> = tasks.iter().map(|t| (t.id.as_str(), t.scope.as_str())).collect();
         let in_scope = |task_id: &str| match &scope {
             None => true,
@@ -191,13 +191,13 @@ impl Engine {
             .map(|t| t.id.clone())
             .collect();
         for id in stale {
-            runs.extend(self.store.runs(&id, 1).await?);
+            runs.extend(self.l4.store.runs(&id, 1).await?);
         }
 
         let mut block_reasons = BTreeMap::new();
         let mut last_progress = BTreeMap::new();
         for run in runs.iter().filter(|r| !r.status.is_terminal() && in_scope(&r.task_id)) {
-            let entries = self.store.run_entries(&run.id, OPEN_RUN_ENTRIES).await?;
+            let entries = self.l4.store.run_entries(&run.id, OPEN_RUN_ENTRIES).await?;
             if let Some(last) = entries.last() {
                 last_progress.insert(run.id.clone(), last.at);
             }
@@ -216,7 +216,7 @@ impl Engine {
         let asks_from = now - Duration::days(2 * window.days());
         let missed_from = now - Duration::hours(MISSED_LOOKBACK_HOURS);
         let journal = self
-            .store
+            .l4.store
             .entries_of_kinds(&["schedule_skipped", ANSWER_KIND, RUN_REQUESTED_KIND], asks_from.min(missed_from))
             .await?;
         let mut skipped = Vec::new();
@@ -267,7 +267,7 @@ impl Engine {
             // Two ticks: a slot the next tick is about to fire is not late
             // -- what the model's own default means, at this instance's tick.
             late_after_seconds: Some(2 * capacity.tick_seconds as i64),
-            harnesses: self.harness.rows(&[], snapshot.config.daemon.harness_health.repair_script.as_deref()),
+            harnesses: self.l3.harness.rows(&[], snapshot.config.daemon.harness_health.repair_script.as_deref()),
             sandboxes: self.sandbox_attention(&snapshot, &tasks),
         };
         Ok(operations::report(&input))
@@ -277,7 +277,7 @@ impl Engine {
     /// that would run it -- what raises `sandbox_not_ready` the moment the
     /// provisioner knows, instead of at the due time.
     fn sandbox_attention(&self, snapshot: &factory_core::config::Factory, tasks: &[factory_core::task::Task]) -> Vec<factory_core::operations::SandboxAttention> {
-        self.provision
+        self.l2.provision
             .all()
             .into_iter()
             .map(|((scope, agent), readiness)| {
@@ -314,7 +314,7 @@ impl Engine {
     /// re-reads and fires a due task, so a slot is fired or skipped, never
     /// both.
     pub(crate) async fn skip_next(&self, id: &str, slot: Option<DateTime<Utc>>, asked: &Asked) -> Result<Task> {
-        let _slot = self.schedule_lock.lock().await;
+        let _slot = self.l4.schedule_lock.lock().await;
         let task = self.require(id).await?;
         let Some(s) = &task.schedule else {
             return Err(FactoryError::BadRequest("only a scheduled task has a next slot to skip".into()));
@@ -344,7 +344,7 @@ impl Engine {
         };
         let dropped_retry = task.pending_retry.is_some();
         let updated = self
-            .store
+            .l4.store
             .update(
                 id,
                 &TaskPatch {
@@ -370,7 +370,7 @@ impl Engine {
             ),
         )
         .await;
-        self.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
+        self.shared.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
         Ok(updated)
     }
 
@@ -395,14 +395,14 @@ impl Engine {
         duplicate_of: Option<String>,
         asked: &Asked,
     ) -> Result<Task> {
-        let _slot = self.schedule_lock.lock().await;
+        let _slot = self.l4.schedule_lock.lock().await;
         let task = self.require(id).await?;
         if task.status == TaskStatus::Intake {
             return Err(FactoryError::BadRequest(
                 "this task is still in intake: close it there (factory intake decide <id> wontfix)".into(),
             ));
         }
-        if let Some(run) = self.store.active_run(id).await? {
+        if let Some(run) = self.l4.store.active_run(id).await? {
             return Err(FactoryError::BadRequest(format!(
                 "attempt {} of this task is still {}; cancel it before closing the task",
                 run.attempt,
@@ -436,7 +436,7 @@ impl Engine {
             at: Utc::now(),
         };
         let updated = self
-            .store
+            .l4.store
             .update(
                 id,
                 &TaskPatch {
@@ -472,7 +472,7 @@ impl Engine {
             ),
         )
         .await;
-        self.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
+        self.shared.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
         self.sweep_workspaces().await;
         // `#274`: a closed task's sandboxed conversation, if it preserved
         // one, is released the same way its worktree is -- no new sweeper,
@@ -489,7 +489,7 @@ impl Engine {
     /// happened last. The failure it may have been closed on goes -- a
     /// pending task carrying one would read as a task waiting on a retry.
     pub(crate) async fn reopen_task(&self, id: &str, asked: &Asked) -> Result<Task> {
-        let _slot = self.schedule_lock.lock().await;
+        let _slot = self.l4.schedule_lock.lock().await;
         let task = self.require(id).await?;
         let Some(was) = task.close_reason() else {
             return Err(FactoryError::BadRequest(format!(
@@ -509,7 +509,7 @@ impl Engine {
             _ => None,
         };
         let updated = self
-            .store
+            .l4.store
             .update(
                 id,
                 &TaskPatch {
@@ -533,7 +533,7 @@ impl Engine {
             ),
         )
         .await;
-        self.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
+        self.shared.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
         Ok(updated)
     }
 
@@ -543,7 +543,7 @@ impl Engine {
     /// in between (a skip, a pause, an edit): that is somebody's decision,
     /// and the next tick reads it afresh.
     pub(crate) async fn still_due(&self, seen: &Task) -> Option<Task> {
-        let now = self.store.get(&seen.id).await.ok().flatten()?;
+        let now = self.l4.store.get(&seen.id).await.ok().flatten()?;
         let same = now.next_run_at == seen.next_run_at
             && now.pending_retry == seen.pending_retry
             && !now.schedule_paused
@@ -593,7 +593,7 @@ impl Engine {
         let Some(session) = run.session.as_ref() else {
             return Err(FactoryError::BadRequest(format!("run {run_id} has no session to answer into")));
         };
-        let runtime = self.registry.runtime(&session.runtime)?;
+        let runtime = self.shared.registry.runtime(&session.runtime)?;
         runtime.send_text(session, text).await?;
         self.entry(
             &run.task_id,
@@ -765,7 +765,7 @@ mod tests {
 
     async fn run_of(engine: &Engine, task_id: &str) -> Run {
         engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task_id.into(),
                 trigger: Trigger::Manual,
@@ -788,7 +788,7 @@ mod tests {
     async fn blocked_run(engine: &Engine, task_id: &str, why: &str) -> Run {
         let run = run_of(engine, task_id).await;
         let run = engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -835,7 +835,7 @@ mod tests {
         let task = task_in(&engine, "demo", "quiet one", None).await;
         let run = run_of(&engine, &task.id).await;
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -876,7 +876,7 @@ mod tests {
         for _ in 0..operations::MIN_HISTORY {
             let run = run_of(&engine, &task.id).await;
             engine
-                .store
+                .l4.store
                 .update_run(
                     &run.id,
                     &RunPatch { status: Some(RunStatus::Done), ended_at: Some(run.started_at), ..Default::default() },
@@ -886,7 +886,7 @@ mod tests {
         }
         let open = run_of(&engine, &task.id).await;
         engine
-            .store
+            .l4.store
             .update_run(&open.id, &RunPatch { status: Some(RunStatus::Running), ..Default::default() })
             .await
             .unwrap();
@@ -905,7 +905,7 @@ mod tests {
         let (engine, _, root) = test_engine();
         let late = task_in(&engine, "demo", "late", Some(Schedule::Every { seconds: 3600 })).await;
         engine
-            .store
+            .l4.store
             .update(&late.id, &TaskPatch { next_run_at: Some(Utc::now() - Duration::hours(1)), ..Default::default() })
             .await
             .unwrap();
@@ -914,7 +914,7 @@ mod tests {
         // down the slots between, exactly as a real late tick would.
         let missed = task_in(&engine, "demo", "missed", Some(Schedule::Every { seconds: 60 })).await;
         let missed = engine
-            .store
+            .l4.store
             .update(&missed.id, &TaskPatch { next_run_at: Some(Utc::now() - Duration::hours(1)), ..Default::default() })
             .await
             .unwrap();
@@ -950,9 +950,9 @@ mod tests {
             started_at: Utc::now(),
             last_seen_at: Utc::now(),
         };
-        engine.store.put_agent(&agent("keeper", Lifetime::Permanent, AgentState::Gone)).await.unwrap();
-        engine.store.put_agent(&agent("temp", Lifetime::Temporary, AgentState::Gone)).await.unwrap();
-        engine.store.put_agent(&agent("fine", Lifetime::Permanent, AgentState::Ready)).await.unwrap();
+        engine.l4.store.put_agent(&agent("keeper", Lifetime::Permanent, AgentState::Gone)).await.unwrap();
+        engine.l4.store.put_agent(&agent("temp", Lifetime::Temporary, AgentState::Gone)).await.unwrap();
+        engine.l4.store.put_agent(&agent("fine", Lifetime::Permanent, AgentState::Ready)).await.unwrap();
 
         let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         let lost: Vec<&str> = report
@@ -975,10 +975,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!engine.signpost_cache.is_populated());
+        assert!(!engine.l5.signpost_cache.is_populated());
         let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         assert!(!kinds(&report).contains(&ExceptionKind::TriggeredSignpost));
-        assert!(!engine.signpost_cache.is_populated(), "Operations never consulted the signpost provider");
+        assert!(!engine.l5.signpost_cache.is_populated(), "Operations never consulted the signpost provider");
         let fact = engine.signposts_fact(Utc::now(), true).await.unwrap();
         assert_eq!(fact.triggered.len(), 1);
         assert_eq!(fact.triggered[0].scenario, "slow-year");
@@ -1026,7 +1026,7 @@ mod tests {
         let task = task_in(&engine, "demo", "failed in spring", None).await;
         let run = run_of(&engine, &task.id).await;
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch { status: Some(RunStatus::Failed), ended_at: Some(Utc::now()), error: Some("gave up".into()), ..Default::default() },
@@ -1041,7 +1041,7 @@ mod tests {
             at: Utc::now(),
         };
         engine
-            .store
+            .l4.store
             .update(&task.id, &TaskPatch { status: Some(TaskStatus::Blocked), failure: Some(failed), ..Default::default() })
             .await
             .unwrap();
@@ -1069,7 +1069,7 @@ mod tests {
         let task = task_in(&engine, "demo", "retried meanwhile", None).await;
         let first = run_of(&engine, &task.id).await;
         engine
-            .store
+            .l4.store
             .update_run(&first.id, &RunPatch { status: Some(RunStatus::Failed), ended_at: Some(Utc::now()), ..Default::default() })
             .await
             .unwrap();
@@ -1083,7 +1083,7 @@ mod tests {
             Response::Error { message, .. } => assert!(message.contains("no longer the task's active run"), "{message}"),
             other => panic!("expected a refusal, got {other:?}"),
         }
-        let still = engine.store.get_run(&retry.id).await.unwrap().unwrap();
+        let still = engine.l4.store.get_run(&retry.id).await.unwrap().unwrap();
         assert!(!still.status.is_terminal(), "the retry is untouched");
 
         let response = engine
@@ -1133,7 +1133,7 @@ mod tests {
         assert!(next > slot, "past the skipped slot");
         assert!(next <= slot + Duration::seconds(3600) + Duration::seconds(5), "and no further than the one after it");
 
-        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 50).await.unwrap();
         let e = entry_of(&entries, "slot_skipped");
         assert_eq!(e.source, "owner");
         assert_eq!(data_str(e, "by"), Some("the owner"));
@@ -1151,7 +1151,7 @@ mod tests {
         let (engine, _, root) = test_engine();
         let task = task_in(&engine, "demo", "hourly", Some(Schedule::Every { seconds: 3600 })).await;
         engine
-            .store
+            .l4.store
             .update(&task.id, &TaskPatch { next_run_at: Some(Utc::now() - Duration::hours(5)), ..Default::default() })
             .await
             .unwrap();
@@ -1176,7 +1176,7 @@ mod tests {
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
         assert_eq!(*runtime.typed.lock().unwrap(), vec!["use the staging one".to_string(), "<enter>".to_string()]);
 
-        let entries = engine.store.run_entries(&run.id, 50).await.unwrap();
+        let entries = engine.l4.store.run_entries(&run.id, 50).await.unwrap();
         let e = entry_of(&entries, ANSWER_KIND);
         assert_eq!(data_str(e, "by"), Some("the owner"));
         assert_eq!(data_str(e, "reason"), Some("it asked which key"));
@@ -1201,7 +1201,7 @@ mod tests {
         assert!(err.to_string().contains("needs a reason"), "{err}");
 
         engine
-            .store
+            .l4.store
             .update_run(&blocked.id, &RunPatch { status: Some(RunStatus::Running), clear_blocked: true, ..Default::default() })
             .await
             .unwrap();
@@ -1221,7 +1221,7 @@ mod tests {
             .handle_request(Request::TaskCancel { id: task.id.clone(), reason: Some("wrong branch".into()), run: None })
             .await;
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
-        let entries = engine.store.run_entries(&run.id, 50).await.unwrap();
+        let entries = engine.l4.store.run_entries(&run.id, 50).await.unwrap();
         let e = entry_of(&entries, "cancel_requested");
         assert_eq!(data_str(e, "reason"), Some("wrong branch"));
 
@@ -1233,7 +1233,7 @@ mod tests {
             })
             .await;
         assert!(matches!(response, Response::Ok { data: Payload::Task { .. } }), "{response:?}");
-        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 50).await.unwrap();
         let e = entry_of(&entries, "schedule_paused");
         assert_eq!(e.source, "owner");
         assert_eq!(data_str(e, "reason"), Some("stop the line"));
@@ -1243,7 +1243,7 @@ mod tests {
             .handle_request(Request::TaskRun { override_wait: false, id: task.id.clone(), reason: Some("try again".into()), continue_run: false })
             .await;
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
-        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 50).await.unwrap();
         assert_eq!(data_str(entry_of(&entries, "run_requested"), "reason"), Some("try again"));
         std::fs::remove_dir_all(root).ok();
     }
@@ -1300,7 +1300,7 @@ mod tests {
         let task = task_in(&engine, "demo", "hourly", Some(Schedule::Every { seconds: 3600 })).await;
         let regular = Utc::now() + Duration::minutes(40);
         engine
-            .store
+            .l4.store
             .update(
                 &task.id,
                 &TaskPatch {
@@ -1315,13 +1315,13 @@ mod tests {
         let skipped = engine.skip_next(&task.id, None, &owner("not today")).await.unwrap();
         assert_eq!(skipped.next_run_at, Some(regular), "the regular slot, not one drifted by the backoff");
         assert!(skipped.pending_retry.is_none());
-        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 50).await.unwrap();
         let e = entry_of(&entries, "slot_skipped");
         assert!(e.message.contains(&regular.to_rfc3339()), "{}", e.message);
 
         // A streak whose regular slot has passed as well resumes from now.
         engine
-            .store
+            .l4.store
             .update(
                 &task.id,
                 &TaskPatch {
@@ -1368,7 +1368,7 @@ mod tests {
         runtime.keys_fail.store(true, std::sync::atomic::Ordering::SeqCst);
 
         assert!(engine.answer_run(&run.id, "yes", &owner("it asked")).await.is_err());
-        let kinds: Vec<String> = engine.store.run_entries(&run.id, 50).await.unwrap().into_iter().map(|e| e.kind).collect();
+        let kinds: Vec<String> = engine.l4.store.run_entries(&run.id, 50).await.unwrap().into_iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&ANSWER_KIND.to_string()), "{kinds:?}");
         assert!(kinds.contains(&"answer_unsent".to_string()), "{kinds:?}");
         std::fs::remove_dir_all(root).ok();
@@ -1384,7 +1384,7 @@ mod tests {
 
         let now = Utc::now();
         assert_eq!(engine.triggered_signposts_cached(now).await.unwrap().len(), 1);
-        assert!(engine.signpost_cache.is_populated(), "kept by L5");
+        assert!(engine.l5.signpost_cache.is_populated(), "kept by L5");
         assert_eq!(engine.triggered_signposts_cached(now).await.unwrap().len(), 1, "served from the cache");
 
         std::fs::remove_file(&file).unwrap();

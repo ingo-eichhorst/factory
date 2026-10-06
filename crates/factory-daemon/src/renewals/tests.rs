@@ -154,7 +154,7 @@ async fn observed_expiry_wins_the_documented_claude_alias_and_forecasts_the_exac
     write(&f.root.join(".factory/config.yaml"), "renewals: [{name: claude-subscription-token, kind: credential, expires: 2090-01-01, affects: [demo/curator]}]\n");
     let expiry = Utc::now() + chrono::Duration::days(60);
     f.engine
-        .credential_expiries
+        .l2.credential_expiries
         .replace(vec![dated("openshell:active:factory-claude", expiry)], true)
         .await
         .unwrap();
@@ -191,12 +191,12 @@ async fn failed_discovery_preserves_a_last_known_expired_date_across_a_restart()
     let f = fixture();
     let expired = dated("credential", Utc::now() - chrono::Duration::days(1));
     f.engine
-        .credential_expiries
+        .l2.credential_expiries
         .replace(vec![expired.clone()], true)
         .await
         .unwrap();
     f.engine
-        .credential_expiries
+        .l2.credential_expiries
         .replace(Vec::new(), false)
         .await
         .unwrap();
@@ -206,7 +206,7 @@ async fn failed_discovery_preserves_a_last_known_expired_date_across_a_restart()
     assert_eq!(report.entries[0].observation.expires_at, expired.expires_at);
     assert_eq!(report.entries[0].milestone, Some(RenewalMilestone::Expired));
     restarted
-        .credential_expiries
+        .l2.credential_expiries
         .replace(
             vec![dated("credential", Utc::now() + chrono::Duration::days(90))],
             true,
@@ -272,7 +272,7 @@ async fn missing_expiry_metadata_does_not_silently_renew_an_expired_dependency()
     let f = fixture();
     let expired = dated("provider", Utc::now() - chrono::Duration::days(1));
     f.engine
-        .credential_expiries
+        .l2.credential_expiries
         .replace(vec![expired.clone()], true)
         .await
         .unwrap();
@@ -280,7 +280,7 @@ async fn missing_expiry_metadata_does_not_silently_renew_an_expired_dependency()
     unknown.expires_at = None;
     unknown.basis = DateBasis::Unknown;
     f.engine
-        .credential_expiries
+        .l2.credential_expiries
         .replace(vec![unknown], true)
         .await
         .unwrap();
@@ -291,7 +291,7 @@ async fn missing_expiry_metadata_does_not_silently_renew_an_expired_dependency()
     let mut renewed = expired;
     renewed.expires_at = Some(Utc::now() + chrono::Duration::days(90));
     f.engine
-        .credential_expiries
+        .l2.credential_expiries
         .replace(vec![renewed], true)
         .await
         .unwrap();
@@ -312,7 +312,7 @@ async fn rare_push_receipts_survive_restart_and_a_new_expiry_rearms_them() {
     f.engine = engine(snapshot.clone());
     let mut expired = dated("credential", Utc::now() - chrono::Duration::days(1));
     f.engine
-        .credential_expiries
+        .l2.credential_expiries
         .replace(vec![expired.clone()], true)
         .await
         .unwrap();
@@ -328,7 +328,7 @@ async fn rare_push_receipts_survive_restart_and_a_new_expiry_rearms_them() {
     assert_eq!(std::fs::read(&received).unwrap(), first);
     expired.expires_at = Some(Utc::now() + chrono::Duration::days(5));
     restarted
-        .credential_expiries
+        .l2.credential_expiries
         .replace(vec![expired.clone()], true)
         .await
         .unwrap();
@@ -342,7 +342,7 @@ async fn rare_push_receipts_survive_restart_and_a_new_expiry_rearms_them() {
     );
     expired.expires_at = Some(Utc::now() + chrono::Duration::hours(20));
     restarted
-        .credential_expiries
+        .l2.credential_expiries
         .replace(vec![expired], true)
         .await
         .unwrap();
@@ -467,7 +467,7 @@ async fn native_attestations_and_cra_keep_their_own_validity_and_fulfillment() {
         clock: None,
         corrective: None,
     };
-    f.engine.policies.append_attestation(&stale).await.unwrap();
+    f.engine.l6.policies.append_attestation(&stale).await.unwrap();
     let first = f.engine.important_dates(None).await.unwrap();
     let date = first
         .entries
@@ -481,7 +481,7 @@ async fn native_attestations_and_cra_keep_their_own_validity_and_fulfillment() {
     let mut fresh = stale.clone();
     fresh.id = "fresh".into();
     fresh.expires_at = now + chrono::Duration::days(40);
-    f.engine.policies.append_attestation(&fresh).await.unwrap();
+    f.engine.l6.policies.append_attestation(&fresh).await.unwrap();
     assert!(
         f.engine
             .important_dates(None)
@@ -560,7 +560,7 @@ async fn native_attestations_and_cra_keep_their_own_validity_and_fulfillment() {
         deadline: ClockDeadlineKind::EarlyWarning,
     });
     f.engine
-        .policies
+        .l6.policies
         .append_attestation(&submission)
         .await
         .unwrap();
@@ -578,7 +578,7 @@ async fn native_attestations_and_cra_keep_their_own_validity_and_fulfillment() {
         .iter()
         .any(|date| date.observation.id == "policy:submission"));
     assert_eq!(
-        f.engine.policies.all().await.unwrap().len(),
+        f.engine.l6.policies.all().await.unwrap().len(),
         3,
         "GETs never copy dates or manufacture evidence"
     );

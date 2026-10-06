@@ -206,214 +206,13 @@ pub(crate) fn append_declared_args(launch: &mut LaunchSpec, declaration: Option<
 }
 
 pub struct Engine {
-    /// The instance settings are stable, while a successful scope-config edit
-    /// replaces the affected scope in this snapshot. Readers clone it before
-    /// awaiting so no filesystem or runtime operation holds the lock.
-    factory: std::sync::RwLock<Factory>,
-    /// Serializes read-modify-write edits to local scope config files.
-    pub(crate) configuration_edit: std::sync::Mutex<()>,
-    pub registry: Registry,
-    pub store: Arc<dyn TaskStore>,
-    pub(crate) workflows: crate::workflows::WorkflowStore,
-    pub(crate) workflow_edit: tokio::sync::Mutex<()>,
-    pub(crate) bench: crate::bench::BenchStore,
-    /// L4 owns run-step evidence and immutable artifact provenance separately
-    /// from L6's policy receipts. Both stores use the existing instance database.
-    pub(crate) run_evidence: factory_process::evidence_store::RunEvidenceStore,
-    /// The attestations audit trail -- see `policies::PolicyStore`. Nothing
-    /// else in a policy request is stateful: the catalogues are read fresh
-    /// off disk on every call, like `.factory/knowledge/` and
-    /// `.factory/datasets/`.
-    pub(crate) policies: crate::policies::PolicyStore,
-    /// `#275`: filed suggestions, append-only -- see
-    /// `crate::suggestions`/`factory_assurance::suggestion_store`.
-    pub(crate) suggestions: crate::suggestions::SuggestionStore,
-    /// The check-ins audit trail -- see `goals::GoalsStore`. Nothing else in
-    /// a goals request is stateful: the direction and cycle catalogues are
-    /// read fresh off disk on every call, like the policy catalogues.
-    pub(crate) goals: crate::goals::GoalsStore,
-    /// What happened to backups -- see `backup::BackupStore`. The archives
-    /// themselves are the destination's, listed fresh on every request.
-    pub(crate) backups: crate::backup::BackupStore,
-    /// Held for the whole of a backup, verification or restore, so the job and a
-    /// person can never run two at once over one destination. Taken with
-    /// `try_lock`: a second request is refused, never queued.
-    pub(crate) backup_busy: tokio::sync::Mutex<()>,
-    /// Deployments, releases and health samples -- see
-    /// `environments::EnvironmentStore` (`#185`).
-    pub(crate) environments: crate::environments::EnvironmentStore,
-    /// Deployment transitions are read-modify-write operations. Keep starts,
-    /// supersession and finishes ordered, including post-deploy verification.
-    pub(crate) deployment_edit: tokio::sync::Mutex<()>,
-    /// Serializes approved remote effects without holding a deployment/health lock.
-    pub(crate) deployment_mirror_busy: tokio::sync::Mutex<()>,
-    /// `#156`: the due slot and reason a verification drill last skipped for
-    /// (an encrypted newest snapshot with no identity), so the job logs it
-    /// once per slot rather than on every tick -- the same skip can recur
-    /// for as long as the newest snapshot stays encrypted and unverified.
-    /// Lost on restart, like `seen_status`: the first tick after one is
-    /// genuinely new information. Never read by `backup_report`'s own
-    /// `verify_skipped`, which is a plain projection of the live facts
-    /// instead -- see `backup::report`'s own comment.
-    pub(crate) verify_drill_skip: std::sync::Mutex<Option<(chrono::DateTime<Utc>, String)>>,
-    /// Serializes a bench run's own read-modify-write: choosing which
-    /// pending attempts to start, and recomputing the run's own status once
-    /// every attempt has settled. Coarse -- one lock for every run, the same
-    /// trade `workflow_edit` already makes -- rather than one per run.
-    pub(crate) bench_edit: tokio::sync::Mutex<()>,
-    /// Serializes a run's usage read-modify-write -- append a snapshot, read
-    /// them all back, write the derived `usage` -- so two snapshots landing
-    /// together never leave the older sum on the run (`costs.rs`).
-    pub(crate) usage_edit: tokio::sync::Mutex<()>,
-    /// Turn-ended reads begin in chronological order but runtime calls may
-    /// finish out of order. Keep their observation times until each call has
-    /// settled so only the earliest outstanding turn can journal the one
-    /// first-turn re-estimate (`costs.rs`).
-    pub(crate) turn_usage_pending: std::sync::Mutex<
-        std::collections::HashMap<String, std::collections::BTreeSet<chrono::DateTime<Utc>>>,
-    >,
-    /// Task ids already enqueued for judgement, or currently being judged by
-    /// the worker: the guard that keeps a report and a cancel racing each
-    /// other (or a live enqueue racing recovery's own sweep) from queuing
-    /// the same attempt's gate command twice over. The worker itself only
-    /// ever processes one task id at a time, so this is a dedup on the
-    /// queue, not a lock a gate holds -- nothing here is held for the
-    /// gate's own duration.
-    pub(crate) bench_judging: std::sync::Mutex<std::collections::HashSet<String>>,
-    /// Where a bench attempt's judgement is actually carried out: sending a
-    /// task id here is the only thing `record_bench_task_state` and
-    /// `sync_bench_for_task` do now. Judging never runs on a caller's own
-    /// path -- a request handler, `fail_run`, the scheduler watchdog -- only
-    /// on `spawn_bench_judge`'s dedicated worker, which receives from the
-    /// other end of this channel. Unbounded: a bounded channel's `send`
-    /// would have to be awaited, reintroducing the exact "the caller waits
-    /// on a gate" problem this exists to remove, and a full channel's
-    /// `try_send` would silently drop a judgement.
-    pub(crate) bench_judge_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    /// Taken by `spawn_bench_judge` the one time it runs. `Engine::new`
-    /// cannot itself spawn the worker -- it returns `Self`, not `Arc<Self>`,
-    /// and the worker needs to hold an `Arc` to call back into judging and
-    /// advancing -- so the receiver waits here until an `Arc<Engine>` exists
-    /// to spawn it from.
-    pub(crate) bench_judge_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
-    pub(crate) dataset_locks: crate::datasets::DatasetLocks,
-    /// Run ids queued for, or in, verification (`#118`). The bool remembers
-    /// a wake-up that arrived while the verifier owned the run, so releasing
-    /// that ownership replays it instead of losing a fast review result.
-    /// See `verification.rs`.
-    pub(crate) verifying: std::sync::Mutex<std::collections::HashMap<String, bool>>,
-    /// Where `report` hands a `done` that needs verifying. The verifier
-    /// (`spawn_verifier`) holds the other end; like `bench_judge_tx`, this is
-    /// how a gate that runs for minutes stays off the report's own path.
-    pub(crate) verify_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    pub(crate) verify_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
-    pub bus: EventBus,
-    pub factory_bin: PathBuf,
-    started: Instant,
-    /// The wall-clock moment this daemon came up. A slot that fell before it
-    /// could not have been dispatched before it -- see `Engine::due_for`.
-    pub(crate) booted_at: chrono::DateTime<Utc>,
-    interfaces: Vec<String>,
-    /// The last liveness we wrote down for each session, so a poll that finds
-    /// no change writes nothing. Lost on restart, which is right: after a
-    /// restart the first observation is genuinely new information.
-    pub(crate) seen_status: std::sync::Mutex<std::collections::HashMap<String, RuntimeStatus>>,
-    /// The last walk of each scope's directory, with when it was taken. The
-    /// site view asks for a scope's size on every run and agent event now, and
-    /// a repository does not change size between two of them -- see
-    /// `site::WALK_TTL`.
-    pub(crate) site_walks:
-        std::sync::Mutex<std::collections::HashMap<String, (Instant, crate::site::Measured)>>,
-    /// Whether each scope's directory can host a worktree, with when that was
-    /// asked. `worktree::capability` is one or two `git` subprocesses, and
-    /// `scope_views` asks it per configured scope, potentially many on a real
-    /// instance, on an endpoint the
-    /// Agents view refetches on every run and agent event. A directory does
-    /// not become a git repository between two of those. Cached for
-    /// `CAPABILITY_TTL`; the first board after a restart still pays in full,
-    /// the same trade `site::WALK_TTL` already makes.
-    pub(crate) worktree_caps:
-        std::sync::Mutex<std::collections::HashMap<String, (Instant, (bool, Option<String>))>>,
-    /// The tier and activity level each hall was last drawn at, which is what
-    /// makes both steps sticky instead of flipping whenever a metric sits on a
-    /// threshold. Lost on restart, like `seen_status`, and for the same
-    /// reason: the first answer after one is genuinely new.
-    pub(crate) site_memory: std::sync::Mutex<
-        std::collections::HashMap<
-            String,
-            (
-                factory_core::building::Tier,
-                factory_core::building::ActivityLevel,
-            ),
-        >,
-    >,
-    /// Keeps the host awake for as long as any run is active -- see
-    /// `crate::power` and issue #61. Acquired once a run's row exists
-    /// (`dispatch`), released for every run `close_session` ever sees,
-    /// terminal outcome or not.
-    pub(crate) power: crate::power::PowerAssertions,
-    /// The host's macOS power mode -- see `crate::host_power` and issue
-    /// #260. No runner at all in tests or off macOS.
-    pub(crate) host_power: crate::host_power::HostPower,
-    /// Whether each harness binary starts, probed before a dispatch and
-    /// cached -- see `crate::harness_health` and issue #131.
-    pub(crate) harness: crate::harness_health::HarnessHealth,
-    /// `sandbox: openshell` prerequisites, kept in the background (`#234`).
-    pub(crate) provision: crate::provision::Provisioner,
-    pub(crate) infrastructure_expiries: crate::renewals::store::InfrastructureExpiryStore,
-    pub(crate) credential_expiries: crate::renewals::store::CredentialExpiryStore,
-    pub(crate) renewal_alerts: crate::renewals::store::AlertStore,
-    pub(crate) renewal_declaration_cache: factory_infrastructure::renewal_declarations::DeclarationCache,
-    /// The fingerprint of what the last successful `Request::Quality`
-    /// loaded -- every profile in `.factory/quality/` and every scope's
-    /// quality chain -- with when it loaded them, so the next read can tell
-    /// that it moved and publish `Event::QualityChanged`, and an older read
-    /// finishing late never overwrites a newer one (`quality/mod.rs`).
-    /// `None` until the first read, which has nothing to compare against
-    /// and so publishes nothing; lost on restart for the same reason
-    /// `seen_status` is.
-    pub(crate) quality_seen: std::sync::Mutex<Option<(Instant, u64)>>,
-    /// Each scope's guide quality block, with when it was judged and the
-    /// profiles' fingerprint it was judged under -- reused for
-    /// `quality::GUIDE_TTL` so a burst of dispatches does not each read the
-    /// run history. An async lock, held across the judging itself, so that
-    /// burst waits for one answer rather than computing it once each.
-    pub(crate) quality_guide_cache: tokio::sync::Mutex<crate::quality::GuideCache>,
-    /// Serializes the two things that move a schedule's next slot on a
-    /// person's or the clock's account: the scheduler firing a due task, and
-    /// `task.skip_next`. Each re-reads the task under it, so a slot is
-    /// either fired or skipped, never both (`#106`).
-    pub(crate) schedule_lock: tokio::sync::Mutex<()>,
-    /// L5's signpost fact provider owns its short cache.
-    pub(crate) signpost_cache: factory_assurance::signposts::Cache,
-    /// Serializes a `max_sessions` admission decision with the run it gates
-    /// (`#179`): read the live counts, decide, `create_run` -- all under this
-    /// one lock, so two dispatches racing for the last slot cannot both take
-    /// it. Held only across that read-decide-write; never across the slower,
-    /// fallible steps dispatch takes afterward (the worktree, the harness's
-    /// own launch).
-    pub(crate) admission_lock: tokio::sync::Mutex<()>,
-    pub(crate) promotion_lock: tokio::sync::Mutex<()>,
-    pub(crate) workspaces: worktree::Owner,
-    run_lifecycle_locks: std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
-    /// Serializes an intake receipt's identity lookup with its create
-    /// (`#167`): whether an item with the same `(kind, provider, reference)`
-    /// already exists, and minting a new one if not, all under one lock --
-    /// the same shape `admission_lock` uses for a dispatch's read-decide-write.
-    /// GitHub's poller and a relayed email/chat's `intake_add` both go
-    /// through `Engine::receive_intake`, so the rule lives in one place.
-    pub(crate) intake_receipt_lock: tokio::sync::Mutex<()>,
-    /// A run ending, or the scheduler tick, sends a [`CapacityEvent`] here so
-    /// one worker admits waiting tasks one event at a time -- without the
-    /// `&self` sites that notice a run end (`report`, `cancel_task_run`)
-    /// needing an `Arc<Self>` of their own, the same shape
-    /// `verify_tx`/`spawn_verifier` already use for exactly that reason, and
-    /// without a release and the tick's own sweep ever running at once: both
-    /// read `waiting_tasks()` and admit from it, and `dispatch` has no
-    /// existing-run guard of its own to fall back on if two admission
-    /// attempts for the same waiting task overlapped.
-    pub(crate) capacity_release_tx: tokio::sync::mpsc::UnboundedSender<CapacityEvent>,
-    pub(crate) capacity_release_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<CapacityEvent>>>,
+    pub(crate) shared: crate::state::Shared,
+    pub(crate) l1: crate::state::L1State,
+    pub(crate) l2: crate::state::L2State,
+    pub(crate) l3: crate::state::L3State,
+    pub(crate) l4: crate::state::L4State,
+    pub(crate) l5: crate::state::L5State,
+    pub(crate) l6: crate::state::L6State,
 }
 
 impl Engine {
@@ -428,70 +227,85 @@ impl Engine {
         let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
         let (capacity_release_tx, capacity_release_rx) = tokio::sync::mpsc::unbounded_channel();
         let power = crate::power::PowerAssertions::new(factory.config.daemon.power_assertion);
+        let workspaces = worktree::Owner::new(factory.worktrees_dir());
         Self {
-            workspaces: worktree::Owner::new(factory.worktrees_dir()),
-            run_lifecycle_locks: Default::default(),
-            factory: std::sync::RwLock::new(factory),
-            configuration_edit: Default::default(),
-            registry,
-            store,
-            workflows: crate::workflows::WorkflowStore::in_memory()
-                .expect("an in-memory workflow store should open"),
-            workflow_edit: tokio::sync::Mutex::new(()),
-            bench: crate::bench::BenchStore::in_memory()
-                .expect("an in-memory bench store should open"),
-            policies: crate::policies::PolicyStore::in_memory()
-                .expect("an in-memory policy store should open"),
-            suggestions: crate::suggestions::SuggestionStore::in_memory()
-                .expect("an in-memory suggestion store should open"),
-            run_evidence: factory_process::evidence_store::RunEvidenceStore::in_memory()
-                .expect("an in-memory run evidence store should open"),
-            goals: crate::goals::GoalsStore::in_memory()
-                .expect("an in-memory goals store should open"),
-            backups: crate::backup::BackupStore::in_memory()
-                .expect("an in-memory backup store should open"),
-            backup_busy: tokio::sync::Mutex::new(()),
-            environments: crate::environments::EnvironmentStore::in_memory()
-                .expect("an in-memory environment store should open"),
-            deployment_edit: tokio::sync::Mutex::new(()),
-            deployment_mirror_busy: tokio::sync::Mutex::new(()),
-            verify_drill_skip: std::sync::Mutex::new(None),
-            bench_edit: tokio::sync::Mutex::new(()),
-            usage_edit: tokio::sync::Mutex::new(()),
-            turn_usage_pending: Default::default(),
-            bench_judging: Default::default(),
-            bench_judge_tx,
-            bench_judge_rx: std::sync::Mutex::new(Some(bench_judge_rx)),
-            dataset_locks: Default::default(),
-            verifying: Default::default(),
-            verify_tx,
-            verify_rx: std::sync::Mutex::new(Some(verify_rx)),
-            bus: EventBus::default(),
-            factory_bin,
-            started: Instant::now(),
-            booted_at: Utc::now(),
-            interfaces,
-            seen_status: Default::default(),
-            site_walks: Default::default(),
-            worktree_caps: Default::default(),
-            site_memory: Default::default(),
-            power,
-            host_power: crate::host_power::HostPower::new(),
-            harness: crate::harness_health::HarnessHealth::new(),
-            provision: crate::provision::Provisioner::default(),
-            infrastructure_expiries: crate::renewals::store::InfrastructureExpiryStore::in_memory().expect("expiry metadata store should open"),
-            credential_expiries: crate::renewals::store::CredentialExpiryStore::in_memory().expect("expiry metadata store should open"),
-            renewal_alerts: crate::renewals::store::AlertStore::in_memory().expect("renewal alert store should open"),
-            renewal_declaration_cache: Default::default(),
-            quality_seen: Default::default(),
-            quality_guide_cache: Default::default(),
-            schedule_lock: tokio::sync::Mutex::new(()),
-            signpost_cache: factory_assurance::signposts::Cache::default(),
-            admission_lock: tokio::sync::Mutex::new(()),
-            promotion_lock: tokio::sync::Mutex::new(()),
-            intake_receipt_lock: tokio::sync::Mutex::new(()),
-            capacity_release_tx,
-            capacity_release_rx: std::sync::Mutex::new(Some(capacity_release_rx)),
+            l1: crate::state::L1State {
+                backups: crate::backup::BackupStore::in_memory()
+                    .expect("an in-memory backup store should open"),
+                backup_busy: tokio::sync::Mutex::new(()),
+                environments: crate::environments::EnvironmentStore::in_memory()
+                    .expect("an in-memory environment store should open"),
+                deployment_edit: tokio::sync::Mutex::new(()),
+                deployment_mirror_busy: tokio::sync::Mutex::new(()),
+                verify_drill_skip: std::sync::Mutex::new(None),
+                infrastructure_expiries: crate::renewals::store::InfrastructureExpiryStore::in_memory().expect("expiry metadata store should open"),
+                renewal_declaration_cache: Default::default(),
+                host_power: crate::host_power::HostPower::new(),
+                power,
+                promotion_lock: tokio::sync::Mutex::new(()),
+            },
+            l2: crate::state::L2State {
+                credential_expiries: crate::renewals::store::CredentialExpiryStore::in_memory().expect("expiry metadata store should open"),
+                provision: crate::provision::Provisioner::default(),
+            },
+            l3: crate::state::L3State {
+                harness: crate::harness_health::HarnessHealth::new(),
+            },
+            l4: crate::state::L4State {
+                store,
+                workflows: crate::workflows::WorkflowStore::in_memory()
+                    .expect("an in-memory workflow store should open"),
+                workflow_edit: tokio::sync::Mutex::new(()),
+                run_evidence: factory_process::evidence_store::RunEvidenceStore::in_memory()
+                    .expect("an in-memory run evidence store should open"),
+                usage_edit: tokio::sync::Mutex::new(()),
+                turn_usage_pending: Default::default(),
+                verifying: Default::default(),
+                verify_tx,
+                verify_rx: std::sync::Mutex::new(Some(verify_rx)),
+                schedule_lock: tokio::sync::Mutex::new(()),
+                admission_lock: tokio::sync::Mutex::new(()),
+                intake_receipt_lock: tokio::sync::Mutex::new(()),
+                capacity_release_tx,
+                capacity_release_rx: std::sync::Mutex::new(Some(capacity_release_rx)),
+                workspaces,
+                run_lifecycle_locks: Default::default(),
+                seen_status: Default::default(),
+                worktree_caps: Default::default(),
+            },
+            l5: crate::state::L5State {
+                bench: crate::bench::BenchStore::in_memory()
+                    .expect("an in-memory bench store should open"),
+                suggestions: crate::suggestions::SuggestionStore::in_memory()
+                    .expect("an in-memory suggestion store should open"),
+                bench_edit: tokio::sync::Mutex::new(()),
+                bench_judging: Default::default(),
+                bench_judge_tx,
+                bench_judge_rx: std::sync::Mutex::new(Some(bench_judge_rx)),
+                dataset_locks: Default::default(),
+                signpost_cache: factory_assurance::signposts::Cache::default(),
+                quality_seen: Default::default(),
+                quality_guide_cache: Default::default(),
+            },
+            l6: crate::state::L6State {
+                policies: crate::policies::PolicyStore::in_memory()
+                    .expect("an in-memory policy store should open"),
+                goals: crate::goals::GoalsStore::in_memory()
+                    .expect("an in-memory goals store should open"),
+                renewal_alerts: crate::renewals::store::AlertStore::in_memory().expect("renewal alert store should open"),
+            },
+            shared: crate::state::Shared {
+                factory: std::sync::RwLock::new(factory),
+                configuration_edit: Default::default(),
+                registry,
+                bus: EventBus::default(),
+                factory_bin,
+                started: Instant::now(),
+                booted_at: Utc::now(),
+                interfaces,
+                site_walks: Default::default(),
+                site_memory: Default::default(),
+            },
         }
     }
 
@@ -499,25 +313,25 @@ impl Engine {
     /// database. Workflow state belongs to the daemon ledger, regardless of
     /// which task-store adapter a scope selects.
     pub fn with_workflow_store(mut self, workflows: crate::workflows::WorkflowStore) -> Self {
-        self.workflows = workflows;
+        self.l4.workflows = workflows;
         self
     }
 
     /// The same, for bench runs.
     pub fn with_bench_store(mut self, bench: crate::bench::BenchStore) -> Self {
-        self.bench = bench;
+        self.l5.bench = bench;
         self
     }
 
     /// The same, for policy attestations.
     pub fn with_policy_store(mut self, policies: crate::policies::PolicyStore) -> Self {
-        self.policies = policies;
+        self.l6.policies = policies;
         self
     }
 
     /// The same, for suggestions (`#275`).
     pub fn with_suggestion_store(mut self, suggestions: crate::suggestions::SuggestionStore) -> Self {
-        self.suggestions = suggestions;
+        self.l5.suggestions = suggestions;
         self
     }
 
@@ -526,25 +340,25 @@ impl Engine {
         mut self,
         evidence: factory_process::evidence_store::RunEvidenceStore,
     ) -> Self {
-        self.run_evidence = evidence;
+        self.l4.run_evidence = evidence;
         self
     }
 
     /// The same, for goals check-ins.
     pub fn with_goals_store(mut self, goals: crate::goals::GoalsStore) -> Self {
-        self.goals = goals;
+        self.l6.goals = goals;
         self
     }
 
     /// The same, for deployments and health samples.
     pub fn with_environment_store(mut self, environments: crate::environments::EnvironmentStore) -> Self {
-        self.environments = environments;
+        self.l1.environments = environments;
         self
     }
 
     /// The same, for the backup history.
     pub fn with_backup_store(mut self, backups: crate::backup::BackupStore) -> Self {
-        self.backups = backups;
+        self.l1.backups = backups;
         self
     }
 
@@ -552,7 +366,7 @@ impl Engine {
     /// still contains the last value; recovering it keeps a failed request
     /// from taking the daemon down with it.
     pub(crate) fn factory_snapshot(&self) -> Factory {
-        self.factory
+        self.shared.factory
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -609,7 +423,7 @@ impl Engine {
         roles: std::collections::BTreeMap<String, factory_core::role::RoleSpec>,
     ) {
         let mut factory = self
-            .factory
+            .shared.factory
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         factory.config.roles = roles;
@@ -619,7 +433,7 @@ impl Engine {
     /// config -- `replace_instance_roles`, for the dashboard layer (`#160`).
     pub(crate) fn replace_instance_dashboard(&self, dashboard: Option<factory_core::dashboard::DashboardConfig>) {
         let mut factory = self
-            .factory
+            .shared.factory
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         factory.config.dashboard = dashboard;
@@ -629,7 +443,7 @@ impl Engine {
     /// config (`#244`) -- `replace_instance_dashboard`, for the catalogue.
     pub(crate) fn replace_instance_secrets(&self, secrets: Vec<factory_core::secrets::SecretDecl>) {
         let mut factory = self
-            .factory
+            .shared.factory
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         factory.config.secrets = secrets;
@@ -637,7 +451,7 @@ impl Engine {
 
     pub(crate) fn replace_scope(&self, id: &str, replacement: factory_core::config::Scope) {
         let mut factory = self
-            .factory
+            .shared.factory
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(scope) = factory.config.scopes.iter_mut().find(|scope| scope.id == id) {
@@ -709,7 +523,7 @@ impl Engine {
             Request::Status => Ok(Payload::Status {
                 status: self.status().await?,
             }),
-            Request::Adapters => Ok(self.registry.list().into()),
+            Request::Adapters => Ok(self.shared.registry.list().into()),
             Request::RuntimeConnections => Ok(Payload::RuntimeConnections {
                 runtimes: self.runtime_connections().await,
             }),
@@ -733,12 +547,12 @@ impl Engine {
                 replace,
             } => {
                 let (scope, name) = self.define_role(&scope, &name, role, replace).await?;
-                self.bus.publish(Event::RolesChanged { scope, name });
+                self.shared.bus.publish(Event::RolesChanged { scope, name });
                 Ok(Payload::Ok)
             }
             Request::RoleDelete { scope, name } => {
                 let (scope, name) = self.delete_role(&scope, &name).await?;
-                self.bus.publish(Event::RolesChanged { scope, name });
+                self.shared.bus.publish(Event::RolesChanged { scope, name });
                 Ok(Payload::Deleted { deleted: true })
             }
             Request::Occupancy { minutes, from, to } => Ok(Payload::Occupancy {
@@ -859,7 +673,7 @@ impl Engine {
                     let factory = self.factory_snapshot();
                     (factory.root, factory.config.daemon.knowledge_provider)
                 };
-                let provider = self.registry.knowledge(&provider_name)?;
+                let provider = self.shared.registry.knowledge(&provider_name)?;
                 let query = factory_core::adapter::KnowledgeQuery {
                     text,
                     tags,
@@ -980,10 +794,10 @@ impl Engine {
                 Ok(Payload::BenchRun { run, results })
             }
             Request::BenchRuns { dataset } => Ok(Payload::BenchRuns {
-                runs: self.bench.runs(dataset.as_deref(), 200).await?,
+                runs: self.l5.bench.runs(dataset.as_deref(), 200).await?,
             }),
             Request::BenchRunGet { id } => {
-                let run = self.bench.get_run(&id).await?.ok_or_else(|| {
+                let run = self.l5.bench.get_run(&id).await?.ok_or_else(|| {
                     FactoryError::BadRequest(format!("no such bench run: {id:?}"))
                 })?;
                 let results = factory_core::bench::aggregate(&run.attempts);
@@ -1020,7 +834,7 @@ impl Engine {
                 let attestation = self
                     .policy_attest(caller, control, scope, evidence, note, expires_at, clock, corrective)
                     .await?;
-                self.bus.publish(Event::PolicyChanged {
+                self.shared.bus.publish(Event::PolicyChanged {
                     scope: attestation.scope.clone(),
                     control: attestation.control.clone(),
                 });
@@ -1028,7 +842,7 @@ impl Engine {
             }
             Request::PolicyWithdraw { id, reason } => {
                 let attestation = self.policy_withdraw(caller, id, reason).await?;
-                self.bus.publish(Event::PolicyChanged {
+                self.shared.bus.publish(Event::PolicyChanged {
                     scope: attestation.scope.clone(),
                     control: attestation.control.clone(),
                 });
@@ -1065,7 +879,7 @@ impl Engine {
             }
             Request::DashboardSet { scope, tiles } => {
                 let scope = self.set_dashboard(&scope, tiles)?;
-                self.bus.publish(Event::DashboardChanged { scope: scope.clone() });
+                self.shared.bus.publish(Event::DashboardChanged { scope: scope.clone() });
                 let (dashboard, source) = self.dashboard_for(Some(&scope))?;
                 Ok(Payload::Dashboard {
                     tiles: dashboard.map(|d| d.tiles),
@@ -1074,7 +888,7 @@ impl Engine {
             }
             Request::DashboardReset { scope } => {
                 let scope = self.reset_dashboard(&scope)?;
-                self.bus.publish(Event::DashboardChanged { scope: scope.clone() });
+                self.shared.bus.publish(Event::DashboardChanged { scope: scope.clone() });
                 let (dashboard, source) = self.dashboard_for(Some(&scope))?;
                 Ok(Payload::Dashboard {
                     tiles: dashboard.map(|d| d.tiles),
@@ -1086,7 +900,7 @@ impl Engine {
             }),
             Request::GoalsCheckIn { kr, value, confidence, note } => {
                 let checkin = self.goals_checkin(caller, kr, value, confidence, note).await?;
-                self.bus.publish(Event::GoalsChanged { kr: checkin.kr.clone() });
+                self.shared.bus.publish(Event::GoalsChanged { kr: checkin.kr.clone() });
                 Ok(Payload::GoalsCheckIn { checkin })
             }
             Request::Scenarios { scope } => Ok(Payload::Scenarios {
@@ -1156,7 +970,7 @@ impl Engine {
                 let (scope, agent) = self.configure_agent(&scope, agent)?;
                 let name = agent.name();
                 let autostart = agent.lifetime.is_standing() && agent.autostart();
-                self.bus.publish(Event::AgentConfigured {
+                self.shared.bus.publish(Event::AgentConfigured {
                     scope: scope.clone(),
                     name: name.clone(),
                 });
@@ -1173,7 +987,7 @@ impl Engine {
             Request::AgentDelete { scope, name } => {
                 let (scope, removed) = self.delete_agent_declaration(&scope, &name)?;
                 let name = removed.name();
-                self.bus.publish(Event::AgentDeleted { scope, name });
+                self.shared.bus.publish(Event::AgentDeleted { scope, name });
                 self.reconcile_agents().await;
                 Ok(Payload::Deleted { deleted: true })
             }
@@ -1225,7 +1039,7 @@ impl Engine {
                 task: self.require(&id).await?,
             }),
             Request::TaskList(filter) => Ok(Payload::Tasks {
-                tasks: self.store.list(&filter).await?,
+                tasks: self.l4.store.list(&filter).await?,
             }),
             Request::TaskUpdate { id, patch, reason } => {
                 let asked = crate::operations::Asked::new(caller, reason);
@@ -1243,25 +1057,25 @@ impl Engine {
                 // A confirmed security report is CRA evidence (`#170`):
                 // checked before anything else touches the run or the row,
                 // whatever the task's current status or stage.
-                if let Some(task) = self.store.get(&id).await? {
+                if let Some(task) = self.l4.store.get(&id).await? {
                     if let Some(reason) = factory_core::intake::confirmed_security_delete_guard(&task) {
                         return Err(FactoryError::BadRequest(reason));
                     }
                 }
-                if let Some(run) = self.store.active_run(&id).await? {
+                if let Some(run) = self.l4.store.active_run(&id).await? {
                     self.close_session(&run).await;
                     // Deleting the task ends the run without ever reaching
                     // `finish_run` (there is no row left to mirror), so the
                     // slot it held is freed here instead (`#179`).
-                    if let Ok(Some(task)) = self.store.get(&id).await {
+                    if let Ok(Some(task)) = self.l4.store.get(&id).await {
                         self.enqueue_capacity_release(&task.scope, &run.agent);
                     }
                 }
                 // `#274`: released with the task, not by a periodic sweep.
                 self.remove_preserved_session(&id);
-                let deleted = self.store.delete(&id).await?;
+                let deleted = self.l4.store.delete(&id).await?;
                 if deleted {
-                    self.bus.publish(Event::TaskDeleted { id });
+                    self.shared.bus.publish(Event::TaskDeleted { id });
                 }
                 Ok(Payload::Deleted { deleted })
             }
@@ -1289,7 +1103,7 @@ impl Engine {
                 }
                 // A task is a standing intent; a run is one attempt at it. Two
                 // attempts at once would race for the same working directory.
-                if let Some(run) = self.store.active_run(&id).await? {
+                if let Some(run) = self.l4.store.active_run(&id).await? {
                     return Err(FactoryError::BadRequest(format!(
                         "attempt {} of this task is still {}; cancel it before starting another",
                         run.attempt,
@@ -1313,7 +1127,7 @@ impl Engine {
                 // can actually be resumed; this only decides whether asking
                 // is sensible at all.
                 let continue_from = if continue_run {
-                    let Some(prev) = self.store.runs(&id, 1).await?.into_iter().next() else {
+                    let Some(prev) = self.l4.store.runs(&id, 1).await?.into_iter().next() else {
                         return Err(FactoryError::BadRequest("this task has no previous run to continue".into()));
                     };
                     if !prev.status.is_terminal() {
@@ -1454,13 +1268,13 @@ impl Engine {
             }
             Request::TaskEntries { id, limit, task_only } => Ok(Payload::Entries {
                 entries: if task_only {
-                    self.store.task_own_entries(&id, limit.unwrap_or(200)).await?
+                    self.l4.store.task_own_entries(&id, limit.unwrap_or(200)).await?
                 } else {
-                    self.store.entries(&id, limit.unwrap_or(200)).await?
+                    self.l4.store.entries(&id, limit.unwrap_or(200)).await?
                 },
             }),
             Request::TaskOutput { id, lines } => {
-                let latest = self.store.runs(&id, 1).await?.into_iter().next();
+                let latest = self.l4.store.runs(&id, 1).await?.into_iter().next();
                 Ok(Payload::Text {
                     text: match latest {
                         Some(run) => self.output(&run, lines.unwrap_or(200)).await,
@@ -1515,7 +1329,7 @@ impl Engine {
                 workflow: self.workflow_definition(&id).await?,
             }),
             Request::WorkflowList { scope } => Ok(Payload::Workflows {
-                workflows: self.workflows.definitions(scope.as_deref()).await?,
+                workflows: self.l4.workflows.definitions(scope.as_deref()).await?,
             }),
             Request::WorkflowUpdate { id, workflow } => Ok(Payload::Workflow {
                 workflow: self.update_workflow(&id, workflow).await?,
@@ -1530,7 +1344,7 @@ impl Engine {
                 run: self.workflow_run(&id).await?,
             }),
             Request::WorkflowRunList { workflow_id, scope, limit } => Ok(Payload::WorkflowRuns {
-                runs: self.workflows.runs(workflow_id.as_deref(), scope.as_deref(), limit.unwrap_or(50)).await?,
+                runs: self.l4.workflows.runs(workflow_id.as_deref(), scope.as_deref(), limit.unwrap_or(50)).await?,
             }),
             Request::WorkflowRunCancel { id } => Ok(Payload::WorkflowRun {
                 run: Box::pin(self.cancel_workflow(&id)).await?,
@@ -1570,7 +1384,7 @@ impl Engine {
 
             Request::RunList { task_id, limit } => Ok(Payload::Runs {
                 runs: self
-                    .store
+                    .l4.store
                     .runs(&task_id, limit.unwrap_or(50))
                     .await?
                     .into_iter()
@@ -1583,7 +1397,7 @@ impl Engine {
             Request::RunUsage { id } => {
                 let run = self.require_run(&id).await?;
                 Ok(Payload::UsageSnapshots {
-                    snapshots: self.store.usage_snapshots(&run.id).await?,
+                    snapshots: self.l4.store.usage_snapshots(&run.id).await?,
                 })
             }
             Request::TaskUsage { id } => Ok(Payload::TaskUsage {
@@ -1598,7 +1412,7 @@ impl Engine {
                     .await?,
             }),
             Request::RunEntries { id, limit } => Ok(Payload::Entries {
-                entries: self.store.run_entries(&id, limit.unwrap_or(200)).await?,
+                entries: self.l4.store.run_entries(&id, limit.unwrap_or(200)).await?,
             }),
             Request::RunOutput { id, lines } => {
                 let run = self.require_run(&id).await?;
@@ -1615,7 +1429,7 @@ impl Engine {
 
     async fn status(&self) -> Result<StatusInfo> {
         let factory = self.factory_snapshot();
-        let tasks = self.store.list(&TaskFilter::default()).await?;
+        let tasks = self.l4.store.list(&TaskFilter::default()).await?;
         let mut capacity = Vec::new();
         // `config.scopes` alone is every scope, root included: discovery
         // already folds the root's own `scope:` block into it
@@ -1639,11 +1453,11 @@ impl Engine {
             instance_id: factory.config.instance.id.clone(),
             root: factory.root.display().to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            uptime_seconds: self.started.elapsed().as_secs(),
+            uptime_seconds: self.shared.started.elapsed().as_secs(),
             tasks_total: tasks.len(),
-            tasks_active: self.store.active_runs().await?.len(),
-            subscribers: self.bus.subscriber_count(),
-            interfaces: self.interfaces.clone(),
+            tasks_active: self.l4.store.active_runs().await?.len(),
+            subscribers: self.shared.bus.subscriber_count(),
+            interfaces: self.shared.interfaces.clone(),
             capacity,
             scopes: factory.scope_names(),
         })
@@ -1668,7 +1482,7 @@ impl Engine {
         }
 
         let metadata: std::collections::BTreeMap<String, (String, String)> = self
-            .registry
+            .shared.registry
             .list()
             .adapters
             .into_iter()
@@ -1679,7 +1493,7 @@ impl Engine {
         let mut views = Vec::with_capacity(scopes_by_runtime.len());
         for (runtime_name, scopes) in scopes_by_runtime {
             let checked_at = Utc::now();
-            let diagnostic = match self.registry.runtime(&runtime_name) {
+            let diagnostic = match self.shared.registry.runtime(&runtime_name) {
                 Ok(runtime) => runtime
                     .connection_diagnostic()
                     .await
@@ -1769,7 +1583,7 @@ impl Engine {
             .flatten()
             .filter(|s| !s.is_empty());
         let started_at = Utc::now()
-            - chrono::Duration::from_std(self.started.elapsed()).unwrap_or_default();
+            - chrono::Duration::from_std(self.shared.started.elapsed()).unwrap_or_default();
         let daemon = DaemonFacts {
             version: env!("CARGO_PKG_VERSION").to_string(),
             pid: std::process::id(),
@@ -1832,11 +1646,11 @@ impl Engine {
         // as cost. It is deliberately not persisted as a second aggregate.
         let now = Utc::now();
         let mut recent_runs = self
-            .store
+            .l4.store
             .runs_between(now - chrono::Duration::days(8), now + chrono::Duration::seconds(1))
             .await
             .unwrap_or_default();
-        if let Ok(active) = self.store.active_runs().await {
+        if let Ok(active) = self.l4.store.active_runs().await {
             for active_run in active {
                 if !recent_runs.iter().any(|candidate| candidate.id == active_run.id) {
                     recent_runs.push(active_run);
@@ -1847,7 +1661,7 @@ impl Engine {
         for run in &recent_runs {
             if !task_scopes.contains_key(&run.task_id) {
                 let scope = self
-                    .store
+                    .l4.store
                     .get(&run.task_id)
                     .await
                     .ok()
@@ -1859,7 +1673,7 @@ impl Engine {
         }
         let mut snapshots_by_run = std::collections::BTreeMap::new();
         for run in recent_runs.iter().filter(|run| run.provider_account.is_some()) {
-            let snapshots = self.store.usage_snapshots(&run.id).await.unwrap_or_default();
+            let snapshots = self.l4.store.usage_snapshots(&run.id).await.unwrap_or_default();
             snapshots_by_run.insert(run.id.clone(), snapshots);
         }
         let bound_runs: Vec<Run> =
@@ -1986,7 +1800,7 @@ impl Engine {
         let mut known: Vec<(String, factory_core::harness::HealthProbe)> = Vec::new();
         for scope in &factory.config.scopes {
             for agent in scope.agents_with(&daemon_config.foreman) {
-                let Some(probe) = self.registry.agent(&agent.harness).ok().and_then(|a| a.health_probe()) else {
+                let Some(probe) = self.shared.registry.agent(&agent.harness).ok().and_then(|a| a.health_probe()) else {
                     continue;
                 };
                 let harness = crate::harness_health::harness_name(&probe);
@@ -1996,7 +1810,7 @@ impl Engine {
             }
         }
         let harnesses = self
-            .harness
+            .l3.harness
             .rows(&known, daemon_config.harness_health.repair_script.as_deref());
 
         Payload::Infrastructure {
@@ -2028,13 +1842,13 @@ impl Engine {
     /// One scope's worktree capability, asked of `git` at most every
     /// `CAPABILITY_TTL`. See `worktree_caps` for why this is cached at all.
     async fn worktree_capability(&self, name: &str, dir: &Path) -> (bool, Option<String>) {
-        if let Some((at, answer)) = self.worktree_caps.lock().unwrap().get(name) {
+        if let Some((at, answer)) = self.l4.worktree_caps.lock().unwrap().get(name) {
             if at.elapsed() < CAPABILITY_TTL {
                 return answer.clone();
             }
         }
         let answer = worktree::capability(dir).await;
-        self.worktree_caps
+        self.l4.worktree_caps
             .lock()
             .unwrap()
             .insert(name.to_string(), (Instant::now(), answer.clone()));
@@ -2043,7 +1857,7 @@ impl Engine {
 
     pub(crate) async fn scope_views(&self) -> Result<(Vec<ScopeView>, Vec<String>)> {
         let factory = self.factory_snapshot();
-        let adapters = self.registry.list();
+        let adapters = self.shared.registry.list();
         let described: std::collections::BTreeMap<String, (String, String)> = adapters
             .adapters
             .iter()
@@ -2060,14 +1874,14 @@ impl Engine {
             .into_iter()
             .collect();
 
-        let standing = self.store.agents().await?;
-        let active = self.store.active_runs().await?;
+        let standing = self.l4.store.agents().await?;
+        let active = self.l4.store.active_runs().await?;
 
         // Runs, grouped by the scope and adapter that are actually doing them.
         let mut work: std::collections::BTreeMap<(String, String), Vec<AgentActivity>> =
             Default::default();
         for run in &active {
-            let task = self.store.get(&run.task_id).await?;
+            let task = self.l4.store.get(&run.task_id).await?;
             // Canonicalized: a task written before a scope's identity became
             // its path still carries the bare name it was given, and this is
             // what lets its active runs land on the same row as everything
@@ -2184,7 +1998,7 @@ impl Engine {
                         .cloned()
                         .unwrap_or_default(),
                     readiness: (decl.sandbox == Sandbox::Openshell)
-                        .then(|| self.provision.readiness(&(scope.name.clone(), name.clone())))
+                        .then(|| self.l2.provision.readiness(&(scope.name.clone(), name.clone())))
                         .flatten(),
                 });
             }
@@ -2312,7 +2126,7 @@ impl Engine {
         asked: Option<&crate::operations::Asked>,
     ) -> Result<Task> {
         let _trigger_edit = if patch.after.is_some() || patch.clear_after || patch.schedule.is_some() || patch.clear_schedule {
-            Some(self.admission_lock.lock().await)
+            Some(self.l4.admission_lock.lock().await)
         } else {
             None
         };
@@ -2391,7 +2205,7 @@ impl Engine {
             None => {}
         }
         if let Some(rt) = &patch.runtime {
-            self.registry.runtime(rt)?;
+            self.shared.registry.runtime(rt)?;
         }
         // A wait names the agent and scope it is waiting on (`#179`); moving
         // either makes the wait meaningless -- it would go on counting
@@ -2474,7 +2288,7 @@ impl Engine {
             }
         }
 
-        let task = self.store.update(id, &patch).await?;
+        let task = self.l4.store.update(id, &patch).await?;
         if let Some(paused) = pause_change {
             // Journal what the store kept, not what was asked: an
             // out-of-process store written before pausing existed takes the
@@ -2483,7 +2297,7 @@ impl Engine {
             // the error.
             if task.schedule_paused != paused {
                 return Err(FactoryError::adapter(
-                    self.store.name(),
+                    self.l4.store.name(),
                     format!(
                         "the task store did not keep schedule_paused = {paused}; it may predate \
                          pausing schedules, so the schedule is unchanged"
@@ -2523,7 +2337,7 @@ impl Engine {
             )
             .await;
         }
-        self.bus.publish(Event::TaskUpdated { task: task.clone() });
+        self.shared.bus.publish(Event::TaskUpdated { task: task.clone() });
         Ok(task)
     }
 
@@ -2584,7 +2398,7 @@ impl Engine {
         intake: Option<factory_core::intake::Intake>,
         internal_review: bool,
     ) -> Result<Task> {
-        let observer = crate::commands::CreationObserver(self.bus.clone());
+        let observer = crate::commands::CreationObserver(self.shared.bus.clone());
         let process = crate::commands::process(self, &observer);
         let receipt = process
             .create_extended(new, workflow_origin, bench_origin.map(Into::into), id, intake, internal_review)
@@ -2604,7 +2418,7 @@ impl Engine {
         // explicit release (or a journaled override) consumes that wait.
         if task.workflow_origin.is_some() { return Ok(blockers); }
         for id in task.depends_on.iter().chain(task.after.iter().flatten()) {
-            match self.store.get(id).await? {
+            match self.l4.store.get(id).await? {
                 Some(parent) if parent.status == TaskStatus::Done => {}
                 Some(parent) => blockers.push(format!(
                     "{} ({}, {})",
@@ -2623,7 +2437,7 @@ impl Engine {
     /// restart. `runs == 0` is deliberate: plan release starts a task once;
     /// retrying an attempt that failed remains an explicit act.
     pub(crate) async fn dependency_ready_tasks(&self) -> Result<Vec<Task>> {
-        let tasks = self.store.list(&TaskFilter::default()).await?;
+        let tasks = self.l4.store.list(&TaskFilter::default()).await?;
         let mut ready = Vec::new();
         for task in tasks.into_iter().filter(|task| {
             task.status == TaskStatus::Pending
@@ -2671,7 +2485,7 @@ impl Engine {
         // However it was asked for, an item still in intake is not started --
         // and not failed either, which is what a dispatch error below would
         // do to it (`#119`).
-        if let Ok(Some(task)) = self.store.get(task_id).await {
+        if let Ok(Some(task)) = self.l4.store.get(task_id).await {
             if task.status == TaskStatus::Intake {
                 self.entry(
                     task_id,
@@ -2722,7 +2536,7 @@ impl Engine {
             // spamming the journal every time.
             Err(FactoryError::CapacityHeld { agent, in_use, max }) => {
                 let reason = format!("waiting for a {agent} slot ({in_use}/{max} in use)");
-                if let Ok(Some(task)) = self.store.get(task_id).await {
+                if let Ok(Some(task)) = self.l4.store.get(task_id).await {
                     let already_this_wait = task
                         .slot_wait
                         .as_ref()
@@ -2754,7 +2568,7 @@ impl Engine {
                         // like, and `create_run` clears it once this
                         // actually dispatches.
                         let _ = self
-                            .store
+                            .l4.store
                             .update(
                                 task_id,
                                 &TaskPatch {
@@ -2774,7 +2588,7 @@ impl Engine {
             }
             Err(e) => {
                 // The run may or may not exist yet; if it does, close it.
-                if let Ok(Some(run)) = self.store.active_run(task_id).await {
+                if let Ok(Some(run)) = self.l4.store.active_run(task_id).await {
                     self.fail_run(&run.id, FailKind::DispatchFailed, &format!("dispatch failed: {e}"))
                         .await;
                 } else {
@@ -2787,7 +2601,7 @@ impl Engine {
                     // to mirror: the task is blocked on the failure itself
                     // (`#122`), exactly as if a run had failed to dispatch.
                     let _ = self
-                        .store
+                        .l4.store
                         .update(
                             task_id,
                             &TaskPatch {
@@ -2838,7 +2652,7 @@ impl Engine {
     ) -> Result<Run> {
         let task = self.require(task_id).await?;
         let workflow_node = if let Some(origin) = &task.workflow_origin {
-            self.workflows.get_run(&origin.workflow_run_id).await?.and_then(|workflow| {
+            self.l4.workflows.get_run(&origin.workflow_run_id).await?.and_then(|workflow| {
                 let node = workflow.nodes.iter().find(|node| node.node_id == origin.node_id
                     && node.task_id.as_deref() == Some(task.id.as_str()))?.clone();
                 let policy = workflow.definition.nodes.iter().find(|node| node.id == origin.node_id)?.session;
@@ -2847,14 +2661,14 @@ impl Engine {
         } else { None };
         let feedback_round = workflow_node.as_ref().map_or(0, |(node, _)| node.round);
         let continue_from = if continue_from.is_none() && trigger == Trigger::Workflow && feedback_round > 0 {
-            self.store.runs(task_id, 1).await?.into_iter().next().filter(|previous| previous.status.is_terminal())
+            self.l4.store.runs(task_id, 1).await?.into_iter().next().filter(|previous| previous.status.is_terminal())
         } else { continue_from };
         // Resolve again rather than trusting what was written down: the config
         // may have changed since the task was created.
         let (agent_name, adapter_name, declaration) =
             self.resolve_agent(&task.scope, &task.agent)?;
-        let agent = self.registry.agent(&adapter_name)?;
-        let runtime = self.registry.runtime(&task.runtime)?;
+        let agent = self.shared.registry.agent(&adapter_name)?;
+        let runtime = self.shared.registry.runtime(&task.runtime)?;
         // Before anything else exists (`#131`): a harness that does not
         // start blocks the task here, with no run row and no session, rather
         // than dispatching into a pane nobody answers and failing it as an
@@ -2889,7 +2703,7 @@ impl Engine {
         let goal = self.goal_context(factory.root.clone(), task.labels.get("goal").cloned()).await;
         let quality = self.quality_context(&task.scope).await;
         let probe = agent.health_probe();
-        let version = probe.as_ref().and_then(|probe| self.harness.rows(
+        let version = probe.as_ref().and_then(|probe| self.l3.harness.rows(
             &[(adapter_name.clone(), probe.clone())], None
         ).into_iter().next().and_then(|row| row.version));
         // Hash guide inputs, code and the observed binary version, never tokens.
@@ -2947,7 +2761,7 @@ impl Engine {
         // An approval-held run already exists but has never launched. Once
         // approved, resume that exact frozen snapshot instead of creating a
         // second attempt that would ask for the same approval again.
-        let existing = self.store.active_run(task_id).await?.filter(|run| {
+        let existing = self.l4.store.active_run(task_id).await?.filter(|run| {
             run.status == RunStatus::Blocked
                 && run.blocked_source == Some(BlockSource::Verification)
                 && run.session.is_none()
@@ -2965,7 +2779,7 @@ impl Engine {
         // approved held run. An approval-held run has no session and is not
         // counted as occupying a slot until it resumes dispatch.
         let run = {
-            let _admission = self.admission_lock.lock().await;
+            let _admission = self.l4.admission_lock.lock().await;
             let admitted_task = self.require(task_id).await?;
             if trigger == Trigger::Workflow && admitted_task.status != TaskStatus::Pending && !resumed {
                 return Err(FactoryError::DispatchSuperseded("this workflow task is no longer pending admission".into()));
@@ -2989,12 +2803,12 @@ impl Engine {
                     || !self.dependency_blockers(&admitted_task).await?.is_empty() {
                     return Err(FactoryError::DispatchSuperseded("the upstream trigger has not been released".into()));
                 }
-                self.store.update(task_id, &TaskPatch { clear_after: true, ..Default::default() }).await?;
+                self.l4.store.update(task_id, &TaskPatch { clear_after: true, ..Default::default() }).await?;
             }
             // The API's earlier active-run check is not an admission claim.
             // Recheck under the reservation lock before creating/launching,
             // including approval-held runs and stale continuation requests.
-            if let Some(active) = self.store.active_run(task_id).await? {
+            if let Some(active) = self.l4.store.active_run(task_id).await? {
                 let held = existing.as_ref().is_some_and(|held| held.id == active.id)
                     && active.status == RunStatus::Blocked
                     && active.session.is_none();
@@ -3006,12 +2820,12 @@ impl Engine {
                 return Err(FactoryError::DispatchSuperseded("the approval-held run already ended".into()));
             }
             if let Some(previous) = &continue_from {
-                if self.store.runs(task_id, 1).await?.first().is_none_or(|latest| latest.id != previous.id) {
+                if self.l4.store.runs(task_id, 1).await?.first().is_none_or(|latest| latest.id != previous.id) {
                     return Err(FactoryError::DispatchSuperseded("a newer attempt replaced the requested continuation".into()));
                 }
             }
             if trigger == Trigger::Workflow && !resumed
-                && self.store.runs(task_id, 1).await?.first().is_some_and(|latest| latest.workflow_round >= feedback_round) {
+                && self.l4.store.runs(task_id, 1).await?.first().is_some_and(|latest| latest.workflow_round >= feedback_round) {
                 return Err(FactoryError::DispatchSuperseded("this feedback round already has an attempt".into()));
             }
             let agent_max = declaration.as_ref().and_then(|d| d.max_sessions);
@@ -3021,11 +2835,11 @@ impl Engine {
                 return Err(FactoryError::CapacityHeld { agent: agent_name.clone(), in_use, max });
             }
             match existing {
-                Some(run) => self.store.update_run(
+                Some(run) => self.l4.store.update_run(
                     &run.id,
                     &RunPatch { status: Some(RunStatus::Dispatching), clear_blocked: true, ..Default::default() },
                 ).await?,
-                None => self.store.create_run(&NewRun {
+                None => self.l4.store.create_run(&NewRun {
                     task_id: task.id.clone(),
                     trigger,
                     agent: agent_name.clone(),
@@ -3038,7 +2852,7 @@ impl Engine {
             }
         };
         if resumed && task.slot_wait.is_some() {
-            self.store.update(task_id, &TaskPatch {
+            self.l4.store.update(task_id, &TaskPatch {
                 clear_slot_wait: true,
                 ..Default::default()
             }).await?;
@@ -3065,7 +2879,7 @@ impl Engine {
         if let Some(ContinueOutcome::Resume(plan)) = &continue_outcome {
             initial_patch.resumed_session = Some(plan.session_id.clone());
         }
-        let run = self.store.update_run(&run.id, &initial_patch).await?;
+        let run = self.l4.store.update_run(&run.id, &initial_patch).await?;
         if let Some(ContinueOutcome::Fresh { reason }) = &continue_outcome {
             self.entry(
                 task_id,
@@ -3090,15 +2904,15 @@ impl Engine {
         let run = if resumed || required_steps.is_empty() {
             run
         } else {
-            self.store
+            self.l4.store
                 .update_run(&run.id, &RunPatch { required_steps: Some(required_steps), ..Default::default() })
                 .await?
         };
 
         if resumed {
-            self.bus.publish(Event::RunUpdated { run: run.clone() });
+            self.shared.bus.publish(Event::RunUpdated { run: run.clone() });
         } else {
-            self.bus.publish(Event::RunStarted { run: run.clone() });
+            self.shared.bus.publish(Event::RunStarted { run: run.clone() });
         }
         self.publish_task(task_id).await;
         if !resumed {
@@ -3139,7 +2953,7 @@ impl Engine {
             .await;
         }
 
-        let approval_evidence = self.run_evidence.step_attestations(&run.id).await?;
+        let approval_evidence = self.l4.run_evidence.step_attestations(&run.id).await?;
         let pending_approval = run
             .required_steps
             .iter()
@@ -3158,7 +2972,7 @@ impl Engine {
             });
         if let Some(approval) = pending_approval {
                 let held = self
-                    .store
+                    .l4.store
                     .update_run(
                         &run.id,
                         &RunPatch {
@@ -3182,14 +2996,14 @@ impl Engine {
                     ),
                 )
                 .await;
-                self.bus.publish(Event::RunUpdated { run: held.clone() });
+                self.shared.bus.publish(Event::RunUpdated { run: held.clone() });
                 self.mirror_to_task(&held).await;
                 return Ok(held);
         }
 
         // Approval has passed (or none was required); only now does this run
         // acquire its liveness assertion and create an outward agent session.
-        self.power.acquire(&run.id).await;
+        self.l1.power.acquire(&run.id).await;
 
         // A worktree of its own, made now rather than left to the harness --
         // the run row already exists, so it is named after it. Nothing below
@@ -3212,7 +3026,7 @@ impl Engine {
                 .map_or(1, |previous| previous.resumes.saturating_add(1))
         } else { 0 };
         let checkpoint = crate::resume::checkpoint(&cwd, fingerprint, resumes).await;
-        let run = self.store.update_run(&run.id, &RunPatch {
+        let run = self.l4.store.update_run(&run.id, &RunPatch {
             resume_context: Some(checkpoint.clone()), ..Default::default()
         }).await?;
 
@@ -3290,7 +3104,7 @@ impl Engine {
             },
             factory_bin: match &openshell {
                 Some((config, _)) => PathBuf::from(&config.factory_bin),
-                None => self.factory_bin.clone(),
+                None => self.shared.factory_bin.clone(),
             },
             socket: factory.socket_path(),
             callback_url: openshell.as_ref().map(|(_, callback)| callback.url()),
@@ -3408,7 +3222,7 @@ impl Engine {
         // really true.
         if let Some((_, _, crate::openshell::RestoreOutcome::FellBack(reason))) = &sandboxed {
             let reverted = factory_core::run::ResumeContext { resumes: 0, ..checkpoint.clone() };
-            self.store
+            self.l4.store
                 .update_run(
                     &run.id,
                     &RunPatch {
@@ -3475,7 +3289,7 @@ impl Engine {
         }
 
         let run = self
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -3484,7 +3298,7 @@ impl Engine {
                 },
             )
             .await?;
-        self.bus.publish(Event::RunUpdated { run: run.clone() });
+        self.shared.bus.publish(Event::RunUpdated { run: run.clone() });
 
         // The baseline, before the task is handed over: whatever the session
         // had already used -- a pane an earlier run left behind, a harness
@@ -3550,7 +3364,7 @@ impl Engine {
         // The previous run's newest usage snapshot entry for this adapter,
         // or -- failing that -- the session id a `turn-ended` hook recorded
         // on it. Never "the latest session in this directory" (rule 6).
-        let snapshots = self.store.usage_snapshots(&prev.id).await.unwrap_or_default();
+        let snapshots = self.l4.store.usage_snapshots(&prev.id).await.unwrap_or_default();
         let session_id = factory_core::usage::newest_session_id_for_adapter(&snapshots, adapter_name)
             .or_else(|| prev.turn_ended_session_id.clone());
         let Some(session_id) = session_id else {
@@ -3674,7 +3488,7 @@ impl Engine {
             Workspace::Reuse { path, branch } => Some((path, branch)),
             Workspace::Fresh if task.bench_origin.is_none() => {
                 let mut previous = None;
-                for attempt in self.store.runs(&task.id, u32::MAX).await?.into_iter().filter(|attempt| attempt.id != run.id) {
+                for attempt in self.l4.store.runs(&task.id, u32::MAX).await?.into_iter().filter(|attempt| attempt.id != run.id) {
                     if let (Some(path), Some(branch)) = (attempt.worktree_path, attempt.worktree_branch) {
                         if Path::new(&path).exists() && crate::resume::on_branch(Path::new(&path), &branch).await {
                             previous = Some((PathBuf::from(path), branch)); break;
@@ -3706,13 +3520,13 @@ impl Engine {
             },
             candidate: dir, branch, base, previous,
         };
-        let (placed, reused) = assignment.provision(&self.workspaces, scope_path).await
+        let (placed, reused) = assignment.provision(&self.l4.workspaces, scope_path).await
             .map_err(|e| FactoryError::adapter("workspace", e))?;
         if reused { self.require_workspace_quiet(&task.id, &placed.path, Some(&run.id)).await?; }
         let dir = placed.path;
         let branch = placed.branch;
         let run = self
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -3722,7 +3536,7 @@ impl Engine {
                 },
             )
             .await?;
-        self.bus.publish(Event::RunUpdated { run: run.clone() });
+        self.shared.bus.publish(Event::RunUpdated { run: run.clone() });
         self.entry(
             &run.task_id,
             TaskEntry::new(
@@ -3759,7 +3573,7 @@ impl Engine {
     pub(crate) async fn upstream_outputs(&self, task: &Task) -> Vec<UpstreamOutput> {
         let mut outputs = Vec::new();
         for parent_task_id in &task.depends_on {
-            match self.store.get(parent_task_id).await {
+            match self.l4.store.get(parent_task_id).await {
                 Ok(Some(parent)) => outputs.push(UpstreamOutput {
                     node_id: parent.decomposition_part.clone().unwrap_or_else(|| "dependency".into()),
                     task_id: parent.id.clone(),
@@ -3784,7 +3598,7 @@ impl Engine {
         let Some(origin) = &task.workflow_origin else {
             return outputs;
         };
-        let run = match self.workflows.get_run(&origin.workflow_run_id).await {
+        let run = match self.l4.workflows.get_run(&origin.workflow_run_id).await {
             Ok(Some(run)) => run,
             Ok(None) => {
                 tracing::warn!(
@@ -3820,7 +3634,7 @@ impl Engine {
             if outputs.iter().any(|output| output.task_id == parent_task_id) {
                 continue;
             }
-            match self.store.get(&parent_task_id).await {
+            match self.l4.store.get(&parent_task_id).await {
                 Ok(Some(parent)) => outputs.push(UpstreamOutput {
                     node_id: edge.from.clone(),
                     task_id: parent.id.clone(),
@@ -3868,7 +3682,7 @@ impl Engine {
                     result: Some(truncate_tail(feedback, UPSTREAM_RESULT_BYTE_CAP).into_owned()),
                 });
             } else {
-                match self.store.get(&request.from_task).await {
+                match self.l4.store.get(&request.from_task).await {
                     Ok(Some(reviewer)) => {
                         let said: Vec<&str> = [reviewer.error.as_deref(), reviewer.result.as_deref()]
                             .into_iter()
@@ -3902,7 +3716,7 @@ impl Engine {
         let Some(origin) = &task.workflow_origin else {
             return Vec::new();
         };
-        let Ok(Some(run)) = self.workflows.get_run(&origin.workflow_run_id).await else {
+        let Ok(Some(run)) = self.l4.workflows.get_run(&origin.workflow_run_id).await else {
             return Vec::new();
         };
         let used = run
@@ -3963,7 +3777,7 @@ impl Engine {
     /// What an agent says about its own run. The token is what makes this a
     /// report rather than anyone on the socket closing anyone's run.
     pub async fn report(&self, task_id: &str, report: TaskReport) -> Result<Run> {
-        let run = self.store.active_run(task_id).await?.ok_or_else(|| {
+        let run = self.l4.store.active_run(task_id).await?.ok_or_else(|| {
             FactoryError::BadRequest(format!(
                 "task {task_id} has no run in progress; reports are no longer accepted"
             ))
@@ -4098,8 +3912,8 @@ impl Engine {
                 .await?
             }
             _ => {
-                let run = self.store.update_run(&run.id, &patch).await?;
-                self.bus.publish(Event::RunUpdated { run: run.clone() });
+                let run = self.l4.store.update_run(&run.id, &patch).await?;
+                self.shared.bus.publish(Event::RunUpdated { run: run.clone() });
                 self.mirror_to_task(&run).await;
                 run
             }
@@ -4114,7 +3928,7 @@ impl Engine {
     /// agent, or the workflow or bench run above it -- and is recorded on
     /// the run; the journal line stays the same for all three.
     pub(crate) async fn cancel_task_run(&self, task_id: &str, expected: Option<&str>, kind: FailKind) -> Result<Run> {
-        let run = self.store.active_run(task_id).await?.ok_or_else(|| {
+        let run = self.l4.store.active_run(task_id).await?.ok_or_else(|| {
             FactoryError::BadRequest(format!("task {task_id} has no run to cancel"))
         })?;
         // The caller named the attempt it saw. Anything else running now --
@@ -4169,7 +3983,7 @@ impl Engine {
                 // never leave a stopped coordinator stuck in `verifying`.
                 if candidate.status == RunStatus::Verifying && self.require_run(run_id).await?.status == RunStatus::Verifying {
                     let blocked = self
-                        .store
+                        .l4.store
                         .update_run(
                             run_id,
                             &RunPatch {
@@ -4182,7 +3996,7 @@ impl Engine {
                         .await?;
                     self.entry(&candidate.task_id, TaskEntry::new("daemon", "blocked",
                         format!("artifact provenance: {error}. Rebuild and report done with --artifact again, or cancel the run.")).in_run(run_id)).await;
-                    self.bus.publish(Event::RunUpdated {
+                    self.shared.bus.publish(Event::RunUpdated {
                         run: blocked.clone(),
                     });
                     self.mirror_to_task(&blocked).await;
@@ -4211,20 +4025,20 @@ impl Engine {
         // `superseded_token_sha256s`, which is the only thing that ever
         // reads it; a digest match authorizes nothing.
         let spent_token_sha256 = self
-            .store
+            .l4.store
             .get_run(run_id)
             .await
             .ok()
             .flatten()
             .and_then(|r| r.token)
             .map(|t| factory_core::run::token_digest(&t));
-        let resume_context = match self.store.get_run(run_id).await? {
+        let resume_context = match self.l4.store.get_run(run_id).await? {
             Some(previous) if previous.resume_context.is_some() => {
                 let context = previous.resume_context.as_ref().expect("checked context");
                 let directory = if let Some(path) = previous.worktree_path.as_ref() {
                     Some(PathBuf::from(path))
                 } else {
-                    self.store.get(&previous.task_id).await?.and_then(|task|
+                    self.l4.store.get(&previous.task_id).await?.and_then(|task|
                         self.factory_snapshot().scope_path(&task.scope).ok())
                 };
                 match directory {
@@ -4236,7 +4050,7 @@ impl Engine {
             _ => None,
         };
         let run = self
-            .store
+            .l4.store
             .update_run(
                 run_id,
                 &RunPatch {
@@ -4263,11 +4077,11 @@ impl Engine {
                 },
             )
             .await?;
-        self.bus.publish(Event::RunUpdated { run: run.clone() });
+        self.shared.bus.publish(Event::RunUpdated { run: run.clone() });
         // The run's session is released here, so nothing will poll it again.
         // Close its liveness span now or the chart draws the agent as still
         // working, forever.
-        if let Ok(Some(task)) = self.store.get(&run.task_id).await {
+        if let Ok(Some(task)) = self.l4.store.get(&run.task_id).await {
             self.record_gone(&format!("run:{}", run.id), &task.scope, &run.agent)
                 .await;
             // A slot just freed: wake whatever is waiting on this (scope,
@@ -4283,7 +4097,7 @@ impl Engine {
         self.settle_suggestion_ask(&run).await;
         self.sweep_workspaces().await;
         if status != RunStatus::Done {
-            if let Ok(Some(task)) = self.store.get(&run.task_id).await {
+            if let Ok(Some(task)) = self.l4.store.get(&run.task_id).await {
                 if let Some(subject) = task.labels.get(crate::verification::REVIEW_RUN_LABEL) {
                     self.enqueue_verification(subject);
                 }
@@ -4295,7 +4109,7 @@ impl Engine {
     // -- max_sessions: releasing a slot (#179) ------------------------------
 
     fn run_lifecycle_lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self.run_lifecycle_locks.lock().expect("run lifecycle mutex");
+        let mut locks = self.l4.run_lifecycle_locks.lock().expect("run lifecycle mutex");
         locks.retain(|_, lock| lock.strong_count() > 0);
         if let Some(lock) = locks.get(id).and_then(std::sync::Weak::upgrade) { return lock; }
         let lock = Arc::new(tokio::sync::Mutex::new(()));
@@ -4309,7 +4123,7 @@ impl Engine {
     /// `Arc<Self>`, and a channel send needs no more than that, the same
     /// reason `enqueue_verification` gets away with it.
     pub(crate) fn enqueue_capacity_release(&self, scope: &str, agent: &str) {
-        let _ = self.capacity_release_tx.send(CapacityEvent::Release(scope.to_string(), agent.to_string()));
+        let _ = self.l4.capacity_release_tx.send(CapacityEvent::Release(scope.to_string(), agent.to_string()));
     }
 
     /// The scheduler tick's own sweep, queued rather than run inline: a tick
@@ -4320,7 +4134,7 @@ impl Engine {
     /// itself. Going through the same channel `Release` does also means a
     /// sweep and a release can never run at once.
     pub(crate) fn enqueue_capacity_sweep(&self) {
-        let _ = self.capacity_release_tx.send(CapacityEvent::Sweep);
+        let _ = self.l4.capacity_release_tx.send(CapacityEvent::Sweep);
     }
 
     /// Start the capacity-release worker: every [`CapacityEvent`]
@@ -4334,7 +4148,7 @@ impl Engine {
     /// same task at once. Called once, at startup, like `spawn_verifier`; a
     /// second call is a no-op.
     pub fn spawn_capacity_release_worker(self: &Arc<Self>) {
-        let Some(mut rx) = self.capacity_release_rx.lock().unwrap().take() else {
+        let Some(mut rx) = self.l4.capacity_release_rx.lock().unwrap().take() else {
             return;
         };
         let engine = self.clone();
@@ -4352,7 +4166,7 @@ impl Engine {
     /// exactly the order `queued_at` gives it.
     async fn waiting_tasks(&self) -> Vec<Task> {
         let mut tasks: Vec<Task> = self
-            .store
+            .l4.store
             .list(&TaskFilter { status: Some(TaskStatus::Pending), ..Default::default() })
             .await
             .unwrap_or_default()
@@ -4408,7 +4222,7 @@ impl Engine {
     /// the next retry, if the effective policy allows one, or lets the
     /// streak end where it stands.
     async fn settle_retry(&self, run: &Run) {
-        let Ok(Some(task)) = self.store.get(&run.task_id).await else {
+        let Ok(Some(task)) = self.l4.store.get(&run.task_id).await else {
             return;
         };
         if task.schedule.is_none() {
@@ -4520,8 +4334,8 @@ impl Engine {
             pending_retry: Some(PendingRetry { attempts, resume_at }),
             ..Default::default()
         };
-        if let Ok(updated) = self.store.update(&task.id, &patch).await {
-            self.bus.publish(Event::TaskUpdated { task: updated });
+        if let Ok(updated) = self.l4.store.update(&task.id, &patch).await {
+            self.shared.bus.publish(Event::TaskUpdated { task: updated });
         }
     }
 
@@ -4550,8 +4364,8 @@ impl Engine {
             clear_pending_retry: true,
             ..Default::default()
         };
-        if let Ok(updated) = self.store.update(&task.id, &patch).await {
-            self.bus.publish(Event::TaskUpdated { task: updated });
+        if let Ok(updated) = self.l4.store.update(&task.id, &patch).await {
+            self.shared.bus.publish(Event::TaskUpdated { task: updated });
         }
     }
 
@@ -4564,7 +4378,7 @@ impl Engine {
     /// boundary the other way.
     pub(crate) async fn mirror_to_task(&self, run: &Run) {
         let recurring = self
-            .store
+            .l4.store
             .get(&run.task_id)
             .await
             .ok()
@@ -4627,8 +4441,8 @@ impl Engine {
             clear_closure: true,
             ..Default::default()
         };
-        if let Ok(task) = self.store.update(&run.task_id, &patch).await {
-            self.bus.publish(Event::TaskUpdated { task });
+        if let Ok(task) = self.l4.store.update(&run.task_id, &patch).await {
+            self.shared.bus.publish(Event::TaskUpdated { task });
         }
     }
 
@@ -4691,7 +4505,7 @@ impl Engine {
         // `power.release` is the counterpart to `dispatch`'s own
         // `power.acquire`, and every run that reaches this function reaches
         // it regardless of whether it ever had a session to close.
-        self.power.release(&run.id).await;
+        self.l1.power.release(&run.id).await;
 
         // The guide file, if this run's harness wrote one, is named after the
         // task rather than the run and nothing else removes it. It cannot be
@@ -4735,7 +4549,7 @@ impl Engine {
         let _ = std::fs::remove_file(hooks);
 
         let Some(session) = &run.session else { return };
-        if let Ok(runtime) = self.registry.runtime(&session.runtime) {
+        if let Ok(runtime) = self.shared.registry.runtime(&session.runtime) {
             if let Ok(text) = runtime.read(session, 400).await {
                 if !text.trim().is_empty() {
                     self.entry(
@@ -4773,8 +4587,8 @@ impl Engine {
         // which the watchdog fails as `session_gone`. Claimed per sandbox,
         // so a run closed twice (a report racing a cancel) is torn down once.
         if let Some(teardown) = crate::openshell::Teardown::from_meta(&session.meta) {
-            let store = self.store.clone();
-            let bus = self.bus.clone();
+            let store = self.l4.store.clone();
+            let bus = self.shared.bus.clone();
             let (task_id, run_id) = (run.task_id.clone(), run.id.clone());
             tokio::spawn(async move {
                 let Some(_claim) = crate::openshell::Claim::take(&teardown.sandbox) else { return };
@@ -4983,7 +4797,7 @@ impl Engine {
         if configs.is_empty() && pending.is_empty() {
             return;
         }
-        let active: std::collections::BTreeSet<String> = match self.store.active_runs().await {
+        let active: std::collections::BTreeSet<String> = match self.l4.store.active_runs().await {
             Ok(runs) => runs.into_iter().map(|r| r.id).collect(),
             Err(e) => {
                 tracing::warn!("openshell reconcile: could not list active runs: {e}");
@@ -5049,13 +4863,13 @@ impl Engine {
     /// polls this should show a blank pane, not a red one.
     pub async fn output(&self, run: &Run, lines: u32) -> String {
         if let Some(session) = &run.session {
-            if let Ok(runtime) = self.registry.runtime(&session.runtime) {
+            if let Ok(runtime) = self.shared.registry.runtime(&session.runtime) {
                 if let Ok(text) = runtime.read(session, lines).await {
                     return text;
                 }
             }
         }
-        let entries = self.store.run_entries(&run.id, 500).await.unwrap_or_default();
+        let entries = self.l4.store.run_entries(&run.id, 500).await.unwrap_or_default();
         for entry in entries.iter().rev() {
             if entry.kind == "transcript" {
                 if let Some(text) = entry
@@ -5078,13 +4892,13 @@ impl Engine {
         // out-of-process store may predate the field and not know to, so
         // the rule is held here as well rather than trusted to every
         // adapter.
-        let mut due = self.store.due(Utc::now()).await?;
+        let mut due = self.l4.store.due(Utc::now()).await?;
         due.retain(|t| !t.schedule_paused && t.fires());
         Ok(due)
     }
 
     pub async fn active_runs(&self) -> Result<Vec<Run>> {
-        self.store.active_runs().await
+        self.l4.store.active_runs().await
     }
 
     /// Every task still stored as `failed` -- written before `#122`, when a
@@ -5104,12 +4918,12 @@ impl Engine {
     /// again, so later starts find none. Returns how many were moved.
     pub async fn migrate_failed_tasks(&self) -> usize {
         let filter = TaskFilter { status: Some(TaskStatus::Failed), ..Default::default() };
-        let Ok(tasks) = self.store.list(&filter).await else {
+        let Ok(tasks) = self.l4.store.list(&filter).await else {
             return 0;
         };
         let mut moved = 0;
         for task in tasks {
-            let newest = self.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
+            let newest = self.l4.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
             let failure = match &newest {
                 Some(run) => TaskFailure {
                     kind: run.fail_kind,
@@ -5134,7 +4948,7 @@ impl Engine {
                 next_run_at,
                 ..Default::default()
             };
-            match self.store.update(&task.id, &patch).await {
+            match self.l4.store.update(&task.id, &patch).await {
                 Ok(updated) => {
                     moved += 1;
                     self.entry(
@@ -5147,7 +4961,7 @@ impl Engine {
                         ),
                     )
                     .await;
-                    self.bus.publish(Event::TaskUpdated { task: updated });
+                    self.shared.bus.publish(Event::TaskUpdated { task: updated });
                 }
                 Err(e) => tracing::warn!(task = %task.id, error = %e, "could not move a failed task to blocked"),
             }
@@ -5207,7 +5021,7 @@ impl Engine {
         }
         let next = schedule::next_after(s, now)?;
         let updated = self
-            .store
+            .l4.store
             .update(
                 &task.id,
                 &TaskPatch {
@@ -5216,7 +5030,7 @@ impl Engine {
                 },
             )
             .await?;
-        self.bus.publish(Event::TaskUpdated { task: updated });
+        self.shared.bus.publish(Event::TaskUpdated { task: updated });
         Ok(())
     }
 
@@ -5227,9 +5041,9 @@ impl Engine {
     /// `resume_from_retry` moves `next_run_at` on, and before the new run
     /// exists, so the newest run is the previous one.
     pub async fn due_for(&self, task: &Task, at: chrono::DateTime<Utc>, scheduled: bool) -> Due {
-        let previous = self.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
+        let previous = self.l4.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
         let mut due = if scheduled { Due::slot(at) } else { Due::retry(at) };
-        due.queued_at = dispatchable_from(at, self.booted_at, previous.as_ref());
+        due.queued_at = dispatchable_from(at, self.shared.booted_at, previous.as_ref());
         due
     }
 
@@ -5239,7 +5053,7 @@ impl Engine {
     /// tick running late). Read off the newest run's own times, the only
     /// record either way.
     async fn skip_reason(&self, task: &Task, first: chrono::DateTime<Utc>) -> SkipReason {
-        let newest = self.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
+        let newest = self.l4.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
         skip_reason_of(newest.as_ref(), first)
     }
 
@@ -5271,7 +5085,7 @@ impl Engine {
             return Ok(());
         };
         let updated = self
-            .store
+            .l4.store
             .update(
                 &task.id,
                 &TaskPatch {
@@ -5280,7 +5094,7 @@ impl Engine {
                 },
             )
             .await?;
-        self.bus.publish(Event::TaskUpdated { task: updated });
+        self.shared.bus.publish(Event::TaskUpdated { task: updated });
         Ok(())
     }
 
@@ -5290,7 +5104,7 @@ impl Engine {
         let Some(session) = &run.session else {
             return Ok(None);
         };
-        let runtime = self.registry.runtime(&session.runtime)?;
+        let runtime = self.shared.registry.runtime(&session.runtime)?;
         runtime.screen(session).await
     }
 
@@ -5298,7 +5112,7 @@ impl Engine {
         let Some(session) = &run.session else {
             return RuntimeStatus::Unknown;
         };
-        match self.registry.runtime(&session.runtime) {
+        match self.shared.registry.runtime(&session.runtime) {
             Ok(rt) => rt.status(session).await.unwrap_or(RuntimeStatus::Unknown),
             Err(_) => RuntimeStatus::Unknown,
         }
@@ -5317,7 +5131,7 @@ impl Engine {
         let Some(session) = &run.session else {
             return unknown;
         };
-        match self.registry.runtime(&session.runtime) {
+        match self.shared.registry.runtime(&session.runtime) {
             Ok(rt) => rt.status_report(session).await.unwrap_or(unknown),
             Err(_) => unknown,
         }
@@ -5326,22 +5140,22 @@ impl Engine {
     // -- small helpers ------------------------------------------------------
 
     pub(crate) async fn require(&self, id: &str) -> Result<Task> {
-        self.store
+        self.l4.store
             .get(id)
             .await?
             .ok_or_else(|| FactoryError::TaskNotFound(id.to_string()))
     }
 
     pub(crate) async fn require_run(&self, id: &str) -> Result<Run> {
-        self.store
+        self.l4.store
             .get_run(id)
             .await?
             .ok_or_else(|| FactoryError::TaskNotFound(format!("run {id}")))
     }
 
     pub(crate) async fn publish_task(&self, id: &str) {
-        if let Ok(Some(task)) = self.store.get(id).await {
-            self.bus.publish(Event::TaskUpdated { task });
+        if let Ok(Some(task)) = self.l4.store.get(id).await {
+            self.shared.bus.publish(Event::TaskUpdated { task });
         }
     }
 
@@ -5349,10 +5163,10 @@ impl Engine {
     /// block or unblock the same way any other daemon-caused change is
     /// journaled here.
     pub(crate) async fn entry(&self, task_id: &str, entry: TaskEntry) {
-        if let Err(e) = self.store.append_entry(task_id, &entry).await {
+        if let Err(e) = self.l4.store.append_entry(task_id, &entry).await {
             tracing::warn!(task = task_id, "could not record journal entry: {e}");
         }
-        self.bus.publish(Event::TaskEntry {
+        self.shared.bus.publish(Event::TaskEntry {
             id: task_id.to_string(),
             entry,
         });
@@ -5419,7 +5233,7 @@ impl Engine {
             scope: Some(task.scope.clone()),
             limit: factory_core::adapter::knowledge::KNOWLEDGE_HINTS_LIMIT,
         };
-        let searched = match self.registry.knowledge(&name) {
+        let searched = match self.shared.registry.knowledge(&name) {
             Ok(provider) => provider.search(&root, &query).await,
             Err(e) => Err(e),
         };
@@ -5462,7 +5276,7 @@ impl Engine {
             let factory = self.factory_snapshot();
             (factory.root, factory.config.daemon.knowledge_provider)
         };
-        let result = match self.registry.knowledge(&name) {
+        let result = match self.shared.registry.knowledge(&name) {
             Ok(provider) => provider.changed(&root, files).await,
             Err(e) => Err(e),
         };
@@ -5491,7 +5305,7 @@ fn knowledge_write_payload(result: factory_core::knowledge::WriteResult) -> Payl
 impl Engine {
     pub(crate) async fn fail_task_for_test(self: &Arc<Self>, task_id: &str, kind: FailKind) -> Task {
         let run = self
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task_id.to_string(),
                 trigger: Trigger::Manual,
@@ -5532,18 +5346,18 @@ mod tests {
         );
         task.schedule = Some(Schedule::Cron("0 9 * * *".into()));
         task.next_run_at = Some("2026-10-05T09:00:00Z".parse().unwrap());
-        engine.store.create(&task).await.unwrap();
+        engine.l4.store.create(&task).await.unwrap();
         let facts = Facts::<L6>::new(&engine);
         let first = facts.get::<ScheduledRunDatesFact>(&()).await.unwrap();
         assert_eq!(first.runs[0].scope, "demo");
-        engine.factory.write().unwrap().config.scopes[0].name = "renamed".into();
+        engine.shared.factory.write().unwrap().config.scopes[0].name = "renamed".into();
         assert_eq!(facts.get::<ScheduledRunDatesFact>(&()).await.unwrap().runs[0].scope, "renamed");
         let selected = facts.get::<TaskInventoryFact>(
             &TaskInventoryQuery::Members(["legacy".into()].into_iter().collect()),
         ).await.unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].scope, "legacy", "inventory never rewrites persisted identity");
-        engine.factory.write().unwrap().config.scopes.clear();
+        engine.shared.factory.write().unwrap().config.scopes.clear();
         assert_eq!(facts.get::<ScheduledRunDatesFact>(&()).await.unwrap().runs[0].scope, "legacy");
         assert!(facts.get::<TaskInventoryFact>(&TaskInventoryQuery::Exact("legacy".into())).await.is_err());
     }
@@ -5576,7 +5390,7 @@ mod tests {
                 // machine runs `cargo test`, once per test, for tests that
                 // never mean to exercise that. `crate::power`'s own tests
                 // already cover the platform call in isolation with a fake;
-                // what the tests in *this* file need from `engine.power` is
+                // what the tests in *this* file need from `engine.l1.power` is
                 // only the bookkeeping (`active_count`), which is identical
                 // whichever backend sits behind it.
                 power_assertion: false,
@@ -5634,8 +5448,8 @@ mod tests {
         use factory_process::creation::TaskCommands;
         use factory_kernel::{People, TaskSnapshotFact};
         let engine = test_engine(PathBuf::from("/tmp/command-demo"));
-        let observer = crate::commands::CreationObserver(engine.bus.clone());
-        let mut events = engine.bus.subscribe();
+        let observer = crate::commands::CreationObserver(engine.shared.bus.clone());
+        let mut events = engine.shared.bus.subscribe();
         let service = crate::commands::process(&engine, &observer);
         let receipt = service.submit(NewTask {
             title: "Owned creation".into(),
@@ -5646,10 +5460,10 @@ mod tests {
             labels: std::collections::BTreeMap::from([("quality".into(), "demo/reliability/restore".into())]),
             ..Default::default()
         }).await.unwrap();
-        let task = engine.store.get(&receipt.id).await.unwrap().unwrap();
+        let task = engine.l4.store.get(&receipt.id).await.unwrap().unwrap();
         assert_eq!(task.scope, "demo");
         assert_eq!(task.estimate.as_ref().unwrap().time.expected, 23);
-        let journal = engine.store.entries(&task.id, 10).await.unwrap();
+        let journal = engine.l4.store.entries(&task.id, 10).await.unwrap();
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].kind, "created");
         assert_eq!(journal[0].message, "created: Owned creation");
@@ -5658,14 +5472,14 @@ mod tests {
         let fact = crate::facts::Facts::<People>::new(&engine)
             .get::<TaskSnapshotFact>(&receipt.id).await.unwrap();
         assert_eq!(fact.0, serde_json::to_value(&task).unwrap());
-        let updated = engine.store.update(&task.id, &TaskPatch {
+        let updated = engine.l4.store.update(&task.id, &TaskPatch {
             title: Some("Changed after acknowledgement".into()),
             status: Some(TaskStatus::Cancelled),
             ..Default::default()
         }).await.unwrap();
         let live = crate::commands::task_snapshot(&engine, receipt.id.clone()).await.unwrap();
         assert_eq!(serde_json::to_value(live).unwrap(), serde_json::to_value(updated).unwrap());
-        assert!(engine.store.delete(&receipt.id).await.unwrap());
+        assert!(engine.l4.store.delete(&receipt.id).await.unwrap());
         assert!(matches!(crate::commands::task_snapshot(&engine, receipt.id.clone()).await,
             Err(FactoryError::TaskNotFound(id)) if id == receipt.id));
     }
@@ -5674,8 +5488,8 @@ mod tests {
     async fn owned_creation_refuses_invalid_runtime_or_reserved_review_labels_without_persisting() {
         use factory_process::creation::TaskCommands;
         let engine = test_engine(PathBuf::from("/tmp/command-demo"));
-        let observer = crate::commands::CreationObserver(engine.bus.clone());
-        let mut events = engine.bus.subscribe();
+        let observer = crate::commands::CreationObserver(engine.shared.bus.clone());
+        let mut events = engine.shared.bus.subscribe();
         let service = crate::commands::process(&engine, &observer);
         assert!(service.submit(NewTask {
             title: "Invalid runtime".into(), agent: Some("shell".into()),
@@ -5686,7 +5500,7 @@ mod tests {
             labels: std::collections::BTreeMap::from([(factory_process::creation::REVIEW_RUN_LABEL.into(), "run".into())]),
             ..Default::default()
         }).await.is_err());
-        assert!(engine.store.list(&TaskFilter::default()).await.unwrap().is_empty());
+        assert!(engine.l4.store.list(&TaskFilter::default()).await.unwrap().is_empty());
         assert!(events.try_recv().is_err());
     }
 
@@ -5828,7 +5642,7 @@ mod tests {
         }
 
         async fn report_done(engine: &Arc<Engine>, task_id: &str) {
-            let run = engine.store.active_run(task_id).await.unwrap().unwrap();
+            let run = engine.l4.store.active_run(task_id).await.unwrap().unwrap();
             engine
                 .report(
                     task_id,
@@ -5861,8 +5675,8 @@ mod tests {
             let mut running = 0;
             let mut waiting = 0;
             for t in &tasks {
-                let stored = engine.store.get(&t.id).await.unwrap().unwrap();
-                if engine.store.active_run(&t.id).await.unwrap().is_some() {
+                let stored = engine.l4.store.get(&t.id).await.unwrap().unwrap();
+                if engine.l4.store.active_run(&t.id).await.unwrap().is_some() {
                     running += 1;
                     assert!(stored.slot_wait.is_none());
                 } else {
@@ -5872,7 +5686,7 @@ mod tests {
                     assert_eq!(wait.scope, "demo");
                     assert_eq!(wait.trigger, Trigger::Manual);
                     assert_eq!(stored.status, TaskStatus::Pending, "waiting for a slot, not blocked on a person");
-                    let entries = engine.store.entries(&t.id, 10).await.unwrap();
+                    let entries = engine.l4.store.entries(&t.id, 10).await.unwrap();
                     assert!(
                         entries.iter().any(|e| e.kind == "capacity_held"),
                         "a held task journals why: {entries:?}"
@@ -5895,11 +5709,11 @@ mod tests {
             let second = task(&engine, "second", "codex").await;
             engine.start_run(&second.id, Trigger::Manual).await;
 
-            let waiting = engine.store.get(&second.id).await.unwrap().unwrap();
+            let waiting = engine.l4.store.get(&second.id).await.unwrap().unwrap();
             let original_queued_at = waiting.slot_wait.expect("held").queued_at;
-            assert!(engine.store.active_run(&second.id).await.unwrap().is_none());
+            assert!(engine.l4.store.active_run(&second.id).await.unwrap().is_none());
 
-            let mut bus = engine.bus.subscribe();
+            let mut bus = engine.shared.bus.subscribe();
             report_done(&engine, &first.id).await;
 
             // The release goes through a channel to a spawned worker; wait
@@ -5917,7 +5731,7 @@ mod tests {
             .expect("the waiting task should be admitted once the slot frees");
 
             assert_eq!(started.queued_at, Some(original_queued_at), "the whole wait counts as queue wait");
-            let settled = engine.store.get(&second.id).await.unwrap().unwrap();
+            let settled = engine.l4.store.get(&second.id).await.unwrap().unwrap();
             assert!(settled.slot_wait.is_none(), "the wait is over");
         }
 
@@ -5933,17 +5747,17 @@ mod tests {
             engine.start_run(&first.id, Trigger::Manual).await;
             let second = task(&engine, "second", "codex").await;
             engine.start_run(&second.id, Trigger::Manual).await;
-            assert!(engine.store.active_run(&second.id).await.unwrap().is_none());
+            assert!(engine.l4.store.active_run(&second.id).await.unwrap().is_none());
 
             report_done(&engine, &first.id).await;
             assert!(
-                engine.store.active_run(&second.id).await.unwrap().is_none(),
+                engine.l4.store.active_run(&second.id).await.unwrap().is_none(),
                 "nothing has swept yet"
             );
 
             engine.recheck_capacity().await;
-            assert!(engine.store.active_run(&second.id).await.unwrap().is_some(), "the sweep admitted it");
-            assert!(engine.store.get(&second.id).await.unwrap().unwrap().slot_wait.is_none());
+            assert!(engine.l4.store.active_run(&second.id).await.unwrap().is_some(), "the sweep admitted it");
+            assert!(engine.l4.store.get(&second.id).await.unwrap().unwrap().slot_wait.is_none());
         }
 
         /// A release and the tick's own sweep both read `waiting_tasks()`
@@ -5961,9 +5775,9 @@ mod tests {
             engine.start_run(&holder.id, Trigger::Manual).await;
             let waiter = task(&engine, "waiter", "shell").await;
             engine.start_run(&waiter.id, Trigger::Manual).await;
-            assert!(engine.store.active_run(&waiter.id).await.unwrap().is_none());
+            assert!(engine.l4.store.active_run(&waiter.id).await.unwrap().is_none());
 
-            let mut bus = engine.bus.subscribe();
+            let mut bus = engine.shared.bus.subscribe();
             report_done(&engine, &holder.id).await;
             // A burst: before the fix, `release_waiting` and
             // `recheck_capacity` ran on separate spawned tasks and could
@@ -5986,7 +5800,7 @@ mod tests {
             .await
             .expect("the waiter should be admitted once");
 
-            let runs = engine.store.runs(&waiter.id, 10).await.unwrap();
+            let runs = engine.l4.store.runs(&waiter.id, 10).await.unwrap();
             assert_eq!(runs.len(), 1, "admitted exactly once, however many release/sweep events raced for it: {runs:?}");
         }
 
@@ -6005,10 +5819,10 @@ mod tests {
             let a2 = task(&engine, "a2", "codex").await;
             engine.start_run(&a2.id, Trigger::Manual).await;
 
-            assert!(engine.store.active_run(&a1.id).await.unwrap().is_some());
-            assert!(engine.store.active_run(&b1.id).await.unwrap().is_some());
-            assert!(engine.store.active_run(&a2.id).await.unwrap().is_none(), "the scope is already at 2/2");
-            let wait = engine.store.get(&a2.id).await.unwrap().unwrap().slot_wait.unwrap();
+            assert!(engine.l4.store.active_run(&a1.id).await.unwrap().is_some());
+            assert!(engine.l4.store.active_run(&b1.id).await.unwrap().is_some());
+            assert!(engine.l4.store.active_run(&a2.id).await.unwrap().is_none(), "the scope is already at 2/2");
+            let wait = engine.l4.store.get(&a2.id).await.unwrap().unwrap().slot_wait.unwrap();
             assert_eq!(wait.agent, "codex");
         }
 
@@ -6025,7 +5839,7 @@ mod tests {
                 let due = Due::now();
                 engine.start_run_due(&waiter.id, trigger, due).await;
 
-                let stored = engine.store.get(&waiter.id).await.unwrap().unwrap();
+                let stored = engine.l4.store.get(&waiter.id).await.unwrap().unwrap();
                 let wait = stored.slot_wait.unwrap_or_else(|| panic!("{trigger:?} should have been held"));
                 assert_eq!(wait.trigger, trigger);
                 assert_eq!(stored.status, TaskStatus::Pending);
@@ -6048,11 +5862,11 @@ mod tests {
 
             let holder = task(&engine, "holds the one slot", "shell").await;
             engine.start_run(&holder.id, Trigger::Manual).await;
-            assert!(engine.store.active_run(&holder.id).await.unwrap().is_some());
+            assert!(engine.l4.store.active_run(&holder.id).await.unwrap().is_some());
 
             // Its next regular slot tries again, and is held.
             engine.start_run_due(&failing.id, Trigger::Schedule, Due::now()).await;
-            let stored = engine.store.get(&failing.id).await.unwrap().unwrap();
+            let stored = engine.l4.store.get(&failing.id).await.unwrap().unwrap();
             assert_eq!(stored.status, TaskStatus::Pending, "forced out of Blocked so it can be found and released");
             assert!(stored.slot_wait.is_some());
 
@@ -6061,7 +5875,7 @@ mod tests {
             report_done(&engine, &holder.id).await;
             engine.recheck_capacity().await;
             assert!(
-                engine.store.active_run(&failing.id).await.unwrap().is_some(),
+                engine.l4.store.active_run(&failing.id).await.unwrap().is_some(),
                 "the previously-blocked task was admitted, not left waiting forever"
             );
         }
@@ -6092,7 +5906,7 @@ mod tests {
         async fn capacity_root_scope_is_not_counted_twice_after_discovery() {
             let engine = capacity_engine(vec![agent("codex", "shell", Some(2))], None);
             {
-                let mut factory = engine.factory.write().unwrap();
+                let mut factory = engine.shared.factory.write().unwrap();
                 let root = factory.config.scopes[0].clone();
                 factory.config.scope = Some(root);
             }
@@ -6114,7 +5928,7 @@ mod tests {
             let engine = capacity_engine(vec![agent("codex", "shell", Some(1))], None);
             let held = task(&engine, "approval held", "codex").await;
             let run = engine
-                .store
+                .l4.store
                 .create_run(&NewRun {
                     task_id: held.id.clone(),
                     trigger: Trigger::Manual,
@@ -6130,16 +5944,16 @@ mod tests {
             // `Blocked`, no session: an approval hold, not a dispatch. It
             // must stay non-terminal so it still shows up in `active_runs`.
             engine
-                .store
+                .l4.store
                 .update_run(&run.id, &RunPatch { status: Some(RunStatus::Blocked), ..Default::default() })
                 .await
                 .unwrap();
-            assert!(engine.store.active_run(&held.id).await.unwrap().is_some(), "still open, just not counted");
+            assert!(engine.l4.store.active_run(&held.id).await.unwrap().is_some(), "still open, just not counted");
 
             let waiter = task(&engine, "waiter", "codex").await;
             engine.start_run(&waiter.id, Trigger::Manual).await;
             assert!(
-                engine.store.active_run(&waiter.id).await.unwrap().is_some(),
+                engine.l4.store.active_run(&waiter.id).await.unwrap().is_some(),
                 "the approval-held run left the one slot free"
             );
         }
@@ -6166,11 +5980,11 @@ mod tests {
                 h.await.unwrap();
             }
 
-            let open = engine.store.active_runs().await.unwrap();
+            let open = engine.l4.store.active_runs().await.unwrap();
             assert_eq!(open.len(), 1, "never more than the declared limit, however the dispatches interleaved");
             let mut waiting_count = 0;
             for t in &tasks {
-                if engine.store.get(&t.id).await.unwrap().unwrap().slot_wait.is_some() {
+                if engine.l4.store.get(&t.id).await.unwrap().unwrap().slot_wait.is_some() {
                     waiting_count += 1;
                 }
             }
@@ -6183,7 +5997,7 @@ mod tests {
         let scope_dir = temp_dir("runtime-diagnostic");
         let engine = test_engine(scope_dir.clone());
         {
-            let mut factory = engine.factory.write().unwrap();
+            let mut factory = engine.shared.factory.write().unwrap();
             factory.config.scopes[0].runtime = Some("not-registered".into());
             let mut second = factory.config.scopes[0].clone();
             second.id = "second-id".into();
@@ -6219,7 +6033,7 @@ mod tests {
         let scope_dir = temp_dir("policy-chain");
         let engine = test_engine(scope_dir.clone());
         {
-            let mut factory = engine.factory.write().unwrap();
+            let mut factory = engine.shared.factory.write().unwrap();
             factory.config.policies = PolicyDeclaration {
                 frameworks: vec!["cra".into()],
                 ..Default::default()
@@ -6248,7 +6062,7 @@ mod tests {
         let scope_dir = temp_dir("infrastructure");
         let engine = test_engine(scope_dir.clone());
         {
-            let mut factory = engine.factory.write().unwrap();
+            let mut factory = engine.shared.factory.write().unwrap();
             factory.config.infrastructure = serde_yaml_ng::from_str(
                 "providers:\n\
                  \x20 - name: claude-max\n    vendor: anthropic\n    kind: subscription\n    plan: Max 20x\n    harnesses: [claude-code]\n\
@@ -6323,7 +6137,7 @@ mod tests {
     /// started now, so every sample below is placed relative to that start.
     async fn provider_runs(engine: &Arc<Engine>, n: usize) -> (Vec<Run>, chrono::DateTime<Utc>) {
         {
-            let mut factory = engine.factory.write().unwrap();
+            let mut factory = engine.shared.factory.write().unwrap();
             factory.config.infrastructure = serde_yaml_ng::from_str(
                 "providers:\n\
                  \x20 - name: claude-max\n    vendor: anthropic\n    kind: subscription\n    harnesses: [claude-code]\n",
@@ -6343,7 +6157,7 @@ mod tests {
         let mut runs = Vec::new();
         for i in 0..n {
             let run = engine
-                .store
+                .l4.store
                 .create_run(&factory_core::run::NewRun {
                     task_id: task.id.clone(),
                     trigger: factory_core::run::Trigger::Manual,
@@ -6357,7 +6171,7 @@ mod tests {
                 .await
                 .unwrap();
             let run = engine
-                .store
+                .l4.store
                 .update_run(&run.id, &RunPatch { provider_account: Some("claude-max".into()), ..Default::default() })
                 .await
                 .unwrap();
@@ -6439,10 +6253,10 @@ mod tests {
             provider_snapshot(b, start, 3, 0, None),
             provider_snapshot(b, start, 5, 100, Some(45.0)),
         ] {
-            engine.store.append_usage(&snapshot).await.unwrap();
+            engine.l4.store.append_usage(&snapshot).await.unwrap();
         }
         engine
-            .store
+            .l4.store
             .update_run(&a.id, &RunPatch {
                 status: Some(RunStatus::Done),
                 ended_at: Some(start + chrono::Duration::seconds(3)),
@@ -6476,14 +6290,14 @@ mod tests {
             provider_snapshot(a, start, 4, 100, Some(14.0)),
             provider_snapshot(b, start, 4, 300, None),
         ] {
-            engine.store.append_usage(&snapshot).await.unwrap();
+            engine.l4.store.append_usage(&snapshot).await.unwrap();
         }
         let apportioned = Some(factory_core::usage::PlanShareAttribution::Apportioned);
         assert_eq!(five_hour_window(&engine).await.attribution, apportioned);
 
         for run in [b, a] {
             engine
-                .store
+                .l4.store
                 .update_run(&run.id, &RunPatch {
                     status: Some(RunStatus::Done),
                     ended_at: Some(start + chrono::Duration::seconds(6)),
@@ -6513,7 +6327,7 @@ mod tests {
             provider_snapshot(a, start, 4, 100, Some(13.0)),
             provider_snapshot(b, start, 4, 300, Some(12.0)),
         ] {
-            engine.store.append_usage(&snapshot).await.unwrap();
+            engine.l4.store.append_usage(&snapshot).await.unwrap();
         }
         let window = five_hour_window(&engine).await;
         assert_eq!(window.used_percent, Some(13.0), "{window:?}");
@@ -6536,7 +6350,7 @@ mod tests {
         let sampled = Utc::now() - chrono::Duration::minutes(40);
         cached.usage.as_mut().unwrap().sampled_at = Some(sampled);
         cached.at = Utc::now();
-        engine.store.append_usage(&cached).await.unwrap();
+        engine.l4.store.append_usage(&cached).await.unwrap();
 
         let window = five_hour_window(&engine).await;
         assert_eq!(window.sampled_at, sampled);
@@ -6546,7 +6360,7 @@ mod tests {
         let mut undated = provider_snapshot(run, start, 2, 0, Some(21.0));
         undated.usage.as_mut().unwrap().sampled_at = None;
         undated.at = Utc::now();
-        engine.store.append_usage(&undated).await.unwrap();
+        engine.l4.store.append_usage(&undated).await.unwrap();
         let window = five_hour_window(&engine).await;
         assert_eq!(window.used_percent, Some(21.0));
         assert_eq!(window.sampled_at, undated.at, "the request time stands in");
@@ -6567,7 +6381,7 @@ mod tests {
         let scope_dir = temp_dir("environment");
         let engine = test_engine(scope_dir.clone());
         {
-            let mut factory = engine.factory.write().unwrap();
+            let mut factory = engine.shared.factory.write().unwrap();
             factory.config.scopes[0].agents.push(ScopeAgent {
                 name: Some("boxed".into()),
                 harness: "shell".into(),
@@ -6627,7 +6441,7 @@ mod tests {
         let scope_dir = temp_dir("root-scope");
         let engine = test_engine(scope_dir.clone());
         {
-            let mut factory = engine.factory.write().unwrap();
+            let mut factory = engine.shared.factory.write().unwrap();
             factory.root.clone_from(&scope_dir);
             factory.config.scopes[0].path = PathBuf::from(".");
         }
@@ -6656,7 +6470,7 @@ mod tests {
         let engine = test_engine(scope_dir.clone());
         let root = temp_dir("knowledge-request-root");
         {
-            let mut factory = engine.factory.write().unwrap();
+            let mut factory = engine.shared.factory.write().unwrap();
             factory.root.clone_from(&root);
         }
         std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
@@ -6688,7 +6502,7 @@ mod tests {
         let scope_dir = temp_dir(name);
         let engine = test_engine(scope_dir.clone());
         let root = temp_dir(&format!("{name}-root"));
-        engine.factory.write().unwrap().root.clone_from(&root);
+        engine.shared.factory.write().unwrap().root.clone_from(&root);
         std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
         (engine, scope_dir, root)
     }
@@ -6795,7 +6609,7 @@ mod tests {
         assert_eq!(hints.hits.len(), factory_core::adapter::knowledge::KNOWLEDGE_HINTS_LIMIT);
         assert_eq!(hints.hits[0].page, "acme", "tag matches all score alike, so page id decides");
 
-        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 50).await.unwrap();
         let entry = entries.iter().find(|e| e.kind == "knowledge").expect("journaled");
         assert_eq!(entry.run_id.as_deref(), Some("run-1"));
         assert!(entry.message.starts_with("handed 5 knowledge page(s) (keyword): acme, "), "{}", entry.message);
@@ -6816,7 +6630,7 @@ mod tests {
         .await;
         assert!(!task.knowledge_hints, "off unless asked for");
         assert!(engine.knowledge_hints(&task, "run-1").await.is_none());
-        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 50).await.unwrap();
         assert!(!entries.iter().any(|e| e.kind == "knowledge"));
 
         // Turned on by an edit, it takes effect on the next run; a task whose
@@ -6828,7 +6642,7 @@ mod tests {
         };
         assert!(task.knowledge_hints);
         assert!(engine.knowledge_hints(&task, "run-2").await.is_none());
-        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 50).await.unwrap();
         let entry = entries.iter().find(|e| e.kind == "knowledge").expect("journaled");
         assert_eq!(entry.message, "no knowledge page matched (keyword)");
 
@@ -6847,9 +6661,9 @@ mod tests {
         .await;
         // Unknown only after startup's check -- the case a hand edit to a
         // running instance's snapshot could still produce.
-        engine.factory.write().unwrap().config.daemon.knowledge_provider = "gone".into();
+        engine.shared.factory.write().unwrap().config.daemon.knowledge_provider = "gone".into();
         assert!(engine.knowledge_hints(&task, "run-1").await.is_none());
-        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 50).await.unwrap();
         let entry = entries.iter().find(|e| e.kind == "knowledge").expect("journaled");
         assert!(entry.message.starts_with("knowledge search failed"), "{}", entry.message);
 
@@ -6890,9 +6704,9 @@ mod tests {
         let stub = Arc::new(Stub(Default::default()));
         Arc::get_mut(&mut engine)
             .expect("nothing else holds the engine yet")
-            .registry
+            .shared.registry
             .add_knowledge(stub.clone(), "test");
-        engine.factory.write().unwrap().config.daemon.knowledge_provider = "stub".into();
+        engine.shared.factory.write().unwrap().config.daemon.knowledge_provider = "stub".into();
 
         // An agent that names no scope searches from its own.
         let caller = crate::access::Caller::Agent {
@@ -6933,7 +6747,7 @@ mod tests {
         let scope_dir = temp_dir("knowledge-write-access");
         let engine = test_engine(scope_dir.clone());
         {
-            let mut factory = engine.factory.write().unwrap();
+            let mut factory = engine.shared.factory.write().unwrap();
             factory.config.scopes[0].path = PathBuf::from(".");
             factory.config.scope = Some(factory.config.scopes[0].clone());
         }
@@ -6985,7 +6799,7 @@ mod tests {
         let scope_dir = temp_dir("benchmarks-request");
         let engine = test_engine(scope_dir.clone());
         {
-            let mut factory = engine.factory.write().unwrap();
+            let mut factory = engine.shared.factory.write().unwrap();
             factory.config.scopes[0].agents.push(ScopeAgent {
                 name: Some("builder".into()),
                 harness: "claude-code".into(),
@@ -7047,7 +6861,7 @@ mod tests {
 
         engine.start_run(&task.id, Trigger::Manual).await;
 
-        let runs = engine.store.runs(&task.id, 10).await.unwrap();
+        let runs = engine.l4.store.runs(&task.id, 10).await.unwrap();
         assert_eq!(runs.len(), 1, "the run row was made before the worktree was attempted");
         let run = &runs[0];
         assert_eq!(run.status, RunStatus::Failed);
@@ -7059,7 +6873,7 @@ mod tests {
             "run.error should carry git's own complaint, got: {error:?}"
         );
 
-        let entries = engine.store.run_entries(&run.id, 50).await.unwrap();
+        let entries = engine.l4.store.run_entries(&run.id, 50).await.unwrap();
         assert!(
             entries.iter().any(|e| e.message.contains("not a git repository")),
             "the journal gets git's complaint too"
@@ -7070,7 +6884,7 @@ mod tests {
         // out for this run when its row was made must be back down to zero
         // by now -- see issue #61.
         assert_eq!(
-            engine.power.active_count().await,
+            engine.l1.power.active_count().await,
             0,
             "a failed dispatch must not leave the power assertion held forever"
         );
@@ -7101,7 +6915,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(engine.power.active_count().await, 0, "nothing has dispatched yet");
+        assert_eq!(engine.l1.power.active_count().await, 0, "nothing has dispatched yet");
 
         // Not a git repository, so this fails inside `place_run` -- after
         // the run row (and so the acquire) but before a session. Calling
@@ -7112,7 +6926,7 @@ mod tests {
         assert!(err.to_string().contains("not a git repository"), "got: {err}");
 
         assert_eq!(
-            engine.power.active_count().await,
+            engine.l1.power.active_count().await,
             1,
             "the run row exists, so its share of the assertion must already be held"
         );
@@ -7142,7 +6956,7 @@ mod tests {
             .unwrap();
 
         let run = engine
-            .store
+            .l4.store
             .create_run(&factory_core::run::NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Manual,
@@ -7157,7 +6971,7 @@ mod tests {
             .unwrap();
 
         let blocked = engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -7174,7 +6988,7 @@ mod tests {
 
         engine.fail_run(&run.id, FailKind::AgentFailed, "nobody ever answered").await;
 
-        let failed = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        let failed = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(failed.status, RunStatus::Failed);
         assert!(failed.blocked_since.is_none(), "a finished run is not still waiting");
         assert!(failed.blocked_source.is_none(), "and nobody is holding it");
@@ -7231,7 +7045,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("Europe/Berln"), "{err}");
-        let unchanged = engine.store.get(&task.id).await.unwrap().unwrap();
+        let unchanged = engine.l4.store.get(&task.id).await.unwrap().unwrap();
         assert_eq!(unchanged.schedule, Some(Schedule::Cron("0 7 * * 1".into())));
     }
 
@@ -7273,7 +7087,7 @@ mod tests {
     /// without going through a real runtime.
     async fn run_for(engine: &Engine, task_id: &str, trigger: Trigger) -> Run {
         engine
-            .store
+            .l4.store
             .create_run(&factory_core::run::NewRun {
                 task_id: task_id.to_string(),
                 trigger,
@@ -7318,7 +7132,7 @@ mod tests {
             .unwrap();
         let run = run_for(engine, &task.id, Trigger::Manual).await;
         let run = engine
-            .store
+            .l4.store
             .update_run(&run.id, &RunPatch { status: Some(status), ..Default::default() })
             .await
             .unwrap();
@@ -7348,12 +7162,12 @@ mod tests {
         let response = send_turn_end(&engine, &task.id, turn).await;
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
 
-        let failed = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        let failed = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(failed.status, RunStatus::Failed, "not left for the timeout to find");
         let error = failed.error.unwrap();
         assert!(error.contains("API error (server_error)"), "{error}");
         assert!(error.contains("I think that is everything."), "{error}");
-        let entries = engine.store.entries(&task.id, 50).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 50).await.unwrap();
         assert!(
             entries.iter().any(|e| e.source == "daemon" && e.kind == "failed"),
             "the daemon ended it, and says so -- it is never journalled as the agent's report"
@@ -7370,7 +7184,7 @@ mod tests {
 
         let response = send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await;
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
-        let held = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        let held = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(held.status, RunStatus::Running, "still running");
         assert!(held.turn_ended_at.is_some());
         let why = held.turn_end_reason.as_deref().unwrap();
@@ -7391,7 +7205,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let resumed = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        let resumed = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
         assert!(resumed.turn_ended_at.is_none(), "the agent talking is a turn that did not end");
         assert!(resumed.turn_end_reason.is_none());
     }
@@ -7403,7 +7217,7 @@ mod tests {
         send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await;
 
         engine.fail_run(&run.id, FailKind::AgentFailed, "for some other reason").await;
-        let failed = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        let failed = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
         assert!(failed.turn_ended_at.is_none(), "nothing left to settle on a finished run");
         assert!(failed.turn_end_reason.is_none());
         assert_eq!(failed.error.as_deref(), Some("for some other reason"));
@@ -7417,7 +7231,7 @@ mod tests {
         for token in [Some("not-it"), None] {
             let response = send_turn_end(&engine, &task.id, stop(token, 0)).await;
             assert!(matches!(response, Response::Error { .. }), "{token:?}: {response:?}");
-            let still = engine.store.get_run(&run.id).await.unwrap().unwrap();
+            let still = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
             assert_eq!(still.status, RunStatus::Running, "{token:?}");
         }
     }
@@ -7447,7 +7261,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let before = engine.store.entries(&task.id, 50).await.unwrap().len();
+        let before = engine.l4.store.entries(&task.id, 50).await.unwrap().len();
 
         // Pinned rather than narrated: this is what every successful
         // claude-code run's last Stop hook actually gets back.
@@ -7457,10 +7271,10 @@ mod tests {
         }
         engine.turn_ended(&task.id, stop(Some("tok"), 0)).await.unwrap();
 
-        let done = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        let done = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(done.status, RunStatus::Done);
         assert!(done.error.is_none());
-        assert_eq!(engine.store.entries(&task.id, 50).await.unwrap().len(), before, "nothing journalled");
+        assert_eq!(engine.l4.store.entries(&task.id, 50).await.unwrap().len(), before, "nothing journalled");
     }
 
     #[tokio::test]
@@ -7469,13 +7283,13 @@ mod tests {
 
         let (task, run) = running_run(&engine, RunStatus::Blocked).await;
         send_turn_end(&engine, &task.id, stop(Some("tok"), 0)).await;
-        let still = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        let still = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(still.status, RunStatus::Blocked, "it asked for a human and is waiting for one");
         assert!(still.turn_ended_at.is_none(), "and nothing is held against it");
 
         let (task, run) = running_run(&engine, RunStatus::Running).await;
         send_turn_end(&engine, &task.id, stop(Some("tok"), 2)).await;
-        let still = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        let still = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(still.status, RunStatus::Running, "the harness will wake it again");
         assert!(still.turn_ended_at.is_none(), "a paused turn is not held as an ended one");
     }
@@ -7492,7 +7306,7 @@ mod tests {
 
         engine.fail_run(&run.id, FailKind::AgentFailed, "the audit script exited 1").await;
 
-        let task = engine.store.get(&task.id).await.unwrap().unwrap();
+        let task = engine.l4.store.get(&task.id).await.unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Pending, "recurring tasks go back to pending");
         assert_eq!(
             task.error.as_deref(),
@@ -7515,7 +7329,7 @@ mod tests {
             "the default backoff is five minutes, so the retry should be due within that window"
         );
 
-        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 20).await.unwrap();
         assert!(
             entries.iter().any(|e| e.kind == "retrying" && e.message.contains("retry 1 of 3")),
             "the retry is visible in the journal without reading the daemon log: {entries:?}"
@@ -7542,7 +7356,7 @@ mod tests {
 
         let first = run_for(&engine, &task.id, Trigger::Schedule).await;
         engine.fail_run(&first.id, FailKind::AgentFailed, "the audit script exited 1").await;
-        let mid = engine.store.get(&task.id).await.unwrap().unwrap();
+        let mid = engine.l4.store.get(&task.id).await.unwrap().unwrap();
         assert!(mid.error.is_some(), "sanity: the failure is on the mirror before the retry runs");
         assert!(mid.pending_retry.is_some(), "sanity: a retry is queued before it runs");
         assert_eq!(mid.status, TaskStatus::Pending, "a queued retry keeps the task scheduled (#122)");
@@ -7561,7 +7375,7 @@ mod tests {
             .await
             .unwrap();
 
-        let task = engine.store.get(&task.id).await.unwrap().unwrap();
+        let task = engine.l4.store.get(&task.id).await.unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Pending);
         assert_eq!(task.result.as_deref(), Some("all clear"));
         assert!(
@@ -7594,13 +7408,13 @@ mod tests {
 
         let first = run_for(&engine, &task.id, Trigger::Schedule).await;
         engine.fail_run(&first.id, FailKind::AgentFailed, "attempt 1 failed").await;
-        let mid = engine.store.get(&task.id).await.unwrap().unwrap();
+        let mid = engine.l4.store.get(&task.id).await.unwrap().unwrap();
         assert_eq!(mid.pending_retry.map(|p| p.attempts), Some(1), "the one allowed retry is queued");
 
         let retry = run_for(&engine, &task.id, Trigger::Retry).await;
         engine.fail_run(&retry.id, FailKind::AgentFailed, "attempt 2 failed too").await;
 
-        let task = engine.store.get(&task.id).await.unwrap().unwrap();
+        let task = engine.l4.store.get(&task.id).await.unwrap().unwrap();
         assert!(
             task.pending_retry.is_none(),
             "the single allowed attempt is used up, so the streak ends here"
@@ -7623,7 +7437,7 @@ mod tests {
         );
         assert_eq!(task.failure.as_ref().and_then(|f| f.run_id.clone()), Some(retry.id.clone()));
 
-        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 20).await.unwrap();
         assert!(
             entries.iter().any(|e| e.kind == "retry_settled" && e.message.contains("exhausted")),
             "exhausting the policy is visible in the journal too: {entries:?}"
@@ -7641,7 +7455,7 @@ mod tests {
         let run = run_for(&engine, &task.id, Trigger::Schedule).await;
         engine.fail_run(&run.id, FailKind::AgentFailed, "boom").await;
 
-        let task = engine.store.get(&task.id).await.unwrap().unwrap();
+        let task = engine.l4.store.get(&task.id).await.unwrap().unwrap();
         assert!(task.pending_retry.is_none(), "`retry: none` queues nothing");
         assert_eq!(
             task.next_run_at,
@@ -7662,7 +7476,7 @@ mod tests {
         // never contradicts a retry that might follow -- for a policy that
         // never retries at all, `queue_or_end_retry` is the one that has to
         // say what happens next.
-        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 20).await.unwrap();
         assert!(
             entries.iter().any(|e| e.kind == "blocked_on_failure" && e.message.contains("`none`")),
             "a task that will never retry still needs a line saying what happens next: {entries:?}"
@@ -7735,7 +7549,7 @@ mod tests {
 
         let captured_resume_at = Utc::now() + chrono::Duration::hours(3);
         let task = engine
-            .store
+            .l4.store
             .update(
                 &task.id,
                 &TaskPatch {
@@ -7749,7 +7563,7 @@ mod tests {
 
         engine.resume_from_retry(&task).await.unwrap();
 
-        let task = engine.store.get(&task.id).await.unwrap().unwrap();
+        let task = engine.l4.store.get(&task.id).await.unwrap().unwrap();
         assert_eq!(
             task.next_run_at,
             Some(captured_resume_at),
@@ -7781,7 +7595,7 @@ mod tests {
         assert!(!task.worktree);
 
         let run = engine
-            .store
+            .l4.store
             .create_run(&factory_core::run::NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Manual,
@@ -7836,7 +7650,7 @@ mod tests {
             "within the TTL the cached answer stands, git is not asked again"
         );
 
-        engine.worktree_caps.lock().unwrap().clear();
+        engine.l4.worktree_caps.lock().unwrap().clear();
         let (third, _) = engine.scope_views().await.unwrap();
         assert!(third[0].worktree_capable, "once stale, git is asked and sees the repository");
     }
@@ -7872,7 +7686,7 @@ mod tests {
             .unwrap();
 
         let run = engine
-            .store
+            .l4.store
             .create_run(&factory_core::run::NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Manual,
@@ -7990,7 +7804,7 @@ mod tests {
 
         let run = run_for(&engine, &task.id, Trigger::Schedule).await;
         engine.fail_run(&run.id, FailKind::RunTimeout, "ran for longer than 60s").await;
-        let failed = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        let failed = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(failed.fail_kind, Some(FailKind::RunTimeout));
         assert_eq!(failed.error.as_deref(), Some("ran for longer than 60s"), "the prose stays beside it");
 
@@ -8010,13 +7824,13 @@ mod tests {
             )
             .await
             .unwrap();
-        let reported = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        let reported = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(reported.fail_kind, Some(FailKind::AgentFailed));
 
         let run = run_for(&engine, &task.id, Trigger::Manual).await;
         let response = engine.handle_request(Request::TaskCancel { id: task.id.clone(), reason: None, run: None }).await;
         assert!(matches!(response, Response::Ok { .. }), "{response:?}");
-        let cancelled = engine.store.get_run(&run.id).await.unwrap().unwrap();
+        let cancelled = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(cancelled.status, RunStatus::Cancelled);
         assert_eq!(
             cancelled.fail_kind,
@@ -8040,7 +7854,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let done = engine.store.get_run(&done.id).await.unwrap().unwrap();
+        let done = engine.l4.store.get_run(&done.id).await.unwrap().unwrap();
         assert_eq!(done.fail_kind, None, "a run that succeeded has no fail kind");
 
         std::fs::remove_dir_all(&scope_dir).ok();
@@ -8066,7 +7880,7 @@ mod tests {
 
         engine.start_run_due(&task.id, Trigger::Schedule, Due::slot(slot)).await;
 
-        let run = engine.store.runs(&task.id, 1).await.unwrap().remove(0);
+        let run = engine.l4.store.runs(&task.id, 1).await.unwrap().remove(0);
         assert_eq!(run.queued_at, Some(slot), "due at the slot, not at the tick that noticed it");
         assert_eq!(run.scheduled_for, Some(slot));
         assert_eq!(run.status, RunStatus::Failed);
@@ -8095,14 +7909,14 @@ mod tests {
         // it never will.
         let slot = Utc::now() - chrono::Duration::seconds(210);
         let task = engine
-            .store
+            .l4.store
             .update(&task.id, &TaskPatch { next_run_at: Some(slot), ..Default::default() })
             .await
             .unwrap();
 
         engine.advance_schedule(&task).await.unwrap();
 
-        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 20).await.unwrap();
         let skipped: Vec<_> = entries.iter().filter(|e| e.kind == "schedule_skipped").collect();
         assert_eq!(skipped.len(), 1, "one entry for the whole gap, not one per slot: {entries:?}");
         let data = skipped[0].data.as_ref().unwrap();
@@ -8114,14 +7928,14 @@ mod tests {
         );
 
         // Fired on time: nothing skipped, nothing journalled.
-        let task = engine.store.get(&task.id).await.unwrap().unwrap();
+        let task = engine.l4.store.get(&task.id).await.unwrap().unwrap();
         let on_time = engine
-            .store
+            .l4.store
             .update(&task.id, &TaskPatch { next_run_at: Some(Utc::now()), ..Default::default() })
             .await
             .unwrap();
         engine.advance_schedule(&on_time).await.unwrap();
-        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 20).await.unwrap();
         assert_eq!(entries.iter().filter(|e| e.kind == "schedule_skipped").count(), 1);
 
         std::fs::remove_dir_all(&scope_dir).ok();
@@ -8248,7 +8062,7 @@ mod tests {
         engine.fail_run(&run.id, FailKind::AgentFailed, "exit 1").await;
         let long_ago = Utc::now() - chrono::Duration::hours(2);
         engine
-            .store
+            .l4.store
             .update(&task.id, &TaskPatch { next_run_at: Some(long_ago), ..Default::default() })
             .await
             .unwrap();
@@ -8271,7 +8085,7 @@ mod tests {
         assert!(resumed.pending_retry.is_none(), "the interrupted retry streak is over");
         assert!(!engine.due_now().await.unwrap().iter().any(|t| t.id == task.id));
 
-        let kinds: Vec<String> = engine.store.entries(&task.id, 50).await.unwrap().into_iter().map(|e| e.kind).collect();
+        let kinds: Vec<String> = engine.l4.store.entries(&task.id, 50).await.unwrap().into_iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&"schedule_paused".to_string()), "{kinds:?}");
         assert!(kinds.contains(&"schedule_resumed".to_string()), "{kinds:?}");
 
@@ -8281,7 +8095,7 @@ mod tests {
             .await
             .unwrap();
         let resumes = engine
-            .store
+            .l4.store
             .entries(&task.id, 50)
             .await
             .unwrap()
@@ -8312,7 +8126,7 @@ mod tests {
             .unwrap();
         assert!(cleared.schedule.is_none());
         assert!(!cleared.schedule_paused, "the pause went with the schedule");
-        let kinds: Vec<String> = engine.store.entries(&task.id, 50).await.unwrap().into_iter().map(|e| e.kind).collect();
+        let kinds: Vec<String> = engine.l4.store.entries(&task.id, 50).await.unwrap().into_iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&"schedule_pause_cleared".to_string()), "{kinds:?}");
 
         let rescheduled = engine
@@ -8322,7 +8136,7 @@ mod tests {
         assert!(!rescheduled.schedule_paused);
         // Due once its first slot comes round.
         engine
-            .store
+            .l4.store
             .update(&task.id, &TaskPatch { next_run_at: Some(Utc::now() - chrono::Duration::seconds(1)), ..Default::default() })
             .await
             .unwrap();
@@ -8522,7 +8336,7 @@ mod tests {
         let engine = test_engine(scope_dir.clone());
         let task = one_off_task(&engine, "nowhere to run").await;
         engine
-            .store
+            .l4.store
             .update(&task.id, &TaskPatch { agent: Some("no-such-agent".into()), ..Default::default() })
             .await
             .unwrap();
@@ -8530,7 +8344,7 @@ mod tests {
         engine.start_run_due(&task.id, Trigger::Manual, Due::now()).await;
 
         let task = engine.require(&task.id).await.unwrap();
-        assert!(engine.store.runs(&task.id, 5).await.unwrap().is_empty(), "sanity: no run was made");
+        assert!(engine.l4.store.runs(&task.id, 5).await.unwrap().is_empty(), "sanity: no run was made");
         assert!(task.blocked_by_failure(), "{:?}", task.status);
         let failure = task.failure.unwrap();
         assert_eq!(failure.kind, Some(FailKind::DispatchFailed));
@@ -8573,14 +8387,14 @@ mod tests {
         let engine = test_engine(scope_dir.clone());
         let task = one_off_task(&engine, "waits for a human").await;
         engine
-            .store
+            .l4.store
             .update(&task.id, &TaskPatch { blocked_timeout_seconds: Some(1), ..Default::default() })
             .await
             .unwrap();
         let run = run_for(&engine, &task.id, Trigger::Manual).await;
         let long_ago = Utc::now() - chrono::Duration::hours(1);
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -8604,7 +8418,7 @@ mod tests {
             active.iter().all(|r| r.task_id != task.id),
             "no blocked run stands in for the failure, so nothing is left for the timeout to find: {active:?}"
         );
-        assert_eq!(engine.store.runs(&task.id, 10).await.unwrap().len(), 1, "and no new run was made to show it");
+        assert_eq!(engine.l4.store.runs(&task.id, 10).await.unwrap().len(), 1, "and no new run was made to show it");
         std::fs::remove_dir_all(&scope_dir).ok();
     }
 
@@ -8630,7 +8444,7 @@ mod tests {
         assert_eq!(closure.by, "the owner");
         assert_eq!(closure.note.as_deref(), Some("the client dropped it"));
 
-        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 20).await.unwrap();
         let entry = entries.iter().find(|e| e.kind == "closed").expect("journaled");
         assert_eq!(entry.source, "owner");
         assert!(entry.message.contains("won't do") && entry.message.contains("the client dropped it"), "{}", entry.message);
@@ -8662,7 +8476,7 @@ mod tests {
         assert_eq!(closed.status, TaskStatus::Cancelled);
         assert_eq!(closed.close_reason(), Some(factory_core::task::CloseReason::Duplicate));
         assert_eq!(closed.closure.as_ref().unwrap().duplicate_of.as_deref(), Some(original.id.as_str()));
-        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 20).await.unwrap();
         let entry = entries.iter().find(|e| e.kind == "closed").unwrap();
         assert!(entry.message.starts_with("its last attempt failed; closed as a duplicate of"), "{}", entry.message);
         assert_eq!(entry.data.as_ref().unwrap()["fail_kind"], "agent_failed");
@@ -8740,7 +8554,7 @@ mod tests {
         assert!(reopened.closure.is_none());
         assert!(reopened.failure.is_none(), "a pending task must not read as one mid-retry");
         assert_eq!(reopened.close_reason(), None);
-        let entries = engine.store.entries(&task.id, 20).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 20).await.unwrap();
         assert!(entries.iter().any(|e| e.kind == "reopened" && e.message.contains("worth another go")), "{entries:?}");
 
         let why = refusal(engine.handle_request(Request::TaskReopen { id: task.id.clone(), reason: None }).await);
@@ -8784,7 +8598,7 @@ mod tests {
         let asking = weekly_task(&engine, None).await;
         let run = run_for(&engine, &asking.id, Trigger::Schedule).await;
         engine
-            .store
+            .l4.store
             .update_run(&run.id, &RunPatch { status: Some(RunStatus::Blocked), ..Default::default() })
             .await
             .unwrap();
@@ -8795,7 +8609,7 @@ mod tests {
 
         let past = Utc::now() - chrono::Duration::minutes(1);
         for id in [&blocked.id, &closed.id, &asking.id] {
-            engine.store.update(id, &TaskPatch { next_run_at: Some(past), ..Default::default() }).await.unwrap();
+            engine.l4.store.update(id, &TaskPatch { next_run_at: Some(past), ..Default::default() }).await.unwrap();
         }
 
         let due: Vec<String> = engine.due_now().await.unwrap().into_iter().map(|t| t.id).collect();
@@ -8816,7 +8630,7 @@ mod tests {
         let task = weekly_task(&engine, None).await;
         task_of(engine.handle_request(close(&task.id, factory_core::task::CloseReason::NotPlanned)).await);
         let long_ago = Utc::now() - chrono::Duration::days(30);
-        engine.store.update(&task.id, &TaskPatch { next_run_at: Some(long_ago), ..Default::default() }).await.unwrap();
+        engine.l4.store.update(&task.id, &TaskPatch { next_run_at: Some(long_ago), ..Default::default() }).await.unwrap();
 
         let reopened = task_of(engine.handle_request(Request::TaskReopen { id: task.id.clone(), reason: None }).await);
         assert_eq!(reopened.status, TaskStatus::Pending);
@@ -8833,7 +8647,7 @@ mod tests {
         let old = one_off_task(&engine, "failed long ago").await;
         let run = run_for(&engine, &old.id, Trigger::Manual).await;
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -8846,12 +8660,12 @@ mod tests {
             )
             .await
             .unwrap();
-        engine.store.update(&old.id, &TaskPatch { status: Some(TaskStatus::Failed), ..Default::default() }).await.unwrap();
+        engine.l4.store.update(&old.id, &TaskPatch { status: Some(TaskStatus::Failed), ..Default::default() }).await.unwrap();
         // One that never got a run, scheduled, its slot long past.
         let never = weekly_task(&engine, None).await;
         let long_ago = Utc::now() - chrono::Duration::days(30);
         engine
-            .store
+            .l4.store
             .update(&never.id, &TaskPatch { status: Some(TaskStatus::Failed), next_run_at: Some(long_ago), ..Default::default() })
             .await
             .unwrap();
@@ -8863,7 +8677,7 @@ mod tests {
         assert!(old.blocked_by_failure());
         assert_eq!(old.failure.as_ref().and_then(|f| f.kind), Some(FailKind::RunTimeout));
         assert_eq!(old.failure.as_ref().and_then(|f| f.run_id.clone()), Some(run.id.clone()));
-        let entries = engine.store.entries(&old.id, 20).await.unwrap();
+        let entries = engine.l4.store.entries(&old.id, 20).await.unwrap();
         assert!(entries.iter().any(|e| e.kind == "migrated"), "{entries:?}");
 
         let never = engine.require(&never.id).await.unwrap();
@@ -9110,7 +8924,7 @@ mod tests {
         /// session (`usage::newest_session_id_for_adapter`).
         async fn seed_session_id(engine: &Arc<Engine>, run: &Run, session_id: &str) {
             engine
-                .store
+                .l4.store
                 .append_usage(&UsageSnapshot {
                     run_id: run.id.clone(),
                     task_id: run.task_id.clone(),
@@ -9137,7 +8951,7 @@ mod tests {
         async fn dispatched_then_failed(engine: &Arc<Engine>, task: &Task, kind: FailKind) -> Run {
             let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
             engine.fail_run(&run.id, kind, "infra hiccup").await;
-            engine.store.get_run(&run.id).await.unwrap().unwrap()
+            engine.l4.store.get_run(&run.id).await.unwrap().unwrap()
         }
 
         async fn git_scope_dir(name: &str) -> PathBuf {
@@ -9155,7 +8969,7 @@ mod tests {
 
         async fn continue_fallback_reasons(engine: &Engine, task_id: &str) -> Vec<String> {
             engine
-                .store
+                .l4.store
                 .entries(task_id, 50)
                 .await
                 .unwrap()
@@ -9173,7 +8987,7 @@ mod tests {
             let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
             assert!(prev.worktree_path.is_some(), "sanity: the failed run got a worktree");
             seed_session_id(&engine, &prev, "sess-123").await;
-            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            let prev = engine.l4.store.get_run(&prev.id).await.unwrap().unwrap();
 
             let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
 
@@ -9233,7 +9047,7 @@ mod tests {
                 .await
                 .unwrap();
             let ask_run_id = answered.ask.as_ref().unwrap().run_id.clone();
-            let ask_run = engine.store.get_run(&ask_run_id).await.unwrap().unwrap();
+            let ask_run = engine.l4.store.get_run(&ask_run_id).await.unwrap().unwrap();
             assert_eq!(ask_run.resumed_session.as_deref(), Some("sess-ask"), "the ask run actually resumed, not a fresh one");
 
             // The question reached `TaskBinding.upstream` -- what a real
@@ -9269,10 +9083,10 @@ mod tests {
 
         async fn wait_node_attempt(engine: &Engine, node: &str, attempt: u32) -> (Task, Run) {
             for _ in 0..500 {
-                for task in engine.store.list(&TaskFilter::default()).await.unwrap() {
+                for task in engine.l4.store.list(&TaskFilter::default()).await.unwrap() {
                     if task.workflow_origin.as_ref().is_some_and(|origin| origin.node_id == node) {
-                        if let Some(run) = engine.store.active_run(&task.id).await.unwrap().filter(|run| run.attempt == attempt) {
-                            if engine.store.entries(&task.id, 50).await.unwrap().iter().any(|entry|
+                        if let Some(run) = engine.l4.store.active_run(&task.id).await.unwrap().filter(|run| run.attempt == attempt) {
+                            if engine.l4.store.entries(&task.id, 50).await.unwrap().iter().any(|entry|
                                 entry.kind == "dispatched" && entry.run_id.as_deref() == Some(run.id.as_str())) {
                                 return (task, run);
                             }
@@ -9309,7 +9123,7 @@ mod tests {
             // daemon. Recovery proves ownership from the recorded run path.
             std::fs::remove_file(engine.factory_snapshot().worktrees_dir().join(".workspace-owner.json")).unwrap();
             engine.recover_workspaces().await;
-            assert_eq!(engine.workspaces.records().await.unwrap().len(), 1);
+            assert_eq!(engine.l4.workspaces.records().await.unwrap().len(), 1);
             assert!(path.exists(), "recovering a failed task does not close it");
             let response = engine.handle_request(Request::TaskClose {
                 id: task.id.clone(), reason: factory_core::task::CloseReason::NotPlanned,
@@ -9317,14 +9131,14 @@ mod tests {
             }).await;
             assert!(!matches!(response, Response::Error { .. }), "{response:?}");
             assert!(path.exists(), "untracked work is retained even after close");
-            assert!(engine.store.entries(&task.id, 100).await.unwrap().iter().any(|entry| entry.kind == "workspace_retained"));
+            assert!(engine.l4.store.entries(&task.id, 100).await.unwrap().iter().any(|entry| entry.kind == "workspace_retained"));
             // Simulate the person moving their unfinished data out of the tree.
             let saved = scope_dir.join("saved-work");
             std::fs::rename(path.join("unfinished"), &saved).unwrap();
             engine.sweep_workspaces().await;
             assert!(!path.exists());
             assert_eq!(std::fs::read_to_string(saved).unwrap(), "keep across fresh sessions");
-            assert!(engine.store.entries(&task.id, 100).await.unwrap().iter().any(|entry| entry.kind == "workspace_released"));
+            assert!(engine.l4.store.entries(&task.id, 100).await.unwrap().iter().any(|entry| entry.kind == "workspace_released"));
             let root = engine.factory_snapshot().root;
             std::fs::remove_dir_all(root).ok();
             std::fs::remove_dir_all(scope_dir).ok();
@@ -9367,7 +9181,7 @@ mod tests {
             let previous = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
             // A crash between closing intent and sending release leaves this
             // clean tree eligible for the next sweep, while manual retry races.
-            engine.store.update(&task.id, &TaskPatch { status: Some(TaskStatus::Done), ..Default::default() }).await.unwrap();
+            engine.l4.store.update(&task.id, &TaskPatch { status: Some(TaskStatus::Done), ..Default::default() }).await.unwrap();
             let (started, ()) = tokio::join!(engine.dispatch(&task.id, Trigger::Manual, Due::now(), None), engine.sweep_workspaces());
             let started = started.unwrap();
             let path = PathBuf::from(started.worktree_path.unwrap());
@@ -9473,7 +9287,7 @@ edges: [{id: next, from: implement, to: review}]
             assert_ne!(second.token.as_deref(), Some(old_token.as_str()));
             assert!(engine.caller_for(Some(&old_token)).await.unwrap_err().to_string().contains("newer run"));
             engine.recover_workflows().await;
-            assert_eq!(engine.store.runs(&implement.id, 50).await.unwrap().len(), 2, "recovery cannot replay feedback");
+            assert_eq!(engine.l4.store.runs(&implement.id, 50).await.unwrap().len(), 2, "recovery cannot replay feedback");
             engine.report(&implement.id, TaskReport {
                 status: Some(RunStatus::Done), result: Some("fixed".into()), token: second.token,
                 artifacts: Vec::new(), message: None, send_to: None, error: None,
@@ -9483,7 +9297,7 @@ edges: [{id: next, from: implement, to: review}]
             assert_eq!(review_again.id, review.id);
             let duplicate = engine.dispatch(&implement.id, Trigger::Workflow, Due::now(), None).await.unwrap_err();
             assert!(matches!(duplicate, FactoryError::DispatchSuperseded(_)), "a settled feedback round cannot be replayed");
-            assert_eq!(engine.store.runs(&implement.id, 50).await.unwrap().len(), 2);
+            assert_eq!(engine.l4.store.runs(&implement.id, 50).await.unwrap().len(), 2);
             if fresh_review {
                 assert_eq!(review_second.worktree_path, review_first.worktree_path, "fresh conversation, same task files");
                 assert!(review_second.resumed_session.is_none());
@@ -9499,7 +9313,7 @@ edges: [{id: next, from: implement, to: review}]
             engine.sync_workflow_for_task(&review.id).await;
             let settled = engine.workflow_run(&workflow.id).await.unwrap();
             assert_eq!(settled.status, factory_core::workflow::WorkflowRunStatus::Done);
-            assert_eq!(engine.store.list(&TaskFilter::default()).await.unwrap().len(), 2);
+            assert_eq!(engine.l4.store.list(&TaskFilter::default()).await.unwrap().len(), 2);
             for node in settled.nodes {
                 assert_eq!(node.attempts.iter().map(|attempt| attempt.round).collect::<Vec<_>>(), vec![0, 1]);
                 assert!(node.superseded_task_ids.is_empty());
@@ -9549,9 +9363,9 @@ edges: [{id: next, from: implement, to: review}]
                 pair => panic!("exactly one dispatch must win: {pair:?}"),
             };
             assert!(matches!(loser, FactoryError::DispatchSuperseded(_)));
-            assert_eq!(engine.store.runs(&task.id, 50).await.unwrap().len(), 2);
+            assert_eq!(engine.l4.store.runs(&task.id, 50).await.unwrap().len(), 2);
             assert_eq!(runtime.starts.lock().unwrap().len(), 2);
-            assert_eq!(engine.store.active_run(&task.id).await.unwrap().unwrap().id, winner.id);
+            assert_eq!(engine.l4.store.active_run(&task.id).await.unwrap().unwrap().id, winner.id);
             engine.start_run_due_continue(&task.id, Due::now(), previous.clone()).await;
             assert!(!engine.require_run(&winner.id).await.unwrap().status.is_terminal(), "the loser cannot fail the winner");
             engine.fail_run(&winner.id, FailKind::AckTimeout, "next outage").await;
@@ -9609,7 +9423,7 @@ edges: [{id: next, from: implement, to: review}]
             let task = task_for(&engine, false).await;
             let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
             seed_session_id(&engine, &prev, "sess-456").await;
-            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            let prev = engine.l4.store.get_run(&prev.id).await.unwrap().unwrap();
 
             let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
 
@@ -9626,7 +9440,7 @@ edges: [{id: next, from: implement, to: review}]
             let task = task_for(&engine, false).await;
             let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
             seed_session_id(&engine, &prev, "sess-789").await;
-            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            let prev = engine.l4.store.get_run(&prev.id).await.unwrap().unwrap();
 
             let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
 
@@ -9643,7 +9457,7 @@ edges: [{id: next, from: implement, to: review}]
             let task = task_for(&engine, true).await;
             let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
             seed_session_id(&engine, &prev, "sess-gone").await;
-            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            let prev = engine.l4.store.get_run(&prev.id).await.unwrap().unwrap();
             // Removed by hand -- Factory itself never does this -- the way
             // `worktree::is_registered` is meant to catch.
             std::fs::remove_dir_all(prev.worktree_path.as_ref().unwrap()).unwrap();
@@ -9664,7 +9478,7 @@ edges: [{id: next, from: implement, to: review}]
             let task = task_for(&engine, true).await;
             let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
             seed_session_id(&engine, &prev, "sess-no-branch").await;
-            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            let prev = engine.l4.store.get_run(&prev.id).await.unwrap().unwrap();
             assert!(prev.worktree_path.is_some(), "sanity: the failed run got a worktree");
             assert!(prev.worktree_branch.is_some(), "sanity: a real dispatch always records both");
             // Nothing in this codebase ever clears `worktree_branch` once
@@ -9692,7 +9506,7 @@ edges: [{id: next, from: implement, to: review}]
             let task = task_for(&engine, false).await;
             let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
             seed_session_id(&engine, &prev, "sess-changed").await;
-            let mut prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            let mut prev = engine.l4.store.get_run(&prev.id).await.unwrap().unwrap();
             // Nothing changed the task's own agent -- only the *previous
             // run's own record* of what it ran as, which is what a task
             // whose agent was edited after that run would actually look
@@ -9777,14 +9591,14 @@ edges: [{id: next, from: implement, to: review}]
             let first = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
             let old_token = first.token.clone().expect("sanity: a fresh run has a token");
             engine.fail_run(&first.id, FailKind::AckTimeout, "infra hiccup").await;
-            let prev = engine.store.get_run(&first.id).await.unwrap().unwrap();
+            let prev = engine.l4.store.get_run(&first.id).await.unwrap().unwrap();
             assert_eq!(
                 prev.spent_token_sha256.as_deref(),
                 Some(factory_core::run::token_digest(&old_token).as_str()),
                 "sanity: finish_run recorded the digest of the token that just cleared"
             );
             seed_session_id(&engine, &prev, "sess-stale").await;
-            let prev = engine.store.get_run(&prev.id).await.unwrap().unwrap();
+            let prev = engine.l4.store.get_run(&prev.id).await.unwrap().unwrap();
 
             let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
             assert!(run.resumed_session.is_some(), "sanity: this one actually resumed");
@@ -10026,7 +9840,7 @@ edges: [{id: next, from: implement, to: review}]
         /// relay over `FACTORY_URL`.
         async fn seed_session_id(engine: &Arc<Engine>, run: &Run, session_id: &str) {
             engine
-                .store
+                .l4.store
                 .append_usage(&UsageSnapshot {
                     run_id: run.id.clone(),
                     task_id: run.task_id.clone(),
@@ -10098,7 +9912,7 @@ edges: [{id: next, from: implement, to: review}]
                 .await
                 .unwrap();
             let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
-            let session = engine.store.get_run(&run.id).await.unwrap().unwrap().session.unwrap();
+            let session = engine.l4.store.get_run(&run.id).await.unwrap().unwrap().session.unwrap();
             let teardown = crate::openshell::Teardown::from_meta(&session.meta).unwrap();
             let prompt = std::fs::read_to_string(teardown.state_dir.join(".factory-run/prompt.md")).unwrap();
             let name = scope_dir.file_name().unwrap().to_string_lossy().to_string();
@@ -10143,13 +9957,13 @@ edges: [{id: next, from: implement, to: review}]
                 "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$1 $2\" in\n'sandbox list') echo '{}' ;;\n'sandbox download') mkdir -p \"$5\" && echo restored > \"$5/result.txt\" ;;\nesac\n",
                 tools.join("calls").display(), listed
             )).unwrap();
-            engine.factory.write().unwrap().config.scopes[0].agents.retain(|agent| agent.openshell.is_none());
+            engine.shared.factory.write().unwrap().config.scopes[0].agents.retain(|agent| agent.openshell.is_none());
             engine.reconcile_openshell().await;
             assert_eq!(std::fs::read_to_string(scope_dir.join("result.txt")).unwrap(), "restored\n");
             assert!(!state.exists());
             let calls = std::fs::read_to_string(tools.join("calls")).unwrap();
             assert!(calls.contains(&format!("sandbox delete {sandbox}")), "{calls}");
-            assert!(engine.store.run_entries(&run, 20).await.unwrap().iter().any(|entry| entry.message.contains("deleted sandbox")));
+            assert!(engine.l4.store.run_entries(&run, 20).await.unwrap().iter().any(|entry| entry.message.contains("deleted sandbox")));
             std::fs::remove_dir_all(scope_dir).ok();
             std::fs::remove_dir_all(tools).ok();
         }
@@ -10171,7 +9985,7 @@ edges: [{id: next, from: implement, to: review}]
                 "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$1 $2\" in\n'sandbox list') echo '{}' ;;\nesac\n",
                 tools.join("calls").display(), listed
             )).unwrap();
-            engine.factory.write().unwrap().config.scopes[0].agents.retain(|agent| agent.openshell.is_none());
+            engine.shared.factory.write().unwrap().config.scopes[0].agents.retain(|agent| agent.openshell.is_none());
             engine.reconcile_openshell().await;
             assert!(state.join("pending.json").exists());
             let calls = std::fs::read_to_string(tools.join("calls")).unwrap();
@@ -10187,7 +10001,7 @@ edges: [{id: next, from: implement, to: review}]
             let task = boxed_task(&engine).await;
             engine.start_run(&task.id, Trigger::Manual).await;
             assert!(runtime.starts.lock().unwrap().is_empty(), "nothing ran on the host in its place");
-            let runs = engine.store.runs(&task.id, 10).await.unwrap();
+            let runs = engine.l4.store.runs(&task.id, 10).await.unwrap();
             let run = runs.iter().max_by_key(|r| r.attempt).expect("the run row exists and carries the failure");
             assert_eq!(run.status, RunStatus::Failed);
             let error = run.error.clone().unwrap_or_default();
@@ -10218,7 +10032,7 @@ edges: [{id: next, from: implement, to: review}]
                 ),
                 ..template
             });
-            *engine.factory.write().unwrap() = factory;
+            *engine.shared.factory.write().unwrap() = factory;
             let key = ("demo".to_string(), "boxed-managed".to_string());
             let at = Utc::now();
             let readiness = |state, thing: Option<&str>, image: Option<&str>| Readiness {
@@ -10232,7 +10046,7 @@ edges: [{id: next, from: implement, to: review}]
                 notes: vec![],
                 expiring: vec![],
             };
-            engine.provision.set_for_test(&key, readiness(ReadinessState::Needs, Some("the credential for factory-claude from the file /nonexistent/token"), None));
+            engine.l2.provision.set_for_test(&key, readiness(ReadinessState::Needs, Some("the credential for factory-claude from the file /nonexistent/token"), None));
             let task = engine
                 .create(NewTask {
                     title: "managed".into(),
@@ -10247,7 +10061,7 @@ edges: [{id: next, from: implement, to: review}]
                 .unwrap();
             engine.start_run(&task.id, Trigger::Manual).await;
             assert!(runtime.starts.lock().unwrap().is_empty(), "nothing ran on the host in its place");
-            let run = engine.store.runs(&task.id, 10).await.unwrap().into_iter().max_by_key(|r| r.attempt).unwrap();
+            let run = engine.l4.store.runs(&task.id, 10).await.unwrap().into_iter().max_by_key(|r| r.attempt).unwrap();
             assert_eq!(run.status, RunStatus::Failed);
             let error = run.error.clone().unwrap_or_default();
             assert!(error.contains("needs the credential for factory-claude") && error.contains("claude setup-token") && error.contains("not started on the host"), "{error}");
@@ -10261,8 +10075,8 @@ edges: [{id: next, from: implement, to: review}]
             agent.openshell = Some(
                 serde_yaml_ng::from_str(&format!("cli: {}\nproviders: [by-hand]\npolicy:\n  network_policies: {{}}\n", cli.display())).unwrap(),
             );
-            *engine.factory.write().unwrap() = factory;
-            engine.provision.set_for_test(&key, readiness(ReadinessState::Ready, None, Some("/images/built/factory-agent-rootfs.tar.gz")));
+            *engine.shared.factory.write().unwrap() = factory;
+            engine.l2.provision.set_for_test(&key, readiness(ReadinessState::Ready, None, Some("/images/built/factory-agent-rootfs.tar.gz")));
             let run = engine.dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
             assert_eq!(runtime.starts.lock().unwrap().len(), 1);
             let calls = std::fs::read_to_string(tools.join("calls")).unwrap();
@@ -10293,7 +10107,7 @@ edges: [{id: next, from: implement, to: review}]
             assert!(calls.contains("sandbox create --name factory-"), "{calls}");
             assert!(!calls.contains(run.token.as_deref().unwrap()), "the run token is on no command line: {calls}");
 
-            let stored = engine.store.get_run(&run.id).await.unwrap().unwrap();
+            let stored = engine.l4.store.get_run(&run.id).await.unwrap().unwrap();
             let session = stored.session.expect("the session is recorded");
             let teardown = crate::openshell::Teardown::from_meta(&session.meta).expect("with its teardown");
             assert!(teardown.state_dir.starts_with(engine.factory_snapshot().factory_dir()), "state lives under .factory");
@@ -10320,12 +10134,12 @@ edges: [{id: next, from: implement, to: review}]
                 .await
                 .unwrap();
             // The teardown runs in the background, after the run is settled.
-            assert_eq!(engine.store.get_run(&run.id).await.unwrap().unwrap().status, RunStatus::Done);
+            assert_eq!(engine.l4.store.get_run(&run.id).await.unwrap().unwrap().status, RunStatus::Done);
             let mut calls = String::new();
             let mut entries = Vec::new();
             for _ in 0..100 {
                 calls = std::fs::read_to_string(tools.join("calls")).unwrap();
-                entries = engine.store.run_entries(&run.id, 100).await.unwrap();
+                entries = engine.l4.store.run_entries(&run.id, 100).await.unwrap();
                 // Removal precedes the background worker's journal writes.
                 // Await the whole observable contract, not only its first
                 // side effects, before asserting the completion evidence.
@@ -10412,7 +10226,7 @@ edges: [{id: next, from: implement, to: review}]
             let sandbox = format!("factory-{}", &first.id[..8]);
             end_and_wait_for_teardown(&engine, &task.id, &first, &tools, &sandbox).await;
             let preserved = crate::openshell::load_preserved(&sessions_root(&engine), &task.id).unwrap();
-            let first = engine.store.get_run(&first.id).await.unwrap().unwrap();
+            let first = engine.l4.store.get_run(&first.id).await.unwrap().unwrap();
 
             let second = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(first.clone())).await.unwrap();
 
@@ -10440,7 +10254,7 @@ edges: [{id: next, from: implement, to: review}]
 
         async fn continue_fallback_reasons_openshell(engine: &Arc<Engine>, task_id: &str) -> Vec<String> {
             engine
-                .store
+                .l4.store
                 .entries(task_id, 50)
                 .await
                 .unwrap()
@@ -10465,7 +10279,7 @@ edges: [{id: next, from: implement, to: review}]
             let sandbox = format!("factory-{}", &first.id[..8]);
             end_and_wait_for_teardown(&engine, &task.id, &first, &tools, &sandbox).await;
             assert!(crate::openshell::load_preserved(&sessions_root(&engine), &task.id).is_some());
-            let first = engine.store.get_run(&first.id).await.unwrap().unwrap();
+            let first = engine.l4.store.get_run(&first.id).await.unwrap().unwrap();
 
             let second = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(first.clone())).await.unwrap();
 
@@ -10495,7 +10309,7 @@ edges: [{id: next, from: implement, to: review}]
             // that (same race the module's other end-to-end test notes).
             let mut journaled = false;
             for _ in 0..100 {
-                if engine.store.run_entries(&first.id, 50).await.unwrap().iter()
+                if engine.l4.store.run_entries(&first.id, 50).await.unwrap().iter()
                     .any(|e| e.kind == "sandbox" && e.message.contains("not preserved")) {
                     journaled = true;
                     break;
@@ -10504,7 +10318,7 @@ edges: [{id: next, from: implement, to: review}]
             }
             assert!(journaled, "the failed download is journaled");
             assert!(crate::openshell::load_preserved(&sessions_root(&engine), &task.id).is_none());
-            let first = engine.store.get_run(&first.id).await.unwrap().unwrap();
+            let first = engine.l4.store.get_run(&first.id).await.unwrap().unwrap();
 
             let second = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(first.clone())).await.unwrap();
 
@@ -10535,7 +10349,7 @@ edges: [{id: next, from: implement, to: review}]
             let sandbox = format!("factory-{}", &first.id[..8]);
             end_and_wait_for_teardown(&engine, &task.id, &first, &tools, &sandbox).await;
             assert!(crate::openshell::load_preserved(&sessions_root(&engine), &task.id).is_some());
-            let first = engine.store.get_run(&first.id).await.unwrap().unwrap();
+            let first = engine.l4.store.get_run(&first.id).await.unwrap().unwrap();
 
             let second = engine.dispatch(&task.id, Trigger::Manual, Due::now(), Some(first.clone())).await.unwrap();
 

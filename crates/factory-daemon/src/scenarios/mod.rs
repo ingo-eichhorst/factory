@@ -34,7 +34,7 @@ impl Engine {
     ) -> factory_direction::scenarios_service::Service<'a> {
         factory_direction::scenarios_service::Service::new(
             self.policy_intent_service(snapshot),
-            &self.goals,
+            &self.l6.goals,
         )
     }
 
@@ -155,7 +155,7 @@ impl Engine {
         let snapshot = self.factory_snapshot();
         let knowledge = factory_kernel::KnowledgeTags::provider(self);
         let comparisons = factory_kernel::CheckComparisonFact::provider(self);
-        let observer = crate::commands::CreationObserver(self.bus.clone());
+        let observer = crate::commands::CreationObserver(self.shared.bus.clone());
         let commands = crate::commands::direction(self, &observer);
         let receipt = self
             .scenarios_service(&snapshot)
@@ -583,9 +583,9 @@ mod tests {
             "assistant".to_string(),
             "shell".to_string(),
         );
-        let task = engine.store.create(&new_task).await.unwrap();
+        let task = engine.l4.store.create(&new_task).await.unwrap();
         let run = engine
-            .store
+            .l4.store
             .create_run(&factory_core::run::NewRun {
                 task_id: task.id.clone(),
                 trigger: factory_core::run::Trigger::Manual,
@@ -599,7 +599,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &factory_core::run::RunPatch {
@@ -852,7 +852,7 @@ mod tests {
 
         // One held run whose gate failed: `gate_fail_rate` is 1.0.
         let task = engine
-            .store
+            .l4.store
             .create(&task_from_new(
                 NewTask {
                     title: "t".into(),
@@ -866,7 +866,7 @@ mod tests {
             .await
             .unwrap();
         let run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Manual,
@@ -891,7 +891,7 @@ mod tests {
         }];
         let now = chrono::Utc::now();
         let run = engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -904,7 +904,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .run_evidence
+            .l4.run_evidence
             .append_step_attestation(&StepAttestation {
                 id: uuid::Uuid::new_v4().to_string(),
                 run_id: run.id.clone(),

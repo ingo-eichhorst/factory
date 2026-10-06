@@ -55,11 +55,11 @@ impl Engine {
         let past_end = now.min(to);
 
         let runs = if from <= now {
-            self.store.runs_between(from, past_end).await?
+            self.l4.store.runs_between(from, past_end).await?
         } else {
             Vec::new()
         };
-        let tasks = self.store.list(&Default::default()).await?;
+        let tasks = self.l4.store.list(&Default::default()).await?;
         let factory = self.factory_snapshot();
         let titles: BTreeMap<&str, &str> = tasks
             .iter()
@@ -89,7 +89,7 @@ impl Engine {
         let mut transitions: BTreeMap<String, Vec<TaskEntry>> = BTreeMap::new();
         if let Some(earliest) = runs.iter().map(|r| r.started_at).min() {
             let since = earliest - Duration::seconds(1);
-            for (_, entry) in self.store.entries_of_kinds(TRANSITION_KINDS, since).await? {
+            for (_, entry) in self.l4.store.entries_of_kinds(TRANSITION_KINDS, since).await? {
                 let Some(run_id) = entry.run_id.as_deref() else { continue };
                 if on_chart.contains(run_id) {
                     transitions.entry(run_id.to_string()).or_default().push(entry);
@@ -151,7 +151,7 @@ impl Engine {
         // Changes from before the window still matter: they say what state the
         // window opened in, so keep the last one before `from` as the opening
         // span.
-        let changes = self.store.status_changes(from - Duration::hours(24)).await?;
+        let changes = self.l4.store.status_changes(from - Duration::hours(24)).await?;
         let mut spans: BTreeMap<String, Vec<StatusChange>> = BTreeMap::new();
         for change in changes {
             spans.entry(change.subject.clone()).or_default().push(change);
@@ -160,7 +160,7 @@ impl Engine {
             trim_to_window(series, from);
         }
 
-        let liveness_since = self.store.status_origin().await?;
+        let liveness_since = self.l4.store.status_origin().await?;
 
         let mut out = Vec::new();
         let (views, _available) = self.scope_views().await?;
@@ -260,7 +260,7 @@ impl Engine {
         status: RuntimeStatus,
     ) {
         {
-            let mut seen = match self.seen_status.lock() {
+            let mut seen = match self.l4.seen_status.lock() {
                 Ok(seen) => seen,
                 // A poisoned lock is not a reason to take the daemon down over
                 // a chart. Skip the sample and carry on.
@@ -278,7 +278,7 @@ impl Engine {
             status,
             at: Utc::now(),
         };
-        if let Err(e) = self.store.append_status(&change).await {
+        if let Err(e) = self.l4.store.append_status(&change).await {
             tracing::debug!(subject, "could not record liveness: {e}");
         }
     }
@@ -294,13 +294,13 @@ impl Engine {
     /// agent while the daemon is down, and a span left open would be drawn
     /// straight through the outage as though someone had been watching.
     pub async fn close_liveness(self: &Arc<Self>) {
-        for agent in self.store.agents().await.unwrap_or_default() {
+        for agent in self.l4.store.agents().await.unwrap_or_default() {
             if agent.session.is_some() {
                 self.record_gone(&agent.id, &agent.scope, &agent.name).await;
             }
         }
-        for run in self.store.active_runs().await.unwrap_or_default() {
-            let Ok(Some(task)) = self.store.get(&run.task_id).await else {
+        for run in self.l4.store.active_runs().await.unwrap_or_default() {
+            let Ok(Some(task)) = self.l4.store.get(&run.task_id).await else {
                 continue;
             };
             self.record_gone(&format!("run:{}", run.id), &task.scope, &run.agent)
@@ -321,12 +321,12 @@ impl Engine {
     /// subprocess (`herdr agent explain`), is asked for exactly once per run
     /// per tick, not two or three times over.
     pub async fn record_run_liveness(self: &Arc<Self>) {
-        let runs = self.store.active_runs().await.unwrap_or_default();
+        let runs = self.l4.store.active_runs().await.unwrap_or_default();
         for run in runs {
             if run.session.is_none() {
                 continue;
             }
-            let Ok(Some(task)) = self.store.get(&run.task_id).await else {
+            let Ok(Some(task)) = self.l4.store.get(&run.task_id).await else {
                 continue;
             };
             let report = self.session_status_report(&run).await;
@@ -396,7 +396,7 @@ impl Engine {
     /// journalled. The token is checked exactly as for a report: without it,
     /// anyone on the socket could end anyone's run.
     pub(crate) async fn turn_ended(self: &Arc<Self>, task_id: &str, turn: TurnEnded) -> Result<()> {
-        let Some(run) = self.store.active_run(task_id).await? else {
+        let Some(run) = self.l4.store.active_run(task_id).await? else {
             return Ok(());
         };
         self.check_run_token(&run, turn.token.as_deref(), task_id)?;
@@ -534,9 +534,9 @@ impl Engine {
     }
 
     async fn patch_run(&self, run: &Run, patch: RunPatch) -> Option<Run> {
-        match self.store.update_run(&run.id, &patch).await {
+        match self.l4.store.update_run(&run.id, &patch).await {
             Ok(updated) => {
-                self.bus.publish(Event::RunUpdated { run: updated.clone() });
+                self.shared.bus.publish(Event::RunUpdated { run: updated.clone() });
                 Some(updated)
             }
             Err(e) => {
@@ -550,7 +550,7 @@ impl Engine {
     /// rather than the mean: one run that sat waiting for a human all night
     /// should not move the estimate for the rest.
     async fn historical_estimate_for(&self, task_id: &str) -> (Option<u64>, u32) {
-        let runs = self.store.runs(task_id, 50).await.unwrap_or_default();
+        let runs = self.l4.store.runs(task_id, 50).await.unwrap_or_default();
         let mut lengths: Vec<i64> = runs
             .iter()
             .filter(|r| r.status == RunStatus::Done)

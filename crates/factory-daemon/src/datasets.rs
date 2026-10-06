@@ -114,7 +114,7 @@ impl Engine {
 
     pub(crate) async fn dataset_create(&self, name: &str, description: Option<String>) -> Result<Dataset> {
         refuse_bad_name(name)?;
-        let lock = self.dataset_locks.lock_for(name);
+        let lock = self.l5.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
         let dir = self.factory_snapshot().datasets_dir();
         if Dataset::load(&dir, name)?.is_some() {
@@ -132,7 +132,7 @@ impl Engine {
 
     pub(crate) async fn dataset_add_cases(&self, name: &str, cases: Vec<Case>) -> Result<Dataset> {
         refuse_bad_name(name)?;
-        let lock = self.dataset_locks.lock_for(name);
+        let lock = self.l5.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
         let dir = self.factory_snapshot().datasets_dir();
         let mut dataset = Dataset::load(&dir, name)?
@@ -158,7 +158,7 @@ impl Engine {
             )
         })?;
 
-        let lock = self.dataset_locks.lock_for(name);
+        let lock = self.l5.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
         let dir = self.factory_snapshot().datasets_dir();
         let mut dataset = match Dataset::load(&dir, name)? {
@@ -180,7 +180,7 @@ impl Engine {
 
     pub(crate) async fn dataset_from_tasks(&self, name: &str, task_ids: Vec<String>) -> Result<Dataset> {
         refuse_bad_name(name)?;
-        let lock = self.dataset_locks.lock_for(name);
+        let lock = self.l5.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
         let dir = self.factory_snapshot().datasets_dir();
         let mut dataset = match Dataset::load(&dir, name)? {
@@ -194,11 +194,11 @@ impl Engine {
 
         for task_id in &task_ids {
             let task = self
-                .store
+                .l4.store
                 .get(task_id)
                 .await?
                 .ok_or_else(|| FactoryError::BadRequest(format!("no such task: {task_id:?}")))?;
-            let newest_run = self.store.runs(task_id, 1).await?.into_iter().next();
+            let newest_run = self.l4.store.runs(task_id, 1).await?.into_iter().next();
             let outcome = newest_run
                 .as_ref()
                 .map(|r| r.status.as_str().to_string())
@@ -236,7 +236,7 @@ impl Engine {
     pub(crate) async fn dataset_delete_case(&self, name: &str, id: &str) -> Result<Dataset> {
         refuse_bad_name(name)?;
         refuse_bad_case_id(id)?;
-        let lock = self.dataset_locks.lock_for(name);
+        let lock = self.l5.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
         let dir = self.factory_snapshot().datasets_dir();
         let mut dataset = Dataset::load(&dir, name)?
@@ -253,7 +253,7 @@ impl Engine {
 
     pub(crate) async fn dataset_delete(&self, name: &str) -> Result<bool> {
         refuse_bad_name(name)?;
-        let lock = self.dataset_locks.lock_for(name);
+        let lock = self.l5.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
         let dir = self.factory_snapshot().datasets_dir();
         if Dataset::load(&dir, name)?.is_none() {

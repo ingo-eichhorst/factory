@@ -3,24 +3,24 @@ use crate::engine::Engine;
 use factory_core::error::Result;
 
 pub(super) fn blueprint_provider(engine: &Engine) -> factory_process::workflow_blueprints::Provider<'_> {
-    factory_process::workflow_blueprints::Provider {tasks: engine.store.as_ref(), workflows: &engine.workflows}
+    factory_process::workflow_blueprints::Provider {tasks: engine.l4.store.as_ref(), workflows: &engine.l4.workflows}
 }
 
 pub(super) fn mirror_provider(engine: &Engine) -> factory_process::workflow_store::WorkflowStore {
-    engine.workflows.clone()
+    engine.l4.workflows.clone()
 }
 
 pub(super) fn provenance_provider(
     engine: &Engine,
 ) -> factory_process::facts::ProvenanceProvider<'_> {
-    factory_process::facts::ProvenanceProvider::new(engine.store.as_ref(), &engine.run_evidence)
+    factory_process::facts::ProvenanceProvider::new(engine.l4.store.as_ref(), &engine.l4.run_evidence)
 }
 
 pub(super) fn provider(engine: &Engine) -> factory_process::facts::Provider<'_> {
     let snapshot = engine.factory_snapshot();
     factory_process::facts::Provider::new(
-        engine.store.as_ref(),
-        &engine.workflows,
+        engine.l4.store.as_ref(),
+        &engine.l4.workflows,
         snapshot.scope_tree(),
         snapshot.root,
     )
@@ -44,9 +44,9 @@ pub(super) fn measurement_provider(
     engine: &Engine,
 ) -> factory_process::measurements::MeasurementProvider<'_> {
     factory_process::measurements::MeasurementProvider::new(
-        engine.store.as_ref(),
-        &engine.workflows,
-        &engine.run_evidence,
+        engine.l4.store.as_ref(),
+        &engine.l4.workflows,
+        &engine.l4.run_evidence,
         engine.factory_snapshot().scope_tree(),
     )
 }

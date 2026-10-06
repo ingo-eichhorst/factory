@@ -67,7 +67,7 @@ pub(super) fn expiry_provider(
 ) -> factory_environment::credential_expiry::Provider<'_> {
     let snapshot = engine.factory_snapshot();
     factory_environment::credential_expiry::Provider {
-        store: &engine.credential_expiries,
+        store: &engine.l2.credential_expiries,
         instance: snapshot.config.instance.id.clone(),
         declarations: snapshot.config.secrets.clone(),
         providers: provider_declarations(&snapshot),

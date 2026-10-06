@@ -358,7 +358,7 @@ pub(crate) async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::R
         }
         tokio::select! {
             _ = ticker.tick() => {}
-            _ = engine.provision.wake.notified() => {
+            _ = engine.l2.provision.wake.notified() => {
                 pass_isolated(&engine).await;
                 if let Some((_, at)) = last.as_mut() { *at = Instant::now(); }
             }
@@ -433,13 +433,13 @@ fn needs(thing: impl Into<String>, command: Option<String>) -> Unready {
 impl Engine {
     /// One reconcile of every declared sandboxed agent. One at a time.
     pub(crate) async fn provision_pass(self: &Arc<Self>) {
-        let _pass = self.provision.pass.lock().await;
+        let _pass = self.l2.provision.pass.lock().await;
         self.check_catalogue().await;
         let agents = declared(self);
         let live: BTreeSet<AgentKey> = agents.iter().map(|d| d.key.clone()).collect();
-        lock(&self.provision.readiness).retain(|key, _| live.contains(key));
-        lock(&self.provision.smoked).retain(|key, _| live.contains(key));
-        lock(&self.provision.smoke_failed).retain(|key, _| live.contains(key));
+        lock(&self.l2.provision.readiness).retain(|key, _| live.contains(key));
+        lock(&self.l2.provision.smoked).retain(|key, _| live.contains(key));
+        lock(&self.l2.provision.smoke_failed).retain(|key, _| live.contains(key));
         // Two agents naming one managed provider differently would update
         // it back and forth; both are told instead.
         let conflicts = conflicting_providers(&agents);
@@ -475,20 +475,20 @@ impl Engine {
                 Err(Unready::Preparing(what)) => (ReadinessState::Preparing, Some(what), None),
                 Err(Unready::Needs { thing, command }) => (ReadinessState::Needs, Some(thing), command),
             };
-            let previous = self.provision.readiness(&agent.key);
+            let previous = self.l2.provision.readiness(&agent.key);
             let changed = previous.as_ref().is_none_or(|p| p.state != state || p.thing != thing);
-            self.provision.set(
+            self.l2.provision.set(
                 &agent.key,
                 Readiness { state, thing, command, since: now, checked_at: now, image, image_build_failure, notes, expiring },
             );
             if changed {
-                let readiness = self.provision.readiness(&agent.key);
+                let readiness = self.l2.provision.readiness(&agent.key);
                 if let Some(r) = readiness {
                     tracing::info!(scope = %agent.key.0, agent = %agent.key.1, state = r.state.as_str(), "openshell readiness: {}", r.reason());
                 }
             }
         }
-        self.provision.settled.notify_waiters();
+        self.l2.provision.settled.notify_waiters();
     }
 
     /// Steps 1-5 for one agent. `Ok` is ready; `notes` and `image` are
@@ -571,7 +571,7 @@ impl Engine {
             .map_err(|e| needs(format!("a policy the smoke can be made with ({e})"), None))?;
         let script = os::smoke_script(&smoke, agent.git.as_deref());
         let print = {
-            let given = lock(&self.provision.given);
+            let given = lock(&self.l2.provision.given);
             let mut hash = Sha256::new();
             for part in [image_path.as_str(), policy.as_str(), script.as_str()] {
                 hash.update(part.as_bytes());
@@ -585,10 +585,10 @@ impl Engine {
             }
             hex(&hash.finalize())
         };
-        if lock(&self.provision.smoked).get(&agent.key) == Some(&print) {
+        if lock(&self.l2.provision.smoked).get(&agent.key) == Some(&print) {
             return Ok(());
         }
-        let failed_before = lock(&self.provision.smoke_failed)
+        let failed_before = lock(&self.l2.provision.smoke_failed)
             .get(&agent.key)
             .filter(|(before, at, _)| *before == print && at.elapsed() < SMOKE_RETRY)
             .map(|(_, _, reason)| reason.clone());
@@ -600,12 +600,12 @@ impl Engine {
         match smoke_run(&base, &instance, &state_root, &image_path, &gateway_names, &policy, &script).await {
             Ok(more) => {
                 notes.extend(more);
-                lock(&self.provision.smoke_failed).remove(&agent.key);
-                lock(&self.provision.smoked).insert(agent.key.clone(), print);
+                lock(&self.l2.provision.smoke_failed).remove(&agent.key);
+                lock(&self.l2.provision.smoked).insert(agent.key.clone(), print);
                 Ok(())
             }
             Err(reason) => {
-                lock(&self.provision.smoke_failed).insert(agent.key.clone(), (print, Instant::now(), reason.clone()));
+                lock(&self.l2.provision.smoke_failed).insert(agent.key.clone(), (print, Instant::now(), reason.clone()));
                 Err(needs(format!("a passing smoke run ({reason})"), smoke_hint(agent, &reason)))
             }
         }
@@ -621,16 +621,16 @@ impl Engine {
         }
         let local = row.server.as_deref().is_none_or(is_local_server);
         let may_start = {
-            let gateways = lock(&self.provision.gateways);
+            let gateways = lock(&self.l2.provision.gateways);
             gateways.get(base).and_then(|g| g.last_start).is_none_or(|t| t.elapsed() >= START_BACKOFF)
         };
         let command = format!("launchctl kickstart gui/{}/{GATEWAY_SERVICE}", unsafe { libc::getuid() });
         if local && may_start {
-            lock(&self.provision.gateways).entry(base.to_vec()).or_default().last_start = Some(Instant::now());
-            match start_gateway(&self.provision.tools.launchctl).await {
+            lock(&self.l2.provision.gateways).entry(base.to_vec()).or_default().last_start = Some(Instant::now());
+            match start_gateway(&self.l2.provision.tools.launchctl).await {
                 Ok(how) => {
                     tracing::warn!(gateway = %label, "the OpenShell gateway was {}; started it with `{how}`", row.status);
-                    let deadline = Instant::now() + self.provision.tools.gateway_wait;
+                    let deadline = Instant::now() + self.l2.provision.tools.gateway_wait;
                     loop {
                         tokio::time::sleep(Duration::from_secs(2)).await;
                         let (up, again) = gateway_status(base, &label).await;
@@ -658,7 +658,7 @@ impl Engine {
     }
 
     fn record_gateway(&self, base: &[String], mut row: GatewayRow) {
-        let mut gateways = lock(&self.provision.gateways);
+        let mut gateways = lock(&self.l2.provision.gateways);
         let entry = gateways.entry(base.to_vec()).or_default();
         if row.started_at.is_none() {
             if let Some(previous) = &entry.row {
@@ -674,7 +674,7 @@ impl Engine {
     /// when a rebuild is under way.
     fn ensure_image(self: &Arc<Self>, factory_dir: &Path) -> Result<(String, Option<String>, Option<factory_kernel::ImageBuildFailure>), Unready> {
         let dir = images_dir(factory_dir);
-        let cli_digest = file_digest(&self.factory_bin).unwrap_or_else(|| "unreadable".into());
+        let cli_digest = file_digest(&self.shared.factory_bin).unwrap_or_else(|| "unreadable".into());
         let key = os::image_key(&cli_digest);
         let current = dir.join(&key).join(os::IMAGE_FILE);
         if current.is_file() {
@@ -683,7 +683,7 @@ impl Engine {
         }
         let started = self.start_build(&dir, &key);
         let previous = newest_image(&dir, &key);
-        let failure = lock(&self.provision.build).failed.clone().filter(|(k, _, _, _)| *k == key);
+        let failure = lock(&self.l2.provision.build).failed.clone().filter(|(k, _, _, _)| *k == key);
         match (previous, failure) {
             (Some(previous), None) => Ok((
                 previous.display().to_string(),
@@ -715,7 +715,7 @@ impl Engine {
     }
 
     fn build_command(&self, dir: &Path) -> String {
-        match &self.provision.tools.source {
+        match &self.l2.provision.tools.source {
             Some(source) => format!("OUT={} {}/examples/openshell/build-image.sh rootfs", dir.display(), source.display()),
             None => "set FACTORY_OPENSHELL_SOURCE to a Factory checkout, or set openshell.image".into(),
         }
@@ -725,7 +725,7 @@ impl Engine {
     /// failed recently.
     fn start_build(self: &Arc<Self>, dir: &Path, key: &str) -> Result<(), String> {
         {
-            let mut build = lock(&self.provision.build);
+            let mut build = lock(&self.l2.provision.build);
             if build.running.is_some() {
                 return Ok(());
             }
@@ -740,9 +740,9 @@ impl Engine {
         let dir = dir.to_path_buf();
         let key = key.to_string();
         tokio::spawn(async move {
-            let outcome = build_image(&engine.provision.tools, &dir, &key).await;
+            let outcome = build_image(&engine.l2.provision.tools, &dir, &key).await;
             {
-                let mut build = lock(&engine.provision.build);
+                let mut build = lock(&engine.l2.provision.build);
                 build.running = None;
                 match &outcome {
                     Ok(()) => build.failed = None,
@@ -753,7 +753,7 @@ impl Engine {
                 Ok(()) => tracing::info!(image = %key, "built Factory's OpenShell image"),
                 Err(reason) => tracing::warn!(image = %key, "Factory's OpenShell image did not build: {reason}"),
             }
-            engine.provision.wake.notify_one();
+            engine.l2.provision.wake.notify_one();
         });
         Ok(())
     }
@@ -780,7 +780,7 @@ impl Engine {
             .ok_or_else(|| needs(format!("a credential variable in Factory's profile {}", managed.kind), None))?;
         let digest: [u8; 32] = Sha256::digest(yaml.as_bytes()).into();
         let key = (base.to_vec(), id.clone());
-        if lock(&self.provision.profiles).get(&key) == Some(&digest) {
+        if lock(&self.l2.provision.profiles).get(&key) == Some(&digest) {
             return Ok(env);
         }
         if !os::owned_by_instance(&id, suffix) {
@@ -805,7 +805,7 @@ impl Engine {
         exec(&argv, None, QUICK, "importing the provider profile", &[])
             .await
             .map_err(|e| needs(format!("the provider profile {id} on the gateway ({e})"), None))?;
-        lock(&self.provision.profiles).insert(key, digest);
+        lock(&self.l2.provision.profiles).insert(key, digest);
         Ok(env)
     }
 
@@ -830,11 +830,11 @@ impl Engine {
                 Some(supply_hint(managed, source, renew)),
             )
         })?;
-        let digest = self.provision.digest(base, &name, &value);
+        let digest = self.l2.provision.digest(base, &name, &value);
         let key = (base.to_vec(), name.clone());
         let profile = os::profile_id(&managed.kind, suffix);
         let existing = listed.get(&name);
-        if existing == Some(&profile) && lock(&self.provision.given).get(&key) == Some(&digest) {
+        if existing == Some(&profile) && lock(&self.l2.provision.given).get(&key) == Some(&digest) {
             return Ok(());
         }
         let mut argv = base.to_vec();
@@ -859,7 +859,7 @@ impl Engine {
             .await
             .map_err(|e| needs(format!("the provider {name} on the gateway ({e})"), None))?;
         tracing::info!(provider = %name, "openshell provider {} from {}", if existing.is_some() { "updated" } else { "created" }, source.describe());
-        lock(&self.provision.given).insert(key, digest);
+        lock(&self.l2.provision.given).insert(key, digest);
         Ok(())
     }
 
@@ -889,18 +889,18 @@ impl Engine {
         }
         let deadline = Instant::now() + GATE_WAIT;
         loop {
-            let settled = self.provision.settled.notified();
-            match self.provision.readiness(key) {
+            let settled = self.l2.provision.settled.notified();
+            match self.l2.provision.readiness(key) {
                 Some(r) if r.state == ReadinessState::Ready => {
                     // `ready` was true at the last pass. A source removed or
                     // rotated since then is found now, not five minutes on.
                     match self.sources_current(base.as_deref().unwrap_or_default(), config, &secrets, &suffix).await {
                         Err((thing, command)) => {
-                            self.provision.wake.notify_one();
+                            self.l2.provision.wake.notify_one();
                             return Err(needs_reason(thing, Some(command)));
                         }
                         Ok(false) if Instant::now() < deadline => {
-                            self.provision.wake.notify_one();
+                            self.l2.provision.wake.notify_one();
                             let _ = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), settled).await;
                             continue;
                         }
@@ -917,7 +917,7 @@ impl Engine {
                             "the sandbox's prerequisites have not been checked yet; the daemon is checking them now".into()
                         }));
                     }
-                    self.provision.wake.notify_one();
+                    self.l2.provision.wake.notify_one();
                     let _ = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), settled).await;
                 }
             }
@@ -950,8 +950,8 @@ impl Engine {
                 )
             })?;
             let name = os::managed_name(&managed.name, suffix);
-            let digest = self.provision.digest(base, &name, &value);
-            if lock(&self.provision.given).get(&(base.to_vec(), name)) != Some(&digest) {
+            let digest = self.l2.provision.digest(base, &name, &value);
+            if lock(&self.l2.provision.given).get(&(base.to_vec(), name)) != Some(&digest) {
                 current = false;
             }
         }
@@ -972,7 +972,7 @@ impl Engine {
                 SourceCheck { resolves: outcome.is_ok(), reason: outcome.err(), checked_at: Utc::now() },
             );
         }
-        *lock(&self.provision.catalogue) = checks;
+        *lock(&self.l2.provision.catalogue) = checks;
     }
 }
 

@@ -595,7 +595,7 @@ impl Engine {
         mut agent: ScopeAgent,
     ) -> Result<(String, ScopeAgent)> {
         let _edit = self
-            .configuration_edit
+            .shared.configuration_edit
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let factory = self.factory_snapshot();
@@ -629,7 +629,7 @@ impl Engine {
                 "an agent name cannot contain `/` or control characters",
             ));
         }
-        self.registry.agent(&agent.harness)?;
+        self.shared.registry.agent(&agent.harness)?;
         let roles = factory.config.roles_for_scope(&from_file)?;
         if !roles.contains(&agent.role) {
             return Err(bad(format!(
@@ -691,7 +691,7 @@ impl Engine {
             return Err(bad("an agent deletion needs a name"));
         }
         let _edit = self
-            .configuration_edit
+            .shared.configuration_edit
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let factory = self.factory_snapshot();
@@ -1248,7 +1248,7 @@ impl Engine {
     /// cannot be held across the store's await.
     async fn given_roles(&self) -> Result<HashMap<String, Role>> {
         Ok(self
-            .store
+            .l4.store
             .agents()
             .await?
             .into_iter()
@@ -1274,7 +1274,7 @@ impl Engine {
         ) -> Result<()>,
     ) -> Result<String> {
         let _edit = self
-            .configuration_edit
+            .shared.configuration_edit
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let factory = self.factory_snapshot();
@@ -1416,7 +1416,7 @@ impl Engine {
     /// nothing else here to guard.
     fn edit_dashboard_layer(&self, scope_name: &str, spec: Option<DashboardConfig>) -> Result<String> {
         let _edit = self
-            .configuration_edit
+            .shared.configuration_edit
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let factory = self.factory_snapshot();
@@ -1902,7 +1902,7 @@ mod tests {
             "version: 1\nscope:\n  id: scope-id\n  name: demo\n",
         );
         let engine = engine(&scratch);
-        let mut events = engine.bus.subscribe();
+        let mut events = engine.shared.bus.subscribe();
 
         let response = engine
             .handle_request(Request::AgentConfigure {
@@ -1929,7 +1929,7 @@ mod tests {
             "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents:\n    - name: reviewer\n      harness: pi\n",
         );
         let engine = engine(&scratch);
-        let mut events = engine.bus.subscribe();
+        let mut events = engine.shared.bus.subscribe();
 
         let response = engine
             .handle_request(Request::AgentDelete {
@@ -2142,7 +2142,7 @@ mod tests {
         let watcher = factory_core::agent::AgentSession::new(
             "demo", "watcher", "pi", "herdr", Lifetime::Permanent, Role::worker(),
         );
-        engine.store.put_agent(&watcher).await.unwrap();
+        engine.l4.store.put_agent(&watcher).await.unwrap();
         engine.set_agent_role("demo/watcher", Some(Role::new("reviewer"))).await.unwrap();
 
         let error = engine.delete_role("projects", "reviewer").await.unwrap_err().to_string();
@@ -2184,7 +2184,7 @@ mod tests {
             "vanished", "ghost", "pi", "herdr", Lifetime::Permanent, Role::worker(),
         );
         stale.assigned_role = Some(Role::new("reviewer"));
-        engine.store.put_agent(&stale).await.unwrap();
+        engine.l4.store.put_agent(&stale).await.unwrap();
 
         engine
             .define_role("projects", "lead", spec("runs the board", &["task.run"], "scope"), false)
@@ -2277,7 +2277,7 @@ mod tests {
 
         let instance = Instance::new("request", ROOT, &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")]);
         let engine = instance.engine();
-        let mut events = engine.bus.subscribe();
+        let mut events = engine.shared.bus.subscribe();
 
         let response = engine
             .handle_request(Request::RoleDefine {
@@ -2506,7 +2506,7 @@ mod tests {
 
         let instance = Instance::new("request", ROOT, &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")]);
         let engine = instance.engine();
-        let mut events = engine.bus.subscribe();
+        let mut events = engine.shared.bus.subscribe();
 
         let response = engine
             .handle_request(Request::DashboardSet {
@@ -2819,7 +2819,7 @@ impl Engine {
         metadata: &factory_core::secrets::SecretMetadata,
     ) -> Result<(factory_core::secrets::SecretMetadata, bool)> {
         let _edit = self
-            .configuration_edit
+            .shared.configuration_edit
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let factory = self.factory_snapshot();

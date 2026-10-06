@@ -43,7 +43,7 @@ impl Engine {
     /// are read off the run itself; the agent states only `suggestion`'s
     /// own fields.
     pub(crate) async fn file_suggestion(&self, task_id: &str, report: SuggestionReport) -> Result<Suggestion> {
-        let run = self.store.active_run(task_id).await?.ok_or_else(|| {
+        let run = self.l4.store.active_run(task_id).await?.ok_or_else(|| {
             FactoryError::BadRequest(format!(
                 "task {task_id} has no run in progress; a suggestion is filed against an active run"
             ))
@@ -75,7 +75,7 @@ impl Engine {
             wasted_tokens: report.wasted_tokens,
         };
         let suggestion = filing.file(uuid::Uuid::new_v4().to_string(), Utc::now());
-        self.suggestions.put(&suggestion).await?;
+        self.l5.suggestions.put(&suggestion).await?;
 
         // `#275`'s acceptance criterion: a suggestion "appears on the run's
         // journal" -- the same task journal every other agent-reported
@@ -105,13 +105,13 @@ impl Engine {
     ) -> Result<suggestion::Report> {
         let scopes = self.suggestion_scope_set(scope)?;
         let filter = suggestion::Filter { scopes, kind, target, state };
-        let all = self.suggestions.all().await?;
+        let all = self.l5.suggestions.all().await?;
         let matching: Vec<Suggestion> = filter.apply(&all).into_iter().cloned().collect();
         Ok(suggestion::report(matching))
     }
 
     pub(crate) async fn suggestion_get(&self, id: &str) -> Result<Suggestion> {
-        self.suggestions
+        self.l5.suggestions
             .get(id)
             .await?
             .ok_or_else(|| FactoryError::BadRequest(format!("no such suggestion: {id:?}")))
@@ -194,7 +194,7 @@ impl Engine {
         let mut labels = BTreeMap::new();
         labels.insert("suggestion".to_string(), ids.join(","));
 
-        let observer = crate::commands::CreationObserver(self.bus.clone());
+        let observer = crate::commands::CreationObserver(self.shared.bus.clone());
         let receipt = crate::commands::assurance(self, &observer)
             .remediate(Intent {
                 title,
@@ -212,7 +212,7 @@ impl Engine {
                 tracing::warn!(suggestion = s.id, "{e}");
                 continue;
             }
-            self.suggestions.put(&s).await?;
+            self.l5.suggestions.put(&s).await?;
         }
         crate::commands::task_snapshot(self, receipt.id).await
     }
@@ -222,7 +222,7 @@ impl Engine {
         suggestion
             .dismiss(reason, &crate::policies::caller_name(caller), Utc::now())
             .map_err(FactoryError::BadRequest)?;
-        self.suggestions.put(&suggestion).await?;
+        self.l5.suggestions.put(&suggestion).await?;
         Ok(suggestion)
     }
 
@@ -231,7 +231,7 @@ impl Engine {
         suggestion
             .done(&crate::policies::caller_name(caller), Utc::now())
             .map_err(FactoryError::BadRequest)?;
-        self.suggestions.put(&suggestion).await?;
+        self.l5.suggestions.put(&suggestion).await?;
         Ok(suggestion)
     }
 
@@ -259,13 +259,13 @@ impl Engine {
         }
         let mut suggestion = self.suggestion_get(id).await?;
         let task_id = suggestion.task_id.clone();
-        if self.store.active_run(&task_id).await?.is_some() {
+        if self.l4.store.active_run(&task_id).await?.is_some() {
             return Err(FactoryError::BadRequest(format!(
                 "task {task_id} has a run in progress; ask once it ends"
             )));
         }
         let task = self.require(&task_id).await?;
-        let Some(prev) = self.store.runs(&task_id, 1).await?.into_iter().next() else {
+        let Some(prev) = self.l4.store.runs(&task_id, 1).await?.into_iter().next() else {
             return Err(FactoryError::BadRequest(format!("task {task_id} has no previous run to ask")));
         };
         if !prev.status.is_terminal() {
@@ -276,8 +276,8 @@ impl Engine {
             )));
         }
         let (agent_name, adapter_name, declaration) = self.resolve_agent(&task.scope, &task.agent)?;
-        let agent = self.registry.agent(&adapter_name)?;
-        let runtime = self.registry.runtime(&task.runtime)?;
+        let agent = self.shared.registry.agent(&adapter_name)?;
+        let runtime = self.shared.registry.runtime(&task.runtime)?;
         let scope_path = self.factory_snapshot().scope_path(&task.scope)?;
         // `#274`: a sandboxed run's conversation may have been preserved in
         // its OpenShell sandbox rather than deleted with it; `resolve_continue`
@@ -332,7 +332,7 @@ impl Engine {
 
         let now = Utc::now();
         suggestion.ask(question, &crate::policies::caller_name(caller), &run.id, now);
-        self.suggestions.put(&suggestion).await?;
+        self.l5.suggestions.put(&suggestion).await?;
         Ok(suggestion)
     }
 
@@ -342,7 +342,7 @@ impl Engine {
     /// nothing) and never fails the run it is settling for -- a suggestion
     /// is evidence, not part of any run's own outcome.
     pub(crate) async fn settle_suggestion_ask(&self, run: &Run) {
-        let found = match self.suggestions.find_by_ask_run(&run.id).await {
+        let found = match self.l5.suggestions.find_by_ask_run(&run.id).await {
             Ok(found) => found,
             Err(e) => {
                 tracing::warn!(run = run.id, "could not look up a pending suggestion ask: {e}");
@@ -358,7 +358,7 @@ impl Engine {
         if !suggestion.answer(&run.id, answer, Utc::now()) {
             return;
         }
-        if let Err(e) = self.suggestions.put(&suggestion).await {
+        if let Err(e) = self.l5.suggestions.put(&suggestion).await {
             tracing::warn!(suggestion = suggestion.id, run = run.id, "could not record a suggestion's answer: {e}");
         }
     }
@@ -501,12 +501,12 @@ mod tests {
             agent.into(),
             "herdr".into(),
         );
-        engine.store.create(&task).await.unwrap()
+        engine.l4.store.create(&task).await.unwrap()
     }
 
     async fn active_run(engine: &Engine, task_id: &str, agent: &str, token: &str) -> Run {
         engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task_id.into(),
                 trigger: Trigger::Manual,
@@ -557,7 +557,7 @@ mod tests {
         assert_eq!(suggestion.target, "L2 secret stripe_key");
 
         // And it is on the run's own journal (#275's acceptance criterion).
-        let entries = engine.store.entries(&task.id, 10).await.unwrap();
+        let entries = engine.l4.store.entries(&task.id, 10).await.unwrap();
         assert!(entries.iter().any(|e| e.kind == "suggestion" && e.run_id.as_deref() == Some(run.id.as_str())));
     }
 
@@ -711,7 +711,7 @@ mod tests {
         let run = active_run(&engine, &task.id, "plain-worker", "tok-1").await;
         let s = engine.file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
         engine
-            .store
+            .l4.store
             .update_run(&run.id, &factory_core::run::RunPatch {
                 status: Some(factory_core::run::RunStatus::Failed),
                 ended_at: Some(Utc::now()),
@@ -724,7 +724,7 @@ mod tests {
         // `resolve_continue` refuses: `shell` declares no resume spec, and
         // either way the run was never confirmed gone. Never dispatched.
         assert!(err.to_string().to_lowercase().contains("resume") || err.to_string().contains("harness"), "{err}");
-        assert!(engine.store.active_run(&task.id).await.unwrap().is_none(), "ask must never have dispatched a fresh run");
+        assert!(engine.l4.store.active_run(&task.id).await.unwrap().is_none(), "ask must never have dispatched a fresh run");
     }
 
     #[tokio::test]

@@ -399,7 +399,7 @@ mod tests {
         usage: Option<RunUsage>,
     ) -> (factory_core::task::Task, Run) {
         let task = engine
-            .store
+            .l4.store
             .create(&task_from_new(
                 NewTask { title: title.into(), ..Default::default() },
                 scope.into(),
@@ -409,7 +409,7 @@ mod tests {
             .await
             .unwrap();
         let mut run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Manual,
@@ -433,7 +433,7 @@ mod tests {
     async fn transition(engine: &Arc<Engine>, task_id: &str, run_id: &str, kind: &str, at: DateTime<Utc>) {
         let mut entry = TaskEntry::new("agent", kind, kind).in_run(run_id);
         entry.at = at;
-        engine.store.append_entry(task_id, &entry).await.unwrap();
+        engine.l4.store.append_entry(task_id, &entry).await.unwrap();
     }
 
     /// A finished run for a fresh task in `root` (or the next attempt of an
@@ -452,7 +452,7 @@ mod tests {
         ended_ago: chrono::Duration,
     ) -> factory_core::task::Task {
         let existing = engine
-            .store
+            .l4.store
             .list(&Default::default())
             .await
             .unwrap()
@@ -467,11 +467,11 @@ mod tests {
                     "assistant".to_string(),
                     "shell".to_string(),
                 );
-                engine.store.create(&new_task).await.unwrap()
+                engine.l4.store.create(&new_task).await.unwrap()
             }
         };
         let run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger,
@@ -485,7 +485,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -1088,7 +1088,7 @@ mod tests {
         };
         labelled.labels.insert("goal".into(), "ship/kr".into());
         let task = engine
-            .store
+            .l4.store
             .create(&task_from_new(
                 labelled,
                 "side".into(),
@@ -1098,7 +1098,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update(
                 &task.id,
                 &TaskPatch {
@@ -1685,9 +1685,9 @@ mod tests {
         // `put_run` never trusts `attempts` embedded on the struct -- they
         // live in their own table (`BenchStore::attempts`), written
         // separately, the same way `bench::engine` itself writes them.
-        engine.bench.put_run(&run).await.unwrap();
-        engine.bench.put_attempt(&run.id, &pass).await.unwrap();
-        engine.bench.put_attempt(&run.id, &fail).await.unwrap();
+        engine.l5.bench.put_run(&run).await.unwrap();
+        engine.l5.bench.put_attempt(&run.id, &pass).await.unwrap();
+        engine.l5.bench.put_attempt(&run.id, &fail).await.unwrap();
 
         let now = Utc::now();
         let id = MetricId::new("bench.resolve_rate.eval-set-a").unwrap();
@@ -1721,8 +1721,8 @@ mod tests {
             started_at: settled - chrono::Duration::hours(1),
             ended_at: Some(settled),
         };
-        engine.bench.put_run(&run).await.unwrap();
-        engine.bench.put_attempt(&run.id, &pass).await.unwrap();
+        engine.l5.bench.put_run(&run).await.unwrap();
+        engine.l5.bench.put_attempt(&run.id, &pass).await.unwrap();
 
         let now = Utc::now();
         let ids: Vec<MetricId> = ["first_pass_yield", "scrap_rate", "throughput_week", "bench.resolve_rate.smoke"]
@@ -1779,12 +1779,12 @@ mod tests {
         let mut labelled_done = NewTask { title: "done".into(), ..Default::default() };
         labelled_done.labels.insert("goal".to_string(), "ship-compliant/cra-open-zero".to_string());
         let t1 = engine
-            .store
+            .l4.store
             .create(&task_from_new(labelled_done, "root".to_string(), "assistant".to_string(), "shell".to_string()))
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update(&t1.id, &TaskPatch { status: Some(factory_core::task::TaskStatus::Done), ..Default::default() })
             .await
             .unwrap();
@@ -1792,7 +1792,7 @@ mod tests {
         let mut labelled_running = NewTask { title: "running".into(), ..Default::default() };
         labelled_running.labels.insert("goal".to_string(), "ship-compliant/cra-open-zero".to_string());
         engine
-            .store
+            .l4.store
             .create(&task_from_new(labelled_running, "root".to_string(), "assistant".to_string(), "shell".to_string()))
             .await
             .unwrap();
@@ -1800,12 +1800,12 @@ mod tests {
         let mut other_label_done = NewTask { title: "other".into(), ..Default::default() };
         other_label_done.labels.insert("goal".to_string(), "raise-quality/fpy-90".to_string());
         let t3 = engine
-            .store
+            .l4.store
             .create(&task_from_new(other_label_done, "root".to_string(), "assistant".to_string(), "shell".to_string()))
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update(&t3.id, &TaskPatch { status: Some(factory_core::task::TaskStatus::Done), ..Default::default() })
             .await
             .unwrap();
@@ -1834,8 +1834,8 @@ mod tests {
         assert_eq!(before["ready_rate"].value, None);
         let mut new = NewTask { title: "live evidence".into(), ..Default::default() };
         new.labels.insert("goal".into(), "live/kr".into());
-        let task = engine.store.create(&task_from_new(new, "root".into(), "shell".into(), "herdr".into())).await.unwrap();
-        engine.store.update(&task.id, &TaskPatch { status: Some(TaskStatus::Done), ..Default::default() }).await.unwrap();
+        let task = engine.l4.store.create(&task_from_new(new, "root".into(), "shell".into(), "herdr".into())).await.unwrap();
+        engine.l4.store.update(&task.id, &TaskPatch { status: Some(TaskStatus::Done), ..Default::default() }).await.unwrap();
         let after = reader.get::<factory_kernel::ProcessMetricFact>(&query).await.unwrap();
         assert_eq!(after[name].value, Some(1.0));
         assert_eq!(after[name].as_of, query.now);
@@ -1880,9 +1880,9 @@ mod tests {
             [("a", RunStatus::Done, 2.0, 1_000), ("b", RunStatus::Failed, 1.0, 3_000)]
         {
             let task = finished_run(&engine, label, status, Trigger::Manual, chrono::Duration::hours(2)).await;
-            let run = engine.store.runs(&task.id, 1).await.unwrap().remove(0);
+            let run = engine.l4.store.runs(&task.id, 1).await.unwrap().remove(0);
             engine
-                .store
+                .l4.store
                 .update_run(&run.id, &RunPatch { usage: Some(measured(usd, tokens)), ..Default::default() })
                 .await
                 .unwrap();
@@ -2154,9 +2154,9 @@ mod tests {
         // controlling the clock.
         for (label, low, high) in [("within", 0u64, 100u64), ("outside", 100u64, 200u64)] {
             let task = finished_run(&engine, label, RunStatus::Done, Trigger::Manual, chrono::Duration::hours(1)).await;
-            let run = engine.store.runs(&task.id, 1).await.unwrap().remove(0);
+            let run = engine.l4.store.runs(&task.id, 1).await.unwrap().remove(0);
             engine
-                .store
+                .l4.store
                 .update_run(
                     &run.id,
                     &RunPatch {
@@ -2455,10 +2455,10 @@ mod tests {
     /// manipulation, like `backdate_decision`, since `intake_decide` always
     /// carries forward whatever `received_at` a task already had.
     async fn backdate_received_at(engine: &Arc<Engine>, task_id: &str, at: DateTime<Utc>) {
-        let task = engine.store.get(task_id).await.unwrap().unwrap();
+        let task = engine.l4.store.get(task_id).await.unwrap().unwrap();
         let mut record = task.intake.unwrap();
         record.received_at = at;
-        engine.store.update(task_id, &TaskPatch { intake: Some(record), ..Default::default() }).await.unwrap();
+        engine.l4.store.update(task_id, &TaskPatch { intake: Some(record), ..Default::default() }).await.unwrap();
     }
 
     #[tokio::test]
@@ -2565,7 +2565,7 @@ mod tests {
         let before = engine.metrics_for(&ids, now, Some("work"), None).await.unwrap();
         assert_eq!(metric(&before, "duplicate_rate").value, Some(1.0));
 
-        assert!(engine.store.delete(&e.id).await.unwrap());
+        assert!(engine.l4.store.delete(&e.id).await.unwrap());
         let after = engine.metrics_for(&ids, now, Some("work"), None).await.unwrap();
         assert_eq!(metric(&after, "duplicate_rate").value, None);
         assert_eq!(
@@ -2647,7 +2647,7 @@ mod tests {
     ) -> Run {
         use factory_core::control_plan::{RequiredStep, StepAttestation, StepKind, GATE_ACTOR};
         let task = engine
-            .store
+            .l4.store
             .create(&task_from_new(
                 NewTask {
                     title: format!("t-{}", uuid::Uuid::new_v4()),
@@ -2661,7 +2661,7 @@ mod tests {
             .await
             .unwrap();
         let run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Manual,
@@ -2685,7 +2685,7 @@ mod tests {
             by: None,
         }];
         let run = engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -2727,7 +2727,7 @@ mod tests {
             worktree_digest: None,
         };
         engine
-            .run_evidence
+            .l4.run_evidence
             .append_step_attestation(&attestation)
             .await
             .unwrap();
@@ -2791,7 +2791,7 @@ mod tests {
         step.actor = Some("reviewer".into());
         required.push(step);
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &factory_core::run::RunPatch {
@@ -2812,7 +2812,7 @@ mod tests {
             a.exit_code = None;
             a.verdict = *verdict;
             a.round = round as u32;
-            engine.run_evidence.append_step_attestation(&a).await.unwrap();
+            engine.l4.run_evidence.append_step_attestation(&a).await.unwrap();
         }
     }
 
@@ -3290,7 +3290,7 @@ mod tests {
             .iter()
             .any(|reference| reference.id == run.id));
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {

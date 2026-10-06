@@ -178,7 +178,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 if last_prune.is_none_or(|t| t.elapsed() >= PRUNE_EVERY) {
                     last_prune = Some(std::time::Instant::now());
                     let before = Utc::now() - Duration::days(env::SAMPLE_RETENTION_DAYS);
-                    match engine.environments.prune_samples(before).await {
+                    match engine.l1.environments.prune_samples(before).await {
                         Ok(0) => {}
                         Ok(n) => tracing::info!(pruned = n, "pruned health samples older than {}d", env::SAMPLE_RETENTION_DAYS),
                         Err(e) => tracing::warn!("could not prune health samples: {e}"),
@@ -198,7 +198,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
 impl Engine {
     /// Record one answer, and publish the environment's status if it moved.
     async fn take_sample(&self, checker: &mut Checker, sample: Sample) {
-        if let Err(e) = self.environments.append_sample(sample.clone()).await {
+        if let Err(e) = self.l1.environments.append_sample(sample.clone()).await {
             tracing::warn!(environment = sample.environment, check = sample.check, "could not record a health sample: {e}");
         }
         let factory = self.factory_snapshot();
@@ -211,7 +211,7 @@ impl Engine {
             .unwrap_or_default();
         if let Some(status) = checker.answered(&sample, &checks) {
             tracing::info!(environment = sample.environment, ?status, "environment status changed");
-            self.bus.publish(Event::EnvironmentStatusChanged {
+            self.shared.bus.publish(Event::EnvironmentStatusChanged {
                 environment: sample.environment.clone(),
                 status,
                 at: sample.at,
@@ -231,7 +231,7 @@ impl Engine {
             mut report, declarations: declared, members, deployments: history,
         } = crate::facts::infrastructure_environments(self).history(scope.as_deref()).await?;
         if actions {
-            let pending = self.workflows.active_runs().await?;
+            let pending = self.l4.workflows.active_runs().await?;
             for deployment in &report.deployments {
                 if let Ok(plan) = self.deployment_mirror_plan(&deployment.id).await {
                     let receipt = crate::facts::Facts::<factory_kernel::People>::new(self).get::<factory_kernel::DeploymentMirrorFact>(&deployment.id).await?.into_iter().next();
@@ -302,7 +302,7 @@ impl Engine {
         match caller {
             Caller::Owner => Actor { kind: ActorKind::Person, name: "owner".into(), run_id: None, task_id: None },
             Caller::Agent { name, run_id: Some(run_id), .. } => {
-                let task_id = self.store.get_run(run_id).await.ok().flatten().map(|r| r.task_id);
+                let task_id = self.l4.store.get_run(run_id).await.ok().flatten().map(|r| r.task_id);
                 Actor { kind: ActorKind::Run, name: name.clone(), run_id: Some(run_id.clone()), task_id }
             }
             Caller::Agent { name, run_id: None, .. } => {
@@ -315,7 +315,7 @@ impl Engine {
     /// environment was never finished; it is ended as failed, naming the
     /// one that took its place, rather than left running forever.
     pub(crate) async fn deploy_start(&self, caller: &Caller, mut req: DeployStart) -> Result<Deployment> {
-        let _edit = self.deployment_edit.lock().await;
+        let _edit = self.l1.deployment_edit.lock().await;
         if !env::is_env_name(&req.environment) {
             return Err(FactoryError::BadRequest(format!(
                 "{:?} is not an environment name: lowercase letters, digits, `-` and `_`",
@@ -338,7 +338,7 @@ impl Engine {
                 None => None,
             };
         }
-        let history = self.environments.deployments().await?;
+        let history = self.l1.environments.deployments().await?;
         let on_env: Vec<&Deployment> = history.iter().filter(|d| d.environment == req.environment).collect();
         let previous_commit =
             on_env.iter().find(|d| d.status == DeployStatus::Succeeded).map(|d| d.release.commit.clone());
@@ -368,21 +368,21 @@ impl Engine {
                 reason: Some(format!("never finished; superseded by deployment {}", deployment.id)),
                 verification: None,
             };
-            self.environments.finished(&stale.id, finished).await?;
-            if let Some(ended) = self.environments.deployment(&stale.id).await? {
-                self.bus.publish(Event::DeploymentUpdated { deployment: Box::new(ended) });
+            self.l1.environments.finished(&stale.id, finished).await?;
+            if let Some(ended) = self.l1.environments.deployment(&stale.id).await? {
+                self.shared.bus.publish(Event::DeploymentUpdated { deployment: Box::new(ended) });
             }
         }
-        self.environments.started(&deployment).await?;
-        self.bus.publish(Event::DeploymentUpdated { deployment: Box::new(deployment.clone()) });
+        self.l1.environments.started(&deployment).await?;
+        self.shared.bus.publish(Event::DeploymentUpdated { deployment: Box::new(deployment.clone()) });
         Ok(deployment)
     }
 
     /// Record how a deployment ended. A success runs the environment's own
     /// checks first and is only recorded as one when they pass.
     pub(crate) async fn deploy_finish(&self, req: DeployFinish) -> Result<Deployment> {
-        let _edit = self.deployment_edit.lock().await;
-        let Some(deployment) = self.environments.deployment(&req.id).await? else {
+        let _edit = self.l1.deployment_edit.lock().await;
+        let Some(deployment) = self.l1.environments.deployment(&req.id).await? else {
             return Err(FactoryError::BadRequest(format!("no deployment {}", req.id)));
         };
         if deployment.status != DeployStatus::Running {
@@ -418,13 +418,13 @@ impl Engine {
         // Verification is part of the attempt; its time belongs in the
         // duration and the instant the release became verified/running.
         finished.at = Utc::now();
-        self.environments.finished(&req.id, finished).await?;
+        self.l1.environments.finished(&req.id, finished).await?;
         let ended = self
-            .environments
+            .l1.environments
             .deployment(&req.id)
             .await?
             .ok_or_else(|| FactoryError::BadRequest(format!("no deployment {}", req.id)))?;
-        self.bus.publish(Event::DeploymentUpdated { deployment: Box::new(ended.clone()) });
+        self.shared.bus.publish(Event::DeploymentUpdated { deployment: Box::new(ended.clone()) });
         Ok(ended)
     }
 
@@ -445,7 +445,7 @@ impl Engine {
             }
         }
         for s in &samples {
-            if let Err(e) = self.environments.append_sample(s.clone()).await {
+            if let Err(e) = self.l1.environments.append_sample(s.clone()).await {
                 tracing::warn!("could not record a verification sample: {e}");
             }
         }
@@ -465,15 +465,15 @@ impl Engine {
                 release.committed_at = committed_at(dir, release.commit.clone()).await;
             }
         }
-        let added = self.environments.releases_added().await?;
-        let deployments = self.environments.deployments().await?;
+        let added = self.l1.environments.releases_added().await?;
+        let deployments = self.l1.environments.deployments().await?;
         let previous = added.iter().filter(|(scope, facts, _)| scope == &req.scope && facts.commit != release.commit)
             .map(|(_, facts, at)| (facts.commit.clone(), *at))
             .chain(deployments.iter().filter(|deployment| deployment.scope == req.scope && deployment.release.commit != release.commit)
                 .map(|deployment| (deployment.release.commit.clone(), deployment.started_at)))
             .max_by_key(|(_, at)| *at).map(|(commit, _)| commit);
         self.enrich_release(&req.scope, &mut release, previous.as_deref()).await?;
-        self.environments.release_added(&req.scope, &release, Utc::now()).await?;
+        self.l1.environments.release_added(&req.scope, &release, Utc::now()).await?;
         Ok((req.scope, release))
     }
 
@@ -558,7 +558,7 @@ pub(crate) mod tests {
         let (engine, root) = engine_with(
             "  - name: staging\n    tier: staging\n    checks: [{ kind: command, command: 'true', name: alive }]\n",
         );
-        let mut events = engine.bus.subscribe();
+        let mut events = engine.shared.bus.subscribe();
         let d = engine.deploy_start(&Caller::Owner, start("staging", "abc123")).await.unwrap();
         assert_eq!(d.status, DeployStatus::Running);
         assert!(d.manual, "the owner with nothing in between is a deploy by hand");
@@ -598,8 +598,8 @@ pub(crate) mod tests {
             factory_core::task::NewTask { title: "release".into(), ..Default::default() },
             "company".into(), "shell".into(), "shell".into(),
         );
-        engine.store.create(&task).await.unwrap();
-        let run = engine.store.create_run(&NewRun {
+        engine.l4.store.create(&task).await.unwrap();
+        let run = engine.l4.store.create_run(&NewRun {
             task_id: task.id, trigger: Trigger::Manual, agent: "shell".into(), adapter: "shell".into(),
             runtime: "herdr".into(), token: "run-test-token".into(), queued_at: None, scheduled_for: None,
         }).await.unwrap();
@@ -607,17 +607,17 @@ pub(crate) mod tests {
         let recorded = engine.deploy_start(&actor, start("prod", "abc")).await.unwrap();
         let manual = engine.deploy_start(&Caller::Owner, start("manual", "abc")).await.unwrap();
         engine.reconcile_run_deployments().await;
-        assert_eq!(engine.environments.deployment(&recorded.id).await.unwrap().unwrap().status, DeployStatus::Running);
-        engine.store.update_run(&run.id, &factory_core::run::RunPatch {
+        assert_eq!(engine.l1.environments.deployment(&recorded.id).await.unwrap().unwrap().status, DeployStatus::Running);
+        engine.l4.store.update_run(&run.id, &factory_core::run::RunPatch {
             status: Some(factory_core::RunStatus::Cancelled), ..Default::default()
         }).await.unwrap();
         engine.reconcile_run_deployments().await;
-        let failed = engine.environments.deployment(&recorded.id).await.unwrap().unwrap();
+        let failed = engine.l1.environments.deployment(&recorded.id).await.unwrap().unwrap();
         assert_eq!(failed.status, DeployStatus::Failed);
         assert!(failed.reason.unwrap().contains("without a deploy finish receipt"));
-        assert_eq!(engine.environments.deployment(&manual.id).await.unwrap().unwrap().status, DeployStatus::Running);
+        assert_eq!(engine.l1.environments.deployment(&manual.id).await.unwrap().unwrap().status, DeployStatus::Running);
         engine.reconcile_run_deployments().await;
-        assert_eq!(engine.environments.deployments().await.unwrap().len(), 2);
+        assert_eq!(engine.l1.environments.deployments().await.unwrap().len(), 2);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -635,7 +635,7 @@ pub(crate) mod tests {
         let mut factory = engine.factory_snapshot();
         factory.config.scopes[0].environments[0].paused = true;
         factory.config.scope = None;
-        let paused = Engine::new(factory, factory_plugins::Registry::with_builtins(), engine.store.clone(), PathBuf::from("factory"), Vec::new())
+        let paused = Engine::new(factory, factory_plugins::Registry::with_builtins(), engine.l4.store.clone(), PathBuf::from("factory"), Vec::new())
             .with_environment_store(reopened);
         let ended = paused.deploy_finish(finish(&second.id, DeployStatus::Succeeded)).await.unwrap();
         assert_eq!(ended.status, DeployStatus::Failed);
@@ -678,7 +678,7 @@ pub(crate) mod tests {
             .deploy_start(&agent, DeployStart { via: Some("release.sh".into()), ..start("review13", "bbb") })
             .await
             .unwrap();
-        let first = engine.environments.deployment(&first.id).await.unwrap().unwrap();
+        let first = engine.l1.environments.deployment(&first.id).await.unwrap().unwrap();
         assert_eq!(first.status, DeployStatus::Failed);
         assert!(first.reason.unwrap().contains(&second.id));
         let report = engine.environments_report(None).await.unwrap();
@@ -708,9 +708,9 @@ pub(crate) mod tests {
             "shell".into(),
             "shell".into(),
         );
-        let task = engine.store.create(&task).await.unwrap();
+        let task = engine.l4.store.create(&task).await.unwrap();
         let run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Manual,
@@ -740,7 +740,7 @@ pub(crate) mod tests {
             "  - name: prod\n    tier: production\n    slo: { availability: 99% }\n    \
              checks: [{ kind: command, command: 'exit 1', name: api, every: 60s, timeout: 5s }]\n",
         );
-        let mut events = engine.bus.subscribe();
+        let mut events = engine.shared.bus.subscribe();
         let mut checker = Checker::default();
         let t0 = std::time::Instant::now();
         let factory = engine.factory_snapshot();
@@ -813,7 +813,7 @@ pub(crate) mod tests {
             "  - name: prod\n    slo: { availability: 99% }\n    checks: [{ kind: command, command: 'sleep 0.1', name: api, slow_after_ms: 1 }]\n",
         );
         let mut checker = Checker::default();
-        let mut events = engine.bus.subscribe();
+        let mut events = engine.shared.bus.subscribe();
         let at = chrono::SubsecRound::trunc_subsecs(Utc::now() - Duration::seconds(5), 3);
         let fast = Sample {
             environment: "prod".into(), check: "api".into(), at,
@@ -866,7 +866,7 @@ pub(crate) mod tests {
                 slow: false,
                 detail: None,
             };
-            engine.environments.append_sample(sample).await.unwrap();
+            engine.l1.environments.append_sample(sample).await.unwrap();
         }
         let d = engine
             .deploy_start(
@@ -932,11 +932,11 @@ pub(crate) mod tests {
         sibling.path = PathBuf::from("projects/other");
         factory.config.scopes.push(sibling);
         let engine = Arc::new(Engine::new(
-            factory, factory_plugins::Registry::with_builtins(), source.store.clone(),
+            factory, factory_plugins::Registry::with_builtins(), source.l4.store.clone(),
             PathBuf::from("factory"), Vec::new(),
-        ).with_environment_store(source.environments.clone()));
+        ).with_environment_store(source.l1.environments.clone()));
         let now = Utc::now();
-        engine.environments.append_sample(Sample {
+        engine.l1.environments.append_sample(Sample {
             environment: "prod".into(), check: "api".into(), at: now,
             ok: true, latency_ms: 1, slow: false, detail: None,
         }).await.unwrap();
@@ -958,7 +958,7 @@ pub(crate) mod tests {
         );
         first.unwrap();
         second.unwrap();
-        let attempts = engine.environments.deployments().await.unwrap();
+        let attempts = engine.l1.environments.deployments().await.unwrap();
         assert_eq!(attempts.iter().filter(|d| d.status == DeployStatus::Running).count(), 1);
         assert_eq!(attempts.iter().filter(|d| d.status == DeployStatus::Failed).count(), 1);
         let running = attempts.iter().find(|d| d.status == DeployStatus::Running).unwrap();

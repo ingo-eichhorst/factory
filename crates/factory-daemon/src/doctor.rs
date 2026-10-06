@@ -70,8 +70,8 @@ impl Engine {
         let mut report = project(dependencies, chrono::Utc::now());
         // The OpenShell gateways sandboxed agents use, as the provisioner
         // last found them -- and whether it had to start one (`#234`).
-        report.openshell = self.provision.gateway_rows();
-        report.openshell_image_failures = self.provision.image_failures();
+        report.openshell = self.l2.provision.gateway_rows();
+        report.openshell_image_failures = self.l2.provision.image_failures();
         Ok(report)
     }
 }

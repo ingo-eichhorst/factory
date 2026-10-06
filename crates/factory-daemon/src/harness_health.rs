@@ -436,7 +436,7 @@ impl Engine {
     /// The probe the agent a task would run on declares, if it declares one.
     pub(crate) fn probe_for(&self, scope: &str, agent: &str) -> Option<HealthProbe> {
         let (_, adapter, _) = self.resolve_agent(scope, agent).ok()?;
-        self.registry.agent(&adapter).ok()?.health_probe()
+        self.shared.registry.agent(&adapter).ok()?.health_probe()
     }
 
     /// Before a run exists (`#131`): whether `task`'s harness starts. When it
@@ -452,7 +452,7 @@ impl Engine {
         let config = self.factory_snapshot().config.daemon.harness_health.clone();
         let harness = harness_name(&probe);
         let trust_failure = trigger != Trigger::Manual;
-        let Verdict::Unhealthy { binary, problem } = self.harness.check(&harness, &probe, &config, trust_failure).await
+        let Verdict::Unhealthy { binary, problem } = self.l3.harness.check(&harness, &probe, &config, trust_failure).await
         else {
             return Ok(());
         };
@@ -469,7 +469,7 @@ impl Engine {
         )
         .await;
         if let Err(e) = self
-            .store
+            .l4.store
             .update(
                 &task.id,
                 &TaskPatch { status: Some(TaskStatus::Blocked), error: Some(reason.clone()), ..Default::default() },
@@ -479,7 +479,7 @@ impl Engine {
             tracing::warn!(task = task.id, "could not block the task on its harness: {e}");
         }
         self.publish_task(&task.id).await;
-        self.harness.hold(
+        self.l3.harness.hold(
             &binary,
             HeldTask { task_id: task.id.clone(), scope: task.scope.clone(), title: task.title.clone() },
         );
@@ -497,19 +497,19 @@ impl Engine {
     /// recent, which is also what makes a restart lose nothing.
     pub(crate) fn recheck_harnesses(self: &Arc<Self>) {
         let config = self.factory_snapshot().config.daemon.harness_health.clone();
-        if !config.enabled || !self.harness.claim_recheck(Duration::from_secs(config.retry_seconds.max(1))) {
+        if !config.enabled || !self.l3.harness.claim_recheck(Duration::from_secs(config.retry_seconds.max(1))) {
             return;
         }
         let engine = self.clone();
         tokio::spawn(async move {
             engine.release_recovered(&config).await;
-            engine.harness.recheck_done();
+            engine.l3.harness.recheck_done();
         });
     }
 
     pub(crate) async fn release_recovered(self: &Arc<Self>, config: &HarnessHealthConfig) {
         let since = Utc::now() - chrono::Duration::days(HELD_LOOKBACK_DAYS);
-        let entries = match self.store.entries_of_kinds(&[HELD_ENTRY], since).await {
+        let entries = match self.l4.store.entries_of_kinds(&[HELD_ENTRY], since).await {
             Ok(entries) => entries,
             Err(e) => {
                 tracing::warn!("could not look for tasks held on a harness: {e}");
@@ -520,10 +520,10 @@ impl Engine {
         let newest: BTreeMap<String, TaskEntry> = entries.into_iter().collect();
         let mut held: Vec<(Task, Trigger, Option<HealthProbe>)> = Vec::new();
         for (task_id, entry) in newest {
-            let Ok(Some(task)) = self.store.get(&task_id).await else {
+            let Ok(Some(task)) = self.l4.store.get(&task_id).await else {
                 continue;
             };
-            if task.status != TaskStatus::Blocked || !matches!(self.store.active_run(&task_id).await, Ok(None)) {
+            if task.status != TaskStatus::Blocked || !matches!(self.l4.store.active_run(&task_id).await, Ok(None)) {
                 continue;
             }
             let trigger = entry
@@ -543,14 +543,14 @@ impl Engine {
         let binaries: std::collections::BTreeSet<String> =
             held.iter().filter_map(|(_, _, p)| p.as_ref().map(binary_of)).collect();
         for binary in &binaries {
-            self.harness.doubt(binary);
+            self.l3.harness.doubt(binary);
         }
         let mut still_held: BTreeMap<String, Vec<HeldTask>> = BTreeMap::new();
         for (task, trigger, probe) in held {
             let verdict = match &probe {
                 Some(probe) => {
                     let harness = harness_name(probe);
-                    self.harness.check(&harness, probe, config, true).await
+                    self.l3.harness.check(&harness, probe, config, true).await
                 }
                 None => Verdict::Healthy,
             };
@@ -568,7 +568,7 @@ impl Engine {
                 }
             }
         }
-        self.harness.set_held(still_held);
+        self.l3.harness.set_held(still_held);
     }
 
     /// Back to `pending`, and dispatched by exactly one thing. A task whose
@@ -582,8 +582,8 @@ impl Engine {
     /// between the decision and the change.
     async fn release_held(self: &Arc<Self>, task: &Task, trigger: Trigger) {
         let scheduler_fires = {
-            let _slot = self.schedule_lock.lock().await;
-            let Ok(Some(current)) = self.store.get(&task.id).await else {
+            let _slot = self.l4.schedule_lock.lock().await;
+            let Ok(Some(current)) = self.l4.store.get(&task.id).await else {
                 return;
             };
             let scheduler_fires = current.next_run_at.is_some_and(|at| at <= Utc::now());
@@ -594,7 +594,7 @@ impl Engine {
             };
             self.entry(&task.id, TaskEntry::new("daemon", RELEASED_ENTRY, said)).await;
             if let Err(e) = self
-                .store
+                .l4.store
                 .update(
                     &task.id,
                     &TaskPatch { status: Some(TaskStatus::Pending), clear_error: true, ..Default::default() },
@@ -619,7 +619,7 @@ impl Engine {
     /// cache says about its harness, so the next dispatch probes it again.
     pub(crate) fn doubt_harness_of(&self, task: Option<&Task>) {
         if let Some(probe) = task.and_then(|t| self.probe_for(&t.scope, &t.agent)) {
-            self.harness.doubt(&binary_of(&probe));
+            self.l3.harness.doubt(&binary_of(&probe));
         }
     }
 
@@ -633,7 +633,7 @@ impl Engine {
         let Some(script) = config.repair_script.clone() else {
             return;
         };
-        if !self.harness.claim_repair(binary) {
+        if !self.l3.harness.claim_repair(binary) {
             return;
         }
         let engine = self.clone();
@@ -642,7 +642,7 @@ impl Engine {
             tracing::warn!(harness, binary, script, "running the automatic harness repair");
             let outcome = run_repair(&script, &harness).await;
             tracing::warn!(harness, binary, outcome, "automatic harness repair finished");
-            engine.harness.repaired(&binary, outcome);
+            engine.l3.harness.repaired(&binary, outcome);
         });
     }
 }
@@ -958,7 +958,7 @@ pub(crate) mod tests {
         }
 
         async fn kinds(engine: &Arc<Engine>, id: &str) -> Vec<String> {
-            engine.store.entries(id, 100).await.unwrap().into_iter().map(|e| e.kind).collect()
+            engine.l4.store.entries(id, 100).await.unwrap().into_iter().map(|e| e.kind).collect()
         }
 
         /// Until `check` holds, or a few seconds pass.
@@ -987,16 +987,16 @@ pub(crate) mod tests {
             engine.start_run(&t.id, Trigger::Schedule).await;
             assert!(started.elapsed() < Duration::from_secs(10), "within the probe's timeout");
 
-            let now = engine.store.get(&t.id).await.unwrap().unwrap();
+            let now = engine.l4.store.get(&t.id).await.unwrap().unwrap();
             assert_eq!(now.status, TaskStatus::Blocked, "blocked, never failed");
             let why = now.error.unwrap_or_default();
             assert!(why.contains(&format!("{} --version", bin.display())), "names the binary: {why}");
             assert!(why.contains("did not answer in 3s"), "{why}");
             assert!(why.contains("scripts/repair-harness codex"), "names the repair: {why}");
-            assert!(engine.store.runs(&t.id, 10).await.unwrap().is_empty(), "no run was started");
+            assert!(engine.l4.store.runs(&t.id, 10).await.unwrap().is_empty(), "no run was started");
             assert!(kinds(&engine, &t.id).await.contains(&HELD_ENTRY.to_string()));
 
-            let rows = engine.harness.rows(&[], None);
+            let rows = engine.l3.harness.rows(&[], None);
             assert_eq!(rows[0].state, HarnessState::Unhealthy);
             assert_eq!(rows[0].held.len(), 1);
             std::fs::remove_dir_all(dir).ok();
@@ -1009,11 +1009,11 @@ pub(crate) mod tests {
             let engine = engine(&dir, &bin, fast());
             let t = task(&engine, "fake").await;
             engine.start_run(&t.id, Trigger::Manual).await;
-            let now = engine.store.get(&t.id).await.unwrap().unwrap();
+            let now = engine.l4.store.get(&t.id).await.unwrap().unwrap();
             assert_eq!(now.status, TaskStatus::Blocked);
             let why = now.error.unwrap_or_default();
             assert!(why.contains("exited with status 7"), "{why}");
-            assert!(engine.store.runs(&t.id, 10).await.unwrap().is_empty());
+            assert!(engine.l4.store.runs(&t.id, 10).await.unwrap().is_empty());
             std::fs::remove_dir_all(dir).ok();
         }
 
@@ -1038,9 +1038,9 @@ pub(crate) mod tests {
             }
             assert_eq!(probes(&dir, "codex"), 1, "one probe for the burst");
             for id in &ids {
-                assert_eq!(engine.store.get(id).await.unwrap().unwrap().status, TaskStatus::Blocked);
+                assert_eq!(engine.l4.store.get(id).await.unwrap().unwrap().status, TaskStatus::Blocked);
             }
-            let rows = engine.harness.rows(&[], None);
+            let rows = engine.l3.harness.rows(&[], None);
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].held.len(), 5);
             std::fs::remove_dir_all(dir).ok();
@@ -1053,13 +1053,13 @@ pub(crate) mod tests {
             let engine = engine(&dir, &bin, fast());
             let t = task(&engine, "fake").await;
             engine.start_run(&t.id, Trigger::Manual).await;
-            let runs = engine.store.runs(&t.id, 10).await.unwrap();
+            let runs = engine.l4.store.runs(&t.id, 10).await.unwrap();
             assert_eq!(runs.len(), 1, "dispatched");
             assert_eq!(probes(&dir, "codex"), 1);
 
             let s = task(&engine, "shell").await;
             engine.start_run(&s.id, Trigger::Manual).await;
-            assert_eq!(engine.store.runs(&s.id, 10).await.unwrap().len(), 1);
+            assert_eq!(engine.l4.store.runs(&s.id, 10).await.unwrap().len(), 1);
             assert_eq!(probes(&dir, "codex"), 1, "the shell agent declares no probe");
 
             let Payload::Infrastructure { harnesses, .. } = engine.infrastructure().await else {
@@ -1081,13 +1081,13 @@ pub(crate) mod tests {
             let engine = engine(&dir, &bin, HarnessHealthConfig { retry_seconds: 0, ..fast() });
             let t = task(&engine, "fake").await;
             engine.start_run(&t.id, Trigger::Schedule).await;
-            assert_eq!(engine.store.get(&t.id).await.unwrap().unwrap().status, TaskStatus::Blocked);
+            assert_eq!(engine.l4.store.get(&t.id).await.unwrap().unwrap().status, TaskStatus::Blocked);
 
             // Still down: stays held.
             let config = engine.factory_snapshot().config.daemon.harness_health.clone();
             engine.release_recovered(&config).await;
-            assert_eq!(engine.store.get(&t.id).await.unwrap().unwrap().status, TaskStatus::Blocked);
-            assert_eq!(engine.harness.rows(&[], None)[0].held.len(), 1);
+            assert_eq!(engine.l4.store.get(&t.id).await.unwrap().unwrap().status, TaskStatus::Blocked);
+            assert_eq!(engine.l3.harness.rows(&[], None)[0].held.len(), 1);
 
             // Repaired: released, and dispatched with its own trigger.
             std::fs::remove_file(&marker).unwrap();
@@ -1096,16 +1096,16 @@ pub(crate) mod tests {
             let id = t.id.clone();
             eventually(|| {
                 let (e, id) = (e.clone(), id.clone());
-                async move { e.store.runs(&id, 10).await.unwrap().len() == 1 }
+                async move { e.l4.store.runs(&id, 10).await.unwrap().len() == 1 }
             })
             .await;
-            let run = &engine.store.runs(&t.id, 10).await.unwrap()[0];
+            let run = &engine.l4.store.runs(&t.id, 10).await.unwrap()[0];
             assert_eq!(run.trigger, Trigger::Schedule);
             assert!(run.error.is_none(), "dispatched cleanly: {:?}", run.error);
-            let task = engine.store.get(&t.id).await.unwrap().unwrap();
+            let task = engine.l4.store.get(&t.id).await.unwrap().unwrap();
             assert!(task.error.is_none(), "the reason does not outlive the hold: {:?}", task.error);
             assert!(kinds(&engine, &t.id).await.contains(&RELEASED_ENTRY.to_string()));
-            assert!(engine.harness.rows(&[], None)[0].held.is_empty());
+            assert!(engine.l3.harness.rows(&[], None)[0].held.is_empty());
             std::fs::remove_dir_all(dir).ok();
         }
 
@@ -1130,7 +1130,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             engine.start_run(&t.id, Trigger::Schedule).await;
-            assert_eq!(engine.store.get(&t.id).await.unwrap().unwrap().status, TaskStatus::Blocked);
+            assert_eq!(engine.l4.store.get(&t.id).await.unwrap().unwrap().status, TaskStatus::Blocked);
             // Held past its next slot.
             tokio::time::sleep(Duration::from_millis(1200)).await;
             std::fs::remove_file(&marker).unwrap();
@@ -1138,9 +1138,9 @@ pub(crate) mod tests {
             let config = engine.factory_snapshot().config.daemon.harness_health.clone();
             engine.release_recovered(&config).await;
             tokio::time::sleep(Duration::from_millis(300)).await;
-            let task = engine.store.get(&t.id).await.unwrap().unwrap();
+            let task = engine.l4.store.get(&t.id).await.unwrap().unwrap();
             assert_eq!(task.status, TaskStatus::Pending);
-            assert!(engine.store.runs(&t.id, 10).await.unwrap().is_empty(), "the release did not dispatch it");
+            assert!(engine.l4.store.runs(&t.id, 10).await.unwrap().is_empty(), "the release did not dispatch it");
             let due = engine.due_now().await.unwrap();
             assert!(due.iter().any(|d| d.id == t.id), "the scheduler fires it, once, on its next tick");
             std::fs::remove_dir_all(dir).ok();
@@ -1158,7 +1158,7 @@ pub(crate) mod tests {
             engine.start_run(&t.id, Trigger::Schedule).await;
             std::fs::remove_file(&marker).unwrap();
             engine.start_run(&t.id, Trigger::Manual).await;
-            assert_eq!(engine.store.runs(&t.id, 10).await.unwrap().len(), 1, "the person's run went ahead");
+            assert_eq!(engine.l4.store.runs(&t.id, 10).await.unwrap().len(), 1, "the person's run went ahead");
             std::fs::remove_dir_all(dir).ok();
         }
 
@@ -1184,7 +1184,7 @@ pub(crate) mod tests {
             let engine = engine(&dir, &bin, config.clone());
             let t = task(&engine, "fake").await;
             engine.start_run(&t.id, Trigger::Schedule).await;
-            let why = engine.store.get(&t.id).await.unwrap().unwrap().error.unwrap_or_default();
+            let why = engine.l4.store.get(&t.id).await.unwrap().unwrap().error.unwrap_or_default();
             assert!(why.contains(&format!("{} codex", repair.display())), "names the configured script: {why}");
 
             let d = dir.clone();
@@ -1196,7 +1196,7 @@ pub(crate) mod tests {
             let e = engine.clone();
             eventually(|| {
                 let e = e.clone();
-                async move { e.harness.rows(&[], None)[0].auto_repair.is_some() }
+                async move { e.l3.harness.rows(&[], None)[0].auto_repair.is_some() }
             })
             .await;
             assert_eq!(std::fs::read_to_string(dir.join("repaired")).unwrap().trim(), "codex");
@@ -1204,7 +1204,7 @@ pub(crate) mod tests {
             let (e, id) = (engine.clone(), t.id.clone());
             eventually(|| {
                 let (e, id) = (e.clone(), id.clone());
-                async move { e.store.runs(&id, 10).await.unwrap().len() == 1 }
+                async move { e.l4.store.runs(&id, 10).await.unwrap().len() == 1 }
             })
             .await;
             assert_eq!(probes(&dir, "repair-harness"), 1, "run once");

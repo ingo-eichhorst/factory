@@ -216,10 +216,10 @@ impl Engine {
     /// fingerprint back. The first read after a start has nothing to
     /// compare against and publishes nothing.
     fn record_quality_fingerprint(&self, inputs: &QualityInputs) {
-        let mut seen = self.quality_seen.lock().unwrap_or_else(|p| p.into_inner());
+        let mut seen = self.l5.quality_seen.lock().unwrap_or_else(|p| p.into_inner());
         match *seen {
             Some((at, _)) if at > inputs.loaded_at => return,
-            Some((_, previous)) if previous != inputs.fingerprint => self.bus.publish(Event::QualityChanged {
+            Some((_, previous)) if previous != inputs.fingerprint => self.shared.bus.publish(Event::QualityChanged {
                 profiles: inputs.catalogue.profiles.keys().cloned().collect(),
             }),
             _ => {}
@@ -351,7 +351,7 @@ impl Engine {
     /// or something cannot be read -- a quality profile must never stop a
     /// task from dispatching -- and a failure is never cached.
     pub(crate) async fn quality_context(self: &Arc<Self>, scope: &str) -> Vec<QualityAttributeContext> {
-        let mut cache = self.quality_guide_cache.lock().await;
+        let mut cache = self.l5.quality_guide_cache.lock().await;
         let inputs = match self.quality_inputs(Some(scope), true).await {
             Ok(inputs) => inputs,
             Err(error) => {
@@ -408,7 +408,7 @@ impl Engine {
             .quality_for_scope(inputs, false)
             .await?
             .ok_or_else(|| FactoryError::BadRequest(format!("no quality profile applies at {scope:?}")))?;
-        let observer = crate::commands::CreationObserver(self.bus.clone());
+        let observer = crate::commands::CreationObserver(self.shared.bus.clone());
         let receipt = crate::commands::assurance(self, &observer)
             .quality(&scope, &attribute, &scenario, agent, &report)
             .await?;
@@ -509,12 +509,12 @@ mod tests {
             "assistant".to_string(),
             "shell".to_string(),
         );
-        engine.store.create(&new).await.unwrap()
+        engine.l4.store.create(&new).await.unwrap()
     }
 
     async fn finish(engine: &Engine, task: &Task, status: RunStatus) {
         let run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task.id.clone(),
                 trigger: Trigger::Manual,
@@ -528,7 +528,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch { status: Some(status), ended_at: Some(Utc::now()), ..Default::default() },
@@ -726,7 +726,7 @@ mod tests {
     #[tokio::test]
     async fn quality_changed_is_published_when_a_profile_moves_and_never_on_the_first_read() {
         let engine = test_engine();
-        let mut bus = engine.bus.subscribe();
+        let mut bus = engine.shared.bus.subscribe();
         let changed = |bus: &mut tokio::sync::broadcast::Receiver<Event>| {
             std::iter::from_fn(|| bus.try_recv().ok()).any(|e| matches!(e, Event::QualityChanged { .. }))
         };
@@ -868,7 +868,7 @@ mod tests {
         assert!(refuse("security.confidentiality", "sandboxed", "demo").await.contains("already met"));
         assert!(refuse("reliability", "someday", "demo").await.contains("draft"));
         assert!(refuse("maintainability.modifiability", "gate", "sibling").await.contains("not a quality scenario"));
-        assert!(engine.store.list(&TaskFilter::default()).await.unwrap().is_empty(), "nothing was created");
+        assert!(engine.l4.store.list(&TaskFilter::default()).await.unwrap().is_empty(), "nothing was created");
     }
 
     #[tokio::test]
@@ -906,7 +906,7 @@ mod tests {
     #[tokio::test]
     async fn an_older_read_never_overwrites_a_newer_fingerprint_or_publishes() {
         let engine = test_engine();
-        let mut bus = engine.bus.subscribe();
+        let mut bus = engine.shared.bus.subscribe();
         let older = engine.quality_inputs(None, false).await.unwrap();
         write_profile(&engine, "service", &SERVICE.replace("importance: H", "importance: M"));
         let newer = engine.quality_inputs(None, false).await.unwrap();
@@ -915,14 +915,14 @@ mod tests {
         engine.record_quality_fingerprint(&newer);
         engine.record_quality_fingerprint(&older);
         assert!(bus.try_recv().is_err(), "first record has nothing to compare; the older one is ignored");
-        let seen = engine.quality_seen.lock().unwrap().unwrap();
+        let seen = engine.l5.quality_seen.lock().unwrap().unwrap();
         assert_eq!(seen.1, newer.fingerprint, "the newer read stays recorded");
     }
 
     #[tokio::test]
     async fn a_metrics_read_of_quality_never_publishes_quality_changed() {
         let engine = test_engine();
-        let mut bus = engine.bus.subscribe();
+        let mut bus = engine.shared.bus.subscribe();
         engine.quality_report(None).await.unwrap();
         write_profile(&engine, "service", &SERVICE.replace("importance: H", "importance: M"));
         let ids = vec![MetricId::new("quality.security").unwrap(), MetricId::new("scrap_rate").unwrap()];

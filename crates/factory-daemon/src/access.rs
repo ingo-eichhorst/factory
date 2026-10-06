@@ -92,11 +92,11 @@ impl Engine {
             return Ok(Caller::Owner);
         };
 
-        let active = self.store.active_runs().await?;
+        let active = self.l4.store.active_runs().await?;
         for run in &active {
             if run.token.as_deref() == Some(token) {
                 let scope = self
-                    .store
+                    .l4.store
                     .get(&run.task_id)
                     .await?
                     .map(|t| t.scope)
@@ -127,7 +127,7 @@ impl Engine {
             }
         }
 
-        for agent in self.store.agents().await? {
+        for agent in self.l4.store.agents().await? {
             if agent.token.as_deref() == Some(token) {
                 let role = self.effective_role(&agent.scope, &agent.name).await;
                 return Ok(Caller::Agent {
@@ -165,7 +165,7 @@ impl Engine {
     /// same agent cannot be told two different things.
     pub async fn effective_role(&self, scope: &str, name: &str) -> Role {
         let declared = self.role_of(scope, name);
-        match self.store.get_agent(&AgentSession::id_for(scope, name)).await {
+        match self.l4.store.get_agent(&AgentSession::id_for(scope, name)).await {
             Ok(Some(agent)) => agent.role_with(&declared),
             _ => declared,
         }
@@ -177,10 +177,10 @@ impl Engine {
     }
 
     async fn task_of_run(&self, run_id: &str) -> Result<Option<Task>> {
-        let Some(run) = self.store.get_run(run_id).await? else {
+        let Some(run) = self.l4.store.get_run(run_id).await? else {
             return Ok(None);
         };
-        self.store.get(&run.task_id).await
+        self.l4.store.get(&run.task_id).await
     }
 
     /// What a request asks of whoever is making it.
@@ -537,14 +537,14 @@ impl Engine {
             // never the caller's to hold a grant over.
             Request::SuggestionTask { ids } => {
                 for id in ids {
-                    if let Ok(Some(suggestion)) = self.suggestions.get(id).await {
+                    if let Ok(Some(suggestion)) = self.l5.suggestions.get(id).await {
                         in_scope(&suggestion.scope)?;
                     }
                 }
                 Ok(())
             }
             Request::SuggestionDismiss { id, .. } | Request::SuggestionDone { id, .. } | Request::SuggestionAsk { id, .. } => {
-                match self.suggestions.get(id).await {
+                match self.l5.suggestions.get(id).await {
                     Ok(Some(suggestion)) => suggestion_in_reach(def, &suggestion),
                     _ => Ok(()), // let the engine report "no such suggestion"
                 }
@@ -557,7 +557,7 @@ impl Engine {
                 if def.reach == Reach::Own && (patch.scope.is_some() || patch.agent.is_some()) {
                     return Err(deny("hand its task to somebody else"));
                 }
-                if let Some(task) = self.store.get(id).await? {
+                if let Some(task) = self.l4.store.get(id).await? {
                     task_in_reach(def, &task)?;
                 }
                 // Moving a task out of the scope would be handing it to
@@ -571,7 +571,7 @@ impl Engine {
             // Handing in follows `TaskCreate`'s rule to the letter.
             Request::IntakeAdd(new) => in_scope(new.scope.as_deref().unwrap_or(scope)),
             // Starting a triage run creates a task in the item's scope.
-            Request::IntakeTriage { id, .. } => match self.store.get(id).await? {
+            Request::IntakeTriage { id, .. } => match self.l4.store.get(id).await? {
                 Some(item) => task_in_reach(def, &item),
                 None => Ok(()),
             },
@@ -580,7 +580,7 @@ impl Engine {
             // over an item gets to answer for it, and only for that item.
             // Releasing moves it, so the route has to be in reach as well.
             Request::IntakeAssess { id, assessment, .. } => {
-                let Some(item) = self.store.get(id).await? else { return Ok(()) };
+                let Some(item) = self.l4.store.get(id).await? else { return Ok(()) };
                 if task_in_reach(def, &item).is_err() && !self.is_items_triage_run(caller, &item).await? {
                     return Err(deny("assess an intake item that is neither in its reach nor its own triage run's"));
                 }
@@ -589,14 +589,14 @@ impl Engine {
             // Flagging (`#170`): the same reach `IntakeAssess` checks, minus
             // the route -- there is none to be in scope of.
             Request::IntakeFlagSecurity { id, .. } => {
-                let Some(item) = self.store.get(id).await? else { return Ok(()) };
+                let Some(item) = self.l4.store.get(id).await? else { return Ok(()) };
                 if task_in_reach(def, &item).is_err() && !self.is_items_triage_run(caller, &item).await? {
                     return Err(deny("flag an intake item that is neither in its reach nor its own triage run's"));
                 }
                 Ok(())
             }
             Request::IntakeDecide { id, decision } => {
-                let Some(item) = self.store.get(id).await? else { return Ok(()) };
+                let Some(item) = self.l4.store.get(id).await? else { return Ok(()) };
                 if task_in_reach(def, &item).is_err() {
                     if !self.is_items_triage_run(caller, &item).await? {
                         return Err(deny("decide an intake item that is neither in its reach nor its own triage run's"));
@@ -628,14 +628,14 @@ impl Engine {
             // Publishing: reach over the item, like `IntakeTriage` -- no
             // triage-run fallback, since publishing is never a run's own
             // work the way assessing or deciding can be.
-            Request::IntakePublish { id } => match self.store.get(id).await? {
+            Request::IntakePublish { id } => match self.l4.store.get(id).await? {
                 Some(item) => task_in_reach(def, &item),
                 None => Ok(()),
             },
             // Answering a needs-info: reach over the item, or having handed
             // it in.
             Request::IntakeInfo { id, .. } => {
-                let Some(item) = self.store.get(id).await? else { return Ok(()) };
+                let Some(item) = self.l4.store.get(id).await? else { return Ok(()) };
                 let me = caller.describe();
                 let requested = item
                     .intake
@@ -650,7 +650,7 @@ impl Engine {
             | Request::TaskClose { id, .. }
             | Request::TaskReopen { id, .. }
             | Request::TaskSkipNext { id, .. } => {
-                match self.store.get(id).await? {
+                match self.l4.store.get(id).await? {
                     Some(task) => task_in_reach(def, &task),
                     None => Ok(()), // let the engine report "no such task"
                 }
@@ -659,7 +659,7 @@ impl Engine {
             Request::TaskReport { id, .. }
             | Request::TaskTurnEnded { id, .. }
             | Request::TaskAttach { id, .. } => {
-                let Some(task) = self.store.get(id).await? else {
+                let Some(task) = self.l4.store.get(id).await? else {
                     return Ok(());
                 };
                 if task_in_reach(def, &task).is_ok() {
@@ -695,7 +695,7 @@ impl Engine {
             }
 
             Request::AgentStop { id } | Request::AgentInput { id, .. } => match def.reach {
-                Reach::Scope => match self.store.get_agent(id).await? {
+                Reach::Scope => match self.l4.store.get_agent(id).await? {
                     Some(agent) => in_scope(&agent.scope),
                     None => Ok(()),
                 },
@@ -728,7 +728,7 @@ impl Engine {
             Request::WorkflowUpdate { id, workflow } => match def.reach {
                 Reach::Scope => {
                     in_scope(&workflow.scope)?;
-                    if let Some(found) = self.workflows.get_definition(id).await? {
+                    if let Some(found) = self.l4.workflows.get_definition(id).await? {
                         in_scope(&found.scope)?;
                     }
                     Ok(())
@@ -736,14 +736,14 @@ impl Engine {
                 Reach::Own => Err(deny("manage workflows; that requires scope reach")),
             },
             Request::WorkflowDelete { id } | Request::WorkflowStart { id, .. } => match def.reach {
-                Reach::Scope => match self.workflows.get_definition(id).await? {
+                Reach::Scope => match self.l4.workflows.get_definition(id).await? {
                     Some(found) => in_scope(&found.scope),
                     None => Ok(()),
                 },
                 Reach::Own => Err(deny("manage workflows; that requires scope reach")),
             },
             Request::WorkflowRunCancel { id } => match def.reach {
-                Reach::Scope => match self.workflows.get_run(id).await? {
+                Reach::Scope => match self.l4.workflows.get_run(id).await? {
                     Some(found) => in_scope(&found.scope),
                     None => Ok(()),
                 },
@@ -815,7 +815,7 @@ impl Engine {
                 }
             }
             Request::DeployFinish(req) => {
-                let Some(deployment) = self.environments.deployment(&req.id).await? else {
+                let Some(deployment) = self.l1.environments.deployment(&req.id).await? else {
                     return Err(FactoryError::BadRequest(format!("no deployment {}", req.id)));
                 };
                 in_scope(&deployment.scope)?;
@@ -826,7 +826,7 @@ impl Engine {
                 }
             }
             Request::DeployPublish { id, .. } => {
-                let deployment = self.environments.deployment(id).await?
+                let deployment = self.l1.environments.deployment(id).await?
                     .ok_or_else(|| FactoryError::BadRequest(format!("no deployment {id}")))?;
                 in_scope(&deployment.scope)?;
                 match def.reach {
@@ -1313,11 +1313,11 @@ mod tests {
         // grant predicate: a denied agent must reach no host command.
         let host = crate::host_power::testing::FakeHost::mac();
         host.install_rule();
-        e.host_power.replace_runner(host.clone());
+        e.l1.host_power.replace_runner(host.clone());
         let mut agent = AgentSession::new("demo", "w", "shell", "herdr", Lifetime::Permanent, Role::new("keeper"));
         agent.assigned_role = Some(Role::new("keeper"));
         agent.token = Some("host-power-agent-test".into());
-        e.store.put_agent(&agent).await.unwrap();
+        e.l4.store.put_agent(&agent).await.unwrap();
         let response = e.handle(factory_core::protocol::Envelope {
             token: agent.token,
             request: set(),
@@ -1380,7 +1380,7 @@ mod tests {
         let source = engine_with_roles_and_root_scope("company", "roles:\n  checker:\n    grants: [deploy.record]\n    reach: scope\n  own-checker:\n    grants: [deploy.record]\n    reach: own\n");
         let mut factory = source.factory_snapshot();
         factory.config.scopes[0].environments = serde_yaml_ng::from_str("[{ name: production, checks: [{ kind: command, command: 'true' }] }]").unwrap();
-        let e = Engine::new(factory, Registry::with_builtins(), source.store.clone(), PathBuf::from("factory"), vec![]);
+        let e = Engine::new(factory, Registry::with_builtins(), source.l4.store.clone(), PathBuf::from("factory"), vec![]);
         let caller = |scope: &str, role: &str, run: Option<&str>| Caller::Agent {
             scope: scope.into(), name: "operator".into(), role: Role::new(role), run_id: run.map(str::to_owned),
         };
@@ -1634,7 +1634,7 @@ mod tests {
             wasted_tokens: None,
         }
         .file(id.into(), chrono::Utc::now());
-        e.suggestions.put(&s).await.unwrap();
+        e.l5.suggestions.put(&s).await.unwrap();
     }
 
     /// `#275`: `suggestion.task` is the same door `scenario.promote` and
@@ -1739,12 +1739,12 @@ mod tests {
             closure: None,
             slot_wait: None,
         };
-        engine.store.create(&task).await.unwrap()
+        engine.l4.store.create(&task).await.unwrap()
     }
 
     async fn run_of(engine: &Engine, task_id: &str, agent: &str) -> String {
         engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: task_id.into(),
                 trigger: Trigger::Manual,
@@ -2890,7 +2890,7 @@ mod tests {
         let e = engine_tree();
         for scope in ["demo-app", "engineering/outsider"] {
             let agent = AgentSession::new(scope, "watcher", "pi", "herdr", Lifetime::Permanent, Role::worker());
-            e.store.put_agent(&agent).await.unwrap();
+            e.l4.store.put_agent(&agent).await.unwrap();
         }
         let given = e
             .set_agent_role("demo-app/watcher", Some(Role::new("reviewer")))
@@ -3059,7 +3059,7 @@ mod tests {
             "roles:\n  runner:\n    grants: [task.run]\n",
         );
         let agent = AgentSession::new("demo", "watcher", "pi", "herdr", Lifetime::Permanent, Role::worker());
-        e.store.put_agent(&agent).await.unwrap();
+        e.l4.store.put_agent(&agent).await.unwrap();
         assert_eq!(e.effective_role("demo", "watcher").await, Role::worker());
 
         let given = e
@@ -3077,7 +3077,7 @@ mod tests {
     async fn a_role_nothing_defines_cannot_be_given() {
         let e = engine();
         let agent = AgentSession::new("demo", "watcher", "pi", "herdr", Lifetime::Permanent, Role::worker());
-        e.store.put_agent(&agent).await.unwrap();
+        e.l4.store.put_agent(&agent).await.unwrap();
         let err = e
             .set_agent_role("demo/watcher", Some(Role::new("ghost")))
             .await

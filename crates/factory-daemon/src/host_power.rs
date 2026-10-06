@@ -684,14 +684,14 @@ fn mode_of(data: &serde_json::Value, key: &str) -> Option<PowerMode> {
 impl crate::engine::Engine {
     /// `Request::HostPowerMode`: read fresh, with the newest changes.
     pub(crate) async fn host_power_report(&self) -> PowerModeReport {
-        let mut report = self.host_power.read().await;
+        let mut report = self.l1.host_power.read().await;
         report.changes = self.power_mode_changes().await;
         report
     }
 
     async fn power_mode_changes(&self) -> Vec<factory_core::protocol::PowerModeChange> {
         let entries = self
-            .store
+            .l4.store
             .entries(HOST_JOURNAL, CHANGES_SHOWN)
             .await
             .unwrap_or_default();
@@ -727,7 +727,7 @@ impl crate::engine::Engine {
             before,
             after,
             verification_error,
-        } = self.host_power.set(mode).await?;
+        } = self.l1.host_power.set(mode).await?;
         let asked = crate::operations::Asked::new(caller, None);
         let mut message = format!(
             "power mode: {} -> {mode} {}",
@@ -750,7 +750,7 @@ impl crate::engine::Engine {
                 "verification_error": verification_error,
             }),
         );
-        if let Err(e) = self.store.append_entry(HOST_JOURNAL, &entry).await {
+        if let Err(e) = self.l4.store.append_entry(HOST_JOURNAL, &entry).await {
             return Err(FactoryError::Other(anyhow::anyhow!(
                 "pmset accepted the change, but it could not be journaled: {e}; Refresh to inspect the host"
             )));

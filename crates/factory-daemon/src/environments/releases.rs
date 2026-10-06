@@ -378,7 +378,7 @@ impl Engine {
             .ok_or_else(|| FactoryError::BadRequest("release is not recorded in the selected scope".into()))?;
         let facts = if let Some(id) = &query.deployment {
             let deployment = self
-                .environments
+                .l1.environments
                 .deployment(id)
                 .await?
                 .filter(|deployment| deployment.scope == query.scope && deployment.release.commit == query.commit)

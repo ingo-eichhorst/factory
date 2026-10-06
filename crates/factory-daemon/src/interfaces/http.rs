@@ -2444,7 +2444,7 @@ async fn term_stream(engine: Arc<Engine>, socket: WebSocket, target: TermTarget)
 /// looking at an empty table until something happens.
 async fn ws_stream(engine: Arc<Engine>, socket: WebSocket) {
     let (mut tx, mut rx) = socket.split();
-    let mut events = engine.bus.subscribe();
+    let mut events = engine.shared.bus.subscribe();
 
     let snapshot = engine
         .handle_request(Request::TaskList(TaskFilter::default()))
@@ -2626,7 +2626,7 @@ mod tests {
         let base = engine_with_quality();
         let mut registry = Registry::with_builtins();
         registry.add_runtime(Arc::new(SlowStop), "test");
-        let engine = Arc::new(Engine::new(base.factory_snapshot(), registry, base.store.clone(), PathBuf::from("factory"), Vec::new()));
+        let engine = Arc::new(Engine::new(base.factory_snapshot(), registry, base.l4.store.clone(), PathBuf::from("factory"), Vec::new()));
         let task = engine
             .create(factory_core::task::NewTask {
                 title: "reports from a sandbox".into(),
@@ -2653,7 +2653,7 @@ mod tests {
         let mut status = None;
         for _ in 0..100 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            status = engine.store.get_run(&run.id).await.unwrap().map(|r| r.status);
+            status = engine.l4.store.get_run(&run.id).await.unwrap().map(|r| r.status);
             if status == Some(factory_core::run::RunStatus::Done) {
                 break;
             }
@@ -2675,7 +2675,7 @@ mod tests {
             .await
             .unwrap();
         let run = engine
-            .store
+            .l4.store
             .create_run(&factory_core::run::NewRun {
                 task_id: task.id.clone(),
                 trigger: factory_core::run::Trigger::Manual,
@@ -2763,7 +2763,7 @@ mod tests {
         let engine = engine_with_quality();
         let host = FakeHost::mac();
         host.install_rule();
-        engine.host_power.replace_runner(host.clone());
+        engine.l1.host_power.replace_runner(host.clone());
 
         for body in [
             r#"{"mode":"3"}"#,
@@ -2850,7 +2850,7 @@ mod tests {
             .await
             .unwrap();
         let run = engine
-            .store
+            .l4.store
             .create_run(&factory_core::run::NewRun {
                 task_id: task.id.clone(),
                 trigger: factory_core::run::Trigger::Manual,
@@ -3254,7 +3254,7 @@ mod tests {
             "herdr".into(),
         );
         task.next_run_at = Some(now + chrono::Duration::minutes(30));
-        engine.store.create(&task).await.unwrap();
+        engine.l4.store.create(&task).await.unwrap();
         let iso = |t: chrono::DateTime<chrono::Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
         // A day ahead, well beyond the quarter the live window keeps: the

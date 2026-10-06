@@ -174,7 +174,7 @@ async fn the_tab_shows_both_entries_with_presence_resolution_expiry_and_users_an
 #[tokio::test]
 async fn changing_the_date_writes_the_root_config_journals_who_and_raises_the_inbox_item_at_once() {
     let (dir, engine) = instance(None);
-    let mut events = engine.bus.subscribe();
+    let mut events = engine.shared.bus.subscribe();
     let soon = Utc::now().date_naive() + chrono::Duration::days(10);
     let metadata = SecretMetadata {
         expires: Some(Expiry::On(soon)),
@@ -201,7 +201,7 @@ async fn changing_the_date_writes_the_root_config_journals_who_and_raises_the_in
     );
 
     // Journaled with who changed what.
-    let entries = engine.store.entries(SECRETS_JOURNAL, 10).await.unwrap();
+    let entries = engine.l4.store.entries(SECRETS_JOURNAL, 10).await.unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, SECRET_CHANGED);
     assert!(entries[0].message.contains(&format!("expires 2027-10-04 -> {}", soon.format("%Y-%m-%d"))), "{}", entries[0].message);
@@ -248,7 +248,7 @@ async fn an_unchanged_write_writes_and_journals_nothing_and_an_unknown_name_is_r
         Response::Ok { .. }
     ));
     assert_eq!(dir.root_text(), before);
-    assert!(engine.store.entries(SECRETS_JOURNAL, 10).await.unwrap().is_empty());
+    assert!(engine.l4.store.entries(SECRETS_JOURNAL, 10).await.unwrap().is_empty());
 
     match engine.handle_request(Request::SecretSet { name: "nope".into(), metadata: SecretMetadata::default() }).await {
         Response::Error { message, .. } => assert!(message.contains("claude-oauth-token, github-gh-login"), "{message}"),
@@ -271,7 +271,7 @@ async fn a_date_that_would_disagree_with_a_providers_own_expires_is_refused_and_
         other => panic!("{other:?}"),
     }
     assert_eq!(dir.root_text(), before);
-    assert!(engine.store.entries(SECRETS_JOURNAL, 10).await.unwrap().is_empty());
+    assert!(engine.l4.store.entries(SECRETS_JOURNAL, 10).await.unwrap().is_empty());
 }
 
 #[test]

@@ -205,7 +205,7 @@ impl Engine {
                 "the executing agent cannot approve or reject its own work".into(),
             ));
         }
-        let evidence = self.run_evidence.step_attestations(run_id).await?;
+        let evidence = self.l4.run_evidence.step_attestations(run_id).await?;
         let step = run
             .required_steps
             .iter()
@@ -254,7 +254,7 @@ impl Engine {
             node_id: step.node_id.clone(),
             at: Utc::now(),
         };
-        self.run_evidence.append_step_attestation(&attestation).await?;
+        self.l4.run_evidence.append_step_attestation(&attestation).await?;
         self.entry(
             &task.id,
             TaskEntry::new(
@@ -294,7 +294,7 @@ impl Engine {
                     // Approval is durable; a busy slot is a queue, not a
                     // failed attempt. The normal release/sweep worker resumes
                     // this same frozen run when capacity becomes available.
-                    self.store.update(&task.id, &factory_core::task::TaskPatch {
+                    self.l4.store.update(&task.id, &factory_core::task::TaskPatch {
                         status: Some(factory_core::task::TaskStatus::Pending),
                         slot_wait: Some(factory_core::task::SlotWait {
                             agent: agent.clone(),
@@ -339,7 +339,7 @@ impl Engine {
                     && run.blocked_source == Some(BlockSource::Verification)))
         {
             let updated = self
-                .store
+                .l4.store
                 .update_run(
                     &run.id,
                     &RunPatch {
@@ -349,7 +349,7 @@ impl Engine {
                     },
                 )
                 .await?;
-            self.bus.publish(Event::RunUpdated {
+            self.shared.bus.publish(Event::RunUpdated {
                 run: updated.clone(),
             });
             self.mirror_to_task(&updated).await;
@@ -377,7 +377,7 @@ impl Engine {
         }
         let task = self.require(&run.task_id).await?;
         let workflow_guard = if task.workflow_origin.is_some() {
-            Some(self.workflow_edit.lock().await)
+            Some(self.l4.workflow_edit.lock().await)
         } else { None };
         let actor = Self::decision_actor(caller);
         if actor == run.agent {
@@ -387,7 +387,7 @@ impl Engine {
         }
         if task.workflow_origin.is_none() {
             let used = self
-                .store
+                .l4.store
                 .runs(&task.id, 100)
                 .await?
                 .into_iter()
@@ -404,7 +404,7 @@ impl Engine {
                 ));
             }
         }
-        let attestations = self.run_evidence.step_attestations(run_id).await?;
+        let attestations = self.l4.run_evidence.step_attestations(run_id).await?;
         let failed = attestations
             .iter()
             .rev()
@@ -499,8 +499,8 @@ impl Engine {
             .await?;
 
         if let Some(workflow) = workflow_rework {
-            self.workflows.put_run(&workflow).await?;
-            self.bus.publish(Event::WorkflowRunUpdated {
+            self.l4.workflows.put_run(&workflow).await?;
+            self.shared.bus.publish(Event::WorkflowRunUpdated {
                 run: workflow.clone(),
             });
             drop(workflow_guard);
@@ -513,7 +513,7 @@ impl Engine {
                 finding
             );
             let _ = self
-                .store
+                .l4.store
                 .update(
                     &task.id,
                     &factory_core::task::TaskPatch {
@@ -652,13 +652,13 @@ impl Engine {
     /// (result, message); the status is this function's to set.
     pub(crate) async fn begin_verification(&self, run: &Run, patch: RunPatch) -> Result<Run> {
         let run = self
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch { status: Some(RunStatus::Verifying), clear_blocked: true, fail_kind: None, ..patch },
             )
             .await?;
-        self.bus.publish(Event::RunUpdated { run: run.clone() });
+        self.shared.bus.publish(Event::RunUpdated { run: run.clone() });
         self.mirror_to_task(&run).await;
         let steps: Vec<&str> = run.required_steps.iter().filter(|s| s.kind.enforced()).map(|s| s.step.as_str()).collect();
         self.entry(
@@ -677,7 +677,7 @@ impl Engine {
 
     fn release_verification(&self, run_id: &str) {
         let replay = {
-            let mut verifying = self.verifying.lock().unwrap();
+            let mut verifying = self.l4.verifying.lock().unwrap();
             match verifying.get_mut(run_id) {
                 Some(requested) if *requested => {
                     *requested = false;
@@ -691,13 +691,13 @@ impl Engine {
             }
         };
         if replay {
-            let _ = self.verify_tx.send(run_id.to_string());
+            let _ = self.l4.verify_tx.send(run_id.to_string());
         }
     }
 
     pub(crate) fn enqueue_verification(&self, run_id: &str) {
         let enqueue = {
-            let mut verifying = self.verifying.lock().unwrap();
+            let mut verifying = self.l4.verifying.lock().unwrap();
             match verifying.get_mut(run_id) {
                 Some(requested) => {
                     *requested = true;
@@ -710,7 +710,7 @@ impl Engine {
             }
         };
         if enqueue {
-            let _ = self.verify_tx.send(run_id.to_string());
+            let _ = self.l4.verify_tx.send(run_id.to_string());
         }
     }
 
@@ -719,7 +719,7 @@ impl Engine {
     /// Called once, at startup, like `spawn_bench_judge`; a second call is a
     /// no-op.
     pub fn spawn_verifier(self: &Arc<Self>) {
-        let Some(mut rx) = self.verify_rx.lock().unwrap().take() else {
+        let Some(mut rx) = self.l4.verify_rx.lock().unwrap().take() else {
             return;
         };
         let engine = self.clone();
@@ -742,7 +742,7 @@ impl Engine {
     /// exact current digest. Complete gate evidence for that digest is reused;
     /// a changed tree starts a fresh gate-then-review round.
     pub(crate) async fn recover_verifications(&self) {
-        match self.store.active_runs().await {
+        match self.l4.store.active_runs().await {
             Ok(runs) => {
                 for run in runs.into_iter().filter(|r| r.status == RunStatus::Verifying) {
                     self.enqueue_verification(&run.id);
@@ -766,8 +766,8 @@ impl Engine {
                 "could not compute the worktree digest for independent review"
             ))
         })?;
-        let attestations = self.run_evidence.step_attestations(&subject.id).await?;
-        let all_tasks = self.store.list(&TaskFilter::default()).await?;
+        let attestations = self.l4.run_evidence.step_attestations(&subject.id).await?;
+        let all_tasks = self.l4.store.list(&TaskFilter::default()).await?;
         let mut waiting = false;
         for step in subject
             .required_steps
@@ -803,7 +803,7 @@ impl Engine {
                 })
                 .max_by_key(|candidate| candidate.created_at);
             if let Some(existing) = existing {
-                if let Some(review_run) = self.store.runs(&existing.id, 1).await?.into_iter().next() {
+                if let Some(review_run) = self.l4.store.runs(&existing.id, 1).await?.into_iter().next() {
                     if review_run.status == RunStatus::Done {
                         match self
                             .record_review_attestation(existing, &review_run, subject, step)
@@ -873,11 +873,11 @@ impl Engine {
             let review = if let Some(previous_id) = previous_task {
                 // A control node also owns one standing task. Its next
                 // independent review is a fresh conversation on a new run.
-                if self.store.active_run(&previous_id).await?.is_some() {
+                if self.l4.store.active_run(&previous_id).await?.is_some() {
                     waiting = true;
                     continue;
                 }
-                self.store.update(&previous_id, &factory_core::task::TaskPatch {
+                self.l4.store.update(&previous_id, &factory_core::task::TaskPatch {
                     instructions: Some(new.instructions),
                     agent: new.agent, runtime: new.runtime,
                     labels: Some(new.labels),
@@ -897,8 +897,8 @@ impl Engine {
                     node.task_created = true;
                     node.status = WorkflowNodeStatus::Pending;
                 }
-                self.workflows.put_run(&workflow).await?;
-                self.bus
+                self.l4.workflows.put_run(&workflow).await?;
+                self.shared.bus
                     .publish(Event::WorkflowRunUpdated { run: workflow });
             }
             self.entry(
@@ -932,7 +932,7 @@ impl Engine {
         step: &RequiredStep,
     ) -> Result<()> {
         if self
-            .run_evidence
+            .l4.run_evidence
             .step_attestations(&subject.id)
             .await?
             .iter()
@@ -1007,7 +1007,7 @@ impl Engine {
             node_id: step.node_id.clone(),
             at: review_run.ended_at.unwrap_or_else(Utc::now),
         };
-        self.run_evidence.append_step_attestation(&attestation).await?;
+        self.l4.run_evidence.append_step_attestation(&attestation).await?;
         self.entry(
             &subject.task_id,
             TaskEntry::new(
@@ -1040,7 +1040,7 @@ impl Engine {
             && subject.blocked_source == Some(BlockSource::Verification)
         {
             subject = self
-                .store
+                .l4.store
                 .update_run(
                     &subject.id,
                     &RunPatch {
@@ -1050,7 +1050,7 @@ impl Engine {
                     },
                 )
                 .await?;
-            self.bus.publish(Event::RunUpdated { run: subject.clone() });
+            self.shared.bus.publish(Event::RunUpdated { run: subject.clone() });
             self.mirror_to_task(&subject).await;
         }
         let step_name = review_task
@@ -1077,7 +1077,7 @@ impl Engine {
         // only `run rework` performs the bounded send-back.
         if review_run.routed_to.is_some() {
             let _ = self
-                .store
+                .l4.store
                 .update(
                     &review_task.id,
                     &factory_core::task::TaskPatch {
@@ -1108,7 +1108,7 @@ impl Engine {
         };
         let category = control_plan::effective_category(task.category.as_deref()).to_string();
         let state = git_state(&dir).await;
-        let mut attestations = self.run_evidence.step_attestations(&run.id).await?;
+        let mut attestations = self.l4.run_evidence.step_attestations(&run.id).await?;
         let round_evidence = |all: &[StepAttestation]| {
             all.iter()
                 .filter(|evidence| {
@@ -1174,7 +1174,7 @@ impl Engine {
                 node_id: step.node_id.clone(),
                 at: Utc::now(),
             };
-            self.run_evidence.append_step_attestation(&attestation).await?;
+            self.l4.run_evidence.append_step_attestation(&attestation).await?;
             let code = exit_code
                 .map(|c| format!("exit {c}"))
                 .unwrap_or_else(|| "did not finish".into());
@@ -1206,7 +1206,7 @@ impl Engine {
         // Deterministic gates pass before a model review is ever spent. The
         // subject remains `verifying`; the review task's report wakes this
         // same coordinator, and labels make restart recovery idempotent.
-        attestations = self.run_evidence.step_attestations(&run.id).await?;
+        attestations = self.l4.run_evidence.step_attestations(&run.id).await?;
         let current_evidence = round_evidence(&attestations);
         let gates = control_plan::judge(
             &gate_steps,
@@ -1220,7 +1220,7 @@ impl Engine {
             return Ok(());
         }
 
-        let attestations = self.run_evidence.step_attestations(&run.id).await?;
+        let attestations = self.l4.run_evidence.step_attestations(&run.id).await?;
         let verdict = control_plan::judge(
             &run.required_steps,
             &round_evidence(&attestations),
@@ -1254,7 +1254,7 @@ impl Engine {
         } else {
             let reason = verdict.reason();
             let blocked = self
-                .store
+                .l4.store
                 .update_run(
                     &run.id,
                     &RunPatch {
@@ -1277,7 +1277,7 @@ impl Engine {
                 .with_data(serde_json::to_value(&verdict).unwrap_or_default()),
             )
             .await;
-            self.bus.publish(Event::RunUpdated { run: blocked.clone() });
+            self.shared.bus.publish(Event::RunUpdated { run: blocked.clone() });
             self.mirror_to_task(&blocked).await;
         }
         self.sync_workflow_for_task(&task.id).await;
@@ -1287,7 +1287,7 @@ impl Engine {
     /// Every attestation a run has collected, oldest first.
     pub(crate) async fn run_attestations(&self, run_id: &str) -> Result<Vec<StepAttestation>> {
         self.require_run(run_id).await?;
-        self.run_evidence.step_attestations(run_id).await
+        self.l4.run_evidence.step_attestations(run_id).await
     }
 
     /// `#158` phase 1: the one L4-owned read the `attested` policy check and
@@ -1545,7 +1545,7 @@ mod tests {
     }
 
     async fn report_done(engine: &Arc<Engine>, task_id: &str) -> Run {
-        let run = engine.store.active_run(task_id).await.unwrap().expect("an active run");
+        let run = engine.l4.store.active_run(task_id).await.unwrap().expect("an active run");
         let run = engine
             .report(
                 task_id,
@@ -1581,7 +1581,7 @@ mod tests {
     async fn review_task(engine: &Arc<Engine>, subject_run: &str) -> Task {
         for _ in 0..400 {
             if let Some(task) = engine
-                .store
+                .l4.store
                 .list(&TaskFilter::default())
                 .await
                 .unwrap()
@@ -1592,7 +1592,7 @@ mod tests {
                         .is_some_and(|id| id == subject_run)
                 })
             {
-                if engine.store.active_run(&task.id).await.unwrap().is_some() {
+                if engine.l4.store.active_run(&task.id).await.unwrap().is_some() {
                     return task;
                 }
             }
@@ -1610,14 +1610,14 @@ mod tests {
         engine.enqueue_verification("subject");
         engine.release_verification("subject");
 
-        let mut receiver = engine.verify_rx.lock().unwrap().take().unwrap();
+        let mut receiver = engine.l4.verify_rx.lock().unwrap().take().unwrap();
         assert_eq!(receiver.try_recv().unwrap(), "subject");
         assert_eq!(receiver.try_recv().unwrap(), "subject");
         assert!(receiver.try_recv().is_err());
 
         // Completing the replay releases ownership normally.
         engine.release_verification("subject");
-        assert!(!engine.verifying.lock().unwrap().contains_key("subject"));
+        assert!(!engine.l4.verifying.lock().unwrap().contains_key("subject"));
     }
 
     #[tokio::test]
@@ -1625,7 +1625,7 @@ mod tests {
         let (engine, _) = engine("      - { applies_to: [feature], step: approval, by: person }");
         let task = task(&engine, Some("feature")).await;
         engine.start_run(&task.id, Trigger::Manual).await;
-        let held = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         assert_eq!(held.status, RunStatus::Blocked);
         assert!(held.session.is_none(), "approval is before launch");
         assert_eq!(held.required_steps[0].actor.as_deref(), Some("owner"));
@@ -1655,10 +1655,10 @@ mod tests {
 
         let subject = task(&engine, Some("feature")).await;
         engine.start_run(&subject.id, Trigger::Manual).await;
-        let held = engine.store.active_run(&subject.id).await.unwrap().unwrap();
+        let held = engine.l4.store.active_run(&subject.id).await.unwrap().unwrap();
         let holder = task(&engine, Some("chore")).await;
         engine.start_run(&holder.id, Trigger::Manual).await;
-        assert!(engine.store.active_run(&holder.id).await.unwrap().unwrap().session.is_some());
+        assert!(engine.l4.store.active_run(&holder.id).await.unwrap().unwrap().session.is_some());
 
         let queued = engine.decide_approval(
             &Caller::Owner, &held.id, AttestationVerdict::Pass, "approved while busy",
@@ -1674,7 +1674,7 @@ mod tests {
         let resumed = engine.require_run(&held.id).await.unwrap();
         assert!(resumed.session.is_some());
         assert!(engine.require(&subject.id).await.unwrap().slot_wait.is_none());
-        assert_eq!(engine.store.runs(&subject.id, 10).await.unwrap().len(), 1);
+        assert_eq!(engine.l4.store.runs(&subject.id, 10).await.unwrap().len(), 1);
         report_done(&engine, &subject.id).await;
         assert_eq!(settled(&engine, &held.id).await.status, RunStatus::Done);
     }
@@ -1694,7 +1694,7 @@ mod tests {
         assert_eq!(failed.status, RunStatus::Failed);
         assert_eq!(failed.fail_kind, Some(factory_core::run::FailKind::DispatchFailed));
         assert!(failed.session.is_none());
-        assert!(engine.store.active_run(&task.id).await.unwrap().is_none());
+        assert!(engine.l4.store.active_run(&task.id).await.unwrap().is_none());
         assert!(engine.require(&task.id).await.unwrap().blocked_by_failure());
     }
 
@@ -1715,7 +1715,7 @@ mod tests {
             .await
             .unwrap();
         engine.start_run(&task.id, Trigger::Manual).await;
-        let held = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         std::fs::remove_file(work.join("fake-harness")).unwrap();
 
         assert_approval_resume_failed(&engine, &task, &held).await;
@@ -1738,7 +1738,7 @@ mod tests {
             .await
             .unwrap();
         engine.start_run(&task.id, Trigger::Manual).await;
-        let held = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
 
         assert_approval_resume_failed(&engine, &task, &held).await;
     }
@@ -1760,7 +1760,7 @@ mod tests {
             .await
             .unwrap();
         engine.start_run(&task.id, Trigger::Manual).await;
-        let held = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
 
         assert_approval_resume_failed(&engine, &task, &held).await;
     }
@@ -1770,7 +1770,7 @@ mod tests {
         let (engine, _) = engine("      - { applies_to: [feature], step: approval, by: person }");
         let task = task(&engine, Some("feature")).await;
         engine.start_run(&task.id, Trigger::Manual).await;
-        let held = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         let caller = Caller::Agent {
             scope: "demo".into(),
             name: held.agent.clone(),
@@ -1791,7 +1791,7 @@ mod tests {
         let (engine, _) = engine(requires);
         let task = task(&engine, Some("feature")).await;
         engine.start_run(&task.id, Trigger::Manual).await;
-        let held = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         engine
             .decide_approval(&Caller::Owner, &held.id, AttestationVerdict::Fail, "release evidence is missing")
             .await
@@ -1803,7 +1803,7 @@ mod tests {
         assert_eq!(evidence.last().unwrap().verdict, AttestationVerdict::Fail);
         assert_eq!(evidence.last().unwrap().findings.as_deref(), Some("release evidence is missing"));
         assert_eq!(evidence.len(), 1, "rejection did not run the later gate");
-        assert!(engine.store.list(&TaskFilter::default()).await.unwrap().iter().all(|task| {
+        assert!(engine.l4.store.list(&TaskFilter::default()).await.unwrap().iter().all(|task| {
             !task.labels.contains_key(REVIEW_RUN_LABEL)
         }), "rejection did not spawn the later review");
     }
@@ -1845,7 +1845,7 @@ mod tests {
         let subject = report_done(&engine, &task.id).await;
         let review = review_task(&engine, &subject.id).await;
         assert_eq!(review.agent, "checker");
-        let review_run = engine.store.active_run(&review.id).await.unwrap().unwrap();
+        let review_run = engine.l4.store.active_run(&review.id).await.unwrap().unwrap();
         engine
             .report(
                 &review.id,
@@ -1885,7 +1885,7 @@ mod tests {
         engine.start_run(&task.id, Trigger::Manual).await;
         let subject = report_done(&engine, &task.id).await;
         let review = review_task(&engine, &subject.id).await;
-        let review_run = engine.store.active_run(&review.id).await.unwrap().unwrap();
+        let review_run = engine.l4.store.active_run(&review.id).await.unwrap().unwrap();
         engine
             .report(
                 &review.id,
@@ -1915,7 +1915,7 @@ mod tests {
         );
         engine.accept_rework(&Caller::Owner, &subject.id).await.unwrap();
         for _ in 0..200 {
-            if engine.store.active_run(&task.id).await.unwrap().is_some() {
+            if engine.l4.store.active_run(&task.id).await.unwrap().is_some() {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1930,17 +1930,17 @@ mod tests {
         engine.start_run(&task.id, Trigger::Manual).await;
         let subject = report_done(&engine, &task.id).await;
         let review = review_task(&engine, &subject.id).await;
-        let first = engine.store.active_run(&review.id).await.unwrap().unwrap();
+        let first = engine.l4.store.active_run(&review.id).await.unwrap().unwrap();
         engine.fail_run(&first.id, factory_core::run::FailKind::AgentFailed, "review crashed").await;
 
         let blocked = settled(&engine, &subject.id).await;
         assert_eq!(blocked.status, RunStatus::Blocked);
-        let entries = engine.store.run_entries(&subject.id, 100).await.unwrap();
+        let entries = engine.l4.store.run_entries(&subject.id, 100).await.unwrap();
         assert!(entries.iter().any(|entry| entry.kind == "review_unusable"
             && entry.message.contains(&review.id)), "{entries:#?}");
 
         engine.start_run(&review.id, Trigger::Manual).await;
-        let retry = engine.store.active_run(&review.id).await.unwrap().unwrap();
+        let retry = engine.l4.store.active_run(&review.id).await.unwrap().unwrap();
         engine.report(
             &review.id,
             TaskReport {
@@ -1964,7 +1964,7 @@ mod tests {
         engine.start_run(&task.id, Trigger::Manual).await;
         let subject = report_done(&engine, &task.id).await;
         let first_review = review_task(&engine, &subject.id).await;
-        let first_run = engine.store.active_run(&first_review.id).await.unwrap().unwrap();
+        let first_run = engine.l4.store.active_run(&first_review.id).await.unwrap().unwrap();
 
         std::fs::write(work.join("changed-during-review.txt"), "new state").unwrap();
         let error = engine.report(
@@ -1983,7 +1983,7 @@ mod tests {
 
         let second_review = review_task(&engine, &subject.id).await;
         assert_ne!(second_review.id, first_review.id);
-        let second_run = engine.store.active_run(&second_review.id).await.unwrap().unwrap();
+        let second_run = engine.l4.store.active_run(&second_review.id).await.unwrap().unwrap();
         engine.report(
             &second_review.id,
             TaskReport {
@@ -2014,7 +2014,7 @@ mod tests {
         let (engine, work) = engine(TESTS_FOR_FEATURES);
         let task = task(&engine, Some("feature")).await;
         engine.start_run(&task.id, Trigger::Manual).await;
-        let run = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        let run = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         assert_eq!(run.required_steps.len(), 1, "fixed at dispatch");
         assert_eq!(run.required_steps[0].required_by, vec!["house/tested"]);
 
@@ -2025,7 +2025,7 @@ mod tests {
         assert_eq!(blocked.status, RunStatus::Blocked);
         assert_eq!(blocked.blocked_source, Some(BlockSource::Verification));
         assert!(blocked.session.is_some(), "the session stays, so the agent can be answered");
-        let entries = engine.store.run_entries(&run.id, 100).await.unwrap();
+        let entries = engine.l4.store.run_entries(&run.id, 100).await.unwrap();
         let reason = entries.iter().rev().find(|e| e.kind == "blocked").expect("a block reason").message.clone();
         assert!(reason.contains("tests exit 1"), "{reason}");
         assert!(reason.contains("house/tested"), "{reason}");
@@ -2075,7 +2075,7 @@ mod tests {
             run_id: None,
         };
         engine.accept_rework(&checker, &failed.id).await.unwrap();
-        let entries = engine.store.run_entries(&failed.id, 100).await.unwrap();
+        let entries = engine.l4.store.run_entries(&failed.id, 100).await.unwrap();
         assert!(entries.iter().any(|entry| entry.kind == "rework_accepted"
             && entry.source == "checker"));
     }
@@ -2125,7 +2125,7 @@ mod tests {
         let run = report_done(&engine, &task.id).await;
         let blocked = settled(&engine, &run.id).await;
         assert_eq!(blocked.status, RunStatus::Blocked);
-        let entries = engine.store.run_entries(&run.id, 100).await.unwrap();
+        let entries = engine.l4.store.run_entries(&run.id, 100).await.unwrap();
         let reason = &entries.iter().rev().find(|e| e.kind == "blocked").unwrap().message;
         assert!(reason.contains("no evidence for: sbom"), "{reason}");
         assert!(engine.run_attestations(&run.id).await.unwrap().is_empty(), "nothing ran, nothing is attested");
@@ -2194,7 +2194,7 @@ mod tests {
                     .and_then(|item| item.task_id.as_ref())
                 {
                     let task = engine.require(task_id).await.unwrap();
-                    if let Some(run) = engine.store.active_run(task_id).await.unwrap() {
+                    if let Some(run) = engine.l4.store.active_run(task_id).await.unwrap() {
                         return (workflow, task, run);
                     }
                 }
@@ -2373,7 +2373,7 @@ mod tests {
         let a_task = loop {
             let run = engine.workflow_run(&wf.id).await.unwrap();
             if let Some(id) = run.nodes.iter().find(|n| n.node_id == "a").and_then(|n| n.task_id.clone()) {
-                if engine.store.active_run(&id).await.unwrap().is_some() {
+                if engine.l4.store.active_run(&id).await.unwrap().is_some() {
                     break id;
                 }
             }
@@ -2386,7 +2386,7 @@ mod tests {
         let wf_now = engine.workflow_run(&wf.id).await.unwrap();
         let waiting_id = wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap().task_id.as_ref().unwrap();
         assert!(engine.require(waiting_id).await.unwrap().after.is_some(), "b exists but is not released on a's word alone");
-        assert!(engine.store.active_run(waiting_id).await.unwrap().is_none());
+        assert!(engine.l4.store.active_run(waiting_id).await.unwrap().is_none());
         assert!(engine.dependency_ready_tasks().await.unwrap().is_empty(), "the scheduler cannot bypass a running gate");
 
         settled(&engine, &run.id).await;
@@ -2418,7 +2418,7 @@ mod tests {
         let first_task = loop {
             let run = engine.workflow_run(&wf.id).await.unwrap();
             if let Some(id) = run.nodes.iter().find(|n| n.node_id == "a").and_then(|n| n.task_id.clone()) {
-                if engine.store.active_run(&id).await.unwrap().is_some() {
+                if engine.l4.store.active_run(&id).await.unwrap().is_some() {
                     break id;
                 }
             }
@@ -2437,7 +2437,7 @@ mod tests {
                 // transient Dispatching row with default orchestration fields.
                 // QuietRuntime does not report an acknowledgement, so session
                 // attachment (not Running status) proves startup reached it.
-                if let Some(retry) = engine.store.active_run(&first_task).await.unwrap()
+                if let Some(retry) = engine.l4.store.active_run(&first_task).await.unwrap()
                     .filter(|run| run.attempt == 2 && run.session.is_some()) {
                     assert_eq!(node.round, 1);
                     assert_eq!(retry.workflow_round, 1);
@@ -2475,7 +2475,7 @@ mod tests {
                 .find(|n| n.node_id == "a")
                 .and_then(|n| n.task_id.clone())
             {
-                if engine.store.active_run(&id).await.unwrap().is_some() {
+                if engine.l4.store.active_run(&id).await.unwrap().is_some() {
                     break id;
                 }
             }
@@ -2484,7 +2484,7 @@ mod tests {
         let failed = report_done(&engine, &task_id).await;
         assert_eq!(settled(&engine, &failed.id).await.status, RunStatus::Blocked);
 
-        let edit = engine.workflow_edit.lock().await;
+        let edit = engine.l4.workflow_edit.lock().await;
         let mut exhausted = engine.workflow_run(&wf.id).await.unwrap();
         let gate = exhausted
             .nodes
@@ -2492,7 +2492,7 @@ mod tests {
             .find(|n| n.node_id == "a.tests")
             .unwrap();
         gate.round = 5;
-        engine.workflows.put_run(&exhausted).await.unwrap();
+        engine.l4.workflows.put_run(&exhausted).await.unwrap();
         drop(edit);
 
         let error = engine.accept_rework(&Caller::Owner, &failed.id).await.unwrap_err();
@@ -2544,7 +2544,7 @@ mod tests {
             .factory_snapshot()
             .root
             .join(".factory/provenance-test.sqlite");
-        Arc::get_mut(&mut engine).unwrap().run_evidence =
+        Arc::get_mut(&mut engine).unwrap().l4.run_evidence =
             factory_process::evidence_store::RunEvidenceStore::open(&db).unwrap();
         if spawn {
             engine.spawn_verifier();
@@ -2553,7 +2553,7 @@ mod tests {
     }
 
     async fn provenance_done(engine: &Arc<Engine>, task: &Task, paths: &[&str]) -> Result<Run> {
-        let run = engine.store.active_run(&task.id).await?.unwrap();
+        let run = engine.l4.store.active_run(&task.id).await?.unwrap();
         engine
             .report(
                 &task.id,
@@ -2587,7 +2587,7 @@ mod tests {
         assert_eq!(held.status, RunStatus::Verifying);
         assert!(engine.run_provenance(&held.id).await.unwrap().is_empty());
         assert!(engine
-            .run_evidence
+            .l4.run_evidence
             .provenance(&held.id)
             .await
             .unwrap()
@@ -2636,10 +2636,10 @@ mod tests {
         std::fs::write(work.join("source.txt"), "source v2").unwrap();
         std::fs::write(work.join("release.bin"), "new output").unwrap();
         assert_eq!(engine.run_provenance(&held.id).await.unwrap(), records);
-        engine.run_evidence.append_provenance(record).await.unwrap();
+        engine.l4.run_evidence.append_provenance(record).await.unwrap();
         let mut changed = record.clone();
         changed.artifact.sha256 = "0".repeat(64);
-        assert!(engine.run_evidence.append_provenance(&changed).await.is_err());
+        assert!(engine.l4.run_evidence.append_provenance(&changed).await.is_err());
         assert_eq!(engine.run_provenance(&held.id).await.unwrap(), records);
         let reopened = factory_process::evidence_store::RunEvidenceStore::open(
             &engine
@@ -2681,7 +2681,7 @@ mod tests {
         );
         assert!(engine.run_provenance(&held.id).await.unwrap().is_empty());
         assert!(engine
-            .store
+            .l4.store
             .run_entries(&held.id, 100)
             .await
             .unwrap()
@@ -2736,7 +2736,7 @@ mod tests {
                 RunStatus::Blocked
             );
             assert!(engine
-                .run_evidence
+                .l4.run_evidence
                 .provenance(&held.id)
                 .await
                 .unwrap()
@@ -2772,7 +2772,7 @@ mod tests {
                 "{paths:?}"
             );
         }
-        let active = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        let active = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         assert!(matches!(
             active.status,
             RunStatus::Dispatching | RunStatus::Running
@@ -2823,7 +2823,7 @@ mod tests {
         provenance_git(&work);
         let task = task(&engine, Some("feature")).await;
         engine.start_run(&task.id, Trigger::Manual).await;
-        let held = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         assert_eq!(held.status, RunStatus::Blocked);
         engine
             .decide_approval(
@@ -2898,7 +2898,7 @@ mod tests {
         }))
         .unwrap();
         engine
-            .run_evidence
+            .l4.run_evidence
             .append_step_attestation(&evidence)
             .await
             .unwrap();
@@ -2906,7 +2906,7 @@ mod tests {
         evidence.id = "foreign".into();
         evidence.actor = "not-the-frozen-reviewer".into();
         engine
-            .run_evidence
+            .l4.run_evidence
             .append_step_attestation(&evidence)
             .await
             .unwrap();
@@ -2915,7 +2915,7 @@ mod tests {
         evidence.actor = step.actor.clone().unwrap();
         evidence.worktree_digest = Some("old-source".into());
         engine
-            .run_evidence
+            .l4.run_evidence
             .append_step_attestation(&evidence)
             .await
             .unwrap();
@@ -2924,7 +2924,7 @@ mod tests {
         evidence.worktree_digest = Some(held.artifacts[0].source.worktree_digest.clone());
         evidence.at = Utc::now();
         engine
-            .run_evidence
+            .l4.run_evidence
             .append_step_attestation(&evidence)
             .await
             .unwrap();
@@ -2933,7 +2933,7 @@ mod tests {
         evidence.verdict = AttestationVerdict::Fail;
         evidence.at += chrono::Duration::seconds(1);
         engine
-            .run_evidence
+            .l4.run_evidence
             .append_step_attestation(&evidence)
             .await
             .unwrap();
@@ -2948,13 +2948,13 @@ mod tests {
         std::fs::write(work.join("release.bin"), "output").unwrap();
         let task = task(&engine, Some("docs")).await;
         engine.start_run(&task.id, Trigger::Manual).await;
-        let mut run = engine.store.active_run(&task.id).await.unwrap().unwrap();
+        let mut run = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         run.artifacts = engine
             .capture_artifacts(&run, &task, &["release.bin".into()])
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &run.id,
                 &RunPatch {
@@ -2966,8 +2966,8 @@ mod tests {
             .unwrap();
         let record =
             factory_core::provenance::statement(&run, &run.artifacts[0], &[], "test", Utc::now());
-        engine.run_evidence.append_provenance(&record).await.unwrap();
-        assert_eq!(engine.run_evidence.provenance(&run.id).await.unwrap().len(), 1);
+        engine.l4.run_evidence.append_provenance(&record).await.unwrap();
+        assert_eq!(engine.l4.run_evidence.provenance(&run.id).await.unwrap().len(), 1);
         assert!(engine.run_provenance(&run.id).await.unwrap().is_empty());
         engine
             .cancel_task_run(
@@ -3034,10 +3034,10 @@ mod tests {
                 agent: "shell".into(),
                 attempt: 1,
             }.into());
-            engine.store.create(&t).await.unwrap()
+            engine.l4.store.create(&t).await.unwrap()
         };
         let bench_run = engine
-            .store
+            .l4.store
             .create_run(&NewRun {
                 task_id: bench_task.id.clone(),
                 trigger: Trigger::Manual,
@@ -3051,7 +3051,7 @@ mod tests {
             .await
             .unwrap();
         engine
-            .store
+            .l4.store
             .update_run(
                 &bench_run.id,
                 &RunPatch {
