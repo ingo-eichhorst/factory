@@ -17,6 +17,7 @@ pub mod store;
 mod promotion;
 mod recovery;
 mod releases;
+mod report;
 
 pub use store::EnvironmentStore;
 
@@ -34,7 +35,13 @@ use std::sync::Arc;
 
 use crate::access::Caller;
 use crate::engine::Engine;
+use crate::l1_service::L1Service;
 use store::Finished;
+use factory_core::environments::{SamplePage, SampleQuery};
+
+fn bad(message: impl Into<String>) -> FactoryError {
+    FactoryError::BadRequest(message.into())
+}
 
 /// How often the loop looks for a check that is due. A check runs at most
 /// every `environments::MIN_EVERY_SECONDS`, so this is fine enough.
@@ -186,7 +193,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 }
             }
             Some(sample) = rx.recv() => {
-                engine.take_sample(&mut checker, sample).await;
+                engine.l1_service().take_sample(&mut checker, sample).await;
             }
             _ = shutdown.changed() => {
                 if *shutdown.borrow() { return; }
@@ -195,13 +202,14 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
     }
 }
 
-impl Engine {
+
+impl L1Service<'_> {
     /// Record one answer, and publish the environment's status if it moved.
     async fn take_sample(&self, checker: &mut Checker, sample: Sample) {
-        if let Err(e) = self.l1.environments.append_sample(sample.clone()).await {
+        if let Err(e) = self.state.environments.append_sample(sample.clone()).await {
             tracing::warn!(environment = sample.environment, check = sample.check, "could not record a health sample: {e}");
         }
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         let checks: Vec<String> = factory
             .config
             .environments()
@@ -211,7 +219,7 @@ impl Engine {
             .unwrap_or_default();
         if let Some(status) = checker.answered(&sample, &checks) {
             tracing::info!(environment = sample.environment, ?status, "environment status changed");
-            self.shared.bus.publish(Event::EnvironmentStatusChanged {
+            self.wiring.bus().publish(Event::EnvironmentStatusChanged {
                 environment: sample.environment.clone(),
                 status,
                 at: sample.at,
@@ -219,62 +227,10 @@ impl Engine {
         }
     }
 
-    /// The Operations tab's report, narrowed to `scope`'s subtree when one
-    /// is named.
-    pub(crate) async fn environments_report(&self, scope: Option<String>) -> Result<EnvironmentsReport> {
-        self.environment_report(scope, true).await
-    }
-
-    /// Metric production reads L1 history only, not pending L4 workflows.
-    async fn environment_report(&self, scope: Option<String>, actions: bool) -> Result<EnvironmentsReport> {
-        let factory_infrastructure::environment_facts::History {
-            mut report, declarations: declared, members, deployments: history,
-        } = crate::facts::infrastructure_environments(self).history(scope.as_deref()).await?;
-        if actions {
-            let pending = self.l4.workflows.active_runs().await?;
-            for deployment in &report.deployments {
-                if let Ok(plan) = self.deployment_mirror_plan(&deployment.id).await {
-                    let receipt = crate::facts::Facts::<factory_kernel::People>::new(self).get::<factory_kernel::DeploymentMirrorFact>(&deployment.id).await?.into_iter().next();
-                    report.deployment_mirrors.insert(deployment.id.clone(), env::DeploymentMirrorOffer { plan, receipt });
-                }
-            }
-            report.recovery_journal = Some(crate::facts::Facts::<factory_kernel::People>::new(self).get::<factory_kernel::RecoveryJournalFact>(
-                &crate::facts::RecoveryQuery { scopes: members.clone(), limit: 200 }
-            ).await?);
-            report.recoveries = crate::facts::Facts::<factory_kernel::People>::new(self).get::<factory_kernel::EnvironmentRecoveryFact>(
-                &crate::facts::RecoveryQuery { scopes: members.clone(), limit: 200 }
-            ).await?;
-            for card in &mut report.environments {
-                if let Some((scope, environment)) = declared.iter().find(|(_, environment)| environment.name == card.name) {
-                    let mut reason = self.recovery_recipe(scope, environment).await.err().map(|error| error.to_string());
-                    if pending.iter().any(|run| operation_targets(run, &card.name)) || card.running.is_some() {
-                        reason = Some("an environment operation is already pending or running".into());
-                    }
-                    card.recovery_ready = reason.is_none();
-                    card.recovery_reason = reason;
-                }
-                if let Some((_, source)) = declared.iter().find(|(_, environment)| {
-                    environment.name == card.name && environment.promotes_to.is_some()
-                }) {
-                    let reason = match self.promotion_target(source, card.current.as_ref(), &history).await {
-                        Err(error) => Some(error.to_string()),
-                        Ok((_, target, _)) if pending.iter().any(|run| operation_targets(run, &target.name)) => {
-                            Some("a promotion to this target is already pending".into())
-                        }
-                        Ok(_) => None,
-                    };
-                    card.promotion_ready = reason.is_none();
-                    card.promotion_reason = reason;
-                }
-            }
-        }
-        Ok(report)
-    }
-
     /// The scope a `deploy.start` belongs to: a declared environment's own,
     /// else the one it names, else the caller's, else the root scope's.
     pub(crate) fn deploy_scope(&self, req: &DeployStart, caller: &Caller) -> Result<String> {
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         if let Some((scope, _)) = factory.config.environments().into_iter().find(|(_, d)| d.name == req.environment) {
             if let Some(asked) = &req.scope {
                 if asked != &scope {
@@ -298,24 +254,11 @@ impl Engine {
             .ok_or_else(|| FactoryError::BadRequest("name the environment's scope with --scope".into()))
     }
 
-    async fn actor(&self, caller: &Caller) -> Actor {
-        match caller {
-            Caller::Owner => Actor { kind: ActorKind::Person, name: "owner".into(), run_id: None, task_id: None },
-            Caller::Agent { name, run_id: Some(run_id), .. } => {
-                let task_id = self.l4.store.get_run(run_id).await.ok().flatten().map(|r| r.task_id);
-                Actor { kind: ActorKind::Run, name: name.clone(), run_id: Some(run_id.clone()), task_id }
-            }
-            Caller::Agent { name, run_id: None, .. } => {
-                Actor { kind: ActorKind::Agent, name: name.clone(), run_id: None, task_id: None }
-            }
-        }
-    }
-
     /// Record a deployment starting. One still running on the same
     /// environment was never finished; it is ended as failed, naming the
     /// one that took its place, rather than left running forever.
-    pub(crate) async fn deploy_start(&self, caller: &Caller, mut req: DeployStart) -> Result<Deployment> {
-        let _edit = self.l1.deployment_edit.lock().await;
+    pub(crate) async fn deploy_start(&self, caller: &Caller, actor: Actor, mut req: DeployStart) -> Result<Deployment> {
+        let _edit = self.state.deployment_edit.lock().await;
         if !env::is_env_name(&req.environment) {
             return Err(FactoryError::BadRequest(format!(
                 "{:?} is not an environment name: lowercase letters, digits, `-` and `_`",
@@ -327,23 +270,22 @@ impl Engine {
             return Err(FactoryError::BadRequest("a deployment names the commit it releases".into()));
         }
         let scope = self.deploy_scope(&req, caller)?;
-        if req.strict_verification && !self.factory_snapshot().config.environments().iter()
+        if req.strict_verification && !self.wiring.snapshot().config.environments().iter()
             .any(|(_, environment)| environment.name == req.environment && !environment.paused && !environment.checks.is_empty()) {
             return Err(FactoryError::BadRequest("strict verification needs declared, unpaused environment checks".into()));
         }
         if req.release.committed_at.is_none() {
-            let dir = self.factory_snapshot().scope_path(&scope).ok();
+            let dir = self.wiring.snapshot().scope_path(&scope).ok();
             req.release.committed_at = match dir {
                 Some(dir) => committed_at(dir, req.release.commit.clone()).await,
                 None => None,
             };
         }
-        let history = self.l1.environments.deployments().await?;
+        let history = self.state.environments.deployments().await?;
         let on_env: Vec<&Deployment> = history.iter().filter(|d| d.environment == req.environment).collect();
         let previous_commit =
             on_env.iter().find(|d| d.status == DeployStatus::Succeeded).map(|d| d.release.commit.clone());
         self.enrich_release(&scope, &mut req.release, previous_commit.as_deref()).await?;
-        let actor = self.actor(caller).await;
         let now = Utc::now();
         let deployment = Deployment {
             id: uuid::Uuid::new_v4().to_string(),
@@ -368,21 +310,21 @@ impl Engine {
                 reason: Some(format!("never finished; superseded by deployment {}", deployment.id)),
                 verification: None,
             };
-            self.l1.environments.finished(&stale.id, finished).await?;
-            if let Some(ended) = self.l1.environments.deployment(&stale.id).await? {
-                self.shared.bus.publish(Event::DeploymentUpdated { deployment: Box::new(ended) });
+            self.state.environments.finished(&stale.id, finished).await?;
+            if let Some(ended) = self.state.environments.deployment(&stale.id).await? {
+                self.wiring.bus().publish(Event::DeploymentUpdated { deployment: Box::new(ended) });
             }
         }
-        self.l1.environments.started(&deployment).await?;
-        self.shared.bus.publish(Event::DeploymentUpdated { deployment: Box::new(deployment.clone()) });
+        self.state.environments.started(&deployment).await?;
+        self.wiring.bus().publish(Event::DeploymentUpdated { deployment: Box::new(deployment.clone()) });
         Ok(deployment)
     }
 
     /// Record how a deployment ended. A success runs the environment's own
     /// checks first and is only recorded as one when they pass.
     pub(crate) async fn deploy_finish(&self, req: DeployFinish) -> Result<Deployment> {
-        let _edit = self.l1.deployment_edit.lock().await;
-        let Some(deployment) = self.l1.environments.deployment(&req.id).await? else {
+        let _edit = self.state.deployment_edit.lock().await;
+        let Some(deployment) = self.state.environments.deployment(&req.id).await? else {
             return Err(FactoryError::BadRequest(format!("no deployment {}", req.id)));
         };
         if deployment.status != DeployStatus::Running {
@@ -418,20 +360,20 @@ impl Engine {
         // Verification is part of the attempt; its time belongs in the
         // duration and the instant the release became verified/running.
         finished.at = Utc::now();
-        self.l1.environments.finished(&req.id, finished).await?;
+        self.state.environments.finished(&req.id, finished).await?;
         let ended = self
-            .l1.environments
+            .state.environments
             .deployment(&req.id)
             .await?
             .ok_or_else(|| FactoryError::BadRequest(format!("no deployment {}", req.id)))?;
-        self.shared.bus.publish(Event::DeploymentUpdated { deployment: Box::new(ended.clone()) });
+        self.wiring.bus().publish(Event::DeploymentUpdated { deployment: Box::new(ended.clone()) });
         Ok(ended)
     }
 
     /// Run every check of a declared, unpaused environment once, now, and
     /// keep the answers as samples too. `None` when it has none to run.
     async fn verify_environment(&self, environment: &str) -> Option<DeployVerification> {
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         let due: Vec<Due> = declared_checks(&factory).into_iter().filter(|d| d.environment == environment).collect();
         if due.is_empty() {
             return None;
@@ -445,7 +387,7 @@ impl Engine {
             }
         }
         for s in &samples {
-            if let Err(e) = self.l1.environments.append_sample(s.clone()).await {
+            if let Err(e) = self.state.environments.append_sample(s.clone()).await {
                 tracing::warn!("could not record a verification sample: {e}");
             }
         }
@@ -453,7 +395,7 @@ impl Engine {
     }
 
     pub(crate) async fn release_add(&self, req: ReleaseAdd) -> Result<(String, ReleaseFacts)> {
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         factory.scope(&req.scope)?;
         let mut release = req.release;
         release.commit = release.commit.trim().to_string();
@@ -465,18 +407,55 @@ impl Engine {
                 release.committed_at = committed_at(dir, release.commit.clone()).await;
             }
         }
-        let added = self.l1.environments.releases_added().await?;
-        let deployments = self.l1.environments.deployments().await?;
+        let added = self.state.environments.releases_added().await?;
+        let deployments = self.state.environments.deployments().await?;
         let previous = added.iter().filter(|(scope, facts, _)| scope == &req.scope && facts.commit != release.commit)
             .map(|(_, facts, at)| (facts.commit.clone(), *at))
             .chain(deployments.iter().filter(|deployment| deployment.scope == req.scope && deployment.release.commit != release.commit)
                 .map(|deployment| (deployment.release.commit.clone(), deployment.started_at)))
             .max_by_key(|(_, at)| *at).map(|(commit, _)| commit);
         self.enrich_release(&req.scope, &mut release, previous.as_deref()).await?;
-        self.l1.environments.release_added(&req.scope, &release, Utc::now()).await?;
+        self.state.environments.release_added(&req.scope, &release, Utc::now()).await?;
         Ok((req.scope, release))
     }
 
+    /// A run may verify the repaired environment using deploy.record's
+    /// existing scope/reach checks. Missing or paused checks are not success.
+    pub(crate) async fn check_environment(&self, environment: &str) -> Result<DeployVerification> {
+        self.verify_environment(environment)
+            .await
+            .ok_or_else(|| bad("verification needs declared, unpaused health checks"))
+    }
+
+    pub(crate) async fn environment_samples(&self, query: SampleQuery) -> Result<SamplePage> {
+        let snapshot = self.wiring.snapshot();
+        let (scope, declaration) = snapshot
+            .config
+            .environments()
+            .into_iter()
+            .find(|(_, declaration)| declaration.name == query.environment)
+            .ok_or_else(|| bad("the environment is not declared"))?;
+        if !declaration.checks.iter().any(|check| check.display_name() == query.check) {
+            return Err(bad("the check is not declared on this environment"));
+        }
+        if let Some(asked) = &query.scope {
+            let (root, children) = factory_core::config::subtree_scopes(&snapshot, Some(asked))?;
+            if !root.iter().chain(&children).any(|member| member.name == scope) {
+                return Err(bad("the environment is outside the selected scope"));
+            }
+        }
+        let now = Utc::now();
+        let to = query.to.unwrap_or(now);
+        let from = query.from.unwrap_or(to - Duration::hours(24));
+        let limit = query.limit.unwrap_or(200);
+        if from >= to || from < now - Duration::days(env::SAMPLE_RETENTION_DAYS) || to > now + Duration::seconds(5) {
+            return Err(bad("sample window must be nonempty, within the retained 90 days and not in the future"));
+        }
+        if !(1..=500).contains(&limit) || query.before.is_some_and(|cursor| cursor <= 0) {
+            return Err(bad("sample limit is 1..500 and the before cursor must be positive"));
+        }
+        self.state.environments.sample_page(query.environment, query.check, from, to, query.before, limit).await
+    }
 }
 
 /// When `commit` was made, asked of the scope's repository -- where lead
@@ -759,11 +738,11 @@ pub(crate) mod tests {
             slow: false,
             detail: None,
         };
-        engine.take_sample(&mut checker, sample(0, true)).await;
+        engine.l1_service().take_sample(&mut checker, sample(0, true)).await;
         assert!(checker.due(declared_checks(&factory), t0 + std::time::Duration::from_secs(30)).is_empty(), "not yet");
         assert_eq!(checker.due(declared_checks(&factory), t0 + std::time::Duration::from_secs(61)).len(), 1);
         for i in 1..=INCIDENT_THRESHOLD as i64 {
-            engine.take_sample(&mut checker, sample(i, false)).await;
+            engine.l1_service().take_sample(&mut checker, sample(i, false)).await;
         }
         match events.recv().await.unwrap() {
             Event::EnvironmentStatusChanged { environment, status, .. } => {
@@ -778,7 +757,7 @@ pub(crate) mod tests {
         assert_eq!(prod.incidents[0].ended_at, None);
         assert!(prod.error_budget.unwrap() < 0.0, "a third of samples failing overspends a 1% budget");
 
-        engine.take_sample(&mut checker, sample(5, true)).await;
+        engine.l1_service().take_sample(&mut checker, sample(5, true)).await;
         assert!(matches!(
             events.recv().await.unwrap(),
             Event::EnvironmentStatusChanged { status: EnvStatus::Up, .. }
@@ -819,14 +798,14 @@ pub(crate) mod tests {
             environment: "prod".into(), check: "api".into(), at,
             ok: true, latency_ms: 1, slow: false, detail: None,
         };
-        engine.take_sample(&mut checker, fast.clone()).await;
+        engine.l1_service().take_sample(&mut checker, fast.clone()).await;
         let slow = Sample {
             at: at + Duration::seconds(1), latency_ms: 100, slow: true,
             detail: Some("slow: 100ms exceeds 1ms".into()), ..fast.clone()
         };
-        engine.take_sample(&mut checker, slow.clone()).await;
+        engine.l1_service().take_sample(&mut checker, slow.clone()).await;
         assert!(matches!(events.try_recv().unwrap(), Event::EnvironmentStatusChanged { status: EnvStatus::Degraded, .. }));
-        engine.take_sample(&mut checker, Sample { at: at + Duration::seconds(2), ..slow.clone() }).await;
+        engine.l1_service().take_sample(&mut checker, Sample { at: at + Duration::seconds(2), ..slow.clone() }).await;
         assert!(events.try_recv().is_err(), "unchanged status publishes nothing");
         let prod = engine.environments_report(None).await.unwrap().environments.remove(0);
         assert_eq!(prod.status, EnvStatus::Degraded);
@@ -837,9 +816,9 @@ pub(crate) mod tests {
         assert_eq!(prod.checks[0].slow_after_ms, Some(1));
         assert!(prod.checks[0].last.as_ref().unwrap().slow);
         assert_eq!(prod.checks[0].strip.iter().map(|b| b.slow).sum::<u32>(), 2);
-        engine.take_sample(&mut checker, Sample { at: at + Duration::seconds(3), ..fast }).await;
+        engine.l1_service().take_sample(&mut checker, Sample { at: at + Duration::seconds(3), ..fast }).await;
         assert!(matches!(events.try_recv().unwrap(), Event::EnvironmentStatusChanged { status: EnvStatus::Up, .. }));
-        let verified = engine.verify_environment("prod").await.unwrap();
+        let verified = engine.l1_service().verify_environment("prod").await.unwrap();
         assert!(verified.ok, "slow is not unavailable");
         assert!(verified.checks[0].slow);
         drop(engine);

@@ -45,20 +45,20 @@ impl Engine {
                 run: self.promote_environment(caller, req).await?,
             }),
             Request::EnvironmentRecover(req) => Ok(Payload::WorkflowRun { run: self.recover_environment(caller, req).await? }),
-            Request::EnvironmentCheck { environment } => Ok(Payload::EnvironmentVerification { verification: self.check_environment(&environment).await? }),
-            Request::EnvironmentSamples(query) => Ok(Payload::EnvironmentSamples { page: self.environment_samples(query).await? }),
+            Request::EnvironmentCheck { environment } => Ok(Payload::EnvironmentVerification { verification: self.l1_service().check_environment(&environment).await? }),
+            Request::EnvironmentSamples(query) => Ok(Payload::EnvironmentSamples { page: self.l1_service().environment_samples(query).await? }),
             Request::ReleaseDetail(query) => Ok(Payload::ReleaseDetail { detail: Box::new(self.release_detail(query).await?) }),
             // `deployment_updated` is published inside.
             Request::DeployStart(req) => Ok(Payload::Deployment {
                 deployment: Box::new(self.deploy_start(caller, req).await?),
             }),
             Request::DeployFinish(req) => Ok(Payload::Deployment {
-                deployment: Box::new(self.deploy_finish(req).await?),
+                deployment: Box::new(self.l1_service().deploy_finish(req).await?),
             }),
             Request::DeployMirrorPlan { id } => Ok(Payload::DeploymentMirrorPlan { plan: self.deployment_mirror_plan(&id).await? }),
             Request::DeployPublish { id, approval } => Ok(Payload::DeploymentMirror { receipt: self.publish_deployment(caller, &id, &approval).await? }),
             Request::ReleaseAdd(req) => {
-                let (scope, release) = self.release_add(req).await?;
+                let (scope, release) = self.l1_service().release_add(req).await?;
                 Ok(Payload::ReleaseAdded { scope, release })
             }
             Request::BackupVerify { snapshot, identity } => Ok(Payload::BackupVerify {

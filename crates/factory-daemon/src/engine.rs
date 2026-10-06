@@ -254,7 +254,6 @@ impl Engine {
                 environments: crate::environments::EnvironmentStore::in_memory()
                     .expect("an in-memory environment store should open"),
                 deployment_edit: tokio::sync::Mutex::new(()),
-                deployment_mirror_busy: tokio::sync::Mutex::new(()),
                 verify_drill_skip: std::sync::Mutex::new(None),
                 infrastructure_expiries: crate::renewals::store::InfrastructureExpiryStore::in_memory().expect("expiry metadata store should open"),
                 renewal_declaration_cache: Default::default(),
@@ -288,6 +287,7 @@ impl Engine {
                 capacity_release_rx: std::sync::Mutex::new(Some(capacity_release_rx)),
                 workspaces,
                 run_lifecycle_locks: Default::default(),
+                deployment_mirror_busy: tokio::sync::Mutex::new(()),
                 seen_status: Default::default(),
                 worktree_caps: Default::default(),
             },

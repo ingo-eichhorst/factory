@@ -69,8 +69,6 @@ pub struct L1State {
     /// Deployment transitions are read-modify-write operations. Keep starts,
     /// supersession and finishes ordered, including post-deploy verification.
     pub(crate) deployment_edit: tokio::sync::Mutex<()>,
-    /// Serializes approved remote effects without holding a deployment/health lock.
-    pub(crate) deployment_mirror_busy: tokio::sync::Mutex<()>,
     /// `#156`: the due slot and reason a verification drill last skipped for
     /// (an encrypted newest snapshot with no identity), so the job logs it
     /// once per slot rather than on every tick -- the same skip can recur
@@ -182,6 +180,9 @@ pub struct L4State {
     /// attempts for the same waiting task overlapped.
     pub(crate) capacity_release_tx: tokio::sync::mpsc::UnboundedSender<CapacityEvent>,
     pub(crate) capacity_release_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<CapacityEvent>>>,
+    /// L4's outbound GitHub deployment mirror (`github_deployments.rs`): serializes
+    /// approved remote effects. It moved here from L1 with the mirror itself.
+    pub(crate) deployment_mirror_busy: tokio::sync::Mutex<()>,
 }
 
 /// L5 Improvement: benchmarks, datasets, suggestions, quality and signposts.

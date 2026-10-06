@@ -41,16 +41,20 @@ use Owner::*;
 const OWNERS: &[(&str, Owner)] = &[
     // L1 Infrastructure
     ("backup/", L1),
+    ("environments/promotion.rs", Wiring),
+    ("environments/recovery.rs", Wiring),
+    ("environments/report.rs", Wiring),
     ("environments/", L1),
     ("host.rs", L1),
     ("host_power.rs", L1),
     ("host_power/", L1),
     ("power.rs", L1),
-    ("github_deployments.rs", L1),
-    ("doctor.rs", L1),
+    ("github_deployments.rs", L4),
+    ("doctor.rs", Wiring),
     ("renewals/", L1), // also touches L2 and L6 state, see BASELINE
     // L2 Environment
     ("provision.rs", L2),
+    ("l1_service.rs", L1),
     ("l2_service.rs", L2),
     ("provision/", L2),
     ("secrets.rs", L2),
@@ -124,9 +128,6 @@ const BASELINE: &[(&str, &str, usize)] = &[
     ("bench/engine.rs", "l4", 8),
     ("datasets.rs", "l4", 2),
     ("dependencies.rs", "l4", 2),
-    ("doctor.rs", "l2", 2),
-    ("environments/mod.rs", "l4", 2),
-    ("github_deployments.rs", "l4", 4),
     ("harness_health.rs", "l4", 7),
     ("host_power.rs", "l4", 2),
     ("operations.rs", "l2", 1),
@@ -144,6 +145,7 @@ struct ServiceEntry {
     accessor: &'static str,
 }
 const SERVICES: &[ServiceEntry] = &[
+    ServiceEntry { owner: L1, accessor: ".l1_service()" },
     ServiceEntry { owner: L2, accessor: ".l2_service()" },
     ServiceEntry { owner: L6, accessor: ".l6_service()" },
 ];
@@ -160,7 +162,6 @@ const PULLS_BASELINE: &[(&str, usize)] = &[
 
 /// Files that name `Facts::<People>` today (count). May only shrink.
 const PEOPLE_BASELINE: &[(&str, usize)] = &[
-    ("environments/mod.rs", 3),
     ("production.rs", 1),
     ("signposts.rs", 1),
 ];
@@ -198,22 +199,78 @@ fn is_test_file(relative: &str) -> bool {
     name == "tests.rs" || name.ends_with("_tests.rs")
 }
 
-/// Production code only, comments blanked.
+/// Production code only: `#[cfg(test)] mod x { .. }` removed wherever it sits in
+/// the file (a few files keep their tests before the code they test), and
+/// comment lines dropped.
 fn production_code(source: &str) -> String {
-    // The test module, not an item that is only compiled for tests.
-    let mut end = source.len();
+    let bytes = source.as_bytes();
+    let mut kept = String::new();
     let mut from = 0;
     while let Some(at) = source[from..].find("#[cfg(test)]") {
         let at = from + at;
-        let rest = source[at + "#[cfg(test)]".len()..].trim_start();
-        if rest.starts_with("mod ") || rest.starts_with("pub mod ") || rest.starts_with("pub(crate) mod ") {
-            end = at;
-            break;
+        let after = at + "#[cfg(test)]".len();
+        let rest = source[after..].trim_start();
+        let is_mod = ["mod ", "pub mod ", "pub(crate) mod "].iter().any(|p| rest.starts_with(p));
+        let open = source[after..].find('{').map(|i| after + i);
+        let Some(open) = open.filter(|_| is_mod) else {
+            kept.push_str(&source[from..after]);
+            from = after;
+            continue;
+        };
+        kept.push_str(&source[from..at]);
+        // Skip to the matching brace, passing over strings, chars and comments.
+        let mut depth = 0usize;
+        let mut i = open;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'"' => {
+                    // raw string `r#"..."#`: count the hashes before the quote
+                    let hashes = source[..i].bytes().rev().take_while(|b| *b == b'#').count();
+                    let raw = source[..i - hashes].ends_with('r');
+                    i += 1;
+                    while i < bytes.len() {
+                        if raw {
+                            if bytes[i] == b'"' && source[i + 1..].bytes().take(hashes).all(|b| b == b'#') {
+                                i += hashes;
+                                break;
+                            }
+                        } else if bytes[i] == b'\\' {
+                            i += 1;
+                        } else if bytes[i] == b'"' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'\'' => {
+                    // a char literal `'x'` / `'\n'`; a lifetime has no closing quote nearby
+                    if bytes.get(i + 2) == Some(&b'\'') {
+                        i += 2;
+                    } else if bytes.get(i + 1) == Some(&b'\\') && bytes.get(i + 3) == Some(&b'\'') {
+                        i += 3;
+                    }
+                }
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
         }
-        from = at + 1;
+        from = (i + 1).min(source.len());
     }
-    source[..end]
-        .lines()
+    kept.push_str(&source[from..]);
+    kept.lines()
         .filter(|line| !line.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n")
@@ -427,4 +484,10 @@ fn the_scanner_sees_a_reach_and_ignores_comments_and_tests() {
     assert_eq!(reach.get("l5"), None);
     assert_eq!(reach.get("l6"), None);
     assert_eq!(group_reach("self.l40.x; self.l4_x.y; other.l4.z;").len(), 0);
+    // A test module in the middle of a file hides only itself, braces in strings included.
+    let code = production_code(
+        "fn a(&self) { self.l1.x; }\n#[cfg(test)]\nmod tests { fn t() { let s = \"}{\"; let c = '}'; self.l2.y; } }\nfn b(&self) { self.l3.z; }\n",
+    );
+    let reach = group_reach(&code);
+    assert_eq!((reach.get("l1"), reach.get("l2"), reach.get("l3")), (Some(&1), None, Some(&1)));
 }

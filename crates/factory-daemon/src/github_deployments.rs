@@ -119,7 +119,7 @@ impl Engine {
             },
         )
         .await?;
-        let _busy = self.l1.deployment_mirror_busy.try_lock().map_err(|_| {
+        let _busy = self.l4.deployment_mirror_busy.try_lock().map_err(|_| {
             bad("another deployment mirror is being published; retry after it finishes")
         })?;
         let plan = self.deployment_mirror_plan(id).await?;
@@ -877,7 +877,7 @@ esac
         let id = start(&engine, SHA, false).await;
         let plan = engine.deployment_mirror_plan(&id).await.unwrap();
         let gh = fake_gh(&root, &plan, 81);
-        let guard = engine.l1.deployment_mirror_busy.lock().await;
+        let guard = engine.l4.deployment_mirror_busy.lock().await;
         assert!(engine
             .publish_deployment_with_gh(&Caller::Owner, &id, &plan.approval, &gh)
             .await

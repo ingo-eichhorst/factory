@@ -1091,9 +1091,9 @@ mod tests {
             .next()
             .unwrap();
         assert!(costs.contains("Facts::<factory_kernel::People>"));
-        let release = include_str!("../environments/releases.rs");
+        let release = include_str!("../environments/report.rs");
         assert!(release.contains("let reader = Facts::<factory_kernel::People>"));
-        let environments = include_str!("../environments/mod.rs")
+        let environments = include_str!("../environments/report.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
