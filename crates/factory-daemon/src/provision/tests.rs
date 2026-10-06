@@ -35,7 +35,7 @@ impl Fixture {
         self.engine.l2.provision.readiness(&self.key()).expect("the pass judged the agent")
     }
     async fn pass(&self) -> Readiness {
-        self.engine.provision_pass().await;
+        self.engine.l2_service().provision_pass().await;
         self.readiness()
     }
 }
@@ -215,7 +215,7 @@ async fn declared_providers_are_made_from_their_sources_and_the_values_go_only_t
     for secret in ["file-secret-123", "cmd-secret-456"] {
         assert!(!calls.contains(secret), "{secret} on a command line: {calls}");
         assert!(!serde_json::to_string(&f.engine.l2.provision.all().values().collect::<Vec<_>>()).unwrap().contains(secret));
-        assert!(!serde_json::to_string(&declared(&f.engine)[0].config).unwrap().contains(secret));
+        assert!(!serde_json::to_string(&declared(&f.engine.factory_snapshot())[0].config).unwrap().contains(secret));
     }
 
     // The smoke ran once, labelled so a restart sweeps an orphan, and was deleted.
@@ -293,26 +293,26 @@ async fn a_credential_file_others_can_read_is_refused_and_nothing_is_created() {
 #[tokio::test]
 async fn a_source_removed_or_rotated_since_the_last_pass_is_found_at_dispatch() {
     let f = managed();
-    let config = declared(&f.engine)[0].config.clone();
+    let config = declared(&f.engine.factory_snapshot())[0].config.clone();
     assert_eq!(f.pass().await.state, ReadinessState::Ready);
-    assert!(f.engine.sandbox_gate(&f.key(), &config).await.is_ok());
+    assert!(f.engine.l2_service().sandbox_gate(&f.key(), &config).await.is_ok());
 
     // Rotated: the dispatch waits for the pass that gives the new value.
     let engine = f.engine.clone();
     let looping = tokio::spawn(async move {
         loop {
             engine.l2.provision.wake.notified().await;
-            engine.provision_pass().await;
+            engine.l2_service().provision_pass().await;
         }
     });
     private_file(&f.root.join("secrets/claude"), "rotated-before-dispatch", 0o600);
-    assert!(f.engine.sandbox_gate(&f.key(), &config).await.is_ok());
+    assert!(f.engine.l2_service().sandbox_gate(&f.key(), &config).await.is_ok());
     assert_eq!(f.file("given-CLAUDE_CODE_OAUTH_TOKEN").as_deref(), Some("rotated-before-dispatch"));
     looping.abort();
 
     // Removed: the run fails closed now, with the one thing and its command.
     std::fs::remove_file(f.root.join("secrets/claude")).unwrap();
-    let e = f.engine.sandbox_gate(&f.key(), &config).await.unwrap_err();
+    let e = f.engine.l2_service().sandbox_gate(&f.key(), &config).await.unwrap_err();
     assert!(e.contains("needs the credential for factory-claude") && e.contains("cannot be read") && e.contains("claude setup-token"), "{e}");
 }
 
@@ -368,7 +368,7 @@ async fn a_credential_the_endpoint_rejects_fails_the_smoke_and_the_agent_needs_i
     assert!(r.thing.as_deref().unwrap().contains("credential was rejected"), "{r:?}");
     assert!(r.command.as_deref().unwrap().contains("claude setup-token"), "{r:?}");
     assert!(f.calls().lines().any(|l| l.starts_with("sandbox delete factory-s")), "the smoke sandbox is deleted either way");
-    let gate = f.engine.sandbox_gate(&f.key(), &declared(&f.engine)[0].config).await.unwrap_err();
+    let gate = f.engine.l2_service().sandbox_gate(&f.key(), &declared(&f.engine.factory_snapshot())[0].config).await.unwrap_err();
     assert!(gate.contains("credential was rejected"), "{gate}");
     // Nothing changed: the next pass does not make another VM to be told
     // the same thing, and the readiness keeps its age.
@@ -403,7 +403,7 @@ async fn a_gateway_that_went_down_since_the_last_pass_is_started_by_the_next_dis
     let f = managed();
     assert_eq!(f.pass().await.state, ReadinessState::Ready);
     std::fs::write(f.dir.join("gateway"), "disconnected").unwrap();
-    let resolved = f.engine.sandbox_gate(&f.key(), &declared(&f.engine)[0].config).await;
+    let resolved = f.engine.l2_service().sandbox_gate(&f.key(), &declared(&f.engine.factory_snapshot())[0].config).await;
     assert!(resolved.is_ok(), "{resolved:?}");
     assert!(f.file("launchctl.log").unwrap().contains("kickstart"));
     assert_eq!(f.file("gateway").as_deref().map(str::trim), Some("connected"));
@@ -444,7 +444,7 @@ async fn factorys_image_is_built_in_the_background_and_the_previous_one_kept_whi
     assert_eq!(r.state, ReadinessState::Ready, "{r:?}");
     let first = r.image.clone().unwrap();
     assert!(first.contains("/.factory/openshell-images/") && first.ends_with("/factory-agent-rootfs.tar.gz"), "{first}");
-    let gate = f.engine.sandbox_gate(&f.key(), &declared(&f.engine)[0].config).await.unwrap();
+    let gate = f.engine.l2_service().sandbox_gate(&f.key(), &declared(&f.engine.factory_snapshot())[0].config).await.unwrap();
     assert_eq!(gate.image, first);
     assert_eq!(gate.providers, [format!("factory-claude-{SUFFIX}"), format!("factory-github-{SUFFIX}")]);
 
@@ -474,7 +474,7 @@ async fn an_agent_that_names_nothing_the_daemon_keeps_is_checked_but_never_gated
     std::fs::write(f.dir.join("providers/by-hand"), "github").unwrap();
     assert_eq!(f.pass().await.state, ReadinessState::Ready);
     assert!(!f.calls().contains("sandbox create"), "nothing of the daemon's to prove");
-    let resolved = f.engine.sandbox_gate(&f.key(), &declared(&f.engine)[0].config).await.unwrap();
+    let resolved = f.engine.l2_service().sandbox_gate(&f.key(), &declared(&f.engine.factory_snapshot())[0].config).await.unwrap();
     assert_eq!(resolved.providers, ["by-hand"]);
 }
 
@@ -508,7 +508,7 @@ async fn failed_rebuild_keeps_old_image_usable_but_is_visible_until_recovery() {
     assert!(failure.reason.contains("missing musl C compiler"));
     assert!(failure.reason.contains(".log"));
     assert!(failure.command.is_some());
-    let gate = f.engine.sandbox_gate(&f.key(), &declared(&f.engine)[0].config).await.unwrap();
+    let gate = f.engine.l2_service().sandbox_gate(&f.key(), &declared(&f.engine.factory_snapshot())[0].config).await.unwrap();
     assert_eq!(gate.image, old_image);
 
     let doctor = f.engine.doctor_report().await.unwrap();
@@ -570,7 +570,7 @@ async fn sources_resolve_and_a_secret_never_prints() {
 #[tokio::test]
 async fn the_gate_waits_briefly_for_a_first_judgement_and_never_lets_a_needs_through() {
     let f = managed();
-    let config = declared(&f.engine)[0].config.clone();
+    let config = declared(&f.engine.factory_snapshot())[0].config.clone();
     let now = Utc::now();
     let needs = Readiness {
         state: ReadinessState::Needs,
@@ -584,20 +584,20 @@ async fn the_gate_waits_briefly_for_a_first_judgement_and_never_lets_a_needs_thr
         expiring: vec![],
     };
     f.engine.l2.provision.set_for_test(&f.key(), needs);
-    let e = f.engine.sandbox_gate(&f.key(), &config).await.unwrap_err();
+    let e = f.engine.l2_service().sandbox_gate(&f.key(), &config).await.unwrap_err();
     assert!(e.contains("needs the OpenShell gateway") && e.contains("launchctl kickstart"), "{e}");
 
     // Not judged yet: the gate asks for a pass and takes its answer.
     let f = managed();
-    let config = declared(&f.engine)[0].config.clone();
+    let config = declared(&f.engine.factory_snapshot())[0].config.clone();
     let engine = f.engine.clone();
     let looping = tokio::spawn(async move {
         loop {
             engine.l2.provision.wake.notified().await;
-            engine.provision_pass().await;
+            engine.l2_service().provision_pass().await;
         }
     });
-    let resolved = f.engine.sandbox_gate(&f.key(), &config).await;
+    let resolved = f.engine.l2_service().sandbox_gate(&f.key(), &config).await;
     looping.abort();
     assert_eq!(resolved.unwrap().image, f.root.join("image.tar.gz").display().to_string());
 }
@@ -646,7 +646,7 @@ async fn moving_inline_credentials_into_the_catalogue_gives_the_same_digest_and_
     assert_eq!(given.len(), 2, "{given:?}");
 
     by_reference(&f);
-    let d = &declared(&f.engine)[0];
+    let d = &declared(&f.engine.factory_snapshot())[0];
     assert_eq!(d.secrets.keys().collect::<Vec<_>>(), ["factory-claude", "factory-github"]);
     std::fs::write(f.dir.join("calls"), "").unwrap();
     let r = f.pass().await;
@@ -660,7 +660,7 @@ async fn moving_inline_credentials_into_the_catalogue_gives_the_same_digest_and_
     // A dispatch, handed the block as written -- references and all.
     let raw = f.engine.factory_snapshot().scope("demo").unwrap().declared_agents()[0].openshell.clone().unwrap();
     assert!(serde_json::to_string(&raw).unwrap().contains(r#""secret":"claude-oauth-token""#));
-    let resolved = f.engine.sandbox_gate(&f.key(), &raw).await.unwrap();
+    let resolved = f.engine.l2_service().sandbox_gate(&f.key(), &raw).await.unwrap();
     assert_eq!(resolved.providers, [format!("factory-claude-{SUFFIX}"), format!("factory-github-{SUFFIX}")]);
     assert!(!f.calls().contains("provider update"), "{}", f.calls());
 
@@ -695,7 +695,7 @@ async fn a_reference_the_catalogue_does_not_declare_is_a_need_never_a_panic() {
     assert!(r.thing.as_deref().unwrap().contains("the secret claude-oauth-token"), "{r:?}");
     assert!(!f.calls().contains("provider create"));
     let raw = f.engine.factory_snapshot().scope("demo").unwrap().declared_agents()[0].openshell.clone().unwrap();
-    let e = f.engine.sandbox_gate(&f.key(), &raw).await.unwrap_err();
+    let e = f.engine.l2_service().sandbox_gate(&f.key(), &raw).await.unwrap_err();
     assert!(e.contains("the secret claude-oauth-token"), "{e}");
 }
 

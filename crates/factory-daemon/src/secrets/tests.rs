@@ -135,7 +135,7 @@ async fn the_tab_shows_both_entries_with_presence_resolution_expiry_and_users_an
     let (rows, _, _, _) = environment(&engine).await;
     assert_eq!(rows[0].resolves, None, "not checked until the provisioner's first pass");
 
-    engine.check_catalogue().await;
+    engine.l2_service().check_catalogue().await;
     let (rows, undeclared, changes, json) = environment(&engine).await;
     assert_no_value("the Environment payload", &json);
     assert!(changes.is_empty());
@@ -164,7 +164,7 @@ async fn the_tab_shows_both_entries_with_presence_resolution_expiry_and_users_an
 
     // A source that stops resolving says why, and still never what.
     std::fs::set_permissions(_dir.0.join("secrets/claude-oauth-token"), std::fs::Permissions::from_mode(0o644)).unwrap();
-    engine.check_catalogue().await;
+    engine.l2_service().check_catalogue().await;
     let (rows, _, _, json) = environment(&engine).await;
     assert_eq!((rows[0].owner_only, rows[0].resolves), (Some(false), Some(false)));
     assert!(rows[0].reason.as_deref().unwrap().contains("chmod 600"), "{:?}", rows[0].reason);
@@ -231,7 +231,7 @@ async fn changing_the_date_writes_the_root_config_journals_who_and_raises_the_in
     assert_eq!(report.entries.iter().filter(|e| e.observation.id.contains("factory-claude")).count(), 0);
 
     // Acceptance 5: no value anywhere this wrote or answered.
-    engine.check_catalogue().await;
+    engine.l2_service().check_catalogue().await;
     assert_no_value("the root config", &dir.root_text());
     assert_no_value("the journal", &serde_json::to_string(&entries).unwrap());
     assert_no_value("Important dates", &serde_json::to_string(&report).unwrap());

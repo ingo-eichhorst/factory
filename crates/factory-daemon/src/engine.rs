@@ -2207,7 +2207,7 @@ impl Engine {
                         "{agent_name} declares sandbox: openshell without an openshell: block; the run was not started on the host instead"
                     ))
                 })?;
-                let callback = config.callback_target(self.http_bind(&factory).as_deref())?;
+                let callback = config.callback_target(crate::facts::selected_http_bind(&factory).as_deref())?;
                 Some((config, callback))
             }
             _ => None,
@@ -2296,7 +2296,7 @@ impl Engine {
                 // its providers -- is ready, or the run fails with the one
                 // thing it needs. Never a fallback to the host.
                 let key = (factory.canonical_scope_name(&task.scope), agent_name.clone());
-                let resolved = self.sandbox_gate(&key, config).await.map_err(|reason| {
+                let resolved = self.l2_service().sandbox_gate(&key, config).await.map_err(|reason| {
                     FactoryError::BadRequest(format!("{reason}. The run was not started on the host instead"))
                 })?;
                 let prompt = agent.prompt(&ctx).await?;
@@ -3744,24 +3744,6 @@ impl Engine {
 
     /// The daemon's own http bind, when it serves the http interface at
     /// all -- what a sandboxed run reports back to.
-    pub(crate) fn http_bind(&self, factory: &Factory) -> Option<String> {
-        let binds: Vec<String> = factory
-            .config
-            .daemon
-            .interfaces
-            .iter()
-            .filter(|interface| interface.kind == "http")
-            .map(|interface| interface.http_bind())
-            .collect();
-        // A loopback one, when there are several: it does not move when the
-        // host's network address does.
-        binds
-            .iter()
-            .find(|bind| bind.starts_with("127.") || bind.starts_with("localhost:") || bind.starts_with("[::1]:"))
-            .or_else(|| binds.first())
-            .cloned()
-    }
-
     /// `#274`: a task's preserved sandbox conversation, when it has one,
     /// is released the same moment its other per-task state is -- closing
     /// or deleting the task, never a periodic sweep of its own.

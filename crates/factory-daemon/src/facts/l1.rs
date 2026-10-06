@@ -71,3 +71,22 @@ pub(super) fn renewal_provider(
             .collect(),
     }
 }
+
+/// The one HTTP bind the daemon reports itself on: a loopback one when there are
+/// several (it does not move when the host's network address does), else the
+/// first. Derived from the L1 interface facts (`InterfaceConfig::http_bind`).
+pub(crate) fn selected_http_bind(factory: &factory_core::config::Factory) -> Option<String> {
+    let binds: Vec<String> = factory
+        .config
+        .daemon
+        .interfaces
+        .iter()
+        .filter(|interface| interface.kind == "http")
+        .map(|interface| interface.http_bind())
+        .collect();
+    binds
+        .iter()
+        .find(|bind| bind.starts_with("127.") || bind.starts_with("localhost:") || bind.starts_with("[::1]:"))
+        .or_else(|| binds.first())
+        .cloned()
+}
