@@ -3,6 +3,8 @@
 
 mod access;
 mod state;
+#[cfg(test)]
+mod level_ownership_tests;
 mod artifacts;
 mod assignments;
 mod agents;

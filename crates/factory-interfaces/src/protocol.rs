@@ -1137,6 +1137,181 @@ pub enum Request {
     Subscribe,
 }
 
+/// The level that serves a request: the routing table the six level routers
+/// (#193 phase 6) are built from.
+///
+/// `Router` is for requests no level owns. A request that is a page composing
+/// several levels is filed under the level whose state it mostly reads; whether
+/// such a module is a page or a service is decided module by module (D5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RouteLevel {
+    L1,
+    L2,
+    L3,
+    L4,
+    L5,
+    L6,
+    Router,
+}
+
+impl Request {
+    /// Which level serves this request. Exhaustive on purpose, with no wildcard
+    /// arm: a new `Request` variant does not compile until it is placed.
+    pub fn level(&self) -> RouteLevel {
+        use RouteLevel::*;
+        match self {
+            // L1
+            Request::Doctor |
+            Request::Infrastructure |
+            Request::HostPowerMode |
+            Request::HostPowerModeSet { .. } |
+            Request::ImportantDates { .. } |
+            Request::Backup |
+            Request::BackupRun |
+            Request::Environments { .. } |
+            Request::EnvironmentPromote(..) |
+            Request::EnvironmentRecover(..) |
+            Request::EnvironmentCheck { .. } |
+            Request::EnvironmentSamples(..) |
+            Request::ReleaseDetail(..) |
+            Request::DeployStart(..) |
+            Request::DeployFinish(..) |
+            Request::DeployMirrorPlan { .. } |
+            Request::DeployPublish { .. } |
+            Request::ReleaseAdd(..) |
+            Request::BackupVerify { .. } |
+            Request::BackupRestore { .. } => L1,
+            // L2
+            Request::TaskAttach { .. } |
+            Request::Environment |
+            Request::Dependencies { .. } |
+            Request::DependenciesVex { .. } |
+            Request::DependencyDocument { .. } |
+            Request::SecretSet { .. } => L2,
+            // L3
+            Request::RuntimeConnections |
+            Request::Agents |
+            Request::AgentStart { .. } |
+            Request::AgentConfigure { .. } |
+            Request::AgentDelete { .. } |
+            Request::AgentStop { .. } |
+            Request::RoleList { .. } |
+            Request::RoleDefine { .. } |
+            Request::RoleDelete { .. } |
+            Request::AgentRole { .. } |
+            Request::AgentInput { .. } |
+            Request::AgentOutput { .. } |
+            Request::AgentScreen { .. } => L3,
+            // L4
+            Request::RunScreen { .. } |
+            Request::RunInput { .. } |
+            Request::RunAnswer { .. } |
+            Request::TaskCreate(..) |
+            Request::TaskGet { .. } |
+            Request::TaskList(..) |
+            Request::TaskUpdate { .. } |
+            Request::TaskDelete { .. } |
+            Request::TaskRun { .. } |
+            Request::TaskCancel { .. } |
+            Request::TaskClose { .. } |
+            Request::TaskReopen { .. } |
+            Request::TaskSkipNext { .. } |
+            Request::TaskReport { .. } |
+            Request::TaskTurnEnded { .. } |
+            Request::TaskEntries { .. } |
+            Request::TaskOutput { .. } |
+            Request::WorkflowCreate(..) |
+            Request::WorkflowGet { .. } |
+            Request::WorkflowList { .. } |
+            Request::WorkflowUpdate { .. } |
+            Request::WorkflowDelete { .. } |
+            Request::WorkflowStart { .. } |
+            Request::WorkflowRunGet { .. } |
+            Request::WorkflowRunList { .. } |
+            Request::WorkflowRunCancel { .. } |
+            Request::WorkflowLint { .. } |
+            Request::RunAttestations { .. } |
+            Request::RunProvenance { .. } |
+            Request::RunApprove { .. } |
+            Request::RunReject { .. } |
+            Request::RunRework { .. } |
+            Request::RunList { .. } |
+            Request::RunGet { .. } |
+            Request::RunEntries { .. } |
+            Request::RunOutput { .. } |
+            Request::Occupancy { .. } |
+            Request::Production { .. } |
+            Request::SiteFootprint |
+            Request::Operations { .. } |
+            Request::IntakeAdd(..) |
+            Request::IntakeBoard { .. } |
+            Request::IntakeTriage { .. } |
+            Request::IntakeAssess { .. } |
+            Request::IntakeDecide { .. } |
+            Request::IntakeInfo { .. } |
+            Request::IntakeFlagSecurity { .. } |
+            Request::IntakeSecurity { .. } |
+            Request::IntakeSecurityReports { .. } |
+            Request::IntakePublish { .. } |
+            Request::TaskUsage { .. } |
+            Request::RunUsage { .. } |
+            Request::Costs { .. } => L4,
+            // L5
+            Request::TaskSuggest { .. } |
+            Request::Knowledge |
+            Request::KnowledgeSearch { .. } |
+            Request::KnowledgeImport { .. } |
+            Request::KnowledgeAdd { .. } |
+            Request::KnowledgeWriteFile { .. } |
+            Request::Benchmarks |
+            Request::Datasets |
+            Request::Dataset { .. } |
+            Request::DatasetCreate { .. } |
+            Request::DatasetAddCases { .. } |
+            Request::DatasetImport { .. } |
+            Request::DatasetFromTasks { .. } |
+            Request::DatasetDeleteCase { .. } |
+            Request::DatasetDelete { .. } |
+            Request::BenchRunStart { .. } |
+            Request::BenchRuns { .. } |
+            Request::BenchRunGet { .. } |
+            Request::BenchRunCancel { .. } |
+            Request::BenchRunClean { .. } |
+            Request::Metrics { .. } |
+            Request::Signposts |
+            Request::Quality { .. } |
+            Request::QualityRemediate { .. } |
+            Request::Suggestions { .. } |
+            Request::SuggestionGet { .. } |
+            Request::SuggestionTask { .. } |
+            Request::SuggestionDismiss { .. } |
+            Request::SuggestionDone { .. } |
+            Request::SuggestionAsk { .. } => L5,
+            // L6
+            Request::Policy { .. } |
+            Request::PolicyClock { .. } |
+            Request::PolicyControl { .. } |
+            Request::PolicyAttest { .. } |
+            Request::PolicyWithdraw { .. } |
+            Request::PolicyRemediate { .. } |
+            Request::PolicyExport { .. } |
+            Request::Dashboard { .. } |
+            Request::DashboardSet { .. } |
+            Request::DashboardReset { .. } |
+            Request::Goals { .. } |
+            Request::GoalsCheckIn { .. } |
+            Request::Scenarios { .. } |
+            Request::ScenarioPromote { .. } |
+            Request::ScenarioWhatIf { .. } |
+            Request::Budget { .. } => L6,
+            // Router
+            Request::Status |
+            Request::Adapters |
+            Request::Subscribe => Router,
+        }
+    }
+}
+
 /// Struct variants throughout: an internally tagged enum can only carry a map,
 /// and a `Tasks(Vec<Task>)` newtype would fail at serialization time rather
 /// than at compile time.
@@ -3281,5 +3456,27 @@ mod tests {
         assert_eq!(wire["op"], "doctor");
         let env: Envelope = serde_json::from_str(r#"{"op":"doctor"}"#).unwrap();
         assert!(matches!(env.request, Request::Doctor));
+    }
+}
+
+#[cfg(test)]
+mod route_level_tests {
+    use super::*;
+
+    fn parse(json: &str) -> Request {
+        serde_json::from_str(json).expect("a request")
+    }
+
+    #[test]
+    fn requests_are_filed_under_the_level_that_serves_them() {
+        assert_eq!(parse(r#"{"op":"status"}"#).level(), RouteLevel::Router);
+        assert_eq!(parse(r#"{"op":"adapters"}"#).level(), RouteLevel::Router);
+        assert_eq!(parse(r#"{"op":"subscribe"}"#).level(), RouteLevel::Router);
+        assert_eq!(parse(r#"{"op":"infrastructure"}"#).level(), RouteLevel::L1);
+        assert_eq!(parse(r#"{"op":"secret.set","params":{"name":"x","metadata":{}}}"#).level(), RouteLevel::L2);
+        assert_eq!(parse(r#"{"op":"agents"}"#).level(), RouteLevel::L3);
+        assert_eq!(parse(r#"{"op":"task.get","params":{"id":"t"}}"#).level(), RouteLevel::L4);
+        assert_eq!(parse(r#"{"op":"signposts"}"#).level(), RouteLevel::L5);
+        assert_eq!(parse(r#"{"op":"policy","params":{}}"#).level(), RouteLevel::L6);
     }
 }
