@@ -20,11 +20,12 @@
 //!   page composition on top of the service and are kept in the same files.
 use crate::engine::Engine;
 use crate::facts::Wiring;
+use factory_kernel::L6;
 use crate::state::L6State;
 
 pub(crate) struct L6Service<'a> {
     pub(crate) state: &'a L6State,
-    pub(crate) wiring: Wiring<'a>,
+    pub(crate) wiring: Wiring<'a, L6>,
 }
 
 impl Engine {

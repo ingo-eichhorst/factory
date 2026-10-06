@@ -70,17 +70,25 @@ impl<'a, R: Reader> Facts<'a, R> {
 
 /// What a level service is handed to reach the rest of the daemon while provider
 /// construction still takes `&Engine` (#193 phase 6; S12 replaces this with the
-/// services' own handles). The `Engine` is private to this type: a service holding a
-/// `Wiring` can read the configuration, build the typed fact providers and the
-/// adjacent command services, and publish events, but it cannot name another
-/// level's state.
-#[derive(Clone, Copy)]
-pub(crate) struct Wiring<'a> {
+/// services' own handles). It is bound to the service's level `L`:
+/// `provider::<F>()` and `facts()` compile only for facts `L` may read (the sealed
+/// `Below` relation), so a service cannot build or read an upward provider through
+/// it. The `Engine` is private to this type, so the service also cannot name
+/// another level's state. Configuration, the bus and, for L6, the command chain
+/// below are the only other things it offers.
+pub(crate) struct Wiring<'a, L: Level> {
     engine: &'a Engine,
+    wired: factory_kernel::Wired<'a, L, Engine>,
 }
-impl<'a> Wiring<'a> {
+impl<L: Level> Clone for Wiring<'_, L> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<L: Level> Copy for Wiring<'_, L> {}
+impl<'a, L: Level> Wiring<'a, L> {
     pub(crate) fn new(engine: &'a Engine) -> Self {
-        Self { engine }
+        Self { engine, wired: factory_kernel::Wired::new(engine) }
     }
     /// The live configuration snapshot (shared by every level).
     pub(crate) fn snapshot(&self) -> factory_core::config::Factory {
@@ -90,14 +98,19 @@ impl<'a> Wiring<'a> {
     pub(crate) fn bus(&self) -> &'a factory_core::event::EventBus {
         &self.engine.shared.bus
     }
-    /// The producing level's live provider for `F`.
-    pub(crate) fn provider<F: Port>(&self) -> F::Provider<'a> {
-        F::provider(self.engine)
+    /// The live provider for `F`, from a producer below this level.
+    pub(crate) fn provider<F: Port>(&self) -> F::Provider<'a>
+    where
+        F::Producer: Below<L>,
+    {
+        F::provider(self.wired.reach::<F>())
     }
-    /// The checked fact read for a reader.
-    pub(crate) fn facts<R: Reader>(&self) -> Facts<'a, R> {
+    /// The checked fact read for this level.
+    pub(crate) fn facts(&self) -> Facts<'a, L> {
         Facts::new(self.engine)
     }
+}
+impl<'a> Wiring<'a, L6> {
     /// The command chain below L6 (L6 -> L5 -> L4 -> L3).
     pub(crate) fn direction<'o>(
         &self,

@@ -92,3 +92,37 @@ fn live_check_result_fact_allows_direction_and_people_but_rejects_process_and_sa
         fixture.check(&source, allowed, "Below<");
     }
 }
+
+fn wired_source(producer: &str, reader: &str) -> String {
+    format!(
+        "#![allow(dead_code)]\nuse factory_kernel::*;\n\
+         #[derive(serde::Serialize, serde::Deserialize)] struct Sample;\n\
+         impl Fact for Sample {{ type Producer = {producer}; }}\n\
+         struct Host;\n\
+         fn reach(host: &Host) {{ let _ = Wired::<{reader}, Host>::new(host).reach::<Sample>(); }}\n"
+    )
+}
+
+/// The host a level service builds providers from is reachable only for a fact the
+/// service's level may read: an L2 handle cannot reach an L4 fact's provider.
+#[test]
+fn a_level_bound_wiring_reaches_only_producers_below_its_level() {
+    let fixture = Fixture::new();
+    let mut allowed_count = 0;
+    let mut forbidden = 0;
+    for producer in 1..=6 {
+        for reader in 1..=6 {
+            let allowed = producer < reader;
+            fixture.check(&wired_source(&format!("L{producer}"), &format!("L{reader}")), allowed, "Below<");
+            if allowed {
+                allowed_count += 1;
+            } else {
+                forbidden += 1;
+            }
+        }
+    }
+    assert_eq!((allowed_count, forbidden), (15, 21));
+    // The named case: an L2 service cannot read an L4 fact through its wiring.
+    fixture.check(&wired_source("L4", "L2"), false, "Below<");
+    fixture.check(&wired_source("L1", "L2"), true, "");
+}

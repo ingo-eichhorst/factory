@@ -98,7 +98,7 @@ pub use workspace::{WorkspaceLifetime, WorkspaceSpec};
 pub mod renewals;
 pub use renewals::*;
 mod service_evidence;
-pub use ports::{Below, FactProvider, FactValue, Facts, People, Provide, Reader};
+pub use ports::{Below, FactProvider, FactValue, Facts, People, Provide, Reader, Wired};
 pub use service_evidence::*;
 
 pub use duration::Duration;
