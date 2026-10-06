@@ -150,7 +150,7 @@ impl<'s> L6Service<'s> {
         has_rows: bool,
     ) -> Result<()> {
         if has_rows {
-            self.wiring.facts::<factory_kernel::People>()
+            self.wiring.facts()
                 .get::<TaskInventoryFact>(&TaskInventoryQuery::All)
                 .await?;
         }
@@ -316,7 +316,7 @@ impl<'s> L6Service<'s> {
     #[cfg(test)]
     pub(crate) async fn open_policy_task(&self, control: &ControlRef, scope: &str) -> Result<Option<TaskInventoryFact>> {
         let label = control.to_string();
-        Ok(self.wiring.facts::<L6>()
+        Ok(self.wiring.facts()
             .get::<TaskInventoryFact>(&TaskInventoryQuery::Exact(scope.to_string()))
             .await?
             .into_iter()

@@ -157,7 +157,6 @@ const PULLS_BASELINE: &[(&str, usize)] = &[
 /// Files that name `Facts::<People>` today (count). May only shrink.
 const PEOPLE_BASELINE: &[(&str, usize)] = &[
     ("environments/mod.rs", 3),
-    ("policies/mod.rs", 1),
     ("production.rs", 1),
     ("signposts.rs", 1),
 ];

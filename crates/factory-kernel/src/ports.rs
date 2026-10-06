@@ -61,6 +61,37 @@ impl<R: Reader> Facts<R> {
     }
 }
 
+/// A reader's checked access to a host that builds providers (#193 phase 6).
+///
+/// The host stays private. The only way to reach it from here is `reach::<F>()`,
+/// which names the fact being asked for and compiles only when that fact's
+/// producer is strictly below the reader (`F::Producer: Below<L>`): the same
+/// sealed relation `Facts::get` uses. A service holding a `Wired<L2, _>` therefore
+/// cannot build the provider of an L4 fact, and a same-level fact is a plain call
+/// inside the service, not a provider lookup.
+pub struct Wired<'a, L: Reader, H: ?Sized> {
+    host: &'a H,
+    reader: PhantomData<L>,
+}
+impl<'a, L: Reader, H: ?Sized> Wired<'a, L, H> {
+    pub fn new(host: &'a H) -> Self {
+        Self { host, reader: PhantomData }
+    }
+    /// The host, for building the provider of `F`. Only a producer below `L` is allowed.
+    pub fn reach<F: Fact>(&self) -> &'a H
+    where
+        F::Producer: Below<L>,
+    {
+        self.host
+    }
+}
+impl<L: Reader, H: ?Sized> Clone for Wired<'_, L, H> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<L: Reader, H: ?Sized> Copy for Wired<'_, L, H> {}
+
 mod sealed {
     use super::*;
     pub trait Below<R: Reader> {}
