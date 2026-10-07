@@ -46,6 +46,8 @@ pub struct SessionStart {
     pub title: String,
     pub cwd: PathBuf,
     pub launch: LaunchSpec,
+    /// Carried on the opened session (a sandbox's teardown record), set once it is up.
+    pub meta: BTreeMap<String, String>,
 }
 
 /// Hand an agent an assignment and open its session.
@@ -88,4 +90,36 @@ pub trait HarnessCommands: CommandPort<Level = L3> + Send + Sync {
 #[async_trait::async_trait]
 pub trait Supervision: CommandPort<Level = L3> + Send + Sync {
     async fn supervise(&self);
+}
+
+/// What L4 asks L3 about an agent's environment (OpenShell sandbox), which L3 passes to L2
+/// (`Commands<L3, L2Port>`): L4 never names an L2 port. The caller's `Notes` capability
+/// receives what happened, at the moment it happens.
+#[async_trait::async_trait]
+pub trait Environments: CommandPort<Level = L3> + Send + Sync {
+    async fn gate_environment(
+        &self,
+        key: &(String, String),
+        config: &factory_environment::openshell::OpenshellConfig,
+    ) -> std::result::Result<factory_environment::provision::Resolved, String>;
+    async fn prepare_environment(
+        &self,
+        request: factory_environment::provision::PrepareRequest<'_>,
+        notes: &dyn factory_environment::provision::Notes,
+    ) -> Result<factory_environment::provision::Prepared>;
+    async fn discard_environment(&self, plan: &factory_environment::openshell::Plan);
+    /// Tear down the sandbox a closed run's session carries, in the background.
+    fn release_environment(
+        &self,
+        session_meta: &BTreeMap<String, String>,
+        task: String,
+        run: String,
+        notes: std::sync::Arc<dyn factory_environment::provision::Notes>,
+    );
+    async fn reconcile_environments(
+        &self,
+        ledger: &dyn factory_environment::provision::RunLedger,
+        notes: &dyn factory_environment::provision::Notes,
+    );
+    fn forget_preserved(&self, task: &str);
 }

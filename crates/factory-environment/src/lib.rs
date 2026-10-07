@@ -9,6 +9,7 @@ pub mod dependencies;
 pub mod dependency_inventory;
 pub mod expiry_store;
 pub mod openshell;
+pub mod provision;
 #[cfg(test)]
 mod provider_tests;
 pub mod sandbox;

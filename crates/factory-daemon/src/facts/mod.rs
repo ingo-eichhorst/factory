@@ -130,6 +130,10 @@ impl<'a, L: Level> Wiring<'a, L> {
     }
 }
 impl<'a> Wiring<'a, L3> {
+    /// The command edge L3 holds to the level below it: `Commands<L3, L2Port>`.
+    pub(crate) fn provision(&self) -> factory_kernel::Commands<L3, crate::dispatch_port::L2Port<'a>> {
+        factory_kernel::Commands::new(crate::dispatch_port::L2Port(self.engine.l2_service()))
+    }
     /// How a task's agent name resolves to an adapter (L3's own selection service).
     pub(crate) fn resolve_agent(&self, scope: &str, name: &str) -> factory_core::error::Result<(String, String, Option<factory_core::config::ScopeAgent>)> {
         crate::commands::agents(self.engine).resolve_agent(scope, name)
