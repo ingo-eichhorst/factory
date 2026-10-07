@@ -1,0 +1,79 @@
+# Patch for issue #193 completion: amends ADR 0006 (command ladder and fact
+# ports), moving its status from "implementation in progress" to implemented
+# and adding an "Amendments" section: where the ladder ended up, which seams
+# are deliberately not gone (pages, spawners, the two L4 capabilities, Wiring
+# and the Engine state groups), how each is counted, and what would retire it.
+#
+# One file diff, path relative to the company root:
+#   .specs/adr/0006-command-ladder-and-fact-ports.md
+#
+# This repository (`projects/factory`) does not own `.specs/`; the ADR lives
+# in the company root (`business-factory`). Apply from there with:
+#   patch -p1 < 193-adr-0006-completion.patch
+--- a/.specs/adr/0006-command-ladder-and-fact-ports.md	2026-10-07 13:58:32
++++ b/.specs/adr/0006-command-ladder-and-fact-ports.md	2026-10-07 13:58:38
+@@ -1,6 +1,7 @@
+ # ADR 0006: A command ladder and live fact ports between the six levels
+ 
+-- Status: Accepted; implementation in progress
++- Status: Accepted; implemented 2026-10-07, with the counted seams named in
++  "Amendments" at the end
+ - Date: 2026-10-04
+ - Decision owners: Business Factory
+ - Tracking: https://github.com/ingo-eichhorst/factory/issues/193
+@@ -174,3 +175,55 @@
+   that compatibility re-exports finish live service isolation.
+ - The company repository owns this decision; Factory README and AGENTS
+   describe the same rule and #193 tracks code-level acceptance.
++
++## Amendments
++
++1. 2026-10-07, completion of #193. The migration and acceptance paragraphs
++   above describe the state at `34608dae`; this records where it ended up.
++   Each level is a daemon service over its own state group plus a
++   level-bound `Wiring`, entered through `engine.lN_service()`. Exactly five
++   adjacent `Commands<Caller, Port>` edges exist, and a two-level command
++   port cannot be named. The daemon's textual ratchets
++   (`factory-daemon/src/level_ownership_tests.rs`) place every source file
++   with an owner and are at zero for cross-level state reach, service pulls,
++   people reads outside the router, impersonated fact reads and direct
++   provider calls. L3 no longer pushes liveness into L4: L4 reads a bounded,
++   ordered `StandingAgentObservationsFact` from a cursor, with L3's own
++   timestamps. Observers (L5's judge, the deployment observer) read facts on
++   a timer, with a bus event only as an early hint.
++
++2. What is deliberately not gone, and how each is counted. None of it reads
++   across levels without a ratchet that may only shrink.
++   - Pages. Code that must compose several levels for a view (the
++     occupancy chart, the environments report, the Important Dates page,
++     Quality, signposts, the GitHub deployment publisher, access, the L2
++     attachment and secret-metadata pages, and similar) is owned by the router
++     side, holds no state and is not a level. Their reach, service calls,
++     people reads and direct providers are counted per file
++     (`PAGE_BASELINE`). A page is an honest classification of composition,
++     not a claim that the reach is gone.
++   - `L4Spawner` and `L5Spawner` hold the one capability-limited
++     `Arc<Engine>` that spawned work needs. `Engine` keeps thin entry points
++     that hand them over.
++   - `SuppliedFromAbove` (the quality block at dispatch, functionary
++     binding) and `SpawnAuthority` (may this caller spawn a workflow node,
++     answered by `access.rs`, which stays the single authorisation check) are
++     the two capabilities L4 is handed. Their use is counted
++     (`ABOVE_BASELINE`). `github_intake.rs`, `scheduler.rs` and
++     `recovery_journal.rs` remain entry-point workers over `Arc<Engine>`,
++     baselined.
++   - `Wiring` and `Engine`. `Engine` still owns the state groups and is the
++     entry point for pages; `Engine::handle(Envelope)` routes each request to
++     its level, and `access.rs` is unchanged.
++
++3. What would retire each seam. Pages retire when a producing level exposes
++   the fact or command the page composes, which for most is a new fact, not a
++   move. Spawners retire when spawned work is submitted as a command to the
++   level's own port, with the executing worker owned by the service. The two
++   capabilities retire when L5 and L6 supply the quality block and the spawn
++   decision as facts that L4 reads. `Wiring` and the `Engine` state groups
++   retire as each level's state is held only by its service.
++
++4. This amendment completes #193's code acceptance. It does not turn typed
++   ownership into a security boundary; authorisation remains at the single
++   router check.

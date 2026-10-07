@@ -5319,6 +5319,67 @@ company-wide dataset list or the aggregated results table, which stays the
 daemon's own numbers for the whole run. **Configurations** is v1's cards,
 unchanged.
 
+## Architecture: six levels, commands down, facts up
+
+Factory is six levels: L1 Infrastructure, L2 Environment, L3 Agent, L4 Process,
+L5 Improvement and L6 Direction, over a pure kernel (L0). Two rules decide every
+edge between them, recorded as ADR 0006 and enforced by tests rather than review.
+
+1. **Commands go only to the level directly below.** A level holds a
+   `Commands<Self, Port>` for the adjacent level and nothing else. A port carries
+   commands and returns acknowledgements and ids, never facts. Five edges exist
+   (L6 to L5, L5 to L4, L4 to L3, L3 to L2, L2 to L1).
+2. **Every read of something a level below knows is a fact read.** A level asks
+   `Facts<Reader>::get::<F>()`; the level that produces `F` implements its
+   provider; the kernel's sealed `Producer: Below<Reader>` relation allows
+   strictly upward reads only, including from the adjacent level. Facts are read
+   live (ADR 0004): there is no status table and no fact log.
+
+Where the code lives:
+
+- **Level crates** (`factory-infrastructure`, `-environment`, `-agents`,
+  `-process`, `-assurance`, `-direction`) each declare
+  `package.metadata.factory.level` and may depend only on L0 and the crate
+  directly below. `factory-composition` and `factory-interfaces` sit outside the
+  stack and no level may depend on them.
+- **Level services** in the daemon (`L1Service` ... `L6Service`, entered through
+  `engine.lN_service()`) hold only their own state and a level-bound `Wiring`,
+  which offers the command port below, fact reads as that level, and the
+  capabilities the level was handed. `Engine` still owns the state groups and
+  is the entry point pages use, but level code reaches another level only
+  through the port or fact read above; `Engine::handle(Envelope)` routes each
+  request to its level's service, and `access.rs` is still the single
+  authorization check.
+- **Pages** compose several levels for a view (the occupancy chart, the
+  environments report, the Important Dates page, Quality, the signposts and
+  similar). A page is owned by the router side (`Owner::Wiring`), owns no state,
+  and is not a level. Pages are the honest classification of code that must read
+  across levels, and their reach is counted and may only shrink (see below).
+- **Spawners and capabilities** are the few things a level is handed beyond its
+  port. `L4Spawner`/`L5Spawner` hold the one capability-limited `Arc<Engine>` a
+  spawned task needs; `SuppliedFromAbove` (the quality block at dispatch and
+  functionary binding) and `SpawnAuthority` (may this caller spawn a workflow
+  node, answered by `access.rs`) are how L4 asks the levels above. Each is
+  counted by a ratchet.
+
+What enforces it:
+
+| Rule | Enforced by |
+| --- | --- |
+| A level crate depends only on L0 and the level below, including aliases, target tables and dev/build edges | `factory-core/tests/level_dependencies.rs` (`physical_level_crates_depend_only_on_kernel_and_the_directly_lower_level`, `aliases_target_tables_and_dev_build_edges_cannot_reach_outside_the_ladder`, `kernel_cannot_depend_on_any_level_or_the_compatibility_facade`); the kernel names no Factory dependency (`no_factory_dependency.rs`) |
+| Exactly five adjacent command edges compile; a command port two levels down cannot be named | `factory-kernel/tests/command_direction.rs` |
+| Fact reads are upward only; downward and same-level reads fail to compile; a level-bound `Wiring` reaches only producers below it | `factory-kernel/tests/fact_read_direction.rs` |
+| Every fact has one producer, readers and a catalogue entry | `factory-kernel/tests/fact_catalogue.rs` (`catalogue_is_complete_unique_and_has_readers`, `a_new_fact_impl_cannot_be_left_out_of_the_catalogue`) |
+| Daemon level code names no other level's state, calls no other level's service, reads no fact as another level, calls no provider directly, holds `Arc<Engine>` only through a spawner, and L4 asks above only through the two capabilities | `factory-daemon/src/level_ownership_tests.rs` (`cross_level_reach_only_shrinks`, `pulls_into_a_level_service_from_other_levels_only_shrink`, `a_level_never_reads_facts_as_another_level_and_only_shrinks`, `direct_provider_calls_in_level_code_only_shrink`, `l4_code_holds_an_arc_engine_only_through_the_spawner_and_the_rest_only_shrinks`, `what_l4_asks_of_the_levels_above_only_shrinks`, `l4_service_has_no_core_handle`) |
+| L3 pushes no liveness into L4; L4 reads L3's observation log by cursor | `l3_pushes_no_liveness_into_l4_through_wiring` |
+| Pages stay within their counted reach | `pages_only_shrink`; `people_reads_stay_with_the_router_and_only_shrink`; `every_daemon_source_file_has_an_owner` places every file |
+
+The daemon is one crate, so its ratchets are textual (comments and test code are
+not scanned) and each baseline may only shrink. Reach across levels, service
+pulls, people reads, impersonated fact reads, direct provider calls and the
+liveness bridge are all at zero. What remains counted is deliberate: the pages
+(`PAGE_BASELINE`), the spawners' `Arc<Engine>`, and the two L4 capabilities.
+
 ## What this prototype does not do yet
 
 - **Runtime, interface and knowledge plugins.** The manifest accepts
@@ -5392,8 +5453,8 @@ open/closed flag, not the full task or its run history. Policy remediation
 lookups, quality report links and scenario backlog/goal counts retain store
 ordering, exact-scope versus selected-subtree semantics and live updates.
 Quality names L5 on its adjacent upward inventory read. Remediation writes
-and Quality's full-task command response still await the command-ladder
-migration; this inventory port does not claim to complete that work.
+and Quality's full-task command response go through the command ladder
+described under Architecture.
 
 The live read API now enforces `Producer: Below<Reader>` in L0 and in the
 daemon's typed wiring. The sealed relation allows exactly the fifteen
@@ -5426,8 +5487,8 @@ stay outside L1. Renewal files retain their live bounded parser, distinct
 root/scope last-good keys and visible findings. Read-only native host probes
 and the canonical interface configuration/bind derivation belong to L1 too.
 L0 owns shared cron/timezone grid arithmetic, not task misfire decisions.
-Native command/timer services and strict adjacent command ports still need
-migration; every registered live fact provider now has a physical level owner.
+Every registered live fact provider has a physical level owner; the
+service and command-port split that followed is described under Architecture.
 
 L2's six remaining live providers now physically belong to
 `factory-environment`: credential presence and expiry, dependency inventory,
@@ -5440,8 +5501,8 @@ OpenShell execution/cleanup records and its evidence collector move together
 into L2, with canonical daemon re-exports. Their command argv, ownership checks,
 fail-closed behavior, evidence bounds/redaction and restart/cleanup contracts
 stay the same. Attachment authorization and task journaling still sit outside
-L2 pending the strict adjacent-command migration. The complete six-service
-split and remaining adjacent command paths are unfinished.
+L2 and now go through the L3-to-L2 command port and L2's service, as
+described under Architecture.
 
 L3's `factory-agents` owns standing-agent state, role resolution, harness
 health, both agent adapter traits and the cumulative session-usage contract.
@@ -5506,8 +5567,8 @@ hub or agent-lifecycle dependency enters L5. Stored and wire JSON is unchanged.
 The benchmark progress backstop has an independent L5 timer: immediate first
 tick, the same startup cadence, delayed missed ticks, one sweep at a time and
 explicit shutdown. L4's process scheduler no longer sweeps benchmark runs.
-Complete live service isolation and the remaining adjacent command paths
-are unfinished.
+The service and command-path split that followed is described under
+Architecture.
 
 `Task.bench_origin` is an L4 `OriginRef`, opaque to process. It has no
 benchmark-field API; the benchmark owner alone decodes its legacy object
@@ -5515,8 +5576,8 @@ reference. Serde preserves existing stored/plugin JSON (and can carry future
 string ids). Rust callers assigning a `BenchOrigin` convert with `.into()`;
 this field-type change does not change the plugin protocol. Opacity is an
 ownership API, not a security boundary. L5 owns origin decoding and its timer;
-live dispatch, reset/base selection and the service/command-ladder migration
-still need their isolated services and adjacent command ports.
+base and reset placement ride on the origin, and L4 reads them generically
+through `OriginRef::placement()` without naming a benchmark field.
 Only the small shared slug/identifier validator moves from dataset to L0;
 no task, run, intake, workflow, plan compilation or usage accounting enters
 the kernel.
@@ -5540,7 +5601,8 @@ wrapper. SQLite tables/indexes, serialized evidence, duplicate/withdrawal
 rules, malformed-row handling, batch/tie ordering and restart persistence
 remain unchanged; opening existing databases neither rewrites nor moves rows.
 No status table, new fact log, schema-version migration or extra database is
-introduced. Physical ownership is not completed live service/provider isolation.
+introduced. Physical ownership of the stores and the services over them are described
+under Architecture.
 
 The remaining explicit SQLite store modules now live with their domains too:
 L1 owns backup events, deployment/health history and infrastructure expiry
@@ -5571,7 +5633,8 @@ adapter methods intact. The observer stream remains lossy, with no subscribers
 normal and whole-run tokens/digests redacted before publication; it is not a
 fact log. Concrete HTTP/socket mounts, the actual router and its single
 `Engine::handle(Envelope)`/`access.rs` authorization entry remain in the daemon.
-Moving page projections does not isolate all their live gatherers.
+Page projections that compose several levels are pages, counted by the
+page ratchet under Architecture.
 
 The live benchmark resolution, gate and knowledge-tag providers now live in
 L5's `factory-assurance`, holding only its benchmark store and instance root.
@@ -5594,8 +5657,7 @@ and path-component ancestry used by configuration and its consumers. Ambiguous
 legacy aliases still fail, removed identities still group under their old name,
 and exact selection never silently becomes a subtree. Stored-scope membership,
 20-run history bounds, receipt conflicts and clean Done-release filters remain
-unchanged. Six-service/command-port isolation is still pending;
-the recovery timer remains outside the stack and
+unchanged. The recovery timer remains outside the stack and
 constructs a fresh provider on every tick.
 
 The live spend, frozen run conformance, production and process-metric providers
@@ -5621,7 +5683,7 @@ edges, tested by compiling all level pairs. Ports return acknowledgements/ids,
 not task state. Duplicate checks are live `Facts<L5/L6>` inventory reads; the
 outside router alone reconstructs legacy task responses through L4's opaque
 live `TaskSnapshotFact`. Authorization remains at the one existing entry.
-This does not complete isolation of every live service, timer or command.
+Every command between levels goes through such an adjacent port.
 
 L5's live check-evidence service now owns lazy lower-fact reads and Quality
 judgement. Policy reports, control details and Scenarios share that one
@@ -5670,7 +5732,7 @@ are canonical L6 data, re-exported by the existing wire paths.
 Request-only Policy compatibility checks remain outside both services. A
 request-local L5 read-phase diagnostic preserves their error priority; it is
 never evidence, a cached metric/status, or something a level reader uses.
-Goal label execution still needs the remaining command-ladder migration.
+Goal label execution goes through the same ladder.
 
 L6's live policy-intent service now owns authored catalogue reads, current
 policy receipts, applicability and raw budget inputs for metrics, Goals,
@@ -5699,8 +5761,8 @@ to its existing append-only store too, preserving error priority, exact item
 scope, corrective anchors and submission deduplication. The router supplies
 only raw caller/request inputs and physical providers; it retains its one
 authorization check and existing receipt-change events. Workflow preview
-decorations now use the live L5 preview fact described below. These paths do
-not complete the six-service split.
+decorations now use the live L5 preview fact described below. These paths
+run through the L6 service.
 
 The live Scenarios service now belongs to L6 too: authored real/draft
 catalogues, overlays, goal changes, backlog, forecasts and promotion deltas
@@ -5713,8 +5775,8 @@ evaluated against one overlay-selected evidence gather, preserving the
 original lazy reads. L6 submits the selected work through its same-level
 remediation service and the L6→L5→L4 command chain; only ids return, with
 legacy task payload hydration outside. Scenarios response data is canonical
-L6 vocabulary with unchanged wire re-exports. Remaining command paths and
-complete six-service isolation are still unfinished.
+L6 vocabulary with unchanged wire re-exports. Its remediation
+commands go down the ladder.
 
 Execution plans and workflow previews now have physical live owners too.
 L6 loads its own applicable authored policy requirements; the L5 plan provider
@@ -5730,14 +5792,13 @@ L6 Policy owns workflow selection and failure folds through `WorkflowTargetsFact
 and `WorkflowPreviewFact`; neither port returns a lower-level report. Store-wide
 failures remain fatal and individual lint refusals remain findings. The router
 only prepares raw authored inputs and hydrates the unchanged people-side lint
-response. These services do not finish every timer or adjacent command path.
+response. Timers that outlive a request are daemon-resident workers over a level service.
 
 The company decision is recorded in
 [ADR 0006](https://github.com/not-ingo/business-factory/blob/main/.specs/adr/0006-command-ladder-and-fact-ports.md),
 with ADR 0004 amended to name the evidence channel. Every registered fact
-provider has a physical producing-level owner. Six complete live services
-and the other adjacent command paths remain
-in #193.
+provider has a physical producing-level owner, and the six level services and
+the command ladder between them are in place (#193); see Architecture.
 
 ## Layout
 
@@ -5746,13 +5807,13 @@ in #193.
     crates/factory-environment    L2: sandbox planning, secrets, dependencies and credential expiry store
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy, TaskStore and run evidence/provenance store
-    crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam (full live services still pending)
+    crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam
     crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data, GoalsStore and policy receipt store
     crates/factory-composition    outside stack: instance config/scope loading and dashboard/site/Line page projections
     crates/factory-interfaces     outside stack: wire protocol, observer event stream and Interface seam
-    crates/factory-core      compatibility paths and remaining cross-level bridges
+    crates/factory-core      compatibility re-export paths
     crates/factory-plugins   built-in adapters, the plugin host, the registry
-    crates/factory-daemon    engine, scheduler, interfaces, the binary
+    crates/factory-daemon    the six level services, the pages that compose them, the router, scheduler, interfaces, the binary
     crates/factory-cli       the `factory` binary
     ui/                      the web UI, compiled into the daemon
     ui/index.html              the page skeleton and the two view containers

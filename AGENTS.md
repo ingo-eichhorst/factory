@@ -9,11 +9,11 @@ A daemon that gives tasks to coding agents and watches what happens.
     crates/factory-environment    L2: sandbox planning, secrets, dependencies and credential expiry store
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy, TaskStore and run evidence/provenance store
-    crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam (full live services still pending)
+    crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam 
     crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data, GoalsStore and policy receipt store
     crates/factory-composition    outside stack: instance config/scope loading and dashboard/site/Line page projections
     crates/factory-interfaces     outside stack: wire protocol, observer event stream and Interface seam
-    crates/factory-core      compatibility paths and remaining cross-level bridges
+    crates/factory-core      compatibility re-export paths
     crates/factory-plugins   built-in adapters, the plugin host, the registry
     crates/factory-daemon    engine, scheduler, interfaces, the binary
     crates/factory-cli       the `factory` binary
@@ -158,6 +158,42 @@ something impossible.
 
 ## The rules that matter
 
+- **Six levels, commands down, facts up (#193, ADR 0006).** Two rules, both
+  enforced by tests, not review. (1) Commands go only to the level directly
+  below, through a `Commands<Self, Port>`; a port carries commands and returns
+  acknowledgements and ids, never facts. Exactly five adjacent edges compile
+  (`factory-kernel/tests/command_direction.rs`). (2) Every read of what a level
+  below knows is `Facts<Reader>::get::<F>()`, with the sealed
+  `Producer: Below<Reader>` relation making downward and same-level reads fail
+  to compile (`fact_read_direction.rs`); every fact has one producer and a
+  catalogue entry (`fact_catalogue.rs`). Facts are read live: no status table,
+  no fact log, no stored copy a reader can fall back on. Level crates depend only on L0 and the level below
+  (`factory-core/tests/level_dependencies.rs`).
+  In the daemon, each level is a service (`engine.lN_service()`) over its own
+  state group plus a level-bound `Wiring`; the owner map in
+  `factory-daemon/src/level_ownership_tests.rs` places every source file
+  (`every_daemon_source_file_has_an_owner`) and its ratchets fail a new
+  cross-level state reach, service pull, impersonated fact read, direct
+  provider call, extra `Arc<Engine>` in L4/L5 code, or L3 liveness push into L4.
+  Their baselines are zero except the counted, deliberate ones below, and a
+  baseline may only shrink: delete or lower the line when you remove one, never
+  raise it.
+  What to do instead: to learn something from below, add a fact (one producer,
+  provider in the owning crate, kernel catalogue entry in the same PR) and read
+  it; to act below, add a command on the adjacent port; to act above, you
+  cannot: L4 is handed exactly two capabilities, `SuppliedFromAbove` (quality
+  block at dispatch, functionary binding) and `SpawnAuthority` (may this caller
+  spawn a workflow node; it calls `access.rs`, the one authorization check), and
+  `above_calls` counts their use. Code that must read across levels for a view
+  is a **page**: owned by `Owner::Wiring`, no state of its own, counted per file
+  in `PAGE_BASELINE` (reach, services, people, providers), and named in
+  `OWNERS` with what it composes. A page is an honest classification, not an
+  exemption to grow. `L4Spawner`/`L5Spawner` are the only holders of an
+  `Arc<Engine>` in level code; the thin `impl Engine` entry points in L4/L5
+  files hand it over and do nothing else. Observers follow the D4 shape: read
+  facts on a timer, with a bus event as an early hint only. L3 tells nobody
+  about liveness: L4 reads `StandingAgentObservationsFact` from a cursor
+  (`l3_pushes_no_liveness_into_l4_through_wiring`).
 - A task's status comes from the agent calling `factory task report`, never from
   looking at a terminal and guessing. Runtime status is a liveness signal only --
   except a `blocked` a runtime reports through a lifecycle hook, which is the
@@ -208,8 +244,8 @@ something impossible.
   L5, the infrastructure expiry store supplies its L1 fact, and L4 supplies
   mirror receipts and Done-only provenance from its own stores. Their daemon
   `facts/` modules only construct physical owner providers. All registered
-  live providers now have physical level owners; live service and adjacent
-  command isolation still remain.
+  live providers have physical level owners; the services and the command
+  ladder are described in the layering rule below.
   L4 also owns inventory, scheduled dates, named task/workflow history,
   recovery evidence/import/journal, security reports and release selection.
   Its providers receive only own store capabilities, root and current plain
@@ -223,7 +259,7 @@ something impossible.
   Operations' run arithmetic canonically re-exports L4; hour measurements use
   authoritative run/blocked-journal unions, shared with the occupancy chart,
   never its inferred-liveness or planned-work view. This is not six-service
-  isolation; live service wiring and command ports remain.
+  isolation; see the layering rule below for the services and command ports.
   Policy and fact-backed metrics ask `Facts<Reader>::get`. A port returns
   only its fact or a collection of it, never another level's report. The
   kernel read boundary enforces a sealed `Producer: Below<Reader>` relation:
@@ -238,9 +274,8 @@ something impossible.
   and dev/build dependencies. Do not add a core/facade back-edge, even for a
   test: whole-instance integration tests belong outside the ladder. Shared
   schedule, launch, time-span, opaque session-id and error values are L0; domain decisions
-  remain in their owning level. Remaining crate/service splitting and the
-  strict command ladder remain in #193; the bound alone is not service
-  isolation or an authorization boundary.
+  remain in their owning level. The bound is a read-direction and dependency
+  constraint, not an authorization boundary.
 - Cumulative session usage is L3's runtime contract; only that typed usage
   data is parsed, never transcript text. Run baselines, deltas and allocation
   belong to the process layer. The runtime adapter seam remains available
@@ -252,8 +287,7 @@ something impossible.
   task JSON stays private and opaque, forwarded only for existing plugins.
   Do not add lifecycle accessors or a facade dependency to this payload.
   Shared workflow references and knowledge hints are plain L0 command
-  values, not new facts or knowledge-search logic. Live services and the
-  strict command ladder remain separate unfinished requirements of #193.
+  values, not new facts or knowledge-search logic.
   L3 owns the live AgentFact provider and declaration/foreman roster models.
   Configuration and authorization share its one role-chain implementation;
   ancestry is L0 path components, nearest definitions replace whole. Never
@@ -267,8 +301,8 @@ something impossible.
   path only adapts producer declarations to its command inputs. A process
   task's origin is opaque: `.into()` a producer-owned `BenchOrigin` when
   constructing it, and decode it only in the benchmark owner. Keep its legacy
-  JSON stable; never add benchmark accessors to L4. This does not finish the
-  live providers/services or command-ladder work.
+  JSON stable; never add benchmark accessors to L4. Placement (base and reset) rides on the origin;
+  L4 reads it through `OriginRef::placement()`.
   Workflow definitions/runs, offline recovery action I/O/journal and deployment
   mirror receipts are L4-owned too. The daemon/Core paths canonically re-export
   those implementations; recovery receipts remain explicit operator evidence,
@@ -361,7 +395,6 @@ something impossible.
   Dispatch binds through that same L5 owner, but still compiles plans fresh;
   an advisory preview never becomes execution evidence. No Engine callback,
   precompiled plan or upper report enters the preview service.
-  The complete six-service split still remains.
   L0 holds only shared receipt/identity data, not
   reporting-clock arithmetic, budget decisions or conformance evaluation.
   L6 still owns authored policy and budget intent. Policy remediation and
@@ -373,8 +406,6 @@ something impossible.
   The router hydrates legacy task payloads through People's live L4
   TaskSnapshotFact, never a level service. The sealed Commands relation allows
   exactly five adjacent edges; no callback into Engine supplies creation.
-  The other command paths and full live service isolation remain
-  separate #193 requirements.
 - Benchmark/dataset/knowledge behavior and the KnowledgeProvider seam belong
   to L5. Core's configuration adapter projects resolved agents into L5's
   `ConfigurationInput`; it must never serialize or debug-print raw arguments.
@@ -383,8 +414,8 @@ something impossible.
   schema in L5, with cross-adapter integration tests outside the ladder. L5
   owns the independent benchmark timer; never add its sweep back to L4's
   task/watchdog tick. Keep immediate startup, cadence, no overlapping sweeps,
-  missed-tick delay and shutdown behavior. Full live service/command-port
-  isolation still remains in #193; the daemon callback is transitional wiring.
+  missed-tick delay and shutdown behavior. L5 reaches L4 only through
+  the L5 to L4 command port and L4 facts, and its timer goes through `L5Spawner`.
 - L6's `factory-direction` owns authored policy applicability/rollups, goals,
   scenarios, budget intent and reporting-clock arithmetic. It depends only on
   L0 and L5, including in tests. It projects declarations to L5 evaluation
@@ -396,8 +427,8 @@ something impossible.
   The daemon opens both on the same existing instance database, with unchanged
   tables, indexes, append-only records and JSON. Never make L6 store or read
   process evidence directly; upward live reads still use its fact ports.
-  Splitting storage does not finish service/provider isolation. The
-  remaining live adjacent command ports still remain in #193.
+  Storage ownership is separate from service ownership: the L4 and L6 services
+  reach these stores only through their own state.
 - L1 owns backup history, deployment/health history and infrastructure expiry
   cache stores. L2 owns the credential expiry cache; L6 owns renewal push
   attempt receipts. Each opens only its own existing tables on the instance
@@ -406,14 +437,14 @@ something impossible.
   it; interrupted push claims remain attempted, not delivered or retried as if
   nothing happened. Current-cache retirement and health retention keep their
   existing rules; append-only histories stay append-only. Native probes, timers
-  and the remaining fact gatherers still need their isolated level services.
+  and gatherers run under their level's service.
   L1's live backup, environment metrics/publication, renewal declarations,
   daemon configuration and scope-capacity providers now physically own their
   reads. Wiring supplies only their own stores/cache and fresh plain inputs.
   Backup pages and facts share one gather; environment page decorations from
   L4 stay outside L1. Native read-only host probes and interface/bind derivation
   live in L1 too. The sole shared calendar grid is L0; task misfire decisions
-  remain with the scheduler. This is not completed timer/command/service isolation.
+  remain with the scheduler.
   L2's credential presence/expiry, dependency inventory, exploited findings,
   release SBOM and sandbox-evidence providers physically own their live reads
   too. The OpenShell runtime/cleanup records and evidence collector share one
@@ -421,8 +452,8 @@ something impossible.
   on these reads: never open values or run a source. Authored catalogue dates
   and file changes count on the next read. Preserve exact-scope evidence,
   immutable attachments, bounds, provenance and unknown/partial coverage.
-  Attachment authorization/journaling remains in the router until the adjacent
-  command migration; physical runtime ownership does not complete that ladder.
+  Attachment metadata and secret metadata are read by pages; attachment commands
+  go through the L2 service.
 - Wire envelopes, responses, observer events and the unchanged Interface seam
   live in `factory-interfaces`, outside the stack. Whole-instance config/scope
   loading and cross-level page projections live in `factory-composition`.
@@ -431,8 +462,7 @@ something impossible.
   dev/target table. They are not extra level services or a fact channel.
   Keep the lossy observer bus and run-token redaction unchanged. Actual mounts,
   `Engine::handle(Envelope)` and the single `access.rs` authorization check
-  remain in the daemon; complete six-service/command-port isolation is still
-  unfinished #193 work.
+  remain in the daemon.
 - Which roles exist is a question about a scope. `Engine::roles_for(scope)`
   resolves the chain -- presets, the root's `roles:`, then each scope's
   `scope.roles` down to that scope -- from the live snapshot, and `authorize`,
