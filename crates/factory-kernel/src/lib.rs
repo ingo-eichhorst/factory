@@ -106,7 +106,7 @@ pub use facts::{
     AgentFact, AttestedRun, ConfirmedSecurityReport, DependenciesFact, ExploitedFinding, GateCase,
     GateFact, RunFact, TaskFact, TaskInventoryFact, WorkflowFact, WorkflowRunFact,
 };
-pub use facts::TaskSnapshotFact;
+pub use facts::{RunSnapshotFact, RunSnapshotQuery, TaskSnapshotFact};
 pub use facts::{SignpostFact, SignpostObservation};
 pub use facts::{
     BackupFact, DaemonConfigFact, Fact, FactCatalogueEntry, Level, SecretsPresence, VerifySummary,

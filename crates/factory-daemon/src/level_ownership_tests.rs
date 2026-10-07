@@ -96,6 +96,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("run_settle.rs", L4),
     ("run_start.rs", L4),
     ("scheduling.rs", L4),
+    ("l4_port.rs", L4),
     ("l4_service.rs", L4),
     ("l4_spawner.rs", L4),
     ("assignments.rs", L4),
@@ -103,11 +104,12 @@ const OWNERS: &[(&str, Owner)] = &[
     ("site.rs", Wiring), // the site page: composes the roster and runs with a repository walk
     // L5 Improvement
     ("bench/", L5),
+    ("l5_service.rs", L5),
     ("datasets.rs", L5),
     ("suggestions.rs", L5),
     ("quality/", L5),
-    ("metrics.rs", L5),
-    ("signposts.rs", L5),
+    ("metrics.rs", Wiring),
+    ("signposts.rs", Wiring),
     // L6 Direction
     ("policies/", L6),
     ("goals/", L6),
@@ -141,10 +143,8 @@ const OWNERS: &[(&str, Owner)] = &[
 /// (file, group, count): today's cross-level reach. May only shrink.
 const BASELINE: &[(&str, &str, usize)] = &[
     ("bench/engine.rs", "l4", 8),
-    ("datasets.rs", "l4", 2),
     ("dependencies.rs", "l4", 2),
     ("secrets.rs", "l4", 2),
-    ("suggestions.rs", "l4", 3),
 ];
 
 /// A level service and the accessor that enters it (`engine.l6_service()`).
@@ -157,6 +157,7 @@ const SERVICES: &[ServiceEntry] = &[
     ServiceEntry { owner: L2, accessor: ".l2_service()" },
     ServiceEntry { owner: L3, accessor: ".l3_service()" },
     ServiceEntry { owner: L4, accessor: ".l4_service()" },
+    ServiceEntry { owner: L5, accessor: ".l5_service()" },
     ServiceEntry { owner: L6, accessor: ".l6_service()" },
 ];
 
@@ -164,9 +165,7 @@ const SERVICES: &[ServiceEntry] = &[
 /// another level. Each is a pull the owning slice has to replace. May only shrink.
 const PULLS_BASELINE: &[(&str, usize)] = &[
     ("harness_hold.rs -> .l3_service()", 2),
-    ("metrics.rs -> .l6_service()", 2),
     ("quality/mod.rs -> .l6_service()", 1),
-    ("signposts.rs -> .l6_service()", 1),
 ];
 
 /// `Arc<Engine>` in L4-owned production code. `l4_spawner.rs` is the handle itself; the rest is workflows, which take an
@@ -195,7 +194,6 @@ const CORE_BASELINE: &[(&str, usize)] = &[
 
 /// Files that name `Facts::<People>` today (count). May only shrink.
 const PEOPLE_BASELINE: &[(&str, usize)] = &[
-    ("signposts.rs", 1),
 ];
 
 fn src_root() -> PathBuf {

@@ -1707,8 +1707,9 @@ mod tests {
         init_repo_with_a_commit(&scope_dir).await;
         let engine = test_engine(scope_dir);
 
-        engine.dataset_create("demo-set", None).await.unwrap();
+        engine.l5_service().dataset_create("demo-set", None).await.unwrap();
         engine
+            .l5_service()
             .dataset_add_cases(
                 "demo-set",
                 vec![Case {
@@ -1758,8 +1759,9 @@ mod tests {
         let short = head[..7].to_string();
         let engine = test_engine(scope_dir);
 
-        engine.dataset_create("demo-set", None).await.unwrap();
+        engine.l5_service().dataset_create("demo-set", None).await.unwrap();
         engine
+            .l5_service()
             .dataset_add_cases(
                 "demo-set",
                 vec![Case {

@@ -6,9 +6,9 @@
 //! reach into L4's task creation and dispatch.
 
 use crate::access::Caller;
-use crate::engine::{ContinueOutcome, Due, Engine};
+use crate::engine::{ContinueOutcome, Due};
 use chrono::Utc;
-use factory_assurance::remediation::{Intent, RemediationCommands};
+use factory_assurance::remediation::Intent;
 use factory_assurance::suggestion::{self, Filing, Suggestion, SuggestionKind, SuggestionReport, SuggestionState, UsageSnapshot};
 use factory_core::adapter::agent::UpstreamOutput;
 use factory_core::config::Sandbox;
@@ -19,14 +19,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) use factory_assurance::suggestion_store::SuggestionStore;
 
-impl Engine {
+use crate::l5_service::L5Service;
+#[cfg(test)]
+use crate::engine::Engine;
+
+impl L5Service<'_> {
     /// The scope subtree `scope` names, resolved from the live config --
     /// `None` is every scope, `Some` is that scope and its descendants
     /// (`Scope.path` ancestry, never a name prefix), the same rule
     /// `Request::Quality`/`Request::Operations` already read a scope by.
     fn suggestion_scope_set(&self, scope: Option<&str>) -> Result<Option<BTreeSet<String>>> {
         let Some(name) = scope else { return Ok(None) };
-        let snapshot = self.factory_snapshot();
+        let snapshot = self.wiring.snapshot();
         let (asked, subtree) = factory_core::config::subtree_scopes(&snapshot, Some(name))?;
         let asked = asked.ok_or_else(|| FactoryError::BadRequest(format!("no such scope: {name:?}")))?;
         let mut members: BTreeSet<String> = subtree.into_iter().map(|s| s.name).collect();
@@ -42,13 +46,13 @@ impl Engine {
     /// are read off the run itself; the agent states only `suggestion`'s
     /// own fields.
     pub(crate) async fn file_suggestion(&self, task_id: &str, report: SuggestionReport) -> Result<Suggestion> {
-        let run = self.l4.store.active_run(task_id).await?.ok_or_else(|| {
+        let run = self.active_run(task_id).await?.ok_or_else(|| {
             FactoryError::BadRequest(format!(
                 "task {task_id} has no run in progress; a suggestion is filed against an active run"
             ))
         })?;
-        self.check_run_token(&run, report.token.as_deref(), task_id)?;
-        let task = self.require(task_id).await?;
+        self.wiring.l4().port().check_run_token(&run, report.token.as_deref(), task_id)?;
+        let task = self.require_task(task_id).await?;
 
         let session_id = run
             .session
@@ -74,12 +78,12 @@ impl Engine {
             wasted_tokens: report.wasted_tokens,
         };
         let suggestion = filing.file(uuid::Uuid::new_v4().to_string(), Utc::now());
-        self.l5.suggestions.put(&suggestion).await?;
+        self.state.suggestions.put(&suggestion).await?;
 
         // `#275`'s acceptance criterion: a suggestion "appears on the run's
         // journal" -- the same task journal every other agent-reported
         // event lands on, so a person reading the run already sees it.
-        self.entry(
+        self.wiring.l4().port().journal(
             task_id,
             TaskEntry::new(
                 "agent",
@@ -104,13 +108,13 @@ impl Engine {
     ) -> Result<suggestion::Report> {
         let scopes = self.suggestion_scope_set(scope)?;
         let filter = suggestion::Filter { scopes, kind, target, state };
-        let all = self.l5.suggestions.all().await?;
+        let all = self.state.suggestions.all().await?;
         let matching: Vec<Suggestion> = filter.apply(&all).into_iter().cloned().collect();
         Ok(suggestion::report(matching))
     }
 
     pub(crate) async fn suggestion_get(&self, id: &str) -> Result<Suggestion> {
-        self.l5.suggestions
+        self.state.suggestions
             .get(id)
             .await?
             .ok_or_else(|| FactoryError::BadRequest(format!("no such suggestion: {id:?}")))
@@ -145,7 +149,7 @@ impl Engine {
             )));
         }
 
-        let snapshot = self.factory_snapshot();
+        let snapshot = self.wiring.snapshot();
         let root = snapshot.config.scope.as_ref().ok_or_else(|| {
             FactoryError::BadRequest(
                 "this instance declares no root scope, so there is nowhere for an improvement task to land".into(),
@@ -193,9 +197,11 @@ impl Engine {
         let mut labels = BTreeMap::new();
         labels.insert("suggestion".to_string(), ids.join(","));
 
-        let observer = crate::commands::CreationObserver(self.shared.bus.clone());
-        let receipt = crate::commands::assurance(self, &observer)
-            .remediate(Intent {
+        let task_id = self
+            .wiring
+            .l4()
+            .port()
+            .create_remediation(Intent {
                 title,
                 instructions: body,
                 scope: root.name.clone(),
@@ -207,13 +213,13 @@ impl Engine {
         let now = Utc::now();
         let by = crate::policies::caller_name(caller);
         for mut s in suggestions {
-            if let Err(e) = s.task(&receipt.id, &by, now) {
+            if let Err(e) = s.task(&task_id, &by, now) {
                 tracing::warn!(suggestion = s.id, "{e}");
                 continue;
             }
-            self.l5.suggestions.put(&s).await?;
+            self.state.suggestions.put(&s).await?;
         }
-        crate::commands::task_snapshot(self, receipt.id).await
+        self.require_task(&task_id).await
     }
 
     pub(crate) async fn suggestion_dismiss(&self, caller: &Caller, id: &str, reason: String) -> Result<Suggestion> {
@@ -221,7 +227,7 @@ impl Engine {
         suggestion
             .dismiss(reason, &crate::policies::caller_name(caller), Utc::now())
             .map_err(FactoryError::BadRequest)?;
-        self.l5.suggestions.put(&suggestion).await?;
+        self.state.suggestions.put(&suggestion).await?;
         Ok(suggestion)
     }
 
@@ -230,7 +236,7 @@ impl Engine {
         suggestion
             .done(&crate::policies::caller_name(caller), Utc::now())
             .map_err(FactoryError::BadRequest)?;
-        self.l5.suggestions.put(&suggestion).await?;
+        self.state.suggestions.put(&suggestion).await?;
         Ok(suggestion)
     }
 
@@ -258,13 +264,13 @@ impl Engine {
         }
         let mut suggestion = self.suggestion_get(id).await?;
         let task_id = suggestion.task_id.clone();
-        if self.l4.store.active_run(&task_id).await?.is_some() {
+        if self.active_run(&task_id).await?.is_some() {
             return Err(FactoryError::BadRequest(format!(
                 "task {task_id} has a run in progress; ask once it ends"
             )));
         }
-        let task = self.require(&task_id).await?;
-        let Some(prev) = self.l4.store.runs(&task_id, 1).await?.into_iter().next() else {
+        let task = self.require_task(&task_id).await?;
+        let Some(prev) = self.latest_run(&task_id).await? else {
             return Err(FactoryError::BadRequest(format!("task {task_id} has no previous run to ask")));
         };
         if !prev.status.is_terminal() {
@@ -274,10 +280,10 @@ impl Engine {
                 prev.status.as_str()
             )));
         }
-        let (agent_name, adapter_name, declaration) = self.resolve_agent(&task.scope, &task.agent)?;
-        let agent = self.shared.registry.agent(&adapter_name)?;
-        let runtime = self.shared.registry.runtime(&task.runtime)?;
-        let scope_path = self.factory_snapshot().scope_path(&task.scope)?;
+        let (agent_name, adapter_name, declaration) = self.wiring.resolve_agent(&task.scope, &task.agent)?;
+        let agent = self.wiring.registry().agent(&adapter_name)?;
+        let runtime = self.wiring.registry().runtime(&task.runtime)?;
+        let scope_path = self.wiring.snapshot().scope_path(&task.scope)?;
         // `#274`: a sandboxed run's conversation may have been preserved in
         // its OpenShell sandbox rather than deleted with it; `resolve_continue`
         // itself decides, from what was actually preserved, exactly as
@@ -287,6 +293,9 @@ impl Engine {
             .filter(|d| d.sandbox == Sandbox::Openshell)
             .and_then(|d| d.openshell.as_ref());
         let outcome = self
+            .wiring
+            .l4()
+            .port()
             .resolve_continue(&task, (&agent_name, &adapter_name), agent.as_ref(), runtime.as_ref(), &prev, &scope_path, sandboxed)
             .await;
         if let ContinueOutcome::Fresh { reason } = &outcome {
@@ -312,7 +321,7 @@ impl Engine {
                 suggestion.kind, suggestion.target, suggestion.summary,
             )),
         };
-        let run = Box::pin(self.dispatch_with(&task_id, Trigger::Manual, Due::now(), Some(prev), vec![ask_note])).await?;
+        let run = Box::pin(self.wiring.l4().port().dispatch_with(&task_id, Trigger::Manual, Due::now(), Some(prev), vec![ask_note])).await?;
         if run.resumed_session.is_none() {
             // `dispatch` applies a few guards of its own beyond
             // `resolve_continue` (guide/role fingerprint drift, an unknown
@@ -321,7 +330,7 @@ impl Engine {
             // replicate. Caught here rather than never: the run is
             // cancelled before it does any work, so the question is never
             // put to a conversation that never saw it.
-            self.cancel_task_run(&task_id, Some(&run.id), FailKind::CancelledByPerson).await.ok();
+            self.wiring.l4().port().cancel_task_run(&task_id, Some(&run.id), FailKind::CancelledByPerson).await.ok();
             return Err(FactoryError::BadRequest(
                 "the harness fell back to a fresh session instead of resuming; the attempt was cancelled \
                  rather than silently asking a new conversation"
@@ -331,7 +340,7 @@ impl Engine {
 
         let now = Utc::now();
         suggestion.ask(question, &crate::policies::caller_name(caller), &run.id, now);
-        self.l5.suggestions.put(&suggestion).await?;
+        self.state.suggestions.put(&suggestion).await?;
         Ok(suggestion)
     }
 
@@ -341,7 +350,7 @@ impl Engine {
     /// nothing) and never fails the run it is settling for -- a suggestion
     /// is evidence, not part of any run's own outcome.
     pub(crate) async fn settle_suggestion_ask(&self, run: &Run) {
-        let found = match self.l5.suggestions.find_by_ask_run(&run.id).await {
+        let found = match self.state.suggestions.find_by_ask_run(&run.id).await {
             Ok(found) => found,
             Err(e) => {
                 tracing::warn!(run = run.id, "could not look up a pending suggestion ask: {e}");
@@ -357,7 +366,7 @@ impl Engine {
         if !suggestion.answer(&run.id, answer, Utc::now()) {
             return;
         }
-        if let Err(e) = self.l5.suggestions.put(&suggestion).await {
+        if let Err(e) = self.state.suggestions.put(&suggestion).await {
             tracing::warn!(suggestion = suggestion.id, run = run.id, "could not record a suggestion's answer: {e}");
         }
     }
@@ -521,6 +530,27 @@ mod tests {
             .unwrap()
     }
 
+    /// L5 reads L4's task and run records as facts (`TaskSnapshotFact`, `RunSnapshotFact`), never from L4's store.
+    #[tokio::test]
+    async fn l5_reads_task_and_run_records_as_facts_and_a_missing_one_is_none() {
+        let engine = test_engine(None, true);
+        let l5 = engine.l5_service();
+        assert!(l5.task_record("nope").await.unwrap().is_none());
+        assert!(l5.latest_run("nope").await.unwrap().is_none());
+        assert!(l5.active_run("nope").await.unwrap().is_none());
+        assert!(matches!(l5.require_task("nope").await, Err(FactoryError::TaskNotFound(_))));
+
+        let task = task_in(&engine, "demo", "a").await;
+        assert_eq!(l5.task_record(&task.id).await.unwrap().unwrap().id, task.id);
+        assert!(l5.active_run(&task.id).await.unwrap().is_none(), "no run yet");
+
+        let run = active_run(&engine, &task.id, "a", "tok").await;
+        assert_eq!(l5.active_run(&task.id).await.unwrap().unwrap().id, run.id);
+        assert_eq!(l5.latest_run(&task.id).await.unwrap().unwrap().id, run.id);
+        let by_id = l5.run_record(factory_kernel::RunSnapshotQuery::ById(run.id.clone())).await.unwrap().unwrap();
+        assert_eq!((by_id.id, by_id.token), (run.id, run.token), "the whole record comes through");
+    }
+
     fn report(token: Option<&str>) -> SuggestionReport {
         SuggestionReport {
             kind: SuggestionKind::Capability,
@@ -594,22 +624,23 @@ mod tests {
         let engine = test_engine(None, false);
         let demo_task = task_in(&engine, "demo", "plain-worker").await;
         active_run(&engine, &demo_task.id, "plain-worker", "tok-demo").await;
-        engine.file_suggestion(&demo_task.id, report(Some("tok-demo"))).await.unwrap();
+        engine.l5_service().file_suggestion(&demo_task.id, report(Some("tok-demo"))).await.unwrap();
 
         let root_task = task_in(&engine, "root", "improver").await;
         active_run(&engine, &root_task.id, "improver", "tok-root").await;
         let mut other = report(Some("tok-root"));
         other.target = "a different target".into();
-        engine.file_suggestion(&root_task.id, other).await.unwrap();
+        engine.l5_service().file_suggestion(&root_task.id, other).await.unwrap();
 
-        let demo_only = engine.suggestions_report(Some("demo"), None, None, None).await.unwrap();
+        let demo_only = engine.l5_service().suggestions_report(Some("demo"), None, None, None).await.unwrap();
         assert_eq!(demo_only.suggestions.len(), 1);
         assert_eq!(demo_only.suggestions[0].scope, "demo");
 
-        let everything = engine.suggestions_report(None, None, None, None).await.unwrap();
+        let everything = engine.l5_service().suggestions_report(None, None, None, None).await.unwrap();
         assert_eq!(everything.suggestions.len(), 2);
 
         let by_target = engine
+            .l5_service()
             .suggestions_report(None, None, Some("a different target".into()), None)
             .await
             .unwrap();
@@ -622,12 +653,12 @@ mod tests {
         let engine = test_engine(None, false);
         let task = task_in(&engine, "demo", "plain-worker").await;
         active_run(&engine, &task.id, "plain-worker", "tok-1").await;
-        let s = engine.file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
+        let s = engine.l5_service().file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
 
-        let dismissed = engine.suggestion_dismiss(&Caller::Owner, &s.id, "not worth it".into()).await.unwrap();
+        let dismissed = engine.l5_service().suggestion_dismiss(&Caller::Owner, &s.id, "not worth it".into()).await.unwrap();
         assert_eq!(dismissed.state, SuggestionState::Dismissed);
-        assert!(engine.suggestion_dismiss(&Caller::Owner, &s.id, "again".into()).await.is_err());
-        assert!(engine.suggestion_done(&Caller::Owner, &s.id).await.is_err());
+        assert!(engine.l5_service().suggestion_dismiss(&Caller::Owner, &s.id, "again".into()).await.is_err());
+        assert!(engine.l5_service().suggestion_done(&Caller::Owner, &s.id).await.is_err());
     }
 
     #[tokio::test]
@@ -635,9 +666,9 @@ mod tests {
         let engine = test_engine(None, false);
         let task = task_in(&engine, "demo", "plain-worker").await;
         active_run(&engine, &task.id, "plain-worker", "tok-1").await;
-        let s = engine.file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
+        let s = engine.l5_service().file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
 
-        let err = engine.suggestion_task(&Caller::Owner, vec![s.id]).await.unwrap_err().to_string();
+        let err = engine.l5_service().suggestion_task(&Caller::Owner, vec![s.id]).await.unwrap_err().to_string();
         assert!(err.contains("improvement_agent"), "{err}");
     }
 
@@ -646,9 +677,9 @@ mod tests {
         let engine = test_engine(Some("improver"), false);
         let task = task_in(&engine, "demo", "plain-worker").await;
         active_run(&engine, &task.id, "plain-worker", "tok-1").await;
-        let s = engine.file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
+        let s = engine.l5_service().file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
 
-        let err = engine.suggestion_task(&Caller::Owner, vec![s.id]).await.unwrap_err().to_string();
+        let err = engine.l5_service().suggestion_task(&Caller::Owner, vec![s.id]).await.unwrap_err().to_string();
         assert!(err.contains("improver"), "{err}");
     }
 
@@ -657,17 +688,17 @@ mod tests {
         let engine = test_engine(Some("improver"), true);
         let task = task_in(&engine, "demo", "plain-worker").await;
         active_run(&engine, &task.id, "plain-worker", "tok-1").await;
-        let s = engine.file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
+        let s = engine.l5_service().file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
 
         // A non-owner caller, to prove the history names whoever actually
         // pressed the button (`#275` QA) rather than a hardcoded "owner".
         let foreman = Caller::Agent { scope: "demo".into(), name: "boss".into(), role: Role::foreman(), run_id: None };
-        let created = engine.suggestion_task(&foreman, vec![s.id.clone()]).await.unwrap();
+        let created = engine.l5_service().suggestion_task(&foreman, vec![s.id.clone()]).await.unwrap();
         assert_eq!(created.scope, "root", "the task lands in the root scope, not demo");
         assert_eq!(created.agent, "improver", "addressed to the improver, never the complaining project agent");
         assert_eq!(created.labels.get("suggestion").map(String::as_str), Some(s.id.as_str()));
 
-        let updated = engine.suggestion_get(&s.id).await.unwrap();
+        let updated = engine.l5_service().suggestion_get(&s.id).await.unwrap();
         assert_eq!(updated.state, SuggestionState::Tasked);
         assert_eq!(updated.improvement_task_id.as_deref(), Some(created.id.as_str()));
         assert_eq!(updated.history.last().unwrap().by, "boss", "names whoever pressed the button, not a hardcoded owner");
@@ -680,25 +711,25 @@ mod tests {
         active_run(&engine, &demo_task.id, "plain-worker", "tok-demo").await;
         let mut from_demo = report(Some("tok-demo"));
         from_demo.target = "shared target".into();
-        let a = engine.file_suggestion(&demo_task.id, from_demo).await.unwrap();
+        let a = engine.l5_service().file_suggestion(&demo_task.id, from_demo).await.unwrap();
 
         let root_task = task_in(&engine, "root", "improver").await;
         active_run(&engine, &root_task.id, "improver", "tok-root").await;
         let mut from_root = report(Some("tok-root"));
         from_root.target = "shared target".into();
-        let b = engine.file_suggestion(&root_task.id, from_root).await.unwrap();
+        let b = engine.l5_service().file_suggestion(&root_task.id, from_root).await.unwrap();
 
         // No "must share a scope" refusal: a group keyed by target alone
         // routinely spans more than one scope, and the task always lands in
         // the root regardless of where its suggestions came from.
-        let created = engine.suggestion_task(&Caller::Owner, vec![a.id.clone(), b.id.clone()]).await.unwrap();
+        let created = engine.l5_service().suggestion_task(&Caller::Owner, vec![a.id.clone(), b.id.clone()]).await.unwrap();
         assert_eq!(created.scope, "root");
         assert!(created.instructions.contains("demo"), "{}", created.instructions);
         assert!(created.instructions.contains("root"), "{}", created.instructions);
         assert_eq!(created.labels.get("suggestion").map(String::as_str), Some(format!("{},{}", a.id, b.id).as_str()));
 
-        assert_eq!(engine.suggestion_get(&a.id).await.unwrap().state, SuggestionState::Tasked);
-        assert_eq!(engine.suggestion_get(&b.id).await.unwrap().state, SuggestionState::Tasked);
+        assert_eq!(engine.l5_service().suggestion_get(&a.id).await.unwrap().state, SuggestionState::Tasked);
+        assert_eq!(engine.l5_service().suggestion_get(&b.id).await.unwrap().state, SuggestionState::Tasked);
     }
 
     #[tokio::test]
@@ -709,7 +740,7 @@ mod tests {
         // run in progress -- but note `active_run` alone never gives this
         // task a *terminal* previous run, so there is nothing to resume.
         let run = active_run(&engine, &task.id, "plain-worker", "tok-1").await;
-        let s = engine.file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
+        let s = engine.l5_service().file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
         engine
             .l4.store
             .update_run(&run.id, &factory_core::run::RunPatch {
@@ -720,7 +751,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = engine.suggestion_ask(&Caller::Owner, &s.id, "why did this fail?".into()).await.unwrap_err();
+        let err = engine.l5_service().suggestion_ask(&Caller::Owner, &s.id, "why did this fail?".into()).await.unwrap_err();
         // `resolve_continue` refuses: `shell` declares no resume spec, and
         // either way the run was never confirmed gone. Never dispatched.
         assert!(err.to_string().to_lowercase().contains("resume") || err.to_string().contains("harness"), "{err}");
@@ -732,9 +763,9 @@ mod tests {
         let engine = test_engine(None, false);
         let task = task_in(&engine, "demo", "plain-worker").await;
         active_run(&engine, &task.id, "plain-worker", "tok-1").await;
-        let s = engine.file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
+        let s = engine.l5_service().file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
 
-        let err = engine.suggestion_ask(&Caller::Owner, &s.id, "why?".into()).await.unwrap_err();
+        let err = engine.l5_service().suggestion_ask(&Caller::Owner, &s.id, "why?".into()).await.unwrap_err();
         assert!(err.to_string().contains("in progress"), "{err}");
     }
 }

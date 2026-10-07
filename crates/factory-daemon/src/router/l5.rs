@@ -97,39 +97,39 @@ impl Engine {
             }
             Request::Datasets => Ok(Payload::Datasets {
                 root: self.factory_snapshot().datasets_dir().display().to_string(),
-                datasets: self.dataset_summaries()?,
+                datasets: self.l5_service().dataset_summaries()?,
             }),
             Request::Dataset { name } => {
-                let (dataset, findings) = self.dataset_view(&name)?;
+                let (dataset, findings) = self.l5_service().dataset_view(&name)?;
                 Ok(Payload::Dataset { dataset, findings })
             }
             Request::DatasetCreate { name, description } => {
-                let dataset = self.dataset_create(&name, description).await?;
-                let findings = factory_core::dataset::findings(&dataset, &self.known_scope_names());
+                let dataset = self.l5_service().dataset_create(&name, description).await?;
+                let findings = factory_core::dataset::findings(&dataset, &self.l5_service().known_scope_names());
                 Ok(Payload::Dataset { dataset, findings })
             }
             Request::DatasetAddCases { name, cases } => {
-                let dataset = self.dataset_add_cases(&name, cases).await?;
-                let findings = factory_core::dataset::findings(&dataset, &self.known_scope_names());
+                let dataset = self.l5_service().dataset_add_cases(&name, cases).await?;
+                let findings = factory_core::dataset::findings(&dataset, &self.l5_service().known_scope_names());
                 Ok(Payload::Dataset { dataset, findings })
             }
             Request::DatasetImport { name, format, content, replace } => {
-                let dataset = self.dataset_import(&name, &format, &content, replace).await?;
-                let findings = factory_core::dataset::findings(&dataset, &self.known_scope_names());
+                let dataset = self.l5_service().dataset_import(&name, &format, &content, replace).await?;
+                let findings = factory_core::dataset::findings(&dataset, &self.l5_service().known_scope_names());
                 Ok(Payload::Dataset { dataset, findings })
             }
             Request::DatasetFromTasks { name, task_ids } => {
-                let dataset = self.dataset_from_tasks(&name, task_ids).await?;
-                let findings = factory_core::dataset::findings(&dataset, &self.known_scope_names());
+                let dataset = self.l5_service().dataset_from_tasks(&name, task_ids).await?;
+                let findings = factory_core::dataset::findings(&dataset, &self.l5_service().known_scope_names());
                 Ok(Payload::Dataset { dataset, findings })
             }
             Request::DatasetDeleteCase { name, id } => {
-                let dataset = self.dataset_delete_case(&name, &id).await?;
-                let findings = factory_core::dataset::findings(&dataset, &self.known_scope_names());
+                let dataset = self.l5_service().dataset_delete_case(&name, &id).await?;
+                let findings = factory_core::dataset::findings(&dataset, &self.l5_service().known_scope_names());
                 Ok(Payload::Dataset { dataset, findings })
             }
             Request::DatasetDelete { name } => Ok(Payload::Deleted {
-                deleted: self.dataset_delete(&name).await?,
+                deleted: self.l5_service().dataset_delete(&name).await?,
             }),
             Request::BenchRunStart {
                 dataset,
@@ -200,28 +200,28 @@ impl Engine {
             // `Event::TaskEntry` (`Engine::entry`, inside `file_suggestion`)
             // like any other journaled report.
             Request::TaskSuggest { id, suggestion } => Ok(Payload::Suggestion {
-                suggestion: self.file_suggestion(&id, suggestion).await?,
+                suggestion: self.l5_service().file_suggestion(&id, suggestion).await?,
             }),
             Request::Suggestions { scope, kind, target, state } => Ok(Payload::Suggestions {
-                report: self.suggestions_report(scope.as_deref(), kind, target, state).await?,
+                report: self.l5_service().suggestions_report(scope.as_deref(), kind, target, state).await?,
             }),
             Request::SuggestionGet { id } => Ok(Payload::Suggestion {
-                suggestion: self.suggestion_get(&id).await?,
+                suggestion: self.l5_service().suggestion_get(&id).await?,
             }),
             // No event of its own: the created task already fired
             // `Event::TaskCreated` inside `Engine::create`, the same rule
             // `PolicyRemediate`/`QualityRemediate` follow.
             Request::SuggestionTask { ids } => Ok(Payload::SuggestionTask {
-                task: self.suggestion_task(caller, ids).await?,
+                task: self.l5_service().suggestion_task(caller, ids).await?,
             }),
             Request::SuggestionDismiss { id, reason } => Ok(Payload::Suggestion {
-                suggestion: self.suggestion_dismiss(caller, &id, reason).await?,
+                suggestion: self.l5_service().suggestion_dismiss(caller, &id, reason).await?,
             }),
             Request::SuggestionDone { id } => Ok(Payload::Suggestion {
-                suggestion: self.suggestion_done(caller, &id).await?,
+                suggestion: self.l5_service().suggestion_done(caller, &id).await?,
             }),
             Request::SuggestionAsk { id, question } => Ok(Payload::Suggestion {
-                suggestion: Box::pin(self.suggestion_ask(caller, &id, question)).await?,
+                suggestion: Box::pin(self.l5_service().suggestion_ask(caller, &id, question)).await?,
             }),
             other => Err(misrouted(other.level())),
         }

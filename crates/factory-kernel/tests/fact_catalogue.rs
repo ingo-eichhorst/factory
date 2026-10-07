@@ -43,6 +43,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<TaskFact, L4>("TaskFact", "L4");
     assert_producer::<TaskInventoryFact, L4>("TaskInventoryFact", "L4");
     assert_producer::<TaskSnapshotFact, L4>("TaskSnapshotFact", "L4");
+    assert_producer::<RunSnapshotFact, L4>("RunSnapshotFact", "L4");
     assert_producer::<WorkflowFact, L4>("WorkflowFact", "L4");
     assert_producer::<EnvironmentRecoveryFact, L4>("EnvironmentRecoveryFact", "L4");
     assert_producer::<RecoveryJournalFact, L4>("RecoveryJournalFact", "L4");
@@ -242,6 +243,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "TaskFact",
         "TaskInventoryFact",
         "TaskSnapshotFact",
+        "RunSnapshotFact",
         "WorkflowFact",
         "EnvironmentRecoveryFact",
         "RecoveryJournalFact",

@@ -124,6 +124,11 @@ impl<'a, L: Level> Wiring<'a, L> {
     {
         F::provider(self.wired.reach::<F>())
     }
+    /// How an agent name resolves to an adapter in a scope: a pure function of the configuration and the adapter
+    /// registry (L3's selection service), readable from any level.
+    pub(crate) fn resolve_agent(&self, scope: &str, name: &str) -> factory_core::error::Result<(String, String, Option<factory_core::config::ScopeAgent>)> {
+        crate::commands::agents(self.engine).resolve_agent(scope, name)
+    }
     /// The checked fact read for this level.
     pub(crate) fn facts(&self) -> Facts<'a, L> {
         Facts::new(self.engine)
@@ -140,10 +145,6 @@ impl<'a> Wiring<'a, L3> {
     pub(crate) fn provision(&self) -> factory_kernel::Commands<L3, crate::dispatch_port::L2Port<'a>> {
         factory_kernel::Commands::new(crate::dispatch_port::L2Port(self.engine.l2_service()))
     }
-    /// How a task's agent name resolves to an adapter (L3's own selection service).
-    pub(crate) fn resolve_agent(&self, scope: &str, name: &str) -> factory_core::error::Result<(String, String, Option<factory_core::config::ScopeAgent>)> {
-        crate::commands::agents(self.engine).resolve_agent(scope, name)
-    }
     /// The liveness sample the occupancy chart keeps (L4's record). L3 reports what it
     /// observed about a session; recording it is L4's. A transitional bridge, removed
     /// when L4 reads it from L3 (S9).
@@ -159,6 +160,12 @@ impl<'a> Wiring<'a, L3> {
     /// A session that is no longer there closes its open span.
     pub(crate) async fn record_gone(&self, subject: &str, scope: &str, agent: &str) {
         self.engine.l4_service().record_gone(subject, scope, agent).await
+    }
+}
+impl<'a> Wiring<'a, factory_kernel::L5> {
+    /// The command edge L5 holds to the level below it: `Commands<L5, L4Port>`.
+    pub(crate) fn l4(&self) -> factory_kernel::Commands<factory_kernel::L5, crate::l4_port::L4Port<'a>> {
+        factory_kernel::Commands::new(crate::l4_port::L4Port(self.engine.l4_service()))
     }
 }
 impl<'a> Wiring<'a, L6> {
@@ -365,6 +372,13 @@ port!(
 );
 port!(TaskFact, factory_process::facts::Provider<'a>, NamedQuery, BTreeMap<String, Vec<TaskFact>>, l4::provider);
 port!(TaskSnapshotFact, factory_process::facts::Provider<'a>, String, TaskSnapshotFact, l4::provider);
+port!(
+    RunSnapshotFact,
+    factory_process::facts::Provider<'a>,
+    factory_kernel::RunSnapshotQuery,
+    RunSnapshotFact,
+    l4::provider
+);
 port!(
     TaskInventoryFact,
     factory_process::facts::Provider<'a>,
@@ -796,6 +810,7 @@ mod tests {
         registered::<TaskFact>();
         registered::<TaskInventoryFact>();
         registered::<TaskSnapshotFact>();
+        registered::<RunSnapshotFact>();
         registered::<WorkflowFact>();
         registered::<EnvironmentRecoveryFact>();
         registered::<RecoveryJournalFact>();
@@ -1404,6 +1419,7 @@ mod tests {
             "dyn Fn",
             "BoxFuture",
             "TaskSnapshotFact",
+            "RunSnapshotFact",
         ] {
             assert!(
                 !owner.contains(forbidden),
