@@ -1033,6 +1033,7 @@ mod tests {
         }
 
         let task = engine
+            .l4_service()
             .create_bench_task(
                 NewTask {
                     title: format!("bench {}", origin.case_id),
@@ -1327,6 +1328,7 @@ mod tests {
         };
 
         let task = engine
+            .l4_service()
             .create_bench_task(
                 NewTask {
                     title: "bench slow-case".into(),

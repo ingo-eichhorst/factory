@@ -92,7 +92,7 @@ impl L4Service<'_> {
             // the task, and there is no run to close.
             Err(FactoryError::HarnessUnhealthy(reason)) => {
                 tracing::warn!(task = task_id, "held on its harness: {reason}");
-                self.core.record_workflow_task_state(task_id).await;
+                self.record_workflow_task_state(task_id).await;
                 self.core.record_bench_task_state(task_id).await;
                 return;
             }
@@ -150,7 +150,7 @@ impl L4Service<'_> {
                         self.publish_task(task_id).await;
                     }
                 }
-                self.core.record_workflow_task_state(task_id).await;
+                self.record_workflow_task_state(task_id).await;
                 self.core.record_bench_task_state(task_id).await;
                 return;
             }
@@ -190,13 +190,13 @@ impl L4Service<'_> {
                         .await;
                     self.publish_task(task_id).await;
                 }
-                self.core.record_workflow_task_state(task_id).await;
+                self.record_workflow_task_state(task_id).await;
                 self.core.record_bench_task_state(task_id).await;
                 return;
             }
         };
         tracing::info!(task = task_id, run = %run.id, attempt = run.attempt, "dispatched");
-        self.core.record_workflow_task_state(task_id).await;
+        self.record_workflow_task_state(task_id).await;
         self.core.record_bench_task_state(task_id).await;
     }
     pub(crate) async fn dispatch(&self, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) -> Result<Run> {

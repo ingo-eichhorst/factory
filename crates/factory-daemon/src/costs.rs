@@ -1226,6 +1226,7 @@ mod tests {
             workspace: None,
         };
         let wf_task = engine
+            .l4_service()
             .create_workflow_task(
                 NewTask {
                     title: "wf task".into(),

@@ -362,7 +362,7 @@ impl L4Service<'_> {
                         format!("approved; waiting for a {agent} slot ({in_use}/{max} in use)"),
                     ).in_run(&run.id)).await;
                     self.publish_task(&task.id).await;
-                    spawner.sync_workflow_for_task(&task.id).await;
+                    self.sync_workflow_for_task(&task.id, spawner).await;
                     return Ok(run);
                 }
                 Err(error) => {
@@ -381,7 +381,7 @@ impl L4Service<'_> {
                     return Err(error);
                 }
             };
-            spawner.sync_workflow_for_task(&task.id).await;
+            self.sync_workflow_for_task(&task.id, spawner).await;
             return Ok(resumed);
         }
         if verdict == AttestationVerdict::Pass
@@ -407,7 +407,7 @@ impl L4Service<'_> {
             self.enqueue_verification(&run.id);
             return Ok(updated);
         }
-        spawner.sync_workflow_for_task(&task.id).await;
+        self.sync_workflow_for_task(&task.id, spawner).await;
         Ok(run)
     }
 
@@ -556,7 +556,7 @@ impl L4Service<'_> {
                 run: workflow.clone(),
             });
             drop(workflow_guard);
-            spawner.advance_workflow(&workflow.id).await?;
+            self.advance_workflow(&workflow.id, spawner).await?;
         } else {
             let instructions = format!(
                 "{}\n\nRework requested from run {}:\n{}",
@@ -908,7 +908,7 @@ impl L4Service<'_> {
                     ..Default::default()
                 }).await?
             } else {
-                self.core.create_review_task(new, review_origin, review_id).await?
+                self.create_review_task(new, review_origin, review_id).await?
             };
             if let (Some(origin), Some(node_id)) = (&task.workflow_origin, &step.node_id) {
                 let mut workflow = self.workflow_run(&origin.workflow_run_id).await?;
@@ -1213,7 +1213,7 @@ impl L4Service<'_> {
         if after_gates != state {
             self.enqueue_verification(run_id);
             self.release_verification(run_id);
-            spawner.sync_workflow_for_task(&task.id).await;
+            self.sync_workflow_for_task(&task.id, spawner).await;
             return Ok(());
         }
 
@@ -1230,7 +1230,7 @@ impl L4Service<'_> {
         );
         if gates.passed && self.ensure_review_tasks(spawner, &run, &task, &dir, &state).await? {
             self.release_verification(run_id);
-            spawner.sync_workflow_for_task(&task.id).await;
+            self.sync_workflow_for_task(&task.id, spawner).await;
             return Ok(());
         }
 
@@ -1257,7 +1257,7 @@ impl L4Service<'_> {
                 RunPatch { status: Some(RunStatus::Done), ..Default::default() },
                 "verified",
             ).await {
-                spawner.sync_workflow_for_task(&task.id).await;
+                self.sync_workflow_for_task(&task.id, spawner).await;
                 return Err(error);
             }
             self.entry(
@@ -1294,7 +1294,7 @@ impl L4Service<'_> {
             self.wiring.bus().publish(Event::RunUpdated { run: blocked.clone() });
             self.mirror_to_task(&blocked).await;
         }
-        spawner.sync_workflow_for_task(&task.id).await;
+        self.sync_workflow_for_task(&task.id, spawner).await;
         Ok(())
     }
 
@@ -2195,7 +2195,7 @@ mod tests {
     #[tokio::test]
     async fn workflow_approval_keeps_its_verdict_while_the_subject_runs_or_stays_rejected() {
         async fn started(engine: &Arc<Engine>) -> (factory_core::workflow::WorkflowRun, Task, Run) {
-            let definition = engine.create_workflow(WorkflowDraft {
+            let definition = engine.l4_service().create_workflow(WorkflowDraft {
                 name: "approval-state".into(),
                 scope: "demo".into(),
                 category: Some("feature".into()),
@@ -2204,7 +2204,7 @@ mod tests {
             }).await.unwrap();
             let workflow = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
             loop {
-                let state = engine.workflow_run(&workflow.id).await.unwrap();
+                let state = engine.l4_service().workflow_run(&workflow.id).await.unwrap();
                 if let Some(task_id) = state.nodes.iter().find(|item| item.node_id == "a")
                     .and_then(|item| item.task_id.as_ref())
                 {
@@ -2222,7 +2222,7 @@ mod tests {
         let (workflow, task, held) = started(&approved_engine).await;
         approved_engine.decide_approval(&Caller::Owner, &held.id, AttestationVerdict::Pass, "approved").await.unwrap();
         approved_engine.sync_workflow_for_task(&task.id).await;
-        let state = approved_engine.workflow_run(&workflow.id).await.unwrap();
+        let state = approved_engine.l4_service().workflow_run(&workflow.id).await.unwrap();
         let approval = state.definition.nodes.iter().find(|item| item.kind == WorkflowNodeKind::Approval).unwrap();
         assert_eq!(state.nodes.iter().find(|item| item.node_id == approval.id).unwrap().status, WorkflowNodeStatus::Done);
 
@@ -2230,7 +2230,7 @@ mod tests {
         let (workflow, task, held) = started(&rejected_engine).await;
         rejected_engine.decide_approval(&Caller::Owner, &held.id, AttestationVerdict::Fail, "rejected").await.unwrap();
         rejected_engine.sync_workflow_for_task(&task.id).await;
-        let state = rejected_engine.workflow_run(&workflow.id).await.unwrap();
+        let state = rejected_engine.l4_service().workflow_run(&workflow.id).await.unwrap();
         let approval = state.definition.nodes.iter().find(|item| item.kind == WorkflowNodeKind::Approval).unwrap();
         assert_eq!(state.nodes.iter().find(|item| item.node_id == approval.id).unwrap().status, WorkflowNodeStatus::Blocked);
     }
@@ -2241,6 +2241,7 @@ mod tests {
         let mut implement = node("implement");
         implement.task.worktree = Some(true);
         engine
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: "feature-part".into(),
                 scope: "demo".into(),
@@ -2286,6 +2287,7 @@ mod tests {
         let mut publish = node("publish");
         publish.task.worktree = Some(true);
         let template = engine
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: "release-part".into(),
                 scope: "demo".into(),
@@ -2329,7 +2331,7 @@ mod tests {
         assert_eq!(into_b, ["a.tests"]);
         let expand = run.definition.nodes.iter().find(|n| n.kind == WorkflowNodeKind::Expand).unwrap();
         assert_eq!(expand.expand.as_ref().unwrap().children, ["a", "b"], "the same children as ever");
-        let _ = engine.cancel_workflow(&run.id).await;
+        let _ = engine.l4_service().cancel_workflow(&run.id).await;
     }
 
     #[tokio::test]
@@ -2358,7 +2360,7 @@ mod tests {
             assert_eq!(gate.gate.as_ref().unwrap().subject.as_deref(), Some(work));
             assert!(gate.gate.as_ref().unwrap().locked);
         }
-        let _ = engine.cancel_workflow(&run.id).await;
+        let _ = engine.l4_service().cancel_workflow(&run.id).await;
     }
 
     #[tokio::test]
@@ -2366,6 +2368,7 @@ mod tests {
         let (engine, work) = engine(TESTS_FOR_FEATURES);
         std::fs::write(work.join("built.txt"), "ok").unwrap();
         let definition = engine
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: "ship".into(),
                 scope: "demo".into(),
@@ -2383,10 +2386,10 @@ mod tests {
 
         let wf = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
         assert_eq!(wf.definition.nodes.len(), 4, "the snapshot carries the gates");
-        assert_eq!(engine.workflow_definition(&definition.id).await.unwrap().nodes.len(), stored_nodes, "the stored workflow does not");
+        assert_eq!(engine.l4_service().workflow_definition(&definition.id).await.unwrap().nodes.len(), stored_nodes, "the stored workflow does not");
 
         let a_task = loop {
-            let run = engine.workflow_run(&wf.id).await.unwrap();
+            let run = engine.l4_service().workflow_run(&wf.id).await.unwrap();
             if let Some(id) = run.nodes.iter().find(|n| n.node_id == "a").and_then(|n| n.task_id.clone()) {
                 if engine.l4.store.active_run(&id).await.unwrap().is_some() {
                     break id;
@@ -2398,7 +2401,7 @@ mod tests {
         let run = report_done(&engine, &a_task).await;
         assert_eq!(run.required_steps.len(), 1);
         assert_eq!(run.required_steps[0].node_id.as_deref(), Some("a.tests"));
-        let wf_now = engine.workflow_run(&wf.id).await.unwrap();
+        let wf_now = engine.l4_service().workflow_run(&wf.id).await.unwrap();
         let waiting_id = wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap().task_id.as_ref().unwrap();
         assert!(engine.require(waiting_id).await.unwrap().after.is_some(), "b exists but is not released on a's word alone");
         assert!(engine.l4.store.active_run(waiting_id).await.unwrap().is_none());
@@ -2406,7 +2409,7 @@ mod tests {
 
         settled(&engine, &run.id).await;
         engine.sync_workflow_for_task(&a_task).await;
-        let wf_now = engine.workflow_run(&wf.id).await.unwrap();
+        let wf_now = engine.l4_service().workflow_run(&wf.id).await.unwrap();
         let gate = wf_now.nodes.iter().find(|n| n.node_id == "a.tests").unwrap();
         assert_eq!(gate.status, WorkflowNodeStatus::Done, "the gate mirrors its attestation");
         assert!(gate.task_id.is_none(), "a gate never spawns a task");
@@ -2417,6 +2420,7 @@ mod tests {
     async fn accepting_a_failed_workflow_gate_sends_the_subject_back_with_findings() {
         let (engine, _) = engine(TESTS_FOR_FEATURES);
         let definition = engine
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: "gate-rework".into(),
                 scope: "demo".into(),
@@ -2431,7 +2435,7 @@ mod tests {
             .await
             .unwrap();
         let first_task = loop {
-            let run = engine.workflow_run(&wf.id).await.unwrap();
+            let run = engine.l4_service().workflow_run(&wf.id).await.unwrap();
             if let Some(id) = run.nodes.iter().find(|n| n.node_id == "a").and_then(|n| n.task_id.clone()) {
                 if engine.l4.store.active_run(&id).await.unwrap().is_some() {
                     break id;
@@ -2444,7 +2448,7 @@ mod tests {
 
         engine.accept_rework(&Caller::Owner, &failed.id).await.unwrap();
         for _ in 0..400 {
-            let run = engine.workflow_run(&wf.id).await.unwrap();
+            let run = engine.l4_service().workflow_run(&wf.id).await.unwrap();
             let node = run.nodes.iter().find(|n| n.node_id == "a").unwrap();
             if node.task_id.as_deref() == Some(first_task.as_str()) {
                 // Admission reserves the run row before patching round/feedback
@@ -2469,6 +2473,7 @@ mod tests {
     async fn exhausted_workflow_rework_leaves_the_subject_blocked_for_a_person() {
         let (engine, _) = engine(TESTS_FOR_FEATURES);
         let definition = engine
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: "exhausted-gate-rework".into(),
                 scope: "demo".into(),
@@ -2483,7 +2488,7 @@ mod tests {
             .await
             .unwrap();
         let task_id = loop {
-            let run = engine.workflow_run(&wf.id).await.unwrap();
+            let run = engine.l4_service().workflow_run(&wf.id).await.unwrap();
             if let Some(id) = run
                 .nodes
                 .iter()
@@ -2500,7 +2505,7 @@ mod tests {
         assert_eq!(settled(&engine, &failed.id).await.status, RunStatus::Blocked);
 
         let edit = engine.l4.workflow_edit.lock().await;
-        let mut exhausted = engine.workflow_run(&wf.id).await.unwrap();
+        let mut exhausted = engine.l4_service().workflow_run(&wf.id).await.unwrap();
         let gate = exhausted
             .nodes
             .iter_mut()
@@ -2516,7 +2521,7 @@ mod tests {
         assert_eq!(still_blocked.status, RunStatus::Blocked);
         assert_eq!(still_blocked.blocked_source, Some(BlockSource::Verification));
         assert!(still_blocked.error.is_none(), "the blocked subject was not consumed");
-        let unchanged = engine.workflow_run(&wf.id).await.unwrap();
+        let unchanged = engine.l4_service().workflow_run(&wf.id).await.unwrap();
         let subject = unchanged.nodes.iter().find(|n| n.node_id == "a").unwrap();
         assert_eq!(subject.task_id.as_deref(), Some(task_id.as_str()));
         assert!(subject.superseded_task_ids.is_empty());

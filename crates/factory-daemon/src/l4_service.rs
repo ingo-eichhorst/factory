@@ -29,7 +29,10 @@ use factory_core::error::{FactoryError, Result};
 use factory_core::occupancy::StatusChange;
 use factory_core::event::Event;
 use factory_core::run::Run;
-use factory_core::task::{Task, TaskEntry};
+use crate::access::Caller;
+use factory_core::task::{NewTask, Task, TaskEntry, WorkflowOrigin};
+use factory_core::protocol::Request;
+use factory_core::workflow::WorkflowActor;
 use factory_kernel::L4;
 
 pub(crate) struct L4Service<'a> {
@@ -174,5 +177,112 @@ impl crate::l4_service::L4Service<'_> {
             self.record_gone(&format!("run:{}", run.id), &task.scope, &run.agent)
                 .await;
         }
+    }
+}
+
+/// Task creation: every way a task is born goes through the L4 creation command (`commands::process`).
+impl L4Service<'_> {
+    pub async fn create(&self, new: NewTask) -> Result<Task> {
+        self.create_task(new, None, None, None, None, false).await
+    }
+
+    /// A task born inside the intake gate (`#119`): `TaskStatus::Intake`
+    /// from its first write, so there is no moment it could be dispatched.
+    pub(crate) async fn create_intake_task(
+        &self,
+        new: NewTask,
+        intake: factory_core::intake::Intake,
+    ) -> Result<Task> {
+        if new.schedule.is_some() {
+            return Err(FactoryError::BadRequest(
+                "an intake item has no schedule; release it first, then schedule the task".into(),
+            ));
+        }
+        self.create_task(new, None, None, None, Some(intake), false).await
+    }
+
+    pub(crate) async fn create_workflow_task(
+        &self,
+        new: NewTask,
+        origin: WorkflowOrigin,
+        id: String,
+    ) -> Result<Task> {
+        self.create_task(new, Some(origin), None, Some(id), None, false).await
+    }
+
+    pub(crate) async fn create_bench_task(
+        &self,
+        new: NewTask,
+        origin: factory_core::bench::BenchOrigin,
+        id: String,
+    ) -> Result<Task> {
+        self.create_task(new, None, Some(origin), Some(id), None, false).await
+    }
+
+    pub(crate) async fn create_review_task(
+        &self,
+        new: NewTask,
+        origin: Option<WorkflowOrigin>,
+        id: String,
+    ) -> Result<Task> {
+        self.create_task(new, origin, None, Some(id), None, true).await
+    }
+
+    async fn create_task(
+        &self,
+        new: NewTask,
+        workflow_origin: Option<WorkflowOrigin>,
+        bench_origin: Option<factory_core::bench::BenchOrigin>,
+        id: Option<String>,
+        intake: Option<factory_core::intake::Intake>,
+        internal_review: bool,
+    ) -> Result<Task> {
+        let observer = crate::commands::CreationObserver(self.wiring.bus().clone());
+        let process = crate::commands::process(self.core, &observer);
+        let receipt = process
+            .create_extended(new, workflow_origin, bench_origin.map(Into::into), id, intake, internal_review)
+            .await?;
+        crate::commands::task_snapshot(self.core, receipt.id).await
+    }
+
+    /// Re-derive who a persisted `WorkflowActor` is right now, honouring a
+    /// role change since the run started -- a workflow run remembers who
+    /// asked, not a frozen copy of what they were allowed to do that moment.
+    pub(crate) async fn caller_for_actor(&self, actor: &WorkflowActor) -> Caller {
+        match actor {
+            WorkflowActor::Owner => Caller::Owner,
+            WorkflowActor::Agent { scope, name } => Caller::Agent {
+                scope: scope.clone(),
+                name: name.clone(),
+                role: self.core.effective_role_for(scope, name).await,
+                run_id: None,
+            },
+        }
+    }
+
+    /// The authority a hand-typed `task.create` immediately followed by
+    /// `task.run` would need from `caller` -- exactly what a workflow node's
+    /// spawn must never exceed. The task does not exist yet when a node
+    /// becomes eligible, so `TaskRun` is checked against an id nothing has
+    /// created: `authorize` already treats an unknown id as "let the engine
+    /// report `no such task`" rather than as anybody's, which is task.run's
+    /// grant-and-scope shape with no task-specific reach left to weigh in.
+    pub(crate) async fn authorize_workflow_spawn(
+        &self,
+        caller: &Caller,
+        template: &NewTask,
+    ) -> Result<()> {
+        self.core.authorize(caller, &Request::TaskCreate(template.clone()))
+            .await?;
+        self.core.authorize(
+            caller,
+            &Request::TaskRun {
+                override_wait: false,
+                id: uuid::Uuid::new_v4().to_string(),
+                reason: None,
+                continue_run: false,
+            },
+        )
+        .await
     }
 }

@@ -1,5 +1,7 @@
 use crate::access::Caller;
 use crate::engine::Engine;
+use crate::l4_service::L4Service;
+use crate::l4_spawner::L4Spawner;
 use crate::verification::run_shell_capture;
 #[cfg(not(test))]
 use crate::verification::DEFAULT_GATE_TIMEOUT_SECS;
@@ -312,21 +314,21 @@ mod tests {
         task.task.worktree = Some(true);
         let mut draft = WorkflowDraft { name: "pinned".into(), scope: "demo".into(), workspace_ref: Some("selected".into()), nodes: vec![task], ..Default::default() };
         let mut definition = WorkflowDefinition::from_draft(draft.clone());
-        engine.freeze_workflow_workspace(&mut definition).await.unwrap();
+        engine.l4_service().freeze_workflow_workspace(&mut definition).await.unwrap();
         let selected = definition.workspace_ref.clone().unwrap();
         assert_eq!(selected.len(), 40);
         git_ok(&repo, &["commit", "-q", "--allow-empty", "-m", "later"]).await;
         git_ok(&repo, &["branch", "-f", "selected", "HEAD"]).await;
-        engine.freeze_workflow_workspace(&mut definition).await.unwrap();
+        engine.l4_service().freeze_workflow_workspace(&mut definition).await.unwrap();
         assert_eq!(definition.workspace_ref.as_deref(), Some(selected.as_str()));
         let mut later = WorkflowDefinition::from_draft(draft.clone());
-        engine.freeze_workflow_workspace(&mut later).await.unwrap();
+        engine.l4_service().freeze_workflow_workspace(&mut later).await.unwrap();
         assert_ne!(later.workspace_ref, definition.workspace_ref);
         draft.nodes[0].task.worktree = Some(false);
-        assert!(engine.freeze_workflow_workspace(&mut WorkflowDefinition::from_draft(draft.clone())).await.unwrap_err().to_string().contains("isolated"));
+        assert!(engine.l4_service().freeze_workflow_workspace(&mut WorkflowDefinition::from_draft(draft.clone())).await.unwrap_err().to_string().contains("isolated"));
         draft.nodes[0].task.worktree = Some(true);
         draft.workspace_ref = Some("missing-ref".into());
-        assert!(engine.freeze_workflow_workspace(&mut WorkflowDefinition::from_draft(draft)).await.is_err());
+        assert!(engine.l4_service().freeze_workflow_workspace(&mut WorkflowDefinition::from_draft(draft)).await.is_err());
         assert!(engine.l4.store.list(&TaskFilter::default()).await.unwrap().is_empty());
         std::fs::remove_dir_all(root).ok();
     }
@@ -502,6 +504,7 @@ mod tests {
         edges: Vec<WorkflowEdge>,
     ) -> WorkflowDefinition {
         engine
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: "pipeline".into(),
                 scope: "demo".into(),
@@ -643,7 +646,7 @@ mod tests {
         let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
         let all = tasks(&engine).await;
         let b = of_node(&all, "b")[0].clone();
-        engine.cancel_workflow(&run.id).await.unwrap();
+        engine.l4_service().cancel_workflow(&run.id).await.unwrap();
         let closed = engine.require(&b.id).await.unwrap();
         assert_eq!(closed.status, TaskStatus::Cancelled);
         assert_eq!(closed.closure.unwrap().reason, factory_core::task::CloseReason::NotPlanned);
@@ -663,7 +666,7 @@ mod tests {
         engine.recover_workflows().await;
         engine.recover_workflows().await;
         assert!(engine.l4.store.get(&id).await.unwrap().is_none());
-        assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Failed);
+        assert_eq!(engine.l4_service().workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Failed);
     }
 
     #[tokio::test]
@@ -719,11 +722,11 @@ mod tests {
         let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
         let all = tasks(&engine).await;
         let b = of_node(&all, "b")[0].clone();
-        engine.override_waiting(&b, &Caller::Owner, "inspect early").await.unwrap();
+        engine.l4_service().override_waiting(&b, &Caller::Owner, "inspect early").await.unwrap();
         engine.advance_workflow(&run.id).await.unwrap();
         assert!(engine.require(&b.id).await.unwrap().after.is_none());
         assert!(engine.l4.store.active_run(&b.id).await.unwrap().is_none(), "the graph does not automatically run an early override");
-        engine.cancel_workflow(&run.id).await.unwrap();
+        engine.l4_service().cancel_workflow(&run.id).await.unwrap();
         engine.l4_service().start_run(&b.id, Trigger::Workflow).await;
         assert!(engine.l4.store.runs(&b.id, 10).await.unwrap().is_empty(), "a queued release cannot launch after cancellation");
         assert_eq!(engine.require(&b.id).await.unwrap().closure.unwrap().reason, factory_core::task::CloseReason::NotPlanned);
@@ -753,7 +756,7 @@ mod tests {
         let first = wait_for_attempt(&engine, &a.id, 1).await;
         engine.l4_service().fail_run(&first.id, FailKind::AckTimeout, "provider vanished").await;
         engine.sync_workflow_for_task(&a.id).await;
-        assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Failed);
+        assert_eq!(engine.l4_service().workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Failed);
         let response = engine.handle_request(factory_core::protocol::Request::TaskRun {
             id: a.id.clone(), reason: None, continue_run: true, override_wait: false,
         }).await;
@@ -957,7 +960,7 @@ mod tests {
         assert_eq!(d.runs, 0);
         finish(&engine, &c.id, RunStatus::Done).await;
         wait_for_tasks(&engine, 4).await;
-        let run = engine.workflow_run(&run.id).await.unwrap();
+        let run = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(
             run.nodes
                 .iter()
@@ -974,7 +977,7 @@ mod tests {
         let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
         let root = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish(&engine, &root.id, RunStatus::Failed).await;
-        let run = engine.workflow_run(&run.id).await.unwrap();
+        let run = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Failed);
         assert_eq!(run.failure_node_id.as_deref(), Some("a"));
         assert_eq!(
@@ -997,7 +1000,7 @@ mod tests {
         let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
         let root = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish(&engine, &root.id, RunStatus::Blocked).await;
-        let paused = engine.workflow_run(&run.id).await.unwrap();
+        let paused = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(paused.status, WorkflowRunStatus::Running);
         assert_eq!(paused.nodes[0].status, WorkflowNodeStatus::Blocked);
         assert_eq!(
@@ -1008,7 +1011,7 @@ mod tests {
         let all = tasks(&engine).await;
         assert!(of_node(&all, "b")[0].after.is_some(), "blocked never unlocks the child");
 
-        let cancelled = engine.cancel_workflow(&run.id).await.unwrap();
+        let cancelled = engine.l4_service().cancel_workflow(&run.id).await.unwrap();
         assert_eq!(cancelled.status, WorkflowRunStatus::Cancelled);
         assert_eq!(
             cancelled
@@ -1053,11 +1056,12 @@ mod tests {
         };
         changed.nodes[0].task.title = "changed later".into();
         let updated = engine
+            .l4_service()
             .update_workflow(&definition.id, changed)
             .await
             .unwrap();
         assert_eq!(updated.revision, 2);
-        let original = engine.workflow_run(&run.id).await.unwrap();
+        let original = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(original.revision, 1);
         assert_eq!(original.definition.nodes[0].task.title, "a");
     }
@@ -1129,7 +1133,7 @@ mod tests {
 
         finish(&engine, &root.id, RunStatus::Done).await;
 
-        let run = engine.workflow_run(&run.id).await.unwrap();
+        let run = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Failed);
         assert_eq!(run.failure_node_id.as_deref(), Some("b"));
         let b = run.nodes.iter().find(|n| n.node_id == "b").unwrap();
@@ -1174,7 +1178,7 @@ mod tests {
             .clone();
 
         finish(&engine, &a.id, RunStatus::Failed).await;
-        let mid = engine.workflow_run(&run.id).await.unwrap();
+        let mid = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(mid.status, WorkflowRunStatus::Failed);
         assert_eq!(mid.failure_node_id.as_deref(), Some("a"));
         assert_eq!(
@@ -1188,7 +1192,7 @@ mod tests {
         );
 
         finish(&engine, &b.id, RunStatus::Done).await;
-        let done = engine.workflow_run(&run.id).await.unwrap();
+        let done = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(
             done.status,
             WorkflowRunStatus::Failed,
@@ -1214,7 +1218,7 @@ mod tests {
         engine.l4.store.delete(&root.id).await.unwrap();
         engine.advance_workflow(&run.id).await.unwrap();
 
-        let run = engine.workflow_run(&run.id).await.unwrap();
+        let run = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Failed);
         assert_eq!(run.failure_node_id.as_deref(), Some("a"));
         let a = run.nodes.iter().find(|n| n.node_id == "a").unwrap();
@@ -1307,7 +1311,7 @@ mod tests {
             .unwrap();
         engine.sync_workflow_for_task(&root.id).await;
 
-        let cancelled = engine.cancel_workflow(&run.id).await.unwrap();
+        let cancelled = engine.l4_service().cancel_workflow(&run.id).await.unwrap();
         assert_eq!(cancelled.status, WorkflowRunStatus::Cancelled);
         assert_eq!(
             cancelled.nodes.iter().find(|n| n.node_id == "a").unwrap().status,
@@ -1424,7 +1428,7 @@ mod tests {
         // off `Pending` is waiting for that write to have happened, since
         // nothing else touches it in between.
         loop {
-            let node = engine1.workflow_run(&run.id).await.unwrap();
+            let node = engine1.l4_service().workflow_run(&run.id).await.unwrap();
             if node.nodes.iter().any(|n| n.node_id == "a" && n.status != WorkflowNodeStatus::Pending) {
                 break;
             }
@@ -1450,7 +1454,7 @@ mod tests {
             .clone();
         finish(&engine2, &b.id, RunStatus::Done).await;
 
-        let finished = engine2.workflow_run(&run.id).await.unwrap();
+        let finished = engine2.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(finished.status, WorkflowRunStatus::Done);
     }
 
@@ -1482,7 +1486,7 @@ mod tests {
         let run = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
         let task = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish(&engine, &task.id, RunStatus::Done).await;
-        let settled = engine.workflow_run(&run.id).await.unwrap();
+        let settled = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(settled.status, WorkflowRunStatus::Done);
 
         // R11: simulate the staleness this test exists for -- an older
@@ -1494,7 +1498,7 @@ mod tests {
 
         engine.recover_workflows().await;
 
-        let recovered = engine.workflow_run(&run.id).await.unwrap();
+        let recovered = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(
             recovered.status,
             WorkflowRunStatus::Done,
@@ -1631,7 +1635,7 @@ mod tests {
         assert!(prompt.contains("sent this work back -- rework round 1 of 5"), "{prompt}");
         assert!(prompt.contains("the parser test is missing"), "{prompt}");
 
-        let midway = engine.workflow_run(&run.id).await.unwrap();
+        let midway = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(midway.status, WorkflowRunStatus::Running);
         assert!(node_run(&midway, "implement").superseded_task_ids.is_empty());
         assert!(node_run(&midway, "review").superseded_task_ids.is_empty());
@@ -1639,9 +1643,9 @@ mod tests {
         assert_eq!(node_run(&midway, "ship").status, WorkflowNodeStatus::Unstarted);
 
         // The superseded review saying anything more changes nothing.
-        engine.record_workflow_task_state(&review.id).await;
+        engine.l4_service().record_workflow_task_state(&review.id).await;
         assert_eq!(
-            node_run(&engine.workflow_run(&run.id).await.unwrap(), "review").status,
+            node_run(&engine.l4_service().workflow_run(&run.id).await.unwrap(), "review").status,
             WorkflowNodeStatus::Unstarted
         );
 
@@ -1653,7 +1657,7 @@ mod tests {
         finish(&engine, &second_review.id, RunStatus::Done).await;
         let ship = of_node(&wait_for_tasks(&engine, 3).await, "ship")[0].clone();
         finish(&engine, &ship.id, RunStatus::Done).await;
-        assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Done);
+        assert_eq!(engine.l4_service().workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Done);
     }
 
     #[tokio::test]
@@ -1710,7 +1714,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("no rounds left"), "{error}");
-        let run = engine.workflow_run(&run.id).await.unwrap();
+        let run = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Running);
         assert_eq!(
             tasks(&engine).await.len(),
@@ -1752,7 +1756,7 @@ mod tests {
         engine.l4_service().fail_run(&active.id, FailKind::RunTimeout, "ran out of time").await;
         engine.sync_workflow_for_task(&review.id).await;
 
-        let run = engine.workflow_run(&run.id).await.unwrap();
+        let run = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Failed);
         assert_eq!(node_run(&run, "review").round, 0);
         assert_eq!(tasks(&engine).await.len(), 2);
@@ -1770,7 +1774,7 @@ mod tests {
         finish(&engine, &implement.id, RunStatus::Done).await;
         let review = of_node(&wait_for_tasks(&engine, 2).await, "review")[0].clone();
         finish(&engine, &review.id, RunStatus::Failed).await;
-        let settled = engine.workflow_run(&run.id).await.unwrap();
+        let settled = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(settled.status, WorkflowRunStatus::Failed);
         assert_eq!(node_run(&settled, "review").round, 0);
         assert_eq!(
@@ -1818,7 +1822,7 @@ mod tests {
             "the default branch was exclusive and skipped"
         );
         let c = of_node(&all, "c")[0].clone();
-        let state = engine.workflow_run(&run.id).await.unwrap();
+        let state = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(
             node_run(&state, "b").status,
             WorkflowNodeStatus::SkippedByRoute
@@ -1833,7 +1837,7 @@ mod tests {
         assert!(closed.after.is_none());
         finish(&engine, &c.id, RunStatus::Done).await;
         assert_eq!(
-            engine.workflow_run(&run.id).await.unwrap().status,
+            engine.l4_service().workflow_run(&run.id).await.unwrap().status,
             WorkflowRunStatus::Done
         );
 
@@ -1851,7 +1855,7 @@ mod tests {
         let (engine, run) = setup("printf 'broken check'; exit 2").await;
         let a = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish(&engine, &a.id, RunStatus::Done).await;
-        let state = engine.workflow_run(&run.id).await.unwrap();
+        let state = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(node_run(&state, "a").status, WorkflowNodeStatus::Blocked);
         assert!(node_run(&state, "a")
             .error
@@ -1868,7 +1872,7 @@ mod tests {
         let (engine, run) = setup("sleep 2").await;
         let a = wait_for_tasks(&engine, 1).await.pop().unwrap();
         finish(&engine, &a.id, RunStatus::Done).await;
-        let state = engine.workflow_run(&run.id).await.unwrap();
+        let state = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(node_run(&state, "a").status, WorkflowNodeStatus::Blocked);
         assert!(node_run(&state, "a").error.as_deref().unwrap().contains("did not finish within 1s"));
         let entries = engine.l4.store.entries(&a.id, 20).await.unwrap();
@@ -1880,7 +1884,7 @@ mod tests {
     async fn exits_are_first_match_wins_and_send_to_refusals_name_alternatives() {
         let standalone_engine = engine();
         let plain = standalone_engine.create(NewTask { title: "plain".into(), scope: Some("demo".into()), ..Default::default() }).await.unwrap();
-        let standalone = standalone_engine.validate_workflow_send_to(&plain.id, Some(RunStatus::Done), Some("b"))
+        let standalone = standalone_engine.l4_service().validate_workflow_send_to(&plain.id, Some(RunStatus::Done), Some("b"))
             .await.unwrap_err().to_string();
         assert!(standalone.contains("only available on a workflow node"), "{standalone}");
 
@@ -1968,7 +1972,7 @@ mod tests {
             "the second true exit was not evaluated as another route"
         );
         assert_eq!(
-            node_run(&engine.workflow_run(&run.id).await.unwrap(), "c").status,
+            node_run(&engine.l4_service().workflow_run(&run.id).await.unwrap(), "c").status,
             WorkflowNodeStatus::SkippedByRoute
         );
     }
@@ -1980,6 +1984,7 @@ mod tests {
         triage.task.title = "Triage #{{issue}}".into();
         triage.task.labels.insert("issue".into(), "{{issue}}".into());
         let definition = engine
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: "ticket".into(),
                 scope: "demo".into(),
@@ -2001,7 +2006,7 @@ mod tests {
         assert_eq!(task.title, "Triage #140");
         assert_eq!(task.labels["issue"], "140");
         assert_eq!(
-            engine.workflow_definition(&definition.id).await.unwrap().nodes[0].task.title,
+            engine.l4_service().workflow_definition(&definition.id).await.unwrap().nodes[0].task.title,
             "Triage #{{issue}}",
             "the stored definition keeps its placeholders"
         );
@@ -2166,7 +2171,7 @@ mod tests {
             .unwrap();
         engine.advance_workflow(&workflow.id).await.unwrap();
 
-        let finished = engine.workflow_run(&workflow.id).await.unwrap();
+        let finished = engine.l4_service().workflow_run(&workflow.id).await.unwrap();
         assert_eq!(finished.status, WorkflowRunStatus::Done);
         let integration = finished.integration.unwrap();
         assert_eq!(integration.merged_nodes, vec!["foundation", "surface"]);
@@ -2182,7 +2187,7 @@ mod tests {
         git_ok(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]).await;
         git_ok(&integration_path, &["push", "-q", "-u", "origin", &integration.branch]).await;
         engine.l4_service().sweep_workspaces().await;
-        assert!(engine.workflow_run(&workflow.id).await.unwrap().integration.unwrap().cleanup_complete,
+        assert!(engine.l4_service().workflow_run(&workflow.id).await.unwrap().integration.unwrap().cleanup_complete,
             "retained receipts: {:?}", engine.l4.workspaces.records().await.unwrap());
         assert!(!integration_path.exists());
         assert!(!foundation_path.exists());
@@ -2279,6 +2284,7 @@ mod tests {
         std::fs::set_permissions(&gh, permissions).unwrap();
 
         let url = engine
+            .l4_service()
             .ensure_integration_pr_with_gh(&run, &gh)
             .await
             .unwrap();
@@ -2357,6 +2363,7 @@ mod tests {
             max_rounds: Some(max_rounds),
         }];
         engine
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: "part-flow".into(),
                 scope: "demo".into(),
@@ -2554,7 +2561,7 @@ mod tests {
         assert_eq!(integration.parts[1].node_id, "b");
         assert_eq!(integration.parts[1].terminal_node, None, "a single-node part plays every role");
         assert_eq!(integration.parts[1].terminal(), "b");
-        let _ = engine.cancel_workflow(&run.id).await;
+        let _ = engine.l4_service().cancel_workflow(&run.id).await;
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2574,7 +2581,7 @@ mod tests {
             ..Default::default()
         };
         draft.nodes[1].task.worktree = Some(true);
-        engine.update_workflow(&template.id, draft).await.unwrap();
+        engine.l4_service().update_workflow(&template.id, draft).await.unwrap();
 
         let parent = engine
             .create(NewTask { title: "Epic".into(), scope: Some("demo".into()), worktree: Some(false), ..Default::default() })
@@ -2595,6 +2602,7 @@ mod tests {
         let mut implement = node("x-y");
         implement.task.worktree = Some(true);
         let colliding = engine
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: "colliding".into(),
                 scope: "demo".into(),
@@ -2663,7 +2671,7 @@ mod tests {
         wait_for_attempt(&engine, &id("a-review"), 1).await;
         report_done(&engine, &id("a-review"), "1. a.txt needs a second line", Some("a-implement")).await;
         wait_for_attempt(&engine, &id("a-implement"), 2).await;
-        let midway = engine.workflow_run(&run.id).await.unwrap();
+        let midway = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(node_run(&midway, "a-review").round, 1);
         assert_eq!(node_run(&midway, "b-review").round, 0, "the other part's budget is its own");
         assert!(midway.integration.as_ref().unwrap().merged_nodes.is_empty());
@@ -2673,7 +2681,7 @@ mod tests {
         report_done(&engine, &id("a-implement"), "fixed", None).await;
         wait_for_attempt(&engine, &id("a-review"), 2).await;
         report_done(&engine, &id("a-review"), "passes", None).await;
-        let merged = engine.workflow_run(&run.id).await.unwrap();
+        let merged = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(merged.integration.as_ref().unwrap().merged_nodes, ["a-implement"]);
         let c_run = wait_for_worktree_run(&engine, &id("c-implement")).await;
         assert!(
@@ -2687,7 +2695,7 @@ mod tests {
         let engine = epic_engine_on_disk(&root, &repo);
         engine.recover_workflows().await;
         engine.recover_workflows().await;
-        let recovered = engine.workflow_run(&run.id).await.unwrap();
+        let recovered = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(recovered.integration.as_ref().unwrap().merged_nodes, ["a-implement"]);
         assert_eq!(recovered.integration.as_ref().unwrap().worktree_path, integration.worktree_path);
         assert_eq!(merges_on(&integration_dir, &integration.branch).await, 1);
@@ -2702,7 +2710,7 @@ mod tests {
         let rework = wait_for_worktree_run(&engine, &id("b-implement")).await;
         assert_eq!(rework.attempt, 2, "the merge conflict returns B's deliverable");
         assert!(rework.feedback.as_ref().unwrap().feedback.as_deref().unwrap().contains("merge the integration branch"));
-        let sent_back = engine.workflow_run(&run.id).await.unwrap();
+        let sent_back = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(sent_back.integration.as_ref().unwrap().merged_nodes, ["a-implement"]);
         let b_review = node_run(&sent_back, "b-review");
         assert_eq!(b_review.status, WorkflowNodeStatus::Unstarted, "B's review is not left showing the old done");
@@ -2723,13 +2731,13 @@ mod tests {
         let review_again = wait_for_attempt(&engine, &id("b-review"), 2).await;
         assert_eq!(review_again.workflow_round, 1);
         assert_eq!(
-            engine.workflow_run(&run.id).await.unwrap().integration.unwrap().merged_nodes,
+            engine.l4_service().workflow_run(&run.id).await.unwrap().integration.unwrap().merged_nodes,
             ["a-implement"],
             "B waits for its review"
         );
         report_done(&engine, &id("b-review"), "passes again", None).await;
         assert_eq!(
-            engine.workflow_run(&run.id).await.unwrap().integration.unwrap().merged_nodes,
+            engine.l4_service().workflow_run(&run.id).await.unwrap().integration.unwrap().merged_nodes,
             ["a-implement", "b-implement"]
         );
 
@@ -2743,16 +2751,16 @@ mod tests {
         let rework = wait_for_worktree_run(&engine, &id("c-implement")).await;
         assert_eq!(rework.attempt, 2);
         assert!(rework.feedback.as_ref().unwrap().feedback.as_deref().unwrap().contains("combined integration check for part c failed"));
-        let checking = engine.workflow_run(&run.id).await.unwrap();
+        let checking = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(checking.integration.as_ref().unwrap().merged_nodes, ["a-implement", "b-implement"]);
         assert!(!checking.integration.as_ref().unwrap().checks_passed);
         assert_eq!(node_run(&checking, "c-review").status, WorkflowNodeStatus::Unstarted);
         commit_in(&engine, &id("c-implement"), &[("fixed.txt", "fixed\n")]).await;
         report_done(&engine, &id("c-implement"), "combined check fixed", None).await;
         wait_for_attempt(&engine, &id("c-review"), 2).await;
-        assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Running);
+        assert_eq!(engine.l4_service().workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Running);
         report_done(&engine, &id("c-review"), "passes again", None).await;
-        let finished = engine.workflow_run(&run.id).await.unwrap();
+        let finished = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(finished.status, WorkflowRunStatus::Done, "{:?}", finished.error);
         let integration = finished.integration.unwrap();
         assert_eq!(integration.merged_nodes, ["a-implement", "b-implement", "c-implement"]);
@@ -2805,7 +2813,7 @@ mod tests {
             report_done(&engine, &implement, "done", None).await;
             wait_for_attempt(&engine, &review, review_attempt).await;
             report_done(&engine, &review, "passes", None).await;
-            let current = engine.workflow_run(&run.id).await.unwrap();
+            let current = engine.l4_service().workflow_run(&run.id).await.unwrap();
             assert_eq!(node_run(&current, "a-implement").integration_rounds, round, "integration round {round}");
             assert_eq!(current.status, WorkflowRunStatus::Running);
             implement_attempt += 1;
@@ -2816,7 +2824,7 @@ mod tests {
         wait_for_attempt(&engine, &review, review_attempt).await;
         report_done(&engine, &review, "passes", None).await;
 
-        let failed = engine.workflow_run(&run.id).await.unwrap();
+        let failed = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(failed.status, WorkflowRunStatus::Failed);
         assert_eq!(failed.failure_node_id.as_deref(), Some("a-implement"));
         assert!(failed.error.as_deref().unwrap().contains("integration rework exhausted after 3 rounds"), "{:?}", failed.error);
@@ -2852,7 +2860,7 @@ mod tests {
         // task was never created.
         let missing = {
             let _guard = engine.l4.workflow_edit.lock().await;
-            let mut torn = engine.workflow_run(&run.id).await.unwrap();
+            let mut torn = engine.l4_service().workflow_run(&run.id).await.unwrap();
             let node = torn.nodes.iter_mut().find(|node| node.node_id == "b-review").unwrap();
             node.task_created = false;
             let id = node.task_id.clone().unwrap();
@@ -2868,14 +2876,14 @@ mod tests {
         let all = tasks(&engine).await;
         assert_eq!(all.len(), 5, "the parent and four tasks: {:?}", all.iter().map(|t| &t.title).collect::<Vec<_>>());
         assert_eq!(task_of(&all, "b-review").id, missing, "recovery fills in exactly the persisted id");
-        let recovered = engine.workflow_run(&run.id).await.unwrap();
+        let recovered = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(recovered.integration, run.integration, "the same integration branch and worktree");
         let integration_dirs = std::fs::read_dir(engine.factory_snapshot().worktrees_dir())
             .unwrap()
             .filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().starts_with("integration-"))
             .count();
         assert_eq!(integration_dirs, 1);
-        let _ = engine.cancel_workflow(&run.id).await;
+        let _ = engine.l4_service().cancel_workflow(&run.id).await;
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2953,11 +2961,11 @@ mod tests {
         report_done(&engine, &id("a-review"), "SECOND FOR A", Some("a-implement")).await;
         let a_rework = wait_for_attempt(&engine, &id("a-implement"), 3).await;
         assert!(a_rework.feedback.unwrap().feedback.unwrap().contains("SECOND FOR A"));
-        let after = engine.workflow_run(&run.id).await.unwrap();
+        let after = engine.l4_service().workflow_run(&run.id).await.unwrap();
         let b_request = node_run(&after, "b-implement").rework_request.clone().unwrap();
         assert_eq!(b_request.from_node, "b-review");
         assert_eq!(b_request.feedback.as_deref(), Some("SECOND FOR B"), "A's send-back did not overwrite B's request");
-        let _ = engine.cancel_workflow(&run.id).await;
+        let _ = engine.l4_service().cancel_workflow(&run.id).await;
     }
 
     #[tokio::test]
@@ -3047,7 +3055,7 @@ mod tests {
         let outputs = engine.l4_service().upstream_outputs(&engine.require(&b.id).await.unwrap()).await;
         assert_eq!(outputs.iter().filter(|output| output.task_id == a.id).count(), 1, "{outputs:?}");
         assert_eq!(outputs[0].result.as_deref(), Some("A RESULT"));
-        let _ = engine.cancel_workflow(&run.id).await;
+        let _ = engine.l4_service().cancel_workflow(&run.id).await;
     }
 
     #[tokio::test]
@@ -3095,7 +3103,7 @@ mod tests {
         finish(&engine, &left.id, RunStatus::Failed).await;
         finish(&engine, &right.id, RunStatus::Done).await;
 
-        let finished = engine.workflow_run(&run.id).await.unwrap();
+        let finished = engine.l4_service().workflow_run(&run.id).await.unwrap();
         assert_eq!(finished.status, WorkflowRunStatus::Done);
         assert_eq!(finished.nodes.iter().filter(|node| node.status == WorkflowNodeStatus::Failed).count(), 1);
     }
@@ -3151,7 +3159,7 @@ mod tests {
             .unwrap();
 
         wait_for_attempt(&engine, &child.id, 1).await;
-        let cancelled = engine.cancel_workflow(&run.id).await.unwrap();
+        let cancelled = engine.l4_service().cancel_workflow(&run.id).await.unwrap();
         assert_eq!(cancelled.status, WorkflowRunStatus::Cancelled);
         assert!(engine.l4.store.active_run(&child.id).await.unwrap().is_some());
         assert_ne!(engine.require(&child.id).await.unwrap().status, TaskStatus::Cancelled);
@@ -3205,6 +3213,37 @@ fn node_status(task: &Task) -> WorkflowNodeStatus {
 }
 
 impl Engine {
+    #[cfg(test)]
+    pub(crate) async fn start_decomposition_workflow(self: &Arc<Self>,
+        item: &Task,
+        parts: &[SplitPart],
+        routing: &Routing,
+        caller: &Caller) -> Result<WorkflowRun> {
+        self.l4_service().start_decomposition_workflow(item, parts, routing, caller, &self.l4_spawner()).await
+    }
+
+    pub(crate) async fn start_workflow(self: &Arc<Self>,
+        id: &str,
+        inputs: BTreeMap<String, String>,
+        caller: &Caller) -> Result<WorkflowRun> {
+        self.l4_service().start_workflow(id, inputs, caller, &self.l4_spawner()).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn advance_workflow(self: &Arc<Self>, id: &str) -> Result<()> {
+        self.l4_service().advance_workflow(id, &self.l4_spawner()).await
+    }
+
+    pub(crate) async fn sync_workflow_for_task(self: &Arc<Self>, task_id: &str)  {
+        self.l4_service().sync_workflow_for_task(task_id, &self.l4_spawner()).await
+    }
+
+    pub(crate) async fn recover_workflows(self: &Arc<Self>)  {
+        self.l4_service().recover_workflows(&self.l4_spawner()).await
+    }
+}
+
+impl L4Service<'_> {
     /// Turn one approved intake decomposition into one durable workflow run.
     /// The definition is generated from the validated plan, while the run
     /// owns the fetched integration branch, merge ledger, combined checks
@@ -3216,13 +3255,12 @@ impl Engine {
     /// root part's entry, a prerequisite's terminal into its dependant's
     /// entry, and control-plan injection runs afterwards, over every node.
     pub(crate) async fn start_decomposition_workflow(
-        self: &Arc<Self>,
+        &self,
         item: &Task,
         parts: &[SplitPart],
         routing: &Routing,
-        caller: &Caller,
-    ) -> Result<WorkflowRun> {
-        let factory = self.factory_snapshot();
+        caller: &Caller, spawner: &L4Spawner) -> Result<WorkflowRun> {
+        let factory = self.wiring.snapshot();
         let scope = factory.scope(&routing.scope)?.clone();
         let scope_path = factory.scope_path(&scope.name)?;
         let github = item
@@ -3240,7 +3278,7 @@ impl Engine {
         // assessed: the template may have been edited since.
         let template = match &routing.workflow {
             Some(wanted) => {
-                let found = self.l4_service().find_workflow(&scope.name, wanted).await?;
+                let found = self.find_workflow(&scope.name, wanted).await?;
                 let shape = found
                     .validate()
                     .and_then(|_| found.part_shape())
@@ -3492,7 +3530,7 @@ impl Engine {
         {
             self.authorize_workflow_spawn(caller, &node.task).await?;
         }
-        let plans = self.l4_service().control_plans(&definition).await?;
+        let plans = self.control_plans(&definition).await?;
         let (definition, _) = definition.inject(&plans);
         definition.validate().map_err(FactoryError::BadRequest)?;
 
@@ -3522,7 +3560,7 @@ impl Engine {
                 },
                 candidate: integration_dir.clone(), branch: branch.clone(),
                 base: Some(base_ref.clone()), previous: None,
-            }.provision(&self.l4.workspaces, &scope_path).await
+            }.provision(&self.state.workspaces, &scope_path).await
                 .map_err(|error| FactoryError::adapter("git", error))?;
             run.integration = Some(WorkflowIntegration {
                 parent_task_id: item.id.clone(),
@@ -3550,22 +3588,22 @@ impl Engine {
             node.task_created = false;
         }
 
-        if let Err(error) = self.l4.workflows.put_definition(&definition).await {
+        if let Err(error) = self.state.workflows.put_definition(&definition).await {
             if let Some(integration) = &run.integration {
-                let _ = crate::assignments::release(&self.l4.workspaces,
+                let _ = crate::assignments::release(&self.state.workspaces,
                     &[PathBuf::from(&integration.worktree_path)]).await;
             }
             return Err(error);
         }
-        self.l4.workflows.put_run(&run).await?;
-        self.shared.bus
+        self.state.workflows.put_run(&run).await?;
+        self.wiring.bus()
             .publish(Event::WorkflowRunUpdated { run: run.clone() });
         {
-            let _guard = self.l4.workflow_edit.lock().await;
+            let _guard = self.state.workflow_edit.lock().await;
             self.materialize_workflow_tasks(&mut run).await?;
             self.close_workflow_waits(&run).await?;
         }
-        self.advance_workflow(&run.id).await?;
+        self.advance_workflow(&run.id, spawner).await?;
         self.workflow_run(&run.id).await
     }
 
@@ -3635,16 +3673,8 @@ impl Engine {
         Ok(())
     }
 
-    pub(crate) async fn workflow_definition(&self, id: &str) -> Result<WorkflowDefinition> {
-        self.l4_service().workflow_definition(id).await
-    }
-
-    pub(crate) async fn workflow_run(&self, id: &str) -> Result<WorkflowRun> {
-        self.l4_service().workflow_run(id).await
-    }
-
     pub(crate) async fn create_workflow(&self, draft: WorkflowDraft) -> Result<WorkflowDefinition> {
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         let scope = factory.scope(&draft.scope)?.name.clone();
         let mut draft = draft;
         draft.scope = scope.clone();
@@ -3655,8 +3685,8 @@ impl Engine {
         }
         let definition = WorkflowDefinition::from_draft(draft);
         definition.validate().map_err(FactoryError::BadRequest)?;
-        self.l4.workflows.put_definition(&definition).await?;
-        self.shared.bus.publish(Event::WorkflowCreated {
+        self.state.workflows.put_definition(&definition).await?;
+        self.wiring.bus().publish(Event::WorkflowCreated {
             workflow: definition.clone(),
         });
         Ok(definition)
@@ -3681,41 +3711,39 @@ impl Engine {
         }
         definition.apply(draft);
         definition.validate().map_err(FactoryError::BadRequest)?;
-        self.l4.workflows.put_definition(&definition).await?;
-        self.shared.bus.publish(Event::WorkflowUpdated {
+        self.state.workflows.put_definition(&definition).await?;
+        self.wiring.bus().publish(Event::WorkflowUpdated {
             workflow: definition.clone(),
         });
         Ok(definition)
     }
 
     pub(crate) async fn delete_workflow(&self, id: &str) -> Result<bool> {
-        let deleted = self.l4.workflows.delete_definition(id).await?;
+        let deleted = self.state.workflows.delete_definition(id).await?;
         if deleted {
-            self.shared.bus
+            self.wiring.bus()
                 .publish(Event::WorkflowDeleted { id: id.to_string() });
         }
         Ok(deleted)
     }
 
     pub(crate) async fn start_workflow(
-        self: &Arc<Self>,
+        &self,
         id: &str,
         inputs: BTreeMap<String, String>,
-        caller: &Caller,
-    ) -> Result<WorkflowRun> {
-        self.start_workflow_with_agents(id, inputs, &BTreeMap::new(), caller).await
+        caller: &Caller, spawner: &L4Spawner) -> Result<WorkflowRun> {
+        self.start_workflow_with_agents(id, inputs, &BTreeMap::new(), caller, spawner).await
     }
 
     /// `start_workflow`, with some steps given to other agents than the
     /// definition names -- the route an intake item was released on. Only
     /// this run's snapshot changes; the definition stays as written.
     pub(crate) async fn start_workflow_with_agents(
-        self: &Arc<Self>,
+        &self,
         id: &str,
         inputs: BTreeMap<String, String>,
         agents: &BTreeMap<String, String>,
-        caller: &Caller,
-    ) -> Result<WorkflowRun> {
+        caller: &Caller, spawner: &L4Spawner) -> Result<WorkflowRun> {
         let definition = self.workflow_definition(id).await?;
         // `#235`: a part workflow is a template. Started as itself it would
         // run once, for no part, with its `{{part_...}}` left in braces.
@@ -3753,23 +3781,23 @@ impl Engine {
         // `#118`: the control plan's required steps merge into this run's
         // immutable snapshot as locked gate nodes. The stored definition is
         // untouched -- a later plan applies to later runs, never this one.
-        let plans = self.l4_service().control_plans(&definition).await?;
+        let plans = self.control_plans(&definition).await?;
         let (mut definition, _) = definition.inject(&plans);
-        self.l4_service().bind_functionaries(&mut definition).await?;
+        self.bind_functionaries(&mut definition).await?;
         self.freeze_workflow_workspace(&mut definition).await?;
         definition.validate().map_err(FactoryError::BadRequest)?;
         let mut run = WorkflowRun::new(definition, caller.as_workflow_actor());
         run.inputs = inputs;
-        self.l4.workflows.put_run(&run).await?;
-        self.shared.bus
+        self.state.workflows.put_run(&run).await?;
+        self.wiring.bus()
             .publish(Event::WorkflowRunUpdated { run: run.clone() });
-        self.advance_workflow(&run.id).await?;
+        self.advance_workflow(&run.id, spawner).await?;
         self.workflow_run(&run.id).await
     }
 
     pub(crate) async fn cancel_workflow(&self, id: &str) -> Result<WorkflowRun> {
         let task_ids = {
-            let _guard = self.l4.workflow_edit.lock().await;
+            let _guard = self.state.workflow_edit.lock().await;
             let mut run = self.workflow_run(id).await?;
             if run.status.is_terminal() {
                 return Ok(run);
@@ -3793,15 +3821,14 @@ impl Engine {
                     }
                 }
             }
-            self.l4.workflows.put_run(&run).await?;
-            self.shared.bus
+            self.state.workflows.put_run(&run).await?;
+            self.wiring.bus()
                 .publish(Event::WorkflowRunUpdated { run: run.clone() });
             task_ids
         };
         for task_id in task_ids {
-            if self.l4.store.active_run(&task_id).await?.is_some() {
+            if self.state.store.active_run(&task_id).await?.is_some() {
                 let _ = self
-                    .l4_service()
                     .cancel_task_run(&task_id, None, factory_core::run::FailKind::CancelledWithParent)
                     .await;
             }
@@ -3811,15 +3838,15 @@ impl Engine {
         self.close_workflow_waits(&run).await?;
         for node in &mut run.nodes {
             if let Some(task_id) = &node.task_id {
-                if let Some(task) = self.l4.store.get(task_id).await? {
+                if let Some(task) = self.state.store.get(task_id).await? {
                     node.status = node_status(&task);
                     node.error = task.error;
                 }
             }
         }
         run.updated_at = Utc::now();
-        self.l4.workflows.put_run(&run).await?;
-        self.shared.bus
+        self.state.workflows.put_run(&run).await?;
+        self.wiring.bus()
             .publish(Event::WorkflowRunUpdated { run: run.clone() });
         Ok(run)
     }
@@ -3832,7 +3859,7 @@ impl Engine {
         if definition.nodes.iter().any(|node| node.kind == WorkflowNodeKind::Task && node.task.worktree == Some(false)) {
             return Err(FactoryError::BadRequest("workspace_ref requires isolated task workspaces".into()));
         }
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         let scopes: std::collections::BTreeSet<&str> = definition.nodes.iter()
             .filter(|node| node.kind == WorkflowNodeKind::Task)
             .map(|node| node.task.scope.as_deref().unwrap_or(&definition.scope)).collect();
@@ -3907,7 +3934,7 @@ impl Engine {
             ));
             return Ok(None);
         }
-        let previous = self.l4.store.runs(&task_id, 1).await?.into_iter().next();
+        let previous = self.state.store.runs(&task_id, 1).await?.into_iter().next();
         let Some(previous) = previous else {
             node.status = WorkflowNodeStatus::Failed;
             node.error = Some(format!(
@@ -3935,7 +3962,7 @@ impl Engine {
         if let Some(part) = &part {
             run.rework_part_body(part);
         }
-        self.l4.store
+        self.state.store
             .update(
                 &task_id,
                 &TaskPatch {
@@ -4015,7 +4042,7 @@ impl Engine {
             else {
                 continue;
             };
-            let Some(attempt) = self.l4.store.runs(&task_id, 1).await?.into_iter().next() else {
+            let Some(attempt) = self.state.store.runs(&task_id, 1).await?.into_iter().next() else {
                 continue;
             };
             let (Some(path), Some(branch)) = (
@@ -4193,7 +4220,7 @@ impl Engine {
                 .find(|node| node.node_id == part.node_id)
                 .and_then(|node| node.task_id.as_deref());
             if let Some(task_id) = task {
-                if let Some(task) = self.l4.store.get(task_id).await? {
+                if let Some(task) = self.state.store.get(task_id).await? {
                     rows.push(format!(
                         "- `{}` — {}: {}",
                         part.part_id,
@@ -4265,14 +4292,14 @@ impl Engine {
         // workspaces.  Recovery can now find the same PR if cleanup is
         // interrupted, without opening a duplicate.
         run.updated_at = Utc::now();
-        self.l4.workflows.put_run(run).await?;
+        self.state.workflows.put_run(run).await?;
         // Release happens only after the workflow outcome is durable and all
         // siblings have stopped. A refused cleanup never fails a valid handoff.
         let result = match pr_url {
             Some(url) => format!("Implemented in {url}"),
             None => format!("Integrated on {}", run.integration.as_ref().unwrap().branch),
         };
-        self.l4.store
+        self.state.store
             .update(
                 &run.integration.as_ref().unwrap().parent_task_id,
                 &TaskPatch {
@@ -4293,8 +4320,8 @@ impl Engine {
     /// make every newly eligible decision. The mutex serializes reports,
     /// cancellation and restart recovery so one node can never be chosen
     /// twice, and so `recover_workflows`'s repair of a node never races this.
-    pub(crate) async fn advance_workflow(self: &Arc<Self>, id: &str) -> Result<()> {
-        let _guard = self.l4.workflow_edit.lock().await;
+    pub(crate) async fn advance_workflow(&self, id: &str, spawner: &L4Spawner) -> Result<()> {
+        let _guard = self.state.workflow_edit.lock().await;
         let mut run = self.workflow_run(id).await?;
         self.materialize_workflow_tasks(&mut run).await?;
 
@@ -4307,13 +4334,13 @@ impl Engine {
             let Some(task_id) = node.task_id.clone() else {
                 continue;
             };
-            match self.l4.store.get(&task_id).await {
+            match self.state.store.get(&task_id).await {
                 Ok(Some(task)) => {
                     if (task.after.is_some() && task.status == TaskStatus::Pending) || (node.status.is_terminal()
                         && task.closure.as_ref().is_some_and(|closure| closure.reason == factory_core::task::CloseReason::NotPlanned)) {
                         continue;
                     }
-                    let attempts = self.l4.store.runs(&task_id, u32::MAX).await?;
+                    let attempts = self.state.store.runs(&task_id, u32::MAX).await?;
                     node.attempts = attempts.iter().rev().map(|attempt| factory_core::workflow::WorkflowAttempt {
                         run_id: attempt.id.clone(), attempt: attempt.attempt,
                         round: attempt.workflow_round, status: attempt.status,
@@ -4321,7 +4348,7 @@ impl Engine {
                     // The task still mirrors the last round until the next
                     // dispatch. Never let that old done overwrite send_back.
                     if node.round > 0 {
-                        let latest = self.l4.store.runs(&task_id, 1).await?.into_iter().next();
+                        let latest = self.state.store.runs(&task_id, 1).await?.into_iter().next();
                         if latest.as_ref().is_none_or(|attempt| attempt.workflow_round < node.round) {
                             continue;
                         }
@@ -4373,9 +4400,9 @@ impl Engine {
             // mirror does, and that alone is worth persisting and publishing.
             self.close_workflow_waits(&run).await?;
             run.updated_at = Utc::now();
-            self.l4.workflows.put_run(&run).await?;
-            self.shared.bus.publish(Event::WorkflowRunUpdated { run });
-            self.l4_service().sweep_workspaces().await;
+            self.state.workflows.put_run(&run).await?;
+            self.wiring.bus().publish(Event::WorkflowRunUpdated { run });
+            self.sweep_workspaces().await;
             return Ok(());
         }
 
@@ -4401,18 +4428,12 @@ impl Engine {
         }
         if !to_continue.is_empty() {
             run.updated_at = Utc::now();
-            self.l4.workflows.put_run(&run).await?;
-            self.shared.bus
+            self.state.workflows.put_run(&run).await?;
+            self.wiring.bus()
                 .publish(Event::WorkflowRunUpdated { run: run.clone() });
             drop(_guard);
             for (task_id, previous) in to_continue {
-                let engine = self.clone();
-                tokio::spawn(async move {
-                    engine
-                        .l4_service()
-                        .start_run_due_continue(&task_id, crate::engine::Due::now(), previous)
-                        .await;
-                });
+                spawner.spawn_start_run_due_continue(task_id, crate::engine::Due::now(), previous);
             }
             return Ok(());
         }
@@ -4491,9 +4512,9 @@ impl Engine {
             }
             run.updated_at = Utc::now();
             self.close_workflow_waits(&run).await?;
-            self.l4.workflows.put_run(&run).await?;
-            self.shared.bus.publish(Event::WorkflowRunUpdated { run });
-            self.l4_service().sweep_workspaces().await;
+            self.state.workflows.put_run(&run).await?;
+            self.wiring.bus().publish(Event::WorkflowRunUpdated { run });
+            self.sweep_workspaces().await;
             return Ok(());
         }
 
@@ -4614,7 +4635,7 @@ impl Engine {
                 .and_then(|node| node.task_id.clone())
             {
                 if self
-                    .l4.store
+                    .state.store
                     .get(&existing_id)
                     .await?
                     .is_some_and(|task| task.status == TaskStatus::Pending && task.runs == 0)
@@ -4630,7 +4651,7 @@ impl Engine {
                         run.error = Some(denial.to_string());
                         continue;
                     }
-                    self.l4.store.update(&existing_id, &TaskPatch { clear_after: true, ..Default::default() }).await?;
+                    self.state.store.update(&existing_id, &TaskPatch { clear_after: true, ..Default::default() }).await?;
                     run.nodes.iter_mut().find(|node| node.node_id == node_id).expect("snapshot node").status = WorkflowNodeStatus::Pending;
                     self.publish_task(&existing_id).await;
                     to_start.push(existing_id);
@@ -4648,7 +4669,7 @@ impl Engine {
                         run.error = Some(denial.to_string());
                         continue;
                     }
-                    self.l4.store.update(&existing_id, &TaskPatch {
+                    self.state.store.update(&existing_id, &TaskPatch {
                         status: Some(TaskStatus::Pending),
                         clear_after: true,
                         clear_result: true, clear_routed_to: true, clear_error: true,
@@ -4707,8 +4728,8 @@ impl Engine {
             run.updated_at = Utc::now();
             // Persist the decision before creating or publishing the task. A
             // restart can fill in this exact id; it must never choose another.
-            self.l4.workflows.put_run(&run).await?;
-            self.shared.bus
+            self.state.workflows.put_run(&run).await?;
+            self.wiring.bus()
                 .publish(Event::WorkflowRunUpdated { run: run.clone() });
 
             let origin = WorkflowOrigin {
@@ -4754,15 +4775,12 @@ impl Engine {
         }
         self.close_workflow_waits(&run).await?;
         run.updated_at = Utc::now();
-        self.l4.workflows.put_run(&run).await?;
-        self.shared.bus
+        self.state.workflows.put_run(&run).await?;
+        self.wiring.bus()
             .publish(Event::WorkflowRunUpdated { run: run.clone() });
         drop(_guard);
         for task_id in to_start {
-            let engine = self.clone();
-            tokio::spawn(async move {
-                engine.l4_service().start_run(&task_id, Trigger::Workflow).await;
-            });
+            spawner.spawn_start_run(task_id, Trigger::Workflow);
         }
         Ok(())
     }
@@ -4781,7 +4799,7 @@ impl Engine {
             .find(|node| node.node_id == from)
             .and_then(|node| node.task_id.clone());
         let task = match task_id.as_deref() {
-            Some(id) => self.l4.store.get(id).await?,
+            Some(id) => self.state.store.get(id).await?,
             None => None,
         };
         let mut selected = None;
@@ -4789,12 +4807,12 @@ impl Engine {
         for (index, exit) in exits.iter().enumerate() {
             let holds = if let Some(command) = &exit.check {
                 let dir = if let Some(task) = &task {
-                    let latest = self.l4.store.runs(&task.id, 1).await?.into_iter().next();
+                    let latest = self.state.store.runs(&task.id, 1).await?.into_iter().next();
                     latest
                         .and_then(|attempt| attempt.worktree_path.map(std::path::PathBuf::from))
-                        .unwrap_or(self.factory_snapshot().scope_path(&task.scope)?)
+                        .unwrap_or(self.wiring.snapshot().scope_path(&task.scope)?)
                 } else {
-                    self.factory_snapshot().scope_path(&run.scope)?
+                    self.wiring.snapshot().scope_path(&run.scope)?
                 };
                 let (code, output) = run_shell_capture(&dir, command, EXIT_CHECK_TIMEOUT_SECS).await;
                 if let Some(task_id) = &task_id {
@@ -4899,7 +4917,7 @@ impl Engine {
             }
             if let Some(task_id) = &task_id {
                 let _ = self
-                    .l4.store
+                    .state.store
                     .update(
                         task_id,
                         &factory_core::task::TaskPatch {
@@ -4914,7 +4932,7 @@ impl Engine {
             node.routed_to = None;
             if let Some(task_id) = &task_id {
                 let _ = self
-                    .l4.store
+                    .state.store
                     .update(
                         task_id,
                         &factory_core::task::TaskPatch {
@@ -4969,7 +4987,7 @@ impl Engine {
             let Some(task_id) = run.nodes.iter().find(|n| n.node_id == subject).and_then(|n| n.task_id.clone()) else {
                 continue;
             };
-            let Ok(Some(subject_run)) = self.l4.store.runs(&task_id, 1).await.map(|r| r.into_iter().next()) else {
+            let Ok(Some(subject_run)) = self.state.store.runs(&task_id, 1).await.map(|r| r.into_iter().next()) else {
                 continue;
             };
             if run.nodes.iter().find(|node| node.node_id == subject)
@@ -4977,7 +4995,7 @@ impl Engine {
                 continue;
             }
             let evidence = self
-                .l4.run_evidence
+                .state.run_evidence
                 .step_attestations(&subject_run.id)
                 .await
                 .unwrap_or_default()
@@ -5011,7 +5029,7 @@ impl Engine {
                     {
                         let since = subject_run.blocked_since.unwrap_or(subject_run.started_at);
                         let newest = self
-                            .l4.run_evidence
+                            .state.run_evidence
                             .step_attestations(&subject_run.id)
                             .await
                             .unwrap_or_default()
@@ -5050,21 +5068,21 @@ impl Engine {
         }
     }
 
-    pub(crate) async fn sync_workflow_for_task(self: &Arc<Self>, task_id: &str) {
-        let Ok(Some(task)) = self.l4.store.get(task_id).await else {
+    pub(crate) async fn sync_workflow_for_task(&self, task_id: &str, spawner: &L4Spawner) {
+        let Ok(Some(task)) = self.state.store.get(task_id).await else {
             return;
         };
         let Some(origin) = task.workflow_origin else {
             return;
         };
-        if let Err(error) = self.advance_workflow(&origin.workflow_run_id).await {
+        if let Err(error) = self.advance_workflow(&origin.workflow_run_id, spawner).await {
             tracing::warn!(
                 workflow_run = origin.workflow_run_id,
                 task = task_id,
                 "could not advance workflow: {error}"
             );
         }
-        self.l4_service().sweep_workspaces().await;
+        self.sweep_workspaces().await;
     }
 
     /// Mirror dispatch progress without recursively advancing the graph. The
@@ -5078,13 +5096,13 @@ impl Engine {
     /// already has an outcome, so a terminal run's status and failure node
     /// are never rewritten here either.
     pub(crate) async fn record_workflow_task_state(&self, task_id: &str) {
-        let Ok(Some(task)) = self.l4.store.get(task_id).await else {
+        let Ok(Some(task)) = self.state.store.get(task_id).await else {
             return;
         };
         let Some(origin) = task.workflow_origin.clone() else {
             return;
         };
-        let _guard = self.l4.workflow_edit.lock().await;
+        let _guard = self.state.workflow_edit.lock().await;
         let Ok(mut run) = self.workflow_run(&origin.workflow_run_id).await else {
             return;
         };
@@ -5101,7 +5119,7 @@ impl Engine {
             return;
         };
         if node.round > 0 {
-            let Ok(Some(latest)) = self.l4.store.runs(task_id, 1).await.map(|runs| runs.into_iter().next()) else {
+            let Ok(Some(latest)) = self.state.store.runs(task_id, 1).await.map(|runs| runs.into_iter().next()) else {
                 return;
             };
             if latest.workflow_round < node.round {
@@ -5112,7 +5130,7 @@ impl Engine {
             && task.closure.as_ref().is_some_and(|closure| closure.reason == factory_core::task::CloseReason::NotPlanned)) { return; }
         node.status = node_status(&task);
         node.error = task.error;
-        if let Ok(attempts) = self.l4.store.runs(task_id, u32::MAX).await {
+        if let Ok(attempts) = self.state.store.runs(task_id, u32::MAX).await {
             node.attempts = attempts.iter().rev().map(|attempt| factory_core::workflow::WorkflowAttempt {
                 run_id: attempt.id.clone(), attempt: attempt.attempt,
                 round: attempt.workflow_round, status: attempt.status,
@@ -5135,16 +5153,16 @@ impl Engine {
         if self.close_workflow_waits(&run).await.is_err() {
             tracing::warn!(workflow_run = run.id, "could not close unadmitted workflow tasks");
         }
-        if self.l4.workflows.put_run(&run).await.is_ok() {
-            self.shared.bus.publish(Event::WorkflowRunUpdated { run });
+        if self.state.workflows.put_run(&run).await.is_ok() {
+            self.wiring.bus().publish(Event::WorkflowRunUpdated { run });
         }
     }
 
     /// Restart recovery is a reconciliation, not a replay: persisted task ids
     /// win. Only interrupted creations (no receipt) are repaired, never
     /// deletions. Released pending tasks with no attempt are dispatched once.
-    pub(crate) async fn recover_workflows(self: &Arc<Self>) {
-        let runs = match self.l4.workflows.active_runs().await {
+    pub(crate) async fn recover_workflows(&self, spawner: &L4Spawner) {
+        let runs = match self.state.workflows.active_runs().await {
             Ok(runs) => runs,
             Err(error) => {
                 tracing::warn!("could not load workflow runs: {error}");
@@ -5152,7 +5170,7 @@ impl Engine {
             }
         };
         for run in runs {
-            if let Err(error) = self.advance_workflow(&run.id).await {
+            if let Err(error) = self.advance_workflow(&run.id, spawner).await {
                 tracing::warn!(workflow_run = run.id, "could not recover workflow: {error}");
             }
             // A task that exists but never acquired a run is the other side
@@ -5162,22 +5180,19 @@ impl Engine {
                     let Some(task_id) = node.task_id else {
                         continue;
                     };
-                    if let Ok(Some(task)) = self.l4.store.get(&task_id).await {
+                    if let Ok(Some(task)) = self.state.store.get(&task_id).await {
                         if task.status == TaskStatus::Pending
                             && task.after.is_none()
                             && (task.runs == 0 || node.round > 0)
                             && self
-                                .l4.store
+                                .state.store
                                 .active_run(&task_id)
                                 .await
                                 .ok()
                                 .flatten()
                                 .is_none()
                         {
-                            let engine = self.clone();
-                            tokio::spawn(async move {
-                                engine.l4_service().start_run(&task_id, Trigger::Workflow).await;
-                            });
+                            spawner.spawn_start_run(task_id, Trigger::Workflow);
                         }
                     }
                 }
@@ -5191,7 +5206,7 @@ impl Engine {
         // terminal run's own status once it sees the run is settled (B2),
         // so reusing it here is exactly "mirror only, do nothing else" with
         // no separate mechanism to keep in sync with that one.
-        match self.l4.workflows.recent_terminal_runs(200).await {
+        match self.state.workflows.recent_terminal_runs(200).await {
             Ok(terminal_runs) => {
                 for run in terminal_runs {
                     if let Err(error) = self.close_workflow_waits(&run).await {
@@ -5202,7 +5217,7 @@ impl Engine {
                         .iter()
                         .any(|node| node.task_id.is_some() && !node.status.is_terminal());
                     if stale {
-                        if let Err(error) = self.advance_workflow(&run.id).await {
+                        if let Err(error) = self.advance_workflow(&run.id, spawner).await {
                             tracing::warn!(
                                 workflow_run = run.id,
                                 "could not reconcile a terminal workflow run: {error}"

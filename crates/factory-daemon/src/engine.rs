@@ -20,7 +20,7 @@ use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
 use factory_core::run::{FailKind, Run, Trigger};
 use factory_core::task::{
-    NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus, WorkflowOrigin,
+    NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus,
 };
 use factory_plugins::registry::Registry;
 use std::path::{Path, PathBuf};
@@ -1000,7 +1000,7 @@ impl Engine {
             return Err(FactoryError::BadRequest("after and schedule are exclusive triggers".into()));
         }
         if let Some(after) = &patch.after {
-            self.validate_after(Some(id), after).await?;
+            self.l4_service().validate_after(Some(id), after).await?;
             if current.status != TaskStatus::Pending || current.runs > 0 {
                 return Err(FactoryError::BadRequest("an after trigger can only be set on a never-started pending task".into()));
             }
@@ -1202,70 +1202,18 @@ impl Engine {
 
     // -- creating ----------------------------------------------------------
 
-    pub async fn create(&self, new: NewTask) -> Result<Task> {
-        self.create_task(new, None, None, None, None, false).await
-    }
-
-    /// A task born inside the intake gate (`#119`): `TaskStatus::Intake`
-    /// from its first write, so there is no moment it could be dispatched.
-    pub(crate) async fn create_intake_task(
-        &self,
-        new: NewTask,
-        intake: factory_core::intake::Intake,
-    ) -> Result<Task> {
-        if new.schedule.is_some() {
-            return Err(FactoryError::BadRequest(
-                "an intake item has no schedule; release it first, then schedule the task".into(),
-            ));
-        }
-        self.create_task(new, None, None, None, Some(intake), false).await
-    }
-
-    pub(crate) async fn create_workflow_task(
-        &self,
-        new: NewTask,
-        origin: WorkflowOrigin,
-        id: String,
-    ) -> Result<Task> {
-        self.create_task(new, Some(origin), None, Some(id), None, false).await
-    }
-
     pub(crate) async fn create_bench_task(
         &self,
         new: NewTask,
         origin: factory_core::bench::BenchOrigin,
         id: String,
     ) -> Result<Task> {
-        self.create_task(new, None, Some(origin), Some(id), None, false).await
+        self.l4_service().create_bench_task(new, origin, id).await
     }
 
-    pub(crate) async fn create_review_task(
-        &self,
-        new: NewTask,
-        origin: Option<WorkflowOrigin>,
-        id: String,
-    ) -> Result<Task> {
-        self.create_task(new, origin, None, Some(id), None, true).await
+    pub async fn create(&self, new: NewTask) -> Result<Task> {
+        self.l4_service().create(new).await
     }
-
-    async fn create_task(
-        &self,
-        new: NewTask,
-        workflow_origin: Option<WorkflowOrigin>,
-        bench_origin: Option<factory_core::bench::BenchOrigin>,
-        id: Option<String>,
-        intake: Option<factory_core::intake::Intake>,
-        internal_review: bool,
-    ) -> Result<Task> {
-        let observer = crate::commands::CreationObserver(self.shared.bus.clone());
-        let process = crate::commands::process(self, &observer);
-        let receipt = process
-            .create_extended(new, workflow_origin, bench_origin.map(Into::into), id, intake, internal_review)
-            .await?;
-        crate::commands::task_snapshot(self, receipt.id).await
-    }
-
-
 
     // -- running -----------------------------------------------------------
 
@@ -5504,7 +5452,7 @@ nodes:
     task: {title: B, instructions: b, scope: demo, agent: recording, runtime: stub-run, worktree: true}
 edges: []
 "#).unwrap();
-            let definition = engine.create_workflow(draft).await.unwrap();
+            let definition = engine.l4_service().create_workflow(draft).await.unwrap();
             let workflow = engine.start_workflow(&definition.id, Default::default(), &crate::access::Caller::Owner).await.unwrap();
             let (a, first) = wait_node_attempt(&engine, "a", 1).await;
             let (b, sibling) = wait_node_attempt(&engine, "b", 1).await;
@@ -5516,7 +5464,7 @@ edges: []
             }).await.unwrap();
             engine.l4_service().fail_run(&first.id, FailKind::AckTimeout, "upstream outage").await;
             engine.sync_workflow_for_task(&a.id).await;
-            assert!(engine.workflow_run(&workflow.id).await.unwrap().status.is_terminal());
+            assert!(engine.l4_service().workflow_run(&workflow.id).await.unwrap().status.is_terminal());
             engine.l4_service().sweep_workspaces().await;
             assert!(first_path.exists() && sibling_path.exists(), "terminal workflow must keep all trees while a sibling waits on a person");
             // Even a terminal report does not prove that a failed stop worked.
@@ -5555,7 +5503,7 @@ edges: [{id: next, from: implement, to: review}]
             if fresh_review {
                 draft.nodes.iter_mut().find(|node| node.id == "review").unwrap().session = factory_core::workflow::SessionPolicy::Fresh;
             }
-            let definition = engine.create_workflow(draft).await.unwrap();
+            let definition = engine.l4_service().create_workflow(draft).await.unwrap();
             let workflow = engine.start_workflow(&definition.id, Default::default(), &crate::access::Caller::Owner).await.unwrap();
             let (implement, first) = wait_node_attempt(&engine, "implement", 1).await;
             let old_token = first.token.clone().unwrap();
@@ -5607,7 +5555,7 @@ edges: [{id: next, from: implement, to: review}]
                 artifacts: Vec::new(), message: None, send_to: None, error: None,
             }).await.unwrap();
             engine.sync_workflow_for_task(&review.id).await;
-            let settled = engine.workflow_run(&workflow.id).await.unwrap();
+            let settled = engine.l4_service().workflow_run(&workflow.id).await.unwrap();
             assert_eq!(settled.status, factory_core::workflow::WorkflowRunStatus::Done);
             assert_eq!(engine.l4.store.list(&TaskFilter::default()).await.unwrap().len(), 2);
             for node in settled.nodes {

@@ -430,7 +430,7 @@ impl Engine {
                 )
                 .await;
                 self.l4_service().mirror_to_task(&updated).await;
-                self.record_workflow_task_state(&run.task_id).await;
+                self.l4_service().record_workflow_task_state(&run.task_id).await;
             }
             // The same hook that set this block says the session is active
             // again. Only fires when the daemon is the one holding the
@@ -462,7 +462,7 @@ impl Engine {
                 )
                 .await;
                 self.l4_service().mirror_to_task(&updated).await;
-                self.record_workflow_task_state(&run.task_id).await;
+                self.l4_service().record_workflow_task_state(&run.task_id).await;
             }
         }
     }

@@ -331,7 +331,7 @@ impl L4Service<'_> {
             .labels
             .contains_key(crate::verification::REVIEW_RUN_LABEL);
         if !review_report {
-            self.core.validate_workflow_send_to(task_id, report.status, report.send_to.as_deref())
+            self.validate_workflow_send_to(task_id, report.status, report.send_to.as_deref())
                 .await?;
         } else if report.send_to.is_some() && report.status != Some(RunStatus::Done) {
             return Err(FactoryError::BadRequest(
@@ -918,7 +918,7 @@ impl L4Service<'_> {
                 why,
             )
             .await;
-        self.core.record_workflow_task_state(&run.task_id).await;
+        self.record_workflow_task_state(&run.task_id).await;
         self.core.record_bench_task_state(&run.task_id).await;
     }
     /// Keep the last of what the agent saw, then let the session go. Every
