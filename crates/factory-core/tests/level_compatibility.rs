@@ -351,6 +351,7 @@ fn benchmark_owner_decodes_the_same_legacy_wire_reference_after_l4_roundtrip() {
         case_id: "c".into(),
         agent: "shell".into(),
         attempt: 2,
+        ..Default::default()
     };
     let legacy = serde_json::to_value(&origin).unwrap();
     let reference: factory_process::origin::OriginRef = origin.clone().into();

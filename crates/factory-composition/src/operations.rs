@@ -2020,6 +2020,7 @@ mod tests {
                 case_id: "c".into(),
                 agent: "pi".into(),
                 attempt: 1,
+                ..Default::default()
             }
             .into(),
         );
