@@ -1177,7 +1177,7 @@ mod tests {
             .await
             .unwrap();
 
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
 
         let starts = stub.starts.lock().unwrap();
         let args = &starts[0].launch.args;
@@ -1250,7 +1250,7 @@ mod tests {
         };
         engine.l4.store.create(&task).await.unwrap();
 
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
 
         let starts = stub.starts.lock().unwrap();
         assert_eq!(
@@ -1284,7 +1284,7 @@ mod tests {
             .await
             .unwrap();
 
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
 
         let starts = stub.starts.lock().unwrap();
         // No declaration named "configured" itself, so nothing to append --
@@ -1321,7 +1321,7 @@ mod tests {
             .await
             .unwrap();
 
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
 
         let guide = factory_core::adapter::agent::run_guide_path(&engine.factory_snapshot().guides_dir(), &task.id);
         assert!(guide.exists(), "still there once the harness is up and running");
@@ -1367,7 +1367,7 @@ mod tests {
             .await
             .unwrap();
 
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
 
         let guide = factory_core::adapter::agent::run_guide_path(&engine.factory_snapshot().guides_dir(), &task.id);
         assert!(guide.exists());

@@ -75,7 +75,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                     let engine = engine.clone();
                     let id = task.id.clone();
                     tokio::spawn(async move {
-                        engine.start_run_due(&id, trigger, due).await;
+                        engine.l4_service().start_run_due(&id, trigger, due).await;
                     });
                 }
             }
@@ -92,7 +92,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 for task in tasks {
                     let engine = engine.clone();
                     tokio::spawn(async move {
-                        engine.start_run_due(&task.id, Trigger::Dependency, crate::engine::Due::now()).await;
+                        engine.l4_service().start_run_due(&task.id, Trigger::Dependency, crate::engine::Due::now()).await;
                     });
                 }
             }

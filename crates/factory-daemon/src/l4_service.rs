@@ -35,6 +35,8 @@ use factory_kernel::L4;
 pub(crate) struct L4Service<'a> {
     pub(crate) state: &'a L4State,
     pub(crate) wiring: Wiring<'a, L4>,
+    /// Transitional (S9a part 2): `Engine` methods the moved run-start code still calls. See `run_start.rs`.
+    pub(crate) core: &'a crate::engine::Engine,
 }
 
 impl crate::engine::Engine {
@@ -42,6 +44,7 @@ impl crate::engine::Engine {
         L4Service {
             state: &self.l4,
             wiring: Wiring::new(self),
+            core: self,
         }
     }
 }

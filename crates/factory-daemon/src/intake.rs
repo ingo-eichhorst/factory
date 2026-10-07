@@ -466,7 +466,7 @@ impl Engine {
         let engine = self.clone();
         let triage_id = triage.id.clone();
         tokio::spawn(async move {
-            engine.start_run_due(&triage_id, Trigger::Manual, Due::now()).await;
+            engine.l4_service().start_run_due(&triage_id, Trigger::Manual, Due::now()).await;
         });
         Ok(triage)
     }
@@ -818,7 +818,7 @@ impl Engine {
                     let engine = self.clone();
                     let id = task.id.clone();
                     tokio::spawn(async move {
-                        engine.start_run_due(&id, Trigger::Manual, due).await;
+                        engine.l4_service().start_run_due(&id, Trigger::Manual, due).await;
                     });
                 }
                 Ok(task)
@@ -1517,7 +1517,7 @@ mod tests {
                 .await,
         );
         assert!(why.contains("still in intake"), "{why}");
-        engine.start_run(&item.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&item.id, Trigger::Manual).await;
         let after = engine.require(&item.id).await.unwrap();
         assert_eq!(after.status, TaskStatus::Intake, "held, not failed");
         assert!(engine.l4.store.active_run(&item.id).await.unwrap().is_none());
@@ -1802,7 +1802,7 @@ mod tests {
         // And now it is ordinary work: dispatch goes ahead rather than
         // holding it. (It then fails on the test scope not being a git
         // repository -- a released item keeps a task's default worktree.)
-        engine.start_run(&item.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&item.id, Trigger::Manual).await;
         assert!(!kinds(&engine, &item.id).await.contains(&"intake_held".to_string()));
         let t = engine.require(&item.id).await.unwrap();
         assert!(t.error.as_deref().unwrap_or("").contains("git"), "{:?} {:?}", t.status, t.error);
@@ -1840,7 +1840,7 @@ mod tests {
             })
             .await
             .unwrap();
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let run = engine.l4.store.active_run(&task.id).await.unwrap().expect("dispatched");
         engine
             .report(
@@ -2289,7 +2289,7 @@ mod tests {
         assert_eq!(surface.depends_on, vec![foundation.id.clone()]);
         assert_eq!(surface.status, TaskStatus::Pending);
         assert_eq!(surface.runs, 0);
-        engine.start_run_due(&surface.id, Trigger::Manual, Due::now()).await;
+        engine.l4_service().start_run_due(&surface.id, Trigger::Manual, Due::now()).await;
         let still_waiting = engine.require(&surface.id).await.unwrap();
         assert_eq!(still_waiting.status, TaskStatus::Pending);
         assert_eq!(still_waiting.runs, 0, "a direct run request cannot jump its dependency");

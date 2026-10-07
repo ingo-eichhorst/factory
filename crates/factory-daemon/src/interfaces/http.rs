@@ -2640,6 +2640,7 @@ mod tests {
             .await
             .unwrap();
         let run = engine
+            .l4_service()
             .dispatch(&task.id, factory_core::run::Trigger::Manual, crate::engine::Due::now(), None)
             .await
             .unwrap();

@@ -92,6 +92,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("production.rs", Wiring), // the People-side production endpoint: reads L4's fact as a page
     ("recovery_journal.rs", L4),
     ("admission.rs", L4),
+    ("run_start.rs", L4),
     ("scheduling.rs", L4),
     ("l4_service.rs", L4),
     ("assignments.rs", L4),

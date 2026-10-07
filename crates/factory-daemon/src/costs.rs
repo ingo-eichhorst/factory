@@ -672,7 +672,7 @@ mod tests {
             })
             .await
             .unwrap();
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let run = engine.l4.store.active_run(&task.id).await.unwrap().expect("dispatched");
         (task, run)
     }
@@ -1052,7 +1052,7 @@ mod tests {
             ..Default::default()
         };
 
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let first = engine.l4.store.active_run(&task.id).await.unwrap().expect("dispatched");
         let first = done(&engine, &task, &first).await;
         engine.l4.store.update_run(&first.id, &ten_minutes(&first)).await.unwrap();
@@ -1073,7 +1073,7 @@ mod tests {
             )
             .await
             .unwrap();
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let second = engine.l4.store.active_run(&task.id).await.unwrap().expect("dispatched again");
         let second = done(&engine, &task, &second).await;
         engine.l4.store.update_run(&second.id, &ten_minutes(&second)).await.unwrap();
@@ -1354,7 +1354,7 @@ mod tests {
             )
             .await
             .unwrap();
-        engine.start_run(&wide.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&wide.id, Trigger::Manual).await;
         let wide_run = engine.l4.store.active_run(&wide.id).await.unwrap().expect("dispatched");
         done(&engine, &wide, &wide_run).await;
 

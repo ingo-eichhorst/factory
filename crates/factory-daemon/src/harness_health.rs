@@ -866,7 +866,7 @@ pub(crate) mod tests {
             let t = task(&engine, "fake").await;
 
             let started = Instant::now();
-            engine.start_run(&t.id, Trigger::Schedule).await;
+            engine.l4_service().start_run(&t.id, Trigger::Schedule).await;
             assert!(started.elapsed() < Duration::from_secs(10), "within the probe's timeout");
 
             let now = engine.l4.store.get(&t.id).await.unwrap().unwrap();
@@ -890,7 +890,7 @@ pub(crate) mod tests {
             let bin = fake_harness(&dir, "codex", "exit 7");
             let engine = engine(&dir, &bin, fast());
             let t = task(&engine, "fake").await;
-            engine.start_run(&t.id, Trigger::Manual).await;
+            engine.l4_service().start_run(&t.id, Trigger::Manual).await;
             let now = engine.l4.store.get(&t.id).await.unwrap().unwrap();
             assert_eq!(now.status, TaskStatus::Blocked);
             let why = now.error.unwrap_or_default();
@@ -912,7 +912,7 @@ pub(crate) mod tests {
                 .iter()
                 .map(|id| {
                     let (engine, id) = (engine.clone(), id.clone());
-                    tokio::spawn(async move { engine.start_run(&id, Trigger::Schedule).await })
+                    tokio::spawn(async move { engine.l4_service().start_run(&id, Trigger::Schedule).await })
                 })
                 .collect();
             for s in starts {
@@ -934,13 +934,13 @@ pub(crate) mod tests {
             let bin = fake_harness(&dir, "codex", "echo 'codex-cli 0.157.0'");
             let engine = engine(&dir, &bin, fast());
             let t = task(&engine, "fake").await;
-            engine.start_run(&t.id, Trigger::Manual).await;
+            engine.l4_service().start_run(&t.id, Trigger::Manual).await;
             let runs = engine.l4.store.runs(&t.id, 10).await.unwrap();
             assert_eq!(runs.len(), 1, "dispatched");
             assert_eq!(probes(&dir, "codex"), 1);
 
             let s = task(&engine, "shell").await;
-            engine.start_run(&s.id, Trigger::Manual).await;
+            engine.l4_service().start_run(&s.id, Trigger::Manual).await;
             assert_eq!(engine.l4.store.runs(&s.id, 10).await.unwrap().len(), 1);
             assert_eq!(probes(&dir, "codex"), 1, "the shell agent declares no probe");
 
@@ -962,7 +962,7 @@ pub(crate) mod tests {
             let bin = fake_harness(&dir, "codex", &format!("[ -e '{}' ] && sleep 30; echo ok", marker.display()));
             let engine = engine(&dir, &bin, HarnessHealthConfig { retry_seconds: 0, ..fast() });
             let t = task(&engine, "fake").await;
-            engine.start_run(&t.id, Trigger::Schedule).await;
+            engine.l4_service().start_run(&t.id, Trigger::Schedule).await;
             assert_eq!(engine.l4.store.get(&t.id).await.unwrap().unwrap().status, TaskStatus::Blocked);
 
             // Still down: stays held.
@@ -1011,7 +1011,7 @@ pub(crate) mod tests {
                 })
                 .await
                 .unwrap();
-            engine.start_run(&t.id, Trigger::Schedule).await;
+            engine.l4_service().start_run(&t.id, Trigger::Schedule).await;
             assert_eq!(engine.l4.store.get(&t.id).await.unwrap().unwrap().status, TaskStatus::Blocked);
             // Held past its next slot.
             tokio::time::sleep(Duration::from_millis(1200)).await;
@@ -1037,9 +1037,9 @@ pub(crate) mod tests {
             let bin = fake_harness(&dir, "codex", &format!("[ -e '{}' ] && exit 1; echo ok", marker.display()));
             let engine = engine(&dir, &bin, fast());
             let t = task(&engine, "fake").await;
-            engine.start_run(&t.id, Trigger::Schedule).await;
+            engine.l4_service().start_run(&t.id, Trigger::Schedule).await;
             std::fs::remove_file(&marker).unwrap();
-            engine.start_run(&t.id, Trigger::Manual).await;
+            engine.l4_service().start_run(&t.id, Trigger::Manual).await;
             assert_eq!(engine.l4.store.runs(&t.id, 10).await.unwrap().len(), 1, "the person's run went ahead");
             std::fs::remove_dir_all(dir).ok();
         }
@@ -1065,7 +1065,7 @@ pub(crate) mod tests {
             };
             let engine = engine(&dir, &bin, config.clone());
             let t = task(&engine, "fake").await;
-            engine.start_run(&t.id, Trigger::Schedule).await;
+            engine.l4_service().start_run(&t.id, Trigger::Schedule).await;
             let why = engine.l4.store.get(&t.id).await.unwrap().unwrap().error.unwrap_or_default();
             assert!(why.contains(&format!("{} codex", repair.display())), "names the configured script: {why}");
 
@@ -1101,7 +1101,7 @@ pub(crate) mod tests {
             let config = HarnessHealthConfig { repair_script: Some(repair.display().to_string()), ..fast() };
             let engine = engine(&dir, &bin, config);
             let t = task(&engine, "fake").await;
-            engine.start_run(&t.id, Trigger::Schedule).await;
+            engine.l4_service().start_run(&t.id, Trigger::Schedule).await;
             tokio::time::sleep(Duration::from_millis(300)).await;
             assert_eq!(probes(&dir, "repair-harness"), 0, "auto_repair is off by default");
             std::fs::remove_dir_all(dir).ok();
