@@ -69,6 +69,7 @@ fn the_benchmark_owner_preserves_and_decodes_l4s_opaque_legacy_reference() {
         case_id: "c".into(),
         agent: "a".into(),
         attempt: 2,
+        ..Default::default()
     };
     let reference: factory_process::origin::OriginRef = origin.clone().into();
     assert_eq!(

@@ -3798,6 +3798,49 @@ mod tests {
         assert!(third[0].worktree_capable, "once stale, git is asked and sees the repository");
     }
 
+    /// A bench task's workspace placement rides on its origin: a reset that exits non-zero ends the run before the
+    /// agent, and a placement hint of the wrong type is refused instead of silently skipping the reset.
+    #[tokio::test]
+    async fn a_placement_on_the_origin_runs_its_reset_and_an_ill_typed_one_is_refused() {
+        let scope_dir = temp_dir("placement");
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "factory@example.com"][..],
+            &["config", "user.name", "factory"][..],
+            &["commit", "-q", "--allow-empty", "-m", "base"][..],
+        ] {
+            assert!(std::process::Command::new("git").args(args).current_dir(&scope_dir).status().unwrap().success());
+        }
+        let engine = test_engine(scope_dir.clone());
+        for (origin, expected) in [
+            (serde_json::json!({"bench_run_id":"b","case_id":"c","agent":"shell","attempt":1,"reset":"exit 3"}), "reset failed: exit 3"),
+            (serde_json::json!({"bench_run_id":"b","case_id":"c","agent":"shell","attempt":1,"reset":5}), "invalid origin placement"),
+        ] {
+            let mut task = engine
+                .create(NewTask { title: "placed".into(), instructions: "true".into(), scope: Some("demo".into()), agent: Some("shell".into()), ..Default::default() })
+                .await
+                .unwrap();
+            task.bench_origin = Some(serde_json::from_value(origin).unwrap());
+            let run = engine
+                .l4
+                .store
+                .create_run(&factory_core::run::NewRun {
+                    task_id: task.id.clone(),
+                    trigger: Trigger::Bench,
+                    agent: "shell".into(),
+                    adapter: "shell".into(),
+                    runtime: task.runtime.clone(),
+                    token: "tok".into(),
+                    queued_at: None,
+                    scheduled_for: None,
+                })
+                .await
+                .unwrap();
+            let error = engine.l4_service().place_run(&task, run, &scope_dir, Workspace::Fresh).await.unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
     #[tokio::test]
     async fn a_capable_scope_gives_the_run_its_own_worktree_and_the_run_remembers_where() {
         let scope_dir = temp_dir("scope");
