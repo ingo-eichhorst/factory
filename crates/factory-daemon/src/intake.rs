@@ -18,6 +18,7 @@
 use crate::access::Caller;
 use crate::engine::{Due, Engine};
 use crate::l4_service::L4Service;
+use crate::l4_spawner::L4Spawner;
 use crate::operations::Asked;
 use chrono::{DateTime, Utc};
 use factory_core::config::Factory;
@@ -44,7 +45,7 @@ impl Engine {
         id: &str,
         agent: Option<String>,
     ) -> Result<Task> {
-        self.l4_service().intake_triage(caller, id, agent, self).await
+        self.l4_service().intake_triage(caller, id, agent, &self.l4_spawner()).await
     }
 
     pub(crate) async fn intake_assess(
@@ -54,11 +55,11 @@ impl Engine {
         assessment: intake::Assessment,
         decide: bool,
     ) -> Result<Task> {
-        self.l4_service().intake_assess(caller, id, assessment, decide, self).await
+        self.l4_service().intake_assess(caller, id, assessment, decide, &self.l4_spawner()).await
     }
 
     pub(crate) async fn intake_decide(self: &Arc<Self>, caller: &Caller, id: &str, decision: Decision) -> Result<Task> {
-        self.l4_service().intake_decide(caller, id, decision, self).await
+        self.l4_service().intake_decide(caller, id, decision, &self.l4_spawner()).await
     }
 
 }
@@ -398,7 +399,7 @@ impl L4Service<'_> {
         &self,
         caller: &Caller,
         id: &str,
-        agent: Option<String>, engine: &Arc<Engine>) -> Result<Task> {
+        agent: Option<String>, spawner: &L4Spawner) -> Result<Task> {
         let item = self.require(id).await?;
         let record = open_record(&item)?.clone();
         if let Some(running) = &record.triage_task {
@@ -491,11 +492,7 @@ impl L4Service<'_> {
             ),
         )
         .await;
-        let engine = engine.clone();
-        let triage_id = triage.id.clone();
-        tokio::spawn(async move {
-            engine.l4_service().start_run_due(&triage_id, Trigger::Manual, Due::now()).await;
-        });
+        spawner.spawn_start_run_due(triage.id.clone(), Trigger::Manual, Due::now());
         Ok(triage)
     }
 
@@ -505,7 +502,7 @@ impl L4Service<'_> {
         caller: &Caller,
         id: &str,
         mut assessment: intake::Assessment,
-        decide: bool, engine: &Arc<Engine>) -> Result<Task> {
+        decide: bool, spawner: &L4Spawner) -> Result<Task> {
         let item = self.require(id).await?;
         let record = open_record(&item)?;
         // A blank route is the assessment's own problem, refused by
@@ -681,9 +678,9 @@ impl L4Service<'_> {
             return Ok(item);
         }
         if executable_plan && intake::plan_is_ready(&assessment, &definition) {
-            return self.intake_expand_plan(caller, &item, engine).await;
+            return self.intake_expand_plan(caller, &item, spawner).await;
         }
-        self.intake_decide(caller, id, decision, engine).await
+        self.intake_decide(caller, id, decision, spawner).await
     }
 
     /// `#168`'s reference class for `scope`+`category` (narrowed to `agent`
@@ -730,7 +727,7 @@ impl L4Service<'_> {
     }
 
     /// `Request::IntakeDecide`.
-    pub(crate) async fn intake_decide(&self, caller: &Caller, id: &str, decision: Decision, engine: &Arc<Engine>) -> Result<Task> {
+    pub(crate) async fn intake_decide(&self, caller: &Caller, id: &str, decision: Decision, spawner: &L4Spawner) -> Result<Task> {
         let item = self.require(id).await?;
         let record = open_record(&item)?.clone();
         let questions = intake::check_decision(&record, &decision).map_err(FactoryError::BadRequest)?;
@@ -809,7 +806,7 @@ impl L4Service<'_> {
                     // left to do itself. `start_workflow` checks the caller
                     // could create and run every node by hand.
                     Some(workflow) => {
-                        let run = engine
+                        let run = spawner
                             .start_workflow_with_agents(workflow, routing.inputs.clone(), &routing.agents, caller)
                             .await?;
                         decided.workflow_run = Some(run.id.clone());
@@ -842,11 +839,7 @@ impl L4Service<'_> {
                         ),
                     )
                     .await;
-                    let engine = engine.clone();
-                    let id = task.id.clone();
-                    tokio::spawn(async move {
-                        engine.l4_service().start_run_due(&id, Trigger::Manual, due).await;
-                    });
+                    spawner.spawn_start_run_due(task.id.clone(), Trigger::Manual, due);
                 }
                 Ok(task)
             }
@@ -905,7 +898,7 @@ impl L4Service<'_> {
     /// Execute a complete plan as one generated workflow.  Its expand node
     /// materialises every internal child, roots start at once, dependants
     /// remain scheduled, and the workflow owns integration through one PR.
-    async fn intake_expand_plan(&self, caller: &Caller, item: &Task, engine: &Arc<Engine>) -> Result<Task> {
+    async fn intake_expand_plan(&self, caller: &Caller, item: &Task, spawner: &L4Spawner) -> Result<Task> {
         if item.parent_task_id.is_some() {
             return Err(FactoryError::BadRequest(
                 "automatic decomposition is one level deep; finish this child as a bounded task".into(),
@@ -919,7 +912,7 @@ impl L4Service<'_> {
             .map_err(|error| FactoryError::BadRequest(format!("the executable plan: {error}")))?;
         let parts = intake::split_parts(&record, &triage.assessment.split)
             .map_err(FactoryError::BadRequest)?;
-        let workflow = engine
+        let workflow = spawner
             .start_decomposition_workflow(item, &parts, &triage.assessment.routing, caller)
             .await?;
         let children = self

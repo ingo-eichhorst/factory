@@ -10,6 +10,7 @@ mod harness_hold;
 mod runtime_events;
 mod l3_service;
 mod l4_service;
+mod l4_spawner;
 mod admission;
 mod agent_rows;
 mod state;
