@@ -11,6 +11,7 @@ pub mod environment_store;
 pub mod environments;
 pub mod expiry_store;
 pub mod host;
+pub mod host_commands;
 pub mod interfaces;
 #[cfg(test)]
 mod provider_tests;

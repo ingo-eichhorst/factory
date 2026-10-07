@@ -3,10 +3,12 @@
 //! `L3Port` is what a `Commands<L4, _>` wraps: the daemon's L3 service behind the traits in
 //! `factory_agents::dispatch`. L4 reaches an adapter, a runtime or the harness health state
 //! only through it.
+use crate::l1_service::L1Service;
 use crate::l2_service::L2Service;
 use crate::l3_service::L3Service;
 use factory_agents::adapter::AgentContext;
 use factory_agents::dispatch::{Assignments, Environments, HarnessCommands, SessionStart, Supervision};
+use factory_infrastructure::host_commands::HostCommands;
 use factory_environment::provision::{Note, Notes, PrepareRequest, Prepared, Provision, Reconcile, Resolved, RunLedger};
 use factory_agents::harness::HeldTask;
 use factory_agents::roster::ScopeAgent;
@@ -153,6 +155,29 @@ impl Provision for L2Port<'_> {
     fn forget_preserved(&self, sessions_root: &std::path::Path, task: &str) {
         crate::openshell::remove_preserved(sessions_root, task);
     }
+    async fn keep_awake(&self, run_id: &str) {
+        self.0.wiring.host().port().keep_awake(run_id).await;
+    }
+    async fn allow_sleep(&self, run_id: &str) {
+        self.0.wiring.host().port().allow_sleep(run_id).await;
+    }
+}
+
+/// L1's command port, as the daemon serves it: what a `Commands<L2, _>` wraps.
+pub(crate) struct L1Port<'a>(pub(crate) L1Service<'a>);
+
+impl CommandPort for L1Port<'_> {
+    type Level = factory_kernel::L1;
+}
+
+#[async_trait::async_trait]
+impl factory_infrastructure::host_commands::HostCommands for L1Port<'_> {
+    async fn keep_awake(&self, run_id: &str) {
+        self.0.state.power.acquire(run_id).await;
+    }
+    async fn allow_sleep(&self, run_id: &str) {
+        self.0.state.power.release(run_id).await;
+    }
 }
 
 /// L3 passes the environment commands to L2 (`Commands<L3, L2Port>`).
@@ -203,5 +228,11 @@ impl Environments for L3Port<'_> {
     fn forget_preserved(&self, task: &str) {
         let sessions_root = self.0.wiring.snapshot().factory_dir().join("openshell").join("sessions");
         self.0.wiring.provision().port().forget_preserved(&sessions_root, task);
+    }
+    async fn keep_awake(&self, run_id: &str) {
+        self.0.wiring.provision().port().keep_awake(run_id).await;
+    }
+    async fn allow_sleep(&self, run_id: &str) {
+        self.0.wiring.provision().port().allow_sleep(run_id).await;
     }
 }

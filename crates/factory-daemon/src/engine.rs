@@ -1814,7 +1814,8 @@ impl Engine {
 
         // Approval has passed (or none was required); only now does this run
         // acquire its liveness assertion and create an outward agent session.
-        self.l1.power.acquire(&run.id).await;
+        let l3 = crate::commands::l3(self);
+        l3.port().keep_awake(&run.id).await;
 
         // A worktree of its own, made now rather than left to the harness --
         // the run row already exists, so it is named after it. Nothing below
@@ -1941,7 +1942,6 @@ impl Engine {
 
         // Process asks Agent through its command port (#193, S8a): the adapter's launch with
         // the `#178` resume args leading and the declaration's args after.
-        let l3 = crate::commands::l3(self);
         let resume_args: Vec<String> = match &continue_outcome {
             Some(ContinueOutcome::Resume(plan)) => plan.resume_args.clone(),
             _ => Vec::new(),
@@ -3329,7 +3329,7 @@ impl Engine {
         // `power.release` is the counterpart to `dispatch`'s own
         // `power.acquire`, and every run that reaches this function reaches
         // it regardless of whether it ever had a session to close.
-        self.l1.power.release(&run.id).await;
+        crate::commands::l3(self).port().allow_sleep(&run.id).await;
 
         // The guide file, if this run's harness wrote one, is named after the
         // task rather than the run and nothing else removes it. It cannot be

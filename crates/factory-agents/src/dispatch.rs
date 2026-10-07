@@ -122,4 +122,8 @@ pub trait Environments: CommandPort<Level = L3> + Send + Sync {
         notes: &dyn factory_environment::provision::Notes,
     );
     fn forget_preserved(&self, task: &str);
+    /// A run now exists: keep the host awake for it (L3 -> L2 -> L1).
+    async fn keep_awake(&self, run_id: &str);
+    /// The run ended, however it ended: let the host sleep again.
+    async fn allow_sleep(&self, run_id: &str);
 }

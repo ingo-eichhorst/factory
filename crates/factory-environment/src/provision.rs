@@ -22,6 +22,8 @@
 //!     fn release(&self, _: &std::collections::BTreeMap<String, String>, _: String, _: String, _: std::sync::Arc<dyn Notes>) {}
 //!     async fn reconcile(&self, _: factory_environment::provision::Reconcile<'_>, _: &dyn RunLedger, _: &dyn Notes) {}
 //!     fn forget_preserved(&self, _: &std::path::Path, _: &str) {}
+//!     async fn keep_awake(&self, _: &str) {}
+//!     async fn allow_sleep(&self, _: &str) {}
 //! }
 //! ```
 use crate::openshell::{CallbackTarget, OpenshellConfig, Plan};
@@ -134,6 +136,11 @@ pub trait Provision: CommandPort<Level = L2> + Send + Sync {
     async fn reconcile(&self, request: Reconcile<'_>, ledger: &dyn RunLedger, notes: &dyn Notes);
     /// A task's preserved conversation is released with the task, never by a sweep.
     fn forget_preserved(&self, sessions_root: &Path, task: &str);
+    /// A run is starting: keep the host awake for it. Environment asks Infrastructure
+    /// (`Commands<L2, L1Port>`); the answer is not Environment's to know.
+    async fn keep_awake(&self, run_id: &str);
+    /// A run just ended, however it ended: let go of its share of the host.
+    async fn allow_sleep(&self, run_id: &str);
 }
 
 /// Plan the run's sandbox, make it, and say so. `launch`/`prompt` are always what a fresh
