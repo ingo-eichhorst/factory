@@ -103,3 +103,37 @@ pub(crate) fn direction<'a>(engine: &'a Engine, observer: &'a CreationObserver) 
 pub(crate) fn l3(engine: &Engine) -> Commands<factory_kernel::L4, crate::dispatch_port::L3Port<'_>> {
     Commands::new(crate::dispatch_port::L3Port(engine.l3_service()))
 }
+
+/// The caller's side of L2's `Notes`: each thing L2 reports becomes a `sandbox` entry on the run's
+/// task, appended and published exactly as `Engine::entry` does it.
+pub(crate) struct EntryNotes {
+    pub(crate) store: std::sync::Arc<dyn factory_core::adapter::TaskStore>,
+    pub(crate) bus: EventBus,
+}
+impl EntryNotes {
+    pub(crate) fn of(engine: &Engine) -> Self {
+        Self { store: engine.l4.store.clone(), bus: engine.shared.bus.clone() }
+    }
+}
+#[async_trait::async_trait]
+impl factory_environment::provision::Notes for EntryNotes {
+    async fn note(&self, note: factory_environment::provision::Note) {
+        let mut entry = TaskEntry::new("daemon", "sandbox", note.message).in_run(&note.run);
+        if let Some(data) = note.data {
+            entry = entry.with_data(data);
+        }
+        if let Err(e) = self.store.append_entry(&note.task, &entry).await {
+            tracing::warn!(task = %note.task, "could not record journal entry: {e}");
+        }
+        self.bus.publish(Event::TaskEntry { id: note.task, entry });
+    }
+}
+
+/// The runs that have not finished, as L4 reads them for L2's reconcile.
+pub(crate) struct StoreLedger(pub(crate) std::sync::Arc<dyn factory_core::adapter::TaskStore>);
+#[async_trait::async_trait]
+impl factory_environment::provision::RunLedger for StoreLedger {
+    async fn active_runs(&self) -> Result<std::collections::BTreeSet<String>> {
+        Ok(self.0.active_runs().await?.into_iter().map(|run| run.id).collect())
+    }
+}

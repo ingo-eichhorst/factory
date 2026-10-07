@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::schedule;
-use factory_agents::dispatch::Assignments;
+use factory_agents::dispatch::{Assignments, Environments};
 #[cfg(test)]
 use factory_core::adapter::runtime::StartRequest;
 use crate::worktree;
@@ -1968,6 +1968,7 @@ impl Engine {
         // the harness's own, and the prompt goes in with it: typed into a
         // TUI through a pty, a multi-line prompt would submit at its first
         // newline.
+        let notes = crate::commands::EntryNotes::of(self);
         let sandboxed = match &openshell {
             // Its own boxed future: everything the sandbox needs lives in
             // that frame, not in this one, which is already deep.
@@ -1976,11 +1977,11 @@ impl Engine {
                 // its providers -- is ready, or the run fails with the one
                 // thing it needs. Never a fallback to the host.
                 let key = (factory.canonical_scope_name(&task.scope), agent_name.clone());
-                let resolved = self.l2_service().sandbox_gate(&key, config).await.map_err(|reason| {
+                let resolved = l3.port().gate_environment(&key, config).await.map_err(|reason| {
                     FactoryError::BadRequest(format!("{reason}. The run was not started on the host instead"))
                 })?;
                 let prompt = l3.port().prompt(&adapter_name, &ctx).await?;
-                let (plan, teardown, restore_outcome) = match &sandbox_restore {
+                let prepared = match &sandbox_restore {
                     // `#274`: a tentative resume plans the *fresh* pair as
                     // the primary -- what the sandbox launches with unless
                     // the preserved conversation actually uploads -- and
@@ -1995,20 +1996,26 @@ impl Engine {
                         let mut launch_fresh = launch.clone();
                         launch_fresh.args.drain(0..resume_args_len);
                         let prompt_fresh = l3.port().prompt(&adapter_name, &ctx_fresh).await?;
-                        Box::pin(self.prepare_sandbox(
-                            &factory, &task, &run.id, &cwd, &launch_fresh, &prompt_fresh,
-                            Some((&launch, prompt.as_str(), local_dir.as_path())),
-                            config, callback, &resolved,
+                        Box::pin(l3.port().prepare_environment(
+                            sandbox_request(
+                                &factory, &task, &run.id, &cwd, &launch_fresh, &prompt_fresh,
+                                Some((&launch, prompt.as_str(), local_dir.as_path())),
+                                config, callback, &resolved,
+                            ),
+                            &notes,
                         ))
                         .await?
                     }
-                    None => Box::pin(self.prepare_sandbox(
-                        &factory, &task, &run.id, &cwd, &launch, &prompt, None, config, callback, &resolved,
+                    None => Box::pin(l3.port().prepare_environment(
+                        sandbox_request(&factory, &task, &run.id, &cwd, &launch, &prompt, None, config, callback, &resolved),
+                        &notes,
                     ))
                     .await?,
                 };
+                let meta = prepared.session_meta();
+                let (plan, restore_outcome) = (prepared.plan, prepared.restore);
                 launch = plan.launch.clone();
-                Some((teardown, plan, restore_outcome))
+                Some((meta, plan, restore_outcome))
             }
             None => None,
         };
@@ -2052,7 +2059,7 @@ impl Engine {
         let lifecycle = self.run_lifecycle_lock(&run.id);
         let _launching = lifecycle.lock().await;
         if self.require_run(&run.id).await?.status.is_terminal() {
-            if let Some((_, plan, _)) = &sandboxed { Box::pin(crate::openshell::discard(plan)).await; }
+            if let Some((_, plan, _)) = &sandboxed { l3.port().discard_environment(plan).await; }
             return Err(FactoryError::DispatchSuperseded("the run ended before its session was launched".into()));
         }
         let started = l3
@@ -2065,20 +2072,19 @@ impl Engine {
                 title: task.title.clone(),
                 cwd,
                 launch,
+                // A sandbox's teardown rides on the session so `close_session` can find it.
+                meta: sandboxed.as_ref().map(|(meta, _, _)| meta.clone()).unwrap_or_default(),
             })
             .await;
-        let mut session = match (started, &sandboxed) {
+        let session = match (started, &sandboxed) {
             (Ok(session), _) => session,
             // No session will ever carry this sandbox to `close_session`.
             (Err(e), Some((_, plan, _))) => {
-                Box::pin(crate::openshell::discard(plan)).await;
+                l3.port().discard_environment(plan).await;
                 return Err(e);
             }
             (Err(e), None) => return Err(e),
         };
-        if let Some((teardown, _, _)) = &sandboxed {
-            session.meta.insert(crate::openshell::META_KEY.to_string(), teardown.to_meta());
-        }
         // `#274`: only now, with the session actually up, is the preserved
         // copy's job done -- an earlier delete would lose the only copy to
         // a failure between the restore upload and here (a failed `create`
@@ -3404,21 +3410,12 @@ impl Engine {
         // that already reported `done` looking active with its pane gone,
         // which the watchdog fails as `session_gone`. Claimed per sandbox,
         // so a run closed twice (a report racing a cancel) is torn down once.
-        if let Some(teardown) = crate::openshell::Teardown::from_meta(&session.meta) {
-            let store = self.l4.store.clone();
-            let bus = self.shared.bus.clone();
-            let (task_id, run_id) = (run.task_id.clone(), run.id.clone());
-            tokio::spawn(async move {
-                let Some(_claim) = crate::openshell::Claim::take(&teardown.sandbox) else { return };
-                for note in Box::pin(crate::openshell::finish(&teardown)).await {
-                    let entry = TaskEntry::new("daemon", "sandbox", note).in_run(&run_id);
-                    if let Err(e) = store.append_entry(&task_id, &entry).await {
-                        tracing::warn!(task = %task_id, "could not record journal entry: {e}");
-                    }
-                    bus.publish(Event::TaskEntry { id: task_id.clone(), entry });
-                }
-            });
-        }
+        crate::commands::l3(self).port().release_environment(
+            &session.meta,
+            run.task_id.clone(),
+            run.id.clone(),
+            Arc::new(crate::commands::EntryNotes::of(self)),
+        );
     }
 
     /// The daemon's own http bind, when it serves the http interface at
@@ -3427,148 +3424,9 @@ impl Engine {
     /// is released the same moment its other per-task state is -- closing
     /// or deleting the task, never a periodic sweep of its own.
     pub(crate) fn remove_preserved_session(&self, task_id: &str) {
-        let sessions_root = self.factory_snapshot().factory_dir().join("openshell").join("sessions");
-        crate::openshell::remove_preserved(&sessions_root, task_id);
+        crate::commands::l3(self).port().forget_preserved(task_id);
     }
 
-    /// `sandbox: openshell` at dispatch (`#218`): plan the run's sandbox,
-    /// make it, and say so on the run. An `Err` fails the run with the
-    /// reason; nothing here ever falls back to the host.
-    ///
-    /// `launch`/`prompt` are always what a *fresh* dispatch would use --
-    /// `resume` is `Some` only for a tentatively-resuming sandboxed run
-    /// (`#274`): the resumed launch/prompt and the preserved conversation's
-    /// local directory. The staged `launch.sh`/`prompt.md` default to the
-    /// fresh pair; `prepare` switches to the resumed pair only once the
-    /// preserved conversation actually uploads, so a failed upload can
-    /// never launch a sandbox with `--resume` pointing at a session that
-    /// is not there.
-    #[allow(clippy::too_many_arguments)]
-    async fn prepare_sandbox(
-        &self,
-        factory: &Factory,
-        task: &Task,
-        run_id: &str,
-        cwd: &Path,
-        launch: &LaunchSpec,
-        prompt: &str,
-        resume: Option<(&LaunchSpec, &str, &Path)>,
-        config: &factory_core::openshell::OpenshellConfig,
-        callback: &factory_core::openshell::CallbackTarget,
-        resolved: &crate::provision::Resolved,
-    ) -> Result<(factory_core::openshell::Plan, crate::openshell::Teardown, crate::openshell::RestoreOutcome)> {
-        let cli = crate::openshell::resolve_cli(config.cli.as_deref())?;
-        let state_dir = factory.factory_dir().join("openshell").join(run_id);
-        let guides_dir = factory.guides_dir();
-        let plan = factory_core::openshell::plan(&factory_core::openshell::PlanInput {
-            config,
-            cli: &cli,
-            image: &resolved.image,
-            providers: &resolved.providers,
-            instance_id: &factory.config.instance.id,
-            run_id,
-            task_id: &task.id,
-            cwd,
-            guides_dir: &guides_dir,
-            state_dir: &state_dir,
-            launch,
-            prompt,
-            callback,
-        })?;
-        // The resumed variant is planned too -- identical in everything but
-        // `launch.sh`/`prompt.md`'s content, which is all `prepare` needs
-        // of it (`#274`).
-        let restore = match resume {
-            Some((resume_launch, resume_prompt, local_dir)) => {
-                let resume_plan = factory_core::openshell::plan(&factory_core::openshell::PlanInput {
-                    config,
-                    cli: &cli,
-                    image: &resolved.image,
-                    providers: &resolved.providers,
-                    instance_id: &factory.config.instance.id,
-                    run_id,
-                    task_id: &task.id,
-                    cwd,
-                    guides_dir: &guides_dir,
-                    state_dir: &state_dir,
-                    launch: resume_launch,
-                    prompt: resume_prompt,
-                    callback,
-                })?;
-                let override_files: Vec<_> = resume_plan
-                    .stage_files
-                    .into_iter()
-                    .filter(|(path, _, _)| {
-                        path.file_name().and_then(|n| n.to_str()) == Some("launch.sh")
-                            || path.file_name().and_then(|n| n.to_str()) == Some("prompt.md")
-                    })
-                    .collect();
-                // Never true today -- the claude branch `plan()` takes
-                // always stages both -- but an empty override would mean
-                // `prepare` reports `Restored` while the sandbox actually
-                // launches with the fresh (unresumed) files it already
-                // staged, and the run row would wrongly go on claiming a
-                // resume that never happened. Fail the dispatch outright
-                // rather than let that silently drift.
-                if override_files.is_empty() {
-                    return Err(FactoryError::Other(anyhow::anyhow!(
-                        "the resumed plan staged neither launch.sh nor prompt.md; refusing to claim a resume prepare cannot actually stage"
-                    )));
-                }
-                Some(crate::openshell::Restore { local_dir: local_dir.to_path_buf(), override_files })
-            }
-            None => None,
-        };
-        self.entry(
-            &task.id,
-            TaskEntry::new(
-                "daemon",
-                "sandbox",
-                format!("creating OpenShell sandbox {} from {}", plan.sandbox, resolved.image),
-            )
-            .in_run(run_id),
-        )
-        .await;
-        let mut teardown = crate::openshell::Teardown::of(&plan, cwd, config.fast_forward, &task.id);
-        teardown.service_evidence = Some(crate::service_observations::CaptureContext {
-            root: factory.root.clone(), instance: factory.config.instance.id.clone(),
-            scope: task.scope.clone(), agent: task.agent.clone(), task: task.id.clone(),
-            run: run_id.to_string(), base: plan.base.clone(),
-        });
-        crate::openshell::Pending {
-            instance: factory.config.instance.id.clone(),
-            run: run_id.to_string(),
-            task: task.id.clone(),
-            base: plan.base.clone(),
-            teardown: teardown.clone(),
-        }.save().map_err(|e| FactoryError::BadRequest(format!("could not persist OpenShell cleanup record: {e}")))?;
-        let restore_outcome = Box::pin(crate::openshell::prepare(&plan, &resolved.providers, restore.as_ref())).await?;
-        if let crate::openshell::RestoreOutcome::FellBack(reason) = &restore_outcome {
-            self.entry(
-                &task.id,
-                TaskEntry::new("daemon", "sandbox", format!("preserved conversation not restored: {reason}; launching fresh"))
-                    .in_run(run_id),
-            )
-            .await;
-        }
-        self.entry(
-            &task.id,
-            TaskEntry::new(
-                "daemon",
-                "sandbox",
-                format!("sandbox {} is ready; the harness runs in {}", plan.sandbox, plan.workdir),
-            )
-            .in_run(run_id)
-            .with_data(serde_json::json!({
-                "sandbox": plan.sandbox,
-                "image": resolved.image,
-                "providers": resolved.providers,
-                "workdir": plan.workdir,
-            })),
-        )
-        .await;
-        Ok((plan, teardown, restore_outcome))
-    }
 
     /// On start: delete every OpenShell sandbox this instance made whose run
     /// is no longer active -- one a crash, a lost session or a failed delete
@@ -3576,85 +3434,10 @@ impl Engine {
     /// asked for current declarations and persisted cleanup records, so
     /// removing or changing a declaration cannot strand an older sandbox.
     pub async fn reconcile_openshell(&self) {
-        let factory = self.factory_snapshot();
-        let mut configs: Vec<factory_core::openshell::OpenshellConfig> = Vec::new();
-        for name in factory.scope_names() {
-            if let Ok(scope) = factory.scope(&name) {
-                for agent in scope.declared_agents() {
-                    if let Some(config) = agent.openshell.filter(|_| agent.sandbox == Sandbox::Openshell) {
-                        configs.push(config);
-                    }
-                }
-            }
-        }
-        let pending = match crate::openshell::pending(&factory.factory_dir().join("openshell"), &factory.config.instance.id) {
-            Ok(pending) => pending,
-            Err(e) => {
-                tracing::warn!("openshell reconcile: could not read cleanup records: {e}");
-                Vec::new()
-            }
-        };
-        if configs.is_empty() && pending.is_empty() {
-            return;
-        }
-        let active: std::collections::BTreeSet<String> = match self.l4.store.active_runs().await {
-            Ok(runs) => runs.into_iter().map(|r| r.id).collect(),
-            Err(e) => {
-                tracing::warn!("openshell reconcile: could not list active runs: {e}");
-                return;
-            }
-        };
-        let mut bases: std::collections::BTreeSet<Vec<String>> = pending.iter().map(|record| record.base.clone()).collect();
-        for config in configs {
-            let Ok(cli) = crate::openshell::resolve_cli(config.cli.as_deref()) else { continue };
-            let mut base = vec![cli];
-            if let Some(gateway) = &config.gateway {
-                base.push("-g".into());
-                base.push(gateway.clone());
-            }
-            bases.insert(base);
-        }
-        for base in bases {
-            let ours = match crate::openshell::list_ours(&base, &factory.config.instance.id).await {
-                Ok(ours) => ours,
-                Err(e) => {
-                    tracing::warn!("openshell reconcile: {e}");
-                    continue;
-                }
-            };
-            // A successful authoritative list also settles a create that
-            // never reached the gateway, or a delete completed just before
-            // the previous daemon exited. Recovery output is never erased.
-            for record in pending.iter().filter(|record| record.base == base && !active.contains(&record.run)) {
-                if !ours.iter().any(|(name, run)| name == &record.teardown.sandbox && run == &record.run)
-                    && !record.teardown.state_dir.join("recovery").exists() {
-                    let _ = std::fs::remove_dir_all(&record.teardown.state_dir);
-                }
-            }
-            for (name, run_id) in ours {
-                if active.contains(&run_id) {
-                    continue;
-                }
-                let Some(_claim) = crate::openshell::Claim::take(&name) else { continue };
-                if let Some(record) = pending.iter().find(|record| record.base == base && record.run == run_id
-                    && record.teardown.sandbox == name && !record.teardown.state_dir.join("recovery").exists()) {
-                    for note in Box::pin(crate::openshell::finish(&record.teardown)).await {
-                        self.entry(&record.task, TaskEntry::new("daemon", "sandbox", note).in_run(&record.run)).await;
-                    }
-                    continue;
-                }
-                match crate::openshell::delete(&base, &name).await {
-                    Ok(()) => {
-                        tracing::info!(sandbox = %name, run = %run_id, "deleted an OpenShell sandbox its run left behind");
-                        let state = factory.factory_dir().join("openshell").join(&run_id);
-                        if !state.join("recovery").exists() {
-                            let _ = std::fs::remove_dir_all(state);
-                        }
-                    }
-                    Err(e) => tracing::warn!(sandbox = %name, "openshell reconcile: {e}"),
-                }
-            }
-        }
+        crate::commands::l3(self)
+            .port()
+            .reconcile_environments(&crate::commands::StoreLedger(self.l4.store.clone()), &crate::commands::EntryNotes::of(self))
+            .await;
     }
 
     /// Terminal output for a run: live while it is running, the transcript kept
@@ -3996,6 +3779,40 @@ pub(crate) fn feedback_round_title(round: u32, integration_rounds: u32) -> Strin
         "Workflow rework round {round} ({} sent back by a workflow step, {integration_rounds} by integration)",
         round.saturating_sub(integration_rounds)
     )
+}
+
+/// The request L2's `prepare` is given for a run's sandbox, from what dispatch has at hand.
+#[allow(clippy::too_many_arguments)]
+fn sandbox_request<'a>(
+    factory: &'a Factory,
+    task: &'a Task,
+    run_id: &'a str,
+    cwd: &'a Path,
+    launch: &'a factory_kernel::LaunchSpec,
+    prompt: &'a str,
+    resume: Option<(&'a factory_kernel::LaunchSpec, &'a str, &'a Path)>,
+    config: &'a factory_core::openshell::OpenshellConfig,
+    callback: &'a factory_core::openshell::CallbackTarget,
+    resolved: &'a crate::provision::Resolved,
+) -> factory_environment::provision::PrepareRequest<'a> {
+    factory_environment::provision::PrepareRequest {
+        instance_id: &factory.config.instance.id,
+        root: factory.root.clone(),
+        factory_dir: factory.factory_dir(),
+        guides_dir: factory.guides_dir(),
+        task_id: &task.id,
+        scope: &task.scope,
+        agent: &task.agent,
+        run_id,
+        cwd,
+        launch,
+        prompt,
+        resume,
+        config,
+        callback,
+        image: &resolved.image,
+        providers: &resolved.providers,
+    }
 }
 
 pub(crate) fn truncate(s: &str, n: usize) -> String {

@@ -20,9 +20,11 @@
 //!   (page); `attach_dependency` is a command a run's token authorises and
 //!   journals in L4: composition at the router, not L2 state.
 //! - `openshell.rs`, `service_observations.rs`: re-exports of the L2 crate.
-//! - `prepare_sandbox` / `reconcile_openshell` (in `engine.rs`): they journal into
-//!   L4 task entries and list L4 runs, so they move with the L3 -> L2 provision
-//!   command (S8b), not here.
+//! - `prepare_sandbox`, `reconcile_openshell`, the sandbox discard and the teardown in
+//!   `close_session` (S8b): now L2's `provision` module (`factory_environment::provision`),
+//!   reached by L3 through `Commands<L3, L2Port>` (`L3Port` passes L4's `Environments`
+//!   commands down). What they used to journal is handed back through a `Notes`
+//!   capability the caller supplies, at the moment each thing happens.
 use crate::engine::Engine;
 use crate::facts::Wiring;
 use crate::state::L2State;

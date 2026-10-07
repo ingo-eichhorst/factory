@@ -160,12 +160,8 @@ pub(crate) struct SourceCheck {
     pub checked_at: DateTime<Utc>,
 }
 
-/// What a dispatch resolves from a `ready` agent.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Resolved {
-    pub image: String,
-    pub providers: Vec<String>,
-}
+/// What a dispatch resolves from a `ready` agent (L2's own type, shared with its command port).
+pub(crate) use factory_environment::provision::Resolved;
 
 /// Paths a test replaces; production uses the defaults.
 #[derive(Debug, Clone)]
