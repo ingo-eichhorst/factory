@@ -167,7 +167,6 @@ const PULLS_BASELINE: &[(&str, usize)] = &[
     ("metrics.rs -> .l6_service()", 2),
     ("quality/mod.rs -> .l6_service()", 1),
     ("signposts.rs -> .l6_service()", 1),
-    ("verification.rs -> .l6_service()", 2),
 ];
 
 /// `self.core.` call sites per file (the transitional `L4Service::core`). May only shrink; goes away with the handle.

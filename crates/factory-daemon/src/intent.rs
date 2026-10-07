@@ -22,6 +22,7 @@ use std::path::PathBuf;
 pub(crate) struct Intent {
     root: PathBuf,
     budgets: factory_direction::policy_intent::Authored,
+    quality: factory_assurance::quality_inputs::Configuration,
 }
 
 /// The scope configuration the policy intent readers work from, as plain data out of the snapshot.
@@ -51,7 +52,29 @@ impl Intent {
         Self {
             root: snapshot.root.clone(),
             budgets: factory_direction::policy_intent::Authored::new(snapshot.root.clone(), policy_configuration(snapshot)),
+            quality: crate::quality::quality_configuration(snapshot),
         }
+    }
+
+    /// A scope's control plan for one category: the authored policy chain folded by `policy::applicable` and the
+    /// authored quality chain folded by `quality::applicable`, compiled by the pure plan compiler over the same
+    /// files. Read fresh off disk every call; no store, spend or verdict is involved.
+    pub(crate) async fn control_plan(
+        &self,
+        scope: &str,
+        category: &str,
+    ) -> factory_core::error::Result<factory_kernel::ControlPlan> {
+        let provider = factory_assurance::plan_service::Provider::new(self.root.clone(), self.quality.clone());
+        self.budgets.control_plan(scope, category, &provider).await
+    }
+
+    /// The authored requirements one `(scope, category)` plan is compiled from (what workflow lint checks against).
+    pub(crate) async fn plan_input(
+        &self,
+        scope: &str,
+        category: &str,
+    ) -> factory_core::error::Result<factory_assurance::plan_service::Read> {
+        self.budgets.plan_input(scope, category).await
     }
 
     /// The authored budget caps a metric plan needs: a pure read of the budget catalogue and the scope
@@ -104,7 +127,7 @@ mod tests {
             root_name: None,
             instance_name: "test".into(),
         };
-        let intent = Intent { root: root.clone(), budgets: factory_direction::policy_intent::Authored::new(root, configuration) };
+        let intent = Intent { root: root.clone(), budgets: factory_direction::policy_intent::Authored::new(root, configuration), quality: Default::default() };
 
         let found = intent.goal_context(Some("obj/kr".to_string())).await.unwrap();
         assert_eq!((found.objective_title.as_str(), found.kr_title.as_str()), ("Objective Title", "KR Title"));

@@ -168,38 +168,6 @@ impl Authored {
         })
     }
 
-    pub async fn quality_budgets(&self, needed: &[&str]) -> QualityBudgets {
-        if needed.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        let config = self
-            .budget_config()
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(self
-            .config
-            .scopes
-            .iter()
-            .filter(|scope| needed.contains(&scope.id.as_str()))
-            .map(|scope| (scope.id.clone(), self.config.budget_intent(scope, &config)))
-            .collect())
-    }
-}
-
-pub struct Service<'a> {
-    pub(crate) root: PathBuf,
-    pub(crate) config: Configuration,
-    pub(crate) receipts: &'a PolicyStore,
-}
-impl<'a> Service<'a> {
-    pub fn new(root: PathBuf, config: Configuration, receipts: &'a PolicyStore) -> Self {
-        Self {
-            root,
-            config,
-            receipts,
-        }
-    }
-
     pub async fn catalogues(&self) -> Result<(Vec<policy::Catalogue>, Vec<policy::Finding>)> {
         let directory = policy::policies_dir(&self.root);
         tokio::task::spawn_blocking(move || policy::load_all(&directory))
@@ -236,6 +204,66 @@ impl<'a> Service<'a> {
             category: category.to_owned(),
             policy: policy::plan_sources(&applied),
         })
+    }
+
+    pub async fn quality_budgets(&self, needed: &[&str]) -> QualityBudgets {
+        if needed.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let config = self
+            .budget_config()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(self
+            .config
+            .scopes
+            .iter()
+            .filter(|scope| needed.contains(&scope.id.as_str()))
+            .map(|scope| (scope.id.clone(), self.config.budget_intent(scope, &config)))
+            .collect())
+    }
+}
+
+pub struct Service<'a> {
+    pub(crate) root: PathBuf,
+    pub(crate) config: Configuration,
+    pub(crate) receipts: &'a PolicyStore,
+}
+impl<'a> Service<'a> {
+    pub fn new(root: PathBuf, config: Configuration, receipts: &'a PolicyStore) -> Self {
+        Self {
+            root,
+            config,
+            receipts,
+        }
+    }
+
+    fn authored(&self) -> Authored {
+        Authored::new(self.root.clone(), self.config.clone())
+    }
+
+    pub async fn catalogues(&self) -> Result<(Vec<policy::Catalogue>, Vec<policy::Finding>)> {
+        self.authored().catalogues().await
+    }
+
+    /// Select current authored requirements in L6, then read the actual L5
+    /// plan compiler. Preserve category/scope/catalogue/Quality failure order.
+    pub async fn control_plan<P>(
+        &self,
+        scope: &str,
+        category: &str,
+        provider: &P,
+    ) -> Result<factory_kernel::ControlPlan>
+    where
+        P: Provide<factory_kernel::CompiledPlanFact,
+            Query = factory_assurance::plan_service::Read,
+            Value = factory_kernel::CompiledPlanFact, Error = FactoryError>,
+    {
+        self.authored().control_plan(scope, category, provider).await
+    }
+
+    pub async fn plan_input(&self, scope: &str, category: &str) -> Result<factory_assurance::plan_service::Read> {
+        self.authored().plan_input(scope, category).await
     }
 
     /// Same-level authored read followed by the actual L5 fact capability.
