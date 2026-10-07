@@ -10,7 +10,7 @@ use factory_kernel::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{path::Path, process::Stdio, sync::Arc, time::Duration};
+use std::{path::Path, process::Stdio, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const TASK: &str = "factory:mirror";
@@ -94,7 +94,7 @@ impl Engine {
     }
 
     pub(crate) async fn publish_deployment(
-        self: &Arc<Self>,
+        &self,
         caller: &Caller,
         id: &str,
         approval: &str,
@@ -105,7 +105,7 @@ impl Engine {
 
     /// Injectable executable for isolated fixtures, never a configurable API host.
     pub(crate) async fn publish_deployment_with_gh(
-        self: &Arc<Self>,
+        &self,
         caller: &Caller,
         id: &str,
         approval: &str,
@@ -416,6 +416,7 @@ async fn api(gh: &Path, endpoint: &str, body: Option<Value>) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use super::*;
     use factory_core::environments::{DeployFinish, DeployStart, DeployStatus, ReleaseFacts};
     use factory_core::role::{Grant, GrantExpansion, Reach, Role, RoleSpec};

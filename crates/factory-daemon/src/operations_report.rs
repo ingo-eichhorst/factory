@@ -10,7 +10,7 @@ impl Engine {
     /// the charts' per-step and per-run detail only when `detail` asks for
     /// it. See the module doc for what is read.
     pub(crate) async fn operations_report(
-        self: &Arc<Self>,
+        &self,
         scope: Option<&str>,
         window: HealthWindow,
         detail: bool,

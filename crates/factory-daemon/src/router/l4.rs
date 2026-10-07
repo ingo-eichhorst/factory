@@ -80,7 +80,7 @@ impl Engine {
                     // `finish_run` (there is no row left to mirror), so the
                     // slot it held is freed here instead (`#179`).
                     if let Ok(Some(task)) = self.l4.store.get(&id).await {
-                        self.enqueue_capacity_release(&task.scope, &run.agent);
+                        self.l4_service().enqueue_capacity_release(&task.scope, &run.agent);
                     }
                 }
                 // `#274`: released with the task, not by a periodic sweep.
@@ -100,10 +100,10 @@ impl Engine {
                         "this task is still in intake: triage it and release it (factory intake decide) before it can run".into(),
                     ));
                 }
-                let blockers = self.dependency_blockers(&task).await?;
+                let blockers = self.l4_service().dependency_blockers(&task).await?;
                 if (task.after.is_some() || !blockers.is_empty()) && !override_wait {
                     let waiting = if task.after.is_some() {
-                        self.waiting_description(&task).await?
+                        self.l4_service().waiting_description(&task).await?
                     } else {
                         blockers.join(", ")
                     };
@@ -187,7 +187,7 @@ impl Engine {
                 if override_wait {
                     let mut released = task.clone();
                     released.after = None;
-                    if !self.dependency_blockers(&released).await?.is_empty() {
+                    if !self.l4_service().dependency_blockers(&released).await?.is_empty() {
                         return Err(FactoryError::BadRequest("--override-wait overrides after, not static decomposition dependencies".into()));
                     }
                     if reason.as_deref().is_none_or(|reason| reason.trim().is_empty()) {

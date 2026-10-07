@@ -324,7 +324,7 @@ impl Engine {
     /// scheduler's own periodic sweep (`scheduler.rs`) is what moves this run
     /// forward again; this failure is rare enough that waiting one tick for
     /// it is the honest cost of not fighting the type system over it.
-    async fn mark_bench_attempt_uncreated(self: &Arc<Self>, run_id: &str, task_id: &str, reason: &str) {
+    async fn mark_bench_attempt_uncreated(&self, run_id: &str, task_id: &str, reason: &str) {
         let _guard = self.l5.bench_edit.lock().await;
         let Ok(Some(mut run)) = self.l5.bench.get_run(run_id).await else { return };
         if let Some(attempt) = run
@@ -392,7 +392,7 @@ impl Engine {
     /// already enqueued or being judged -- which is what makes calling this
     /// (or `sync_bench_for_task`) more than once for the same settle safe,
     /// without ever running the same case's gate command twice.
-    pub(crate) async fn record_bench_task_state(self: &Arc<Self>, task_id: &str) {
+    pub(crate) async fn record_bench_task_state(&self, task_id: &str) {
         self.enqueue_bench_judgement(task_id).await;
     }
 
@@ -401,7 +401,7 @@ impl Engine {
     /// `TaskCancel`, restart recovery) -- the worker does that unconditionally
     /// now, for every enqueue, so there is nothing left for this to do that
     /// `record_bench_task_state` does not.
-    pub(crate) async fn sync_bench_for_task(self: &Arc<Self>, task_id: &str) {
+    pub(crate) async fn sync_bench_for_task(&self, task_id: &str) {
         self.enqueue_bench_judgement(task_id).await;
     }
 
@@ -457,7 +457,7 @@ impl Engine {
         });
     }
 
-    async fn judge_bench_attempt(self: &Arc<Self>, origin: &BenchOrigin, task: &Task) -> Result<()> {
+    async fn judge_bench_attempt(&self, origin: &BenchOrigin, task: &Task) -> Result<()> {
         let Some(run) = self.l5.bench.get_run(&origin.bench_run_id).await? else {
             return Ok(());
         };
@@ -615,7 +615,7 @@ impl Engine {
     /// verdict of its own. Either way, that decision stands -- this one
     /// checks the attempt is still unsettled in the fresh read before
     /// writing anything, and never flips a run that is not still `Running`.
-    async fn finish_bench_judgement(self: &Arc<Self>, run_id: &str, task: &Task, attempt: BenchAttempt) -> Result<()> {
+    async fn finish_bench_judgement(&self, run_id: &str, task: &Task, attempt: BenchAttempt) -> Result<()> {
         let _guard = self.l5.bench_edit.lock().await;
         let Some(mut run) = self.l5.bench.get_run(run_id).await? else {
             return Ok(());
@@ -657,7 +657,7 @@ impl Engine {
     /// Cancel every attempt not yet settled: an in-flight one through the
     /// ordinary task-cancel path, a pending one directly, since there is no
     /// task yet to cancel.
-    pub(crate) async fn cancel_bench_run(self: &Arc<Self>, run_id: &str) -> Result<BenchRun> {
+    pub(crate) async fn cancel_bench_run(&self, run_id: &str) -> Result<BenchRun> {
         let task_ids = {
             let _guard = self.l5.bench_edit.lock().await;
             let mut run = self.l5.bench.get_run(run_id).await?.ok_or_else(|| missing("bench run", run_id))?;

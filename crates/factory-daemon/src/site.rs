@@ -27,7 +27,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use factory_core::building::{appearance, Activity, RepoMetrics};
@@ -297,7 +296,7 @@ impl Engine {
     ///
     /// Configured scopes only. Ordinary directories are not halls, so the
     /// filesystem walk is paid exactly once per scope a local config opted in.
-    pub async fn site_footprint(self: &Arc<Self>) -> Result<SiteFootprint> {
+    pub async fn site_footprint(&self) -> Result<SiteFootprint> {
         let activity = self.scope_activity().await?;
         let factory = self.factory_snapshot();
         let mut scopes = Vec::new();
@@ -331,7 +330,7 @@ impl Engine {
 
     /// One scope's size, walked at most every `WALK_TTL`. One
     /// `spawn_blocking` per walk: a bounded traversal, off the reactor.
-    async fn measure_scope(self: &Arc<Self>, name: &str) -> Result<Measured> {
+    async fn measure_scope(&self, name: &str) -> Result<Measured> {
         if let Some((at, measured)) = self.shared.site_walks.lock().unwrap().get(name) {
             if at.elapsed() < WALK_TTL {
                 return Ok(measured.clone());
@@ -354,7 +353,7 @@ impl Engine {
     /// tasks, one of runs in flight, one of standing agents -- rather than a
     /// lookup per run, which is what `scope_views` pays to answer a different
     /// question.
-    async fn scope_activity(self: &Arc<Self>) -> Result<BTreeMap<String, Activity>> {
+    async fn scope_activity(&self) -> Result<BTreeMap<String, Activity>> {
         let factory = self.factory_snapshot();
         let mut out: BTreeMap<String, Activity> = BTreeMap::new();
         for scope in &factory.config.scopes {
@@ -419,6 +418,7 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use super::*;
 
     /// A unique scratch directory per test, removed when the test drops it --

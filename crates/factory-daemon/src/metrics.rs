@@ -22,12 +22,11 @@ use factory_kernel::L6;
 use std::collections::BTreeMap;
 use std::{
     collections::BTreeSet,
-    sync::Arc,
 };
 
 impl Engine {
     pub(crate) async fn metrics(
-        self: &Arc<Self>,
+        &self,
         ids: &[MetricId],
         now: DateTime<Utc>,
     ) -> Result<Metrics> {
@@ -35,7 +34,7 @@ impl Engine {
     }
 
     pub(crate) async fn metrics_for(
-        self: &Arc<Self>,
+        &self,
         ids: &[MetricId],
         now: DateTime<Utc>,
         scope: Option<&str>,
@@ -74,7 +73,7 @@ impl Engine {
     /// never heard of is silently left out here (its own `UnknownMetric`
     /// finding already says so at `factory goals`), never turned into a
     /// refusal the way an explicitly typed unknown id is.
-    pub(crate) async fn default_metric_ids(self: &Arc<Self>) -> Vec<MetricId> {
+    pub(crate) async fn default_metric_ids(&self) -> Vec<MetricId> {
         let mut ids: Vec<MetricId> = metrics::registry()
             .into_iter()
             .filter(|d| !d.id.contains('<'))
@@ -238,6 +237,7 @@ mod tests {
     //! `factory_core::metrics` itself (covered on its own), but this module
     //! glued to real data the way a real request sees it: real runs and
     //! tasks in the store, and a real policy catalogue on disk.
+    use std::sync::Arc;
 
     use super::*;
     use crate::access::Caller;

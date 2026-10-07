@@ -2,8 +2,6 @@
 //! against its own cap and its scope's. L4's decision, read at dispatch under
 //! `admission_lock` and by the status page. The one L3 input, whether a live
 //! permanent agent of the same name holds a slot, is L3's `StandingAgentLiveFact`.
-use crate::engine::Engine;
-use factory_core::error::Result;
 
 // ============================================================== capacity
 
@@ -78,39 +76,6 @@ pub fn capacity(
 }
 
 
-impl Engine {
-    /// The live admission picture for `scope`'s `agent`, gathered fresh: an
-    /// `active_runs` scan plus one standing-agent lookup, so this is only
-    /// ever right for the instant it was called at -- exactly why `dispatch`
-    /// calls it under `admission_lock`, with `create_run` still inside the
-    /// same critical section, rather than trusting an answer from before.
-    pub(crate) async fn capacity_for(
-        &self,
-        scope: &str,
-        agent: &str,
-        agent_max: Option<u32>,
-    ) -> Result<Capacity> {
-        let scope_max = self.factory_snapshot().scope(scope).ok().and_then(|s| s.max_sessions);
-        let runs = self.l4.store.active_runs().await?;
-        let mut counted = Vec::with_capacity(runs.len());
-        for run in &runs {
-            if !run_uses_a_slot(run.status, run.session.is_some()) {
-                continue;
-            }
-            if let Ok(Some(task)) = self.l4.store.get(&run.task_id).await {
-                counted.push((task.scope, run.agent.clone()));
-            }
-        }
-        // L3's fact, read as the level above it: whether a live permanent agent of
-        // this name occupies a slot of its own.
-        let permanent_agent_live = crate::facts::Facts::<factory_kernel::L4>::new(self)
-            .get::<factory_kernel::StandingAgentLiveFact>(&(scope.to_string(), agent.to_string()))
-            .await
-            .map(|fact| fact.live)
-            .unwrap_or(false);
-        Ok(capacity(scope, agent, agent_max, scope_max, counted, permanent_agent_live))
-    }
-}
 
 #[cfg(test)]
 mod tests {

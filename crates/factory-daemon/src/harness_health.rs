@@ -1023,7 +1023,7 @@ pub(crate) mod tests {
             let task = engine.l4.store.get(&t.id).await.unwrap().unwrap();
             assert_eq!(task.status, TaskStatus::Pending);
             assert!(engine.l4.store.runs(&t.id, 10).await.unwrap().is_empty(), "the release did not dispatch it");
-            let due = engine.due_now().await.unwrap();
+            let due = engine.l4_service().due_now().await.unwrap();
             assert!(due.iter().any(|d| d.id == t.id), "the scheduler fires it, once, on its next tick");
             std::fs::remove_dir_all(dir).ok();
         }

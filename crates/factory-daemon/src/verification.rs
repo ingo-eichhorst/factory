@@ -2386,7 +2386,7 @@ mod tests {
         let waiting_id = wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap().task_id.as_ref().unwrap();
         assert!(engine.require(waiting_id).await.unwrap().after.is_some(), "b exists but is not released on a's word alone");
         assert!(engine.l4.store.active_run(waiting_id).await.unwrap().is_none());
-        assert!(engine.dependency_ready_tasks().await.unwrap().is_empty(), "the scheduler cannot bypass a running gate");
+        assert!(engine.l4_service().dependency_ready_tasks().await.unwrap().is_empty(), "the scheduler cannot bypass a running gate");
 
         settled(&engine, &run.id).await;
         engine.sync_workflow_for_task(&a_task).await;

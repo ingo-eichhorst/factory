@@ -15,24 +15,6 @@ impl Engine {
     pub(crate) async fn validate_after(&self,task_id:Option<&str>,after:&[String])->Result<()>{
         factory_process::creation::validate_after(self.l4.store.as_ref(),task_id,after).await
     }
-    pub(crate) async fn waiting_description(&self, task: &Task) -> Result<String> {
-        let mut names = Vec::new();
-        for id in task.after.iter().flatten() {
-            names.push(match self.l4.store.get(id).await? {
-                Some(parent) => format!("{} ({id})", parent.title),
-                None => format!("{id} (missing)"),
-            });
-        }
-        let mut description = if names.is_empty() {
-            "waiting for workflow release".into()
-        } else {
-            format!("waiting on {}", names.join(", "))
-        };
-        if let Some(condition) = &task.after_condition {
-            description.push_str(&format!("; {condition}"));
-        }
-        Ok(description)
-    }
 
     pub(crate) async fn override_waiting(
         &self,

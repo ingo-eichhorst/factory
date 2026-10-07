@@ -5,7 +5,7 @@ use super::misrouted;
 
 impl Engine {
     pub(super) async fn route_l6(
-        self: &Arc<Self>,
+        &self,
         caller: &crate::access::Caller,
         req: Request,
     ) -> Result<Payload> {
