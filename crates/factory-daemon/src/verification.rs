@@ -541,10 +541,7 @@ impl Engine {
     /// quality chain folded by `quality::applicable`. Read fresh off disk
     /// every time, like every other L6 read.
     pub(crate) async fn control_plan(&self, scope: &str, category: &str) -> Result<ControlPlan> {
-        let snapshot = self.factory_snapshot();
-        let provider = factory_assurance::plan_service::Provider::new(
-            snapshot.root.clone(), crate::quality::quality_configuration(&snapshot));
-        self.l6_service().policy_intent_service(&snapshot).control_plan(scope, category, &provider).await
+        crate::intent::Intent::of(&self.factory_snapshot()).control_plan(scope, category).await
     }
 
     /// One plan per category `definition`'s task nodes are planned as.
@@ -1336,7 +1333,7 @@ impl Engine {
             &blueprints,
         ).await?;
         let snapshot = self.factory_snapshot();
-        let intent = self.l6_service().policy_intent_service(&snapshot);
+        let intent = crate::intent::Intent::of(&snapshot);
         let mut requirements = Vec::new();
         for category in prepared.categories() {
             requirements.push(intent.plan_input(prepared.scope(), category).await);
