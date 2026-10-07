@@ -47,11 +47,13 @@ const OWNERS: &[(&str, Owner)] = &[
     ("environments/", L1),
     ("host.rs", L1),
     ("host_power.rs", L1),
+    ("host_power/page.rs", Wiring),
     ("host_power/", L1),
     ("power.rs", L1),
     ("github_deployments.rs", L4),
     ("doctor.rs", Wiring),
-    ("renewals/", L1), // also touches L2 and L6 state, see BASELINE
+    ("renewals/mod.rs", Wiring), // the Important Dates page: L1 and L2 caches plus L6 attestations and clock
+    ("renewals/", L1),
     // L2 Environment
     ("provision.rs", L2),
     ("l1_service.rs", L1),
@@ -129,11 +131,8 @@ const BASELINE: &[(&str, &str, usize)] = &[
     ("datasets.rs", "l4", 2),
     ("dependencies.rs", "l4", 2),
     ("harness_health.rs", "l4", 7),
-    ("host_power.rs", "l4", 2),
     ("operations.rs", "l2", 1),
     ("operations.rs", "l3", 1),
-    ("renewals/mod.rs", "l2", 2),
-    ("renewals/mod.rs", "l6", 4),
     ("roles.rs", "l4", 1),
     ("secrets.rs", "l4", 2),
     ("suggestions.rs", "l4", 3),
@@ -155,7 +154,6 @@ const SERVICES: &[ServiceEntry] = &[
 const PULLS_BASELINE: &[(&str, usize)] = &[
     ("metrics.rs -> .l6_service()", 3),
     ("quality/mod.rs -> .l6_service()", 1),
-    ("renewals/mod.rs -> .l6_service()", 1),
     ("signposts.rs -> .l6_service()", 2),
     ("verification.rs -> .l6_service()", 2),
 ];
