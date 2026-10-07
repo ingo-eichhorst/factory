@@ -22,23 +22,29 @@ pub use factory_kernel::BenchVerdict as Verdict;
 /// What ties a task to the bench attempt that spawned it, following
 /// `WorkflowOrigin`'s own shape. `#[serde(default)]` on `Task::bench_origin`
 /// reads a task written before this field existed as `None`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// `base` and `reset` are the placement the attempt's workspace needs, decided by L5 when it creates the task and
+/// carried on the origin so L4 can place the run without calling back up: the commit the worktree branches from, and a
+/// command that runs in the fresh worktree before the agent starts. Both are absent in an origin written before they
+/// existed (`#[serde(default)]`) and are not written when absent, so an old origin round-trips byte for byte.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BenchOrigin {
     pub bench_run_id: String,
     pub case_id: String,
     pub agent: String,
     pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset: Option<String>,
 }
 
 // Only the benchmark owner interprets its legacy reference. L4 forwards it
 // without depending on this type or gaining an accessor for its fields.
 impl From<BenchOrigin> for factory_process::origin::OriginRef {
     fn from(origin: BenchOrigin) -> Self {
-        serde_json::from_value(serde_json::json!({
-            "bench_run_id": origin.bench_run_id, "case_id": origin.case_id,
-            "agent": origin.agent, "attempt": origin.attempt
-        }))
-        .expect("an opaque reference accepts plain JSON")
+        serde_json::from_value(serde_json::to_value(&origin).expect("an origin serializes"))
+            .expect("an opaque reference accepts plain JSON")
     }
 }
 
@@ -397,6 +403,26 @@ pub fn aggregate(attempts: &[BenchAttempt]) -> Vec<BenchResult> {
 
 #[cfg(test)]
 mod tests {
+    /// An origin written before `base` and `reset` existed still parses (both absent) and round-trips unchanged;
+    /// one that carries them round-trips with them, and L4 sees them as a placement.
+    #[test]
+    fn a_pre_change_origin_parses_without_placement_and_round_trips_unchanged() {
+        let legacy = serde_json::json!({"bench_run_id": "b", "case_id": "c", "agent": "shell", "attempt": 2});
+        let origin: BenchOrigin = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!((origin.base.as_deref(), origin.reset.as_deref()), (None, None));
+        assert_eq!(serde_json::to_value(&origin).unwrap(), legacy, "no new keys are written for an old origin");
+        let reference: factory_process::origin::OriginRef = origin.clone().into();
+        assert_eq!(serde_json::to_value(&reference).unwrap(), legacy);
+        assert_eq!(BenchOrigin::try_from(&reference).unwrap(), origin);
+        assert_eq!(reference.placement(), Ok(Default::default()));
+
+        let placed = BenchOrigin { base: Some("0123abc".into()), reset: Some("make clean".into()), ..origin };
+        let reference: factory_process::origin::OriginRef = placed.clone().into();
+        assert_eq!(BenchOrigin::try_from(&reference).unwrap(), placed);
+        let placement = reference.placement().unwrap();
+        assert_eq!((placement.base.as_deref(), placement.reset.as_deref()), (Some("0123abc"), Some("make clean")));
+    }
+
     use super::*;
 
     fn config(harness: &str, args: &[&str]) -> ConfigSnapshot {

@@ -106,18 +106,6 @@ impl Engine {
     // `place_run` asks for a case's pinned base and reset command: page forwarders, because an L4 file calling
     // `.l5_service()` would be a pull up the ladder (they go when the bench origin carries them at creation). L4 no
     // longer tells L5 that a task settled: the judge poller below reads run completion itself (D4).
-    pub(crate) async fn bench_case_base(&self, origin: &factory_core::task::OriginRef) -> Result<Option<String>> {
-        self.l5_service().bench_case_base(origin).await
-    }
-
-    pub(crate) async fn bench_case_reset(&self, origin: &factory_core::task::OriginRef) -> Result<Option<String>> {
-        self.l5_service().bench_case_reset(origin).await
-    }
-
-    pub(crate) async fn run_bench_reset(&self, dir: &Path, command: &str) -> std::result::Result<(), String> {
-        self.l5_service().run_bench_reset(dir, command).await
-    }
-
     /// The judge worker: the one place a bench attempt's gate actually
     /// runs. Started once, at daemon startup (`main.rs`, right before
     /// `recover_bench_runs`), and processes one task id at a time for the
@@ -358,6 +346,7 @@ impl L5Service<'_> {
                             agent_name,
                             attempt.attempt,
                             dataset.clone(),
+                            run.case_bases.get(&case.id).cloned(),
                         ));
                     }
                     Err(e) => {
@@ -381,12 +370,15 @@ impl L5Service<'_> {
             self.wiring.bus().publish(Event::BenchRunUpdated { run: run.clone() });
         }
 
-        for (task_id, case, agent_name, attempt_n, dataset) in to_start {
+        for (task_id, case, agent_name, attempt_n, dataset, base) in to_start {
             let origin = BenchOrigin {
                 bench_run_id: run_id.to_string(),
                 case_id: case.id.clone(),
                 agent: agent_name.clone(),
                 attempt: attempt_n,
+                // L4 places the run from these, without calling back up for them.
+                base,
+                reset: case.reset.clone(),
             };
             let new = NewTask {
                 title: format!("bench {dataset}/{} · {agent_name} · #{attempt_n}", case.id),
@@ -432,40 +424,6 @@ impl L5Service<'_> {
     }
 
     // -- judging -----------------------------------------------------------
-
-    /// Where a run's own worktree base is pinned, for `place_run`. `None`
-    /// when this is not a bench task, or the run is gone.
-    pub(crate) async fn bench_case_base(&self, origin: &factory_core::task::OriginRef) -> Result<Option<String>> {
-        let origin = BenchOrigin::try_from(origin).map_err(|error| {
-            FactoryError::BadRequest(format!("unsupported or invalid benchmark origin: {error}"))
-        })?;
-        let Some(run) = self.state.bench.get_run(&origin.bench_run_id).await.ok().flatten() else { return Ok(None) };
-        Ok(run.case_bases.get(&origin.case_id).cloned())
-    }
-
-    /// The case's reset command, for `place_run` to run before the agent
-    /// starts.
-    pub(crate) async fn bench_case_reset(&self, origin: &factory_core::task::OriginRef) -> Result<Option<String>> {
-        let origin = BenchOrigin::try_from(origin).map_err(|error| {
-            FactoryError::BadRequest(format!("unsupported or invalid benchmark origin: {error}"))
-        })?;
-        let Some(run) = self.state.bench.get_run(&origin.bench_run_id).await.ok().flatten() else { return Ok(None) };
-        Ok(run.cases.iter().find(|c| c.id == origin.case_id).and_then(|c| c.reset.clone()))
-    }
-
-    /// Run a case's reset command in its fresh worktree. `Ok(())` only on
-    /// exit 0; anything else -- non-zero, a timeout, a process that never
-    /// started -- is `Err`, and `place_run` turns that into a run failure
-    /// whose `error` this module later reads back as `skipped` rather than
-    /// `error`.
-    pub(crate) async fn run_bench_reset(&self, dir: &Path, command: &str) -> std::result::Result<(), String> {
-        let (exit_code, output) = run_shell_capture(dir, command, DEFAULT_COMMAND_TIMEOUT_SECS).await;
-        match exit_code {
-            Some(0) => Ok(()),
-            Some(code) => Err(format!("exit {code}: {}", tail_4kib(&output))),
-            None => Err(output),
-        }
-    }
 
     /// Enqueue `task_id` for the judge worker (`spawn_bench_judge`) to look at once its task's run has settled.
     /// Judging -- which means running the case's own `gate`, for up to its own timeout or the ten-minute default --
@@ -1116,21 +1074,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn undecodable_origins_cannot_silently_skip_the_benchmark_base_or_reset() {
-        let engine = test_engine(std::env::temp_dir().join("factory-bench-origin-no-dispatch"));
-        let reference = factory_core::task::OriginRef::opaque("unsupported-reference");
-        for error in [engine.bench_case_base(&reference).await.unwrap_err(), engine.bench_case_reset(&reference).await.unwrap_err()] {
-            assert_eq!(error.code(), "bad_request");
-            assert!(error.to_string().contains("benchmark origin"));
-        }
-        let known: factory_core::task::OriginRef = BenchOrigin {
-            bench_run_id: "missing-run".into(), case_id: "case".into(), agent: "shell".into(), attempt: 1,
-        }.into();
-        assert!(engine.bench_case_base(&known).await.unwrap().is_none());
-        assert!(engine.bench_case_reset(&known).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
     async fn l5_timer_settles_a_run_without_starting_the_process_scheduler() {
         let engine = test_engine(std::env::temp_dir().join("factory-bench-timer-no-dispatch"));
         let mut attempt = BenchAttempt::pending("attempt".into(), "case".into(), "shell".into(), 1);
@@ -1238,6 +1181,7 @@ mod tests {
             case_id: case.id.clone(),
             agent: agent.to_string(),
             attempt: 1,
+            ..Default::default()
         };
         let attempt = BenchAttempt::pending(uuid::Uuid::new_v4().to_string(), case.id.clone(), agent.to_string(), 1);
         let run = BenchRun {
@@ -1556,6 +1500,7 @@ mod tests {
             case_id: case.id.clone(),
             agent: "shell".into(),
             attempt: 1,
+            ..Default::default()
         };
 
         let task = engine

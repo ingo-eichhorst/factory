@@ -3030,6 +3030,7 @@ mod tests {
                 case_id: "c1".into(),
                 agent: "shell".into(),
                 attempt: 1,
+                ..Default::default()
             }.into());
             engine.l4.store.create(&t).await.unwrap()
         };

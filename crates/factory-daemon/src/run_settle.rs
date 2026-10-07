@@ -220,8 +220,16 @@ impl L4Service<'_> {
         }
         let branch = worktree::branch_name(&task.id, &task.title, run.attempt);
         let dir = self.wiring.snapshot().worktrees_dir().join(&run.id);
+        // The workspace placement a producer asked for travels on the task's origin (`OriginRef::placement`): L4 places
+        // the run from it, without calling back up for a case's base or reset command.
+        let placement = match &task.bench_origin {
+            Some(origin) => origin
+                .placement()
+                .map_err(|e| FactoryError::BadRequest(format!("unsupported or invalid origin placement: {e}")))?,
+            None => Default::default(),
+        };
         let base = match &task.bench_origin {
-            Some(origin) => self.core.bench_case_base(origin).await?,
+            Some(_) => placement.base.clone(),
             None => task
                 .workflow_origin
                 .as_ref()
@@ -271,10 +279,10 @@ impl L4Service<'_> {
         // reads this exact "reset failed" prefix back off `run.error` to
         // settle the attempt `skipped` rather than `error`, without ever
         // dispatching the agent.
-        if let Some(origin) = &task.bench_origin {
+        if task.bench_origin.is_some() {
             if reused { return Ok((dir, run)); }
-            if let Some(reset) = self.core.bench_case_reset(origin).await? {
-                if let Err(detail) = self.core.run_bench_reset(&dir, &reset).await {
+            if let Some(reset) = &placement.reset {
+                if let Err(detail) = run_workspace_reset(&dir, reset).await {
                     return Err(FactoryError::BadRequest(format!("reset failed: {detail}")));
                 }
             }
@@ -1027,5 +1035,18 @@ impl L4Service<'_> {
     /// or deleting the task, never a periodic sweep of its own.
     pub(crate) fn remove_preserved_session(&self, task_id: &str) {
         self.wiring.l3().port().forget_preserved(task_id);
+    }
+}
+
+/// Run a placement's reset command in its fresh worktree. `Ok(())` only on exit 0; anything else -- non-zero, a
+/// timeout, a process that never started -- is `Err`, and `place_run` turns that into a run failure whose `error` the
+/// bench judge later reads back as `skipped` rather than `error`.
+async fn run_workspace_reset(dir: &Path, command: &str) -> std::result::Result<(), String> {
+    let (exit_code, output) =
+        crate::verification::run_shell_capture(dir, command, crate::verification::DEFAULT_GATE_TIMEOUT_SECS).await;
+    match exit_code {
+        Some(0) => Ok(()),
+        Some(code) => Err(format!("exit {code}: {}", factory_core::bench::tail_4kib(&output))),
+        None => Err(output),
     }
 }
