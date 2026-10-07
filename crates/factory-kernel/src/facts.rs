@@ -137,6 +137,29 @@ pub struct HarnessHealthFact {
 }
 impl Fact for HarnessHealthFact { type Producer = L3; }
 
+/// One thing L3 observed about a standing agent's session: what the runtime said it was doing, and when L3 asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandingAgentObservation {
+    /// The standing agent's own id.
+    pub subject: String,
+    pub scope: String,
+    pub agent: String,
+    /// The runtime's word for the status (`working`, `idle`, `gone`, ...), as L3's runtime vocabulary spells it.
+    pub status: String,
+    pub at: DateTime<Utc>,
+}
+
+/// Standing agents' observed session status, in the order L3 made the observations, from a cursor on. Query: the
+/// sequence number to read from (0 reads everything still kept); the answer carries the cursor to read from next. The
+/// log is bounded: a reader that stays away longer than it keeps simply misses the oldest entries. A read, never a
+/// notification: L3 does not know who reads, and tells nobody.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandingAgentObservationsFact {
+    pub observations: Vec<StandingAgentObservation>,
+    pub next: u64,
+}
+impl Fact for StandingAgentObservationsFact { type Producer = L3; }
+
 /// The name of the role an agent runs under right now: its declared role, overridden by a standing agent's live one (the
 /// single answer to "what may this agent do" for a run and a standing agent alike). Query: (scope, agent name).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -819,6 +842,11 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
     FactCatalogueEntry {
         fact: "FunctionaryRosterFact", producer: "L3", readers: &["L5 independent preview binding"],
         lives_in_kernel: true, note: "declaration-order checker names and raw scope default; no arguments, role verdict or selection",
+    },
+    FactCatalogueEntry {
+        fact: "StandingAgentObservationsFact", producer: "L3", readers: &["L4 occupancy (the liveness record of standing agents)"],
+        lives_in_kernel: true,
+        note: "what L3 observed about each standing agent's session, in order, from a cursor; bounded; L4 reads, L3 tells nobody",
     },
     FactCatalogueEntry {
         fact: "EffectiveRoleFact", producer: "L3", readers: &["L4 (dispatch guide, intake triage role check, workflow caller)"],

@@ -86,3 +86,62 @@ impl factory_kernel::Provide<factory_kernel::EffectiveRoleFact> for RoleProvider
         Ok(factory_kernel::EffectiveRoleFact(self.0.effective_role(scope, name).await.as_str().to_string()))
     }
 }
+
+/// What L3 observed about standing agents' sessions, kept in order and bounded. L3 writes it as it looks at a session
+/// (the supervision tick, a start, a stop); it never calls anyone. L4 reads it as a fact from a cursor
+/// (`StandingAgentObservationsFact`) and appends what it reads to the occupancy record.
+#[derive(Default)]
+pub(crate) struct LivenessLog {
+    inner: std::sync::Mutex<(u64, std::collections::VecDeque<(u64, factory_kernel::StandingAgentObservation)>)>,
+}
+
+/// More than a busy day of ticks; a reader away for longer than this misses only the oldest observations.
+const LIVENESS_LOG_CAPACITY: usize = 8192;
+
+impl LivenessLog {
+    pub(crate) fn push(&self, observation: factory_kernel::StandingAgentObservation) {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        guard.0 += 1;
+        let seq = guard.0;
+        guard.1.push_back((seq, observation));
+        while guard.1.len() > LIVENESS_LOG_CAPACITY {
+            guard.1.pop_front();
+        }
+    }
+
+    /// Everything after `cursor`, and the cursor to read from next.
+    pub(crate) fn since(&self, cursor: u64) -> (Vec<factory_kernel::StandingAgentObservation>, u64) {
+        let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let seen = guard.1.iter().filter(|(seq, _)| *seq > cursor).map(|(_, o)| o.clone()).collect();
+        (seen, guard.0)
+    }
+}
+
+/// L3's provider for `StandingAgentObservationsFact`.
+pub(crate) struct LivenessProvider(pub(crate) std::sync::Arc<LivenessLog>);
+impl factory_kernel::FactProvider for LivenessProvider {
+    type Level = factory_kernel::L3;
+}
+#[async_trait::async_trait]
+impl factory_kernel::Provide<factory_kernel::StandingAgentObservationsFact> for LivenessProvider {
+    type Query = u64;
+    type Value = factory_kernel::StandingAgentObservationsFact;
+    type Error = factory_core::error::FactoryError;
+    async fn get(&self, cursor: &u64) -> factory_core::error::Result<Self::Value> {
+        let (observations, next) = self.0.since(*cursor);
+        Ok(factory_kernel::StandingAgentObservationsFact { observations, next })
+    }
+}
+
+impl L3Service<'_> {
+    /// Write down what the runtime says a standing agent's session is doing, as of now.
+    pub(crate) fn observe(&self, subject: &str, scope: &str, agent: &str, status: factory_core::adapter::runtime::RuntimeStatus) {
+        self.state.liveness.push(factory_kernel::StandingAgentObservation {
+            subject: subject.to_string(),
+            scope: scope.to_string(),
+            agent: agent.to_string(),
+            status: status.as_str().to_string(),
+            at: chrono::Utc::now(),
+        });
+    }
+}

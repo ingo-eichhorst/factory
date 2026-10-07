@@ -145,6 +145,18 @@ impl crate::l4_service::L4Service<'_> {
         agent: &str,
         status: RuntimeStatus,
     ) {
+        self.record_status_at(subject, scope, agent, status, Utc::now()).await
+    }
+
+    /// `record_status`, for an observation made earlier (L3's, read from its log) that keeps the time it was made.
+    pub(crate) async fn record_status_at(
+        &self,
+        subject: &str,
+        scope: &str,
+        agent: &str,
+        status: RuntimeStatus,
+        at: chrono::DateTime<Utc>,
+    ) {
         {
             let mut seen = match self.state.seen_status.lock() {
                 Ok(seen) => seen,
@@ -162,7 +174,7 @@ impl crate::l4_service::L4Service<'_> {
             scope: scope.to_string(),
             agent: agent.to_string(),
             status,
-            at: Utc::now(),
+            at,
         };
         if let Err(e) = self.state.store.append_status(&change).await {
             tracing::debug!(subject, "could not record liveness: {e}");
@@ -174,10 +186,32 @@ impl crate::l4_service::L4Service<'_> {
         self.record_status(subject, scope, agent, RuntimeStatus::Gone)
             .await;
     }
+    /// Read what L3 has observed about standing agents' sessions since the last read (a fact, from a cursor) and
+    /// append it to the liveness record with the times L3 made the observations. The scheduler's tick does this right
+    /// after supervising, a pushed runtime event does it before recording its own sample so the record stays in
+    /// order, and `close_liveness` does it before closing the spans. L3 never calls L4 for this.
+    pub(crate) async fn sample_standing_agents(&self) {
+        let mut cursor = self.state.standing_cursor.lock().await;
+        let fact = match self.wiring.facts().get::<factory_kernel::StandingAgentObservationsFact>(&*cursor).await {
+            Ok(fact) => fact,
+            Err(error) => {
+                tracing::debug!("could not read the standing agents' observations: {error}");
+                return;
+            }
+        };
+        for observation in fact.observations {
+            let status = RuntimeStatus::parse(&observation.status);
+            self.record_status_at(&observation.subject, &observation.scope, &observation.agent, status, observation.at)
+                .await;
+        }
+        *cursor = fact.next;
+    }
+
     /// Close every open liveness span on the way out. Nothing observes an
     /// agent while the daemon is down, and a span left open would be drawn
     /// straight through the outage as though someone had been watching.
     pub async fn close_liveness(&self) {
+        self.sample_standing_agents().await;
         for agent in self.state.store.agents().await.unwrap_or_default() {
             if agent.session.is_some() {
                 self.record_gone(&agent.id, &agent.scope, &agent.name).await;
@@ -321,6 +355,68 @@ impl L4Service<'_> {
 
 #[cfg(test)]
 mod read_tests {
+    use factory_core::adapter::runtime::RuntimeStatus;
+
+    /// Standing agents' liveness reaches L4 as a fact read from a cursor, with the time L3 observed it: the same
+    /// samples and transitions the old direct call produced, and nothing recorded twice.
+    #[tokio::test]
+    async fn l4_records_l3s_standing_agent_observations_with_their_own_times_exactly_once() {
+        let (engine, _root) = crate::environments::tests::engine_with("  - name: prod\n");
+        let l3 = engine.l3_service();
+        let before = chrono::Utc::now() - chrono::Duration::seconds(1);
+        l3.observe("demo/w", "demo", "w", RuntimeStatus::Working);
+        l3.observe("demo/w", "demo", "w", RuntimeStatus::Working); // a repeat: a chart keeps one
+        l3.observe("demo/w", "demo", "w", RuntimeStatus::Idle);
+        l3.observe("demo/w", "demo", "w", RuntimeStatus::Gone);
+        // Nothing is in L4's record until L4 reads.
+        assert!(engine.l4.store.status_changes(before).await.unwrap().is_empty());
+
+        engine.l4_service().sample_standing_agents().await;
+        let first: Vec<_> = engine.l4.store.status_changes(before).await.unwrap();
+        let statuses: Vec<_> = first.iter().map(|c| c.status).collect();
+        assert_eq!(statuses, [RuntimeStatus::Working, RuntimeStatus::Idle, RuntimeStatus::Gone], "{first:?}");
+        assert!(first.iter().all(|c| c.subject == "demo/w" && c.scope == "demo" && c.agent == "w"));
+        assert!(first.windows(2).all(|pair| pair[0].at <= pair[1].at), "kept in the order they were observed");
+
+        // A second read finds nothing new: the cursor moved, and a repeat is still a repeat.
+        engine.l4_service().sample_standing_agents().await;
+        assert_eq!(engine.l4.store.status_changes(before).await.unwrap().len(), 3);
+        l3.observe("demo/w", "demo", "w", RuntimeStatus::Gone);
+        engine.l4_service().sample_standing_agents().await;
+        assert_eq!(engine.l4.store.status_changes(before).await.unwrap().len(), 3, "gone after gone is not a change");
+        l3.observe("demo/w", "demo", "w", RuntimeStatus::Working);
+        engine.l4_service().sample_standing_agents().await;
+        assert_eq!(engine.l4.store.status_changes(before).await.unwrap().len(), 4);
+    }
+
+    /// The log is bounded and ordered; a cursor reads only what came after it.
+    #[test]
+    fn the_observation_log_reads_from_a_cursor_and_forgets_only_the_oldest() {
+        let log = crate::l3_service::LivenessLog::default();
+        let obs = |n: usize| factory_kernel::StandingAgentObservation {
+            subject: format!("s{n}"),
+            scope: "demo".into(),
+            agent: "a".into(),
+            status: "working".into(),
+            at: chrono::Utc::now(),
+        };
+        for n in 0..3 {
+            log.push(obs(n));
+        }
+        let (all, next) = log.since(0);
+        assert_eq!((all.len(), next), (3, 3));
+        log.push(obs(3));
+        let (after, next) = log.since(next);
+        assert_eq!((after.iter().map(|o| o.subject.as_str()).collect::<Vec<_>>(), next), (vec!["s3"], 4));
+        for n in 4..9000 {
+            log.push(obs(n));
+        }
+        let (kept, next) = log.since(0);
+        assert_eq!(next, 9000);
+        assert!(kept.len() < 9000 && kept.len() > 1000, "bounded, not emptied: {}", kept.len());
+        assert_eq!(kept.last().unwrap().subject, "s8999");
+    }
+
     /// L4 reads the effective role and the harness version from L3 as facts, and they are what L3 itself answers.
     #[tokio::test]
     async fn l4_reads_the_effective_role_and_harness_version_as_l3_facts() {

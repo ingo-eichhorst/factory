@@ -105,11 +105,15 @@ pub struct L3State {
     pub(crate) harness: crate::harness_health::HarnessHealth,
     /// The standing-agent rows: L3's own handle (D3), not the task store.
     pub(crate) agents: Arc<dyn factory_agents::store::AgentStore>,
+    /// What L3 observed about standing agents' sessions, for L4 to read as a fact (`StandingAgentObservationsFact`).
+    pub(crate) liveness: Arc<crate::l3_service::LivenessLog>,
 }
 
 /// L4 Process: tasks, runs, workflows, dispatch admission and scheduling.
 pub struct L4State {
     pub(crate) store: Arc<dyn TaskStore>,
+    /// How far into L3's standing-agent observations the occupancy record has read.
+    pub(crate) standing_cursor: tokio::sync::Mutex<u64>,
     pub(crate) workflows: crate::workflows::WorkflowStore,
     pub(crate) workflow_edit: tokio::sync::Mutex<()>,
     /// L4 owns run-step evidence and immutable artifact provenance separately

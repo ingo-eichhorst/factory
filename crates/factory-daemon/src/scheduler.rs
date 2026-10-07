@@ -121,6 +121,8 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         // exactly as intended, and must never be caught by the run timeouts
         // below.
         factory_agents::dispatch::Supervision::supervise(crate::commands::l3(&engine).port()).await;
+        // What L3 just observed about the standing agents' sessions, into the liveness record.
+        engine.l4_service().sample_standing_agents().await;
         // What the runtime says the working agents are doing. Nothing else
         // keeps this: herdr answers "now" and forgets.
         engine.record_run_liveness().await;

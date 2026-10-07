@@ -205,13 +205,13 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("facts/l1.rs", "reach", 3),
     ("facts/l1.rs", "services", 1),
     ("facts/l2.rs", "reach", 1),
-    ("facts/l3.rs", "reach", 3),
+    ("facts/l3.rs", "reach", 4),
     ("facts/l3.rs", "services", 1),
     ("facts/l4.rs", "reach", 10),
     ("facts/l5.rs", "providers", 1),
     ("facts/l5.rs", "reach", 2),
     ("facts/mod.rs", "providers", 2),
-    ("facts/mod.rs", "services", 6),
+    ("facts/mod.rs", "services", 4),
     ("host_power/page.rs", "reach", 4),
     ("l2_pages.rs", "reach", 5),
     ("l2_pages.rs", "services", 2),
@@ -223,17 +223,12 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("renewals/mod.rs", "reach", 8),
     ("renewals/mod.rs", "services", 1),
     ("runtime_events.rs", "reach", 3),
-    ("runtime_events.rs", "services", 2),
+    ("runtime_events.rs", "services", 3),
     ("scope_views.rs", "reach", 6),
     ("signposts.rs", "people", 1),
     ("signposts.rs", "services", 1),
     ("site.rs", "reach", 3),
     ("supplied.rs", "providers", 3),
-];
-/// L3's standing-agent liveness pushed into L4's record through `Wiring::record_status`/`record_gone`: the one upward
-/// call left behind a wiring method. Draining it means L4 reading L3's session state as a fact (D4's shape).
-const BRIDGE_BASELINE: &[(&str, usize)] = &[
-    ("agents.rs", 2),
 ];
 const ABOVE_BASELINE: &[(&str, usize)] = &[
     ("l4_service.rs", 1),
@@ -593,11 +588,9 @@ fn scan() -> Scan {
         if impersonated > 0 {
             result.impersonation.insert(relative.clone(), impersonated);
         }
-        if own_group != "l4" {
-            let bridge = liveness_bridge_calls(&code);
-            if bridge > 0 {
-                result.bridge.insert(relative.clone(), bridge);
-            }
+        let bridge = liveness_bridge_calls(&code);
+        if bridge > 0 {
+            result.bridge.insert(relative.clone(), bridge);
         }
         if own_group == "l4" || own_group == "l5" {
             let arcs = arc_engine_mentions(&code);
@@ -657,10 +650,6 @@ fn describe(scan: &Scan) -> String {
     out.push_str("];\nconst PAGE_BASELINE: &[(&str, &str, usize)] = &[\n");
     for ((file, metric), count) in &scan.pages {
         out.push_str(&format!("    ({file:?}, {metric:?}, {count}),\n"));
-    }
-    out.push_str("];\nconst BRIDGE_BASELINE: &[(&str, usize)] = &[\n");
-    for (file, count) in &scan.bridge {
-        out.push_str(&format!("    ({file:?}, {count}),\n"));
     }
     out.push_str("];\nconst ABOVE_BASELINE: &[(&str, usize)] = &[\n");
     for (file, count) in &scan.above {
@@ -826,10 +815,12 @@ fn pages_only_shrink() {
     assert!(bad.is_empty(), "{bad:#?}\ncurrent state:\n{}", describe(&scan));
 }
 
+/// L3 no longer pushes anything into L4: standing agents' liveness is L3's observation log, which L4 reads as a fact
+/// (`StandingAgentObservationsFact`). The `Wiring` bridge that carried it upward is gone and may not come back.
 #[test]
-fn the_liveness_bridge_into_l4_only_shrinks() {
+fn l3_pushes_no_liveness_into_l4_through_wiring() {
     let scan = scan();
-    only_shrinks("`wiring.record_*` liveness bridge calls", &scan.bridge, BRIDGE_BASELINE, &scan);
+    assert!(scan.bridge.is_empty(), "`wiring.record_status`/`record_gone` is gone; do not bring it back: {:?}", scan.bridge);
 }
 
 #[test]
