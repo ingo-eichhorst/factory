@@ -353,7 +353,7 @@ impl Engine {
                 run: Box::pin(self.l4_service().cancel_workflow(&id)).await?,
             }),
             Request::WorkflowLint { workflow, task, scope, category } => Ok(Payload::WorkflowLint {
-                lint: self.l4_service().workflow_lint(workflow, task, scope, category).await?,
+                lint: self.workflow_lint(workflow, task, scope, category).await?,
             }),
             Request::RunAttestations { id } => Ok(Payload::Attestations {
                 attestations: self.l4_service().run_attestations(&id).await?,

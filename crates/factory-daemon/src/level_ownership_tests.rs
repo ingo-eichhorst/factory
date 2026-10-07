@@ -96,6 +96,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("run_settle.rs", L4),
     ("run_start.rs", L4),
     ("scheduling.rs", L4),
+    ("supplied.rs", Wiring),
     ("l4_port.rs", L4),
     ("l4_service.rs", L4),
     ("l4_spawner.rs", L4),
@@ -108,7 +109,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("l5_spawner.rs", L5),
     ("datasets.rs", L5),
     ("suggestions.rs", L5),
-    ("quality/", L5),
+    ("quality/", Wiring),
     ("metrics.rs", Wiring),
     ("signposts.rs", Wiring),
     // L6 Direction
@@ -165,7 +166,6 @@ const SERVICES: &[ServiceEntry] = &[
 /// another level. Each is a pull the owning slice has to replace. May only shrink.
 const PULLS_BASELINE: &[(&str, usize)] = &[
     ("harness_hold.rs -> .l3_service()", 2),
-    ("quality/mod.rs -> .l6_service()", 1),
 ];
 
 /// `Arc<Engine>` in L4- and L5-owned production code. `l4_spawner.rs` and `l5_spawner.rs` are the handles themselves; the rest is workflows, which take an
@@ -179,17 +179,20 @@ const ARC_ENGINE_BASELINE: &[(&str, usize)] = &[
     ("recovery_journal.rs", 1),
     ("scheduler.rs", 1),
 ];
-const IMPERSONATION_BASELINE: &[(&str, usize)] = &[];
-/// Direct `Port::provider` calls from level code: L4 reading L5-produced workflow facts, a downward read past the
-/// `Below` gate. S10 resolves them with commands or capabilities.
-const DIRECT_PROVIDER_BASELINE: &[(&str, usize)] = &[
-    ("verification.rs", 3),
+/// `self.above.` call sites per file (`SuppliedFromAbove`: the quality block at dispatch and functionary binding).
+const ABOVE_BASELINE: &[(&str, usize)] = &[
+    ("run_start.rs", 1),
+    ("verification.rs", 1),
 ];
+const IMPERSONATION_BASELINE: &[(&str, usize)] = &[];
+/// Direct `Port::provider` calls from level code, which reach a producer without the `Below` bound. Empty since S10
+/// part 4 moved the last ones (L4 reading L5-produced workflow facts) behind `SuppliedFromAbove` and a page.
+const DIRECT_PROVIDER_BASELINE: &[(&str, usize)] = &[];
 
 /// `self.core.` call sites per file (the transitional `L4Service::core`). May only shrink; goes away with the handle.
 const CORE_BASELINE: &[(&str, usize)] = &[
     ("run_settle.rs", 5),
-    ("run_start.rs", 4),
+    ("run_start.rs", 3),
     ("intake.rs", 2),
     ("l4_service.rs", 3),
 ];
@@ -352,7 +355,7 @@ fn next_token(code: &str, at: usize) -> Option<(&str, usize)> {
 
 /// Every place `core` is used as a field of `self` (or of another `core`): `(position after "core", token after the
 /// following dot)`. Whitespace between the tokens is tolerated, so a call split over lines still counts.
-fn core_fields(code: &str) -> Vec<String> {
+fn handle_fields(code: &str, handle: &str) -> Vec<String> {
     let mut found = Vec::new();
     for (at, _) in code.match_indices("self") {
         let before_ok = !code[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_');
@@ -364,7 +367,7 @@ fn core_fields(code: &str) -> Vec<String> {
             continue;
         }
         let Some((name, p)) = next_token(code, p) else { continue };
-        if name != "core" {
+        if name != handle {
             continue;
         }
         let Some((dot, p)) = next_token(code, p) else { continue };
@@ -378,9 +381,19 @@ fn core_fields(code: &str) -> Vec<String> {
     found
 }
 
+fn core_fields(code: &str) -> Vec<String> {
+    handle_fields(code, "core")
+}
+
 /// `self.core.` call sites: the transitional `L4Service::core` handle on `Engine` (S9a).
 fn core_calls(code: &str) -> usize {
     core_fields(code).len()
+}
+
+/// `self.above.` call sites: what L4 asks of the levels above, through `SuppliedFromAbove` (S10 part 4). The trait is
+/// the whole list; each call site is counted so a new one is a visible decision.
+fn above_calls(code: &str) -> usize {
+    handle_fields(code, "above").len()
 }
 
 /// `core.l1`..`core.l6` and `core.shared`: the handle must never be a way to reach a level's state or the shared
@@ -453,6 +466,7 @@ struct Scan {
     impersonation: BTreeMap<String, usize>,
     direct_provider: BTreeMap<String, usize>,
     arc_engine: BTreeMap<String, usize>,
+    above: BTreeMap<String, usize>,
 }
 
 fn scan() -> Scan {
@@ -460,7 +474,7 @@ fn scan() -> Scan {
     let mut files = Vec::new();
     rust_files(&root, &mut files);
     files.sort();
-    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new(), core: BTreeMap::new(), core_state: BTreeMap::new(), impersonation: BTreeMap::new(), direct_provider: BTreeMap::new(), arc_engine: BTreeMap::new() };
+    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new(), core: BTreeMap::new(), core_state: BTreeMap::new(), impersonation: BTreeMap::new(), direct_provider: BTreeMap::new(), arc_engine: BTreeMap::new(), above: BTreeMap::new() };
     for file in files {
         let relative = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
         if is_test_file(&relative) {
@@ -474,6 +488,10 @@ fn scan() -> Scan {
         let state_reaches = core_state_reaches(&code);
         if state_reaches > 0 {
             result.core_state.insert(relative.clone(), state_reaches);
+        }
+        let above = above_calls(&code);
+        if above > 0 {
+            result.above.insert(relative.clone(), above);
         }
         let core = core_calls(&code);
         if core > 0 {
@@ -543,6 +561,10 @@ fn describe(scan: &Scan) -> String {
     }
     out.push_str("];\nconst ARC_ENGINE_BASELINE: &[(&str, usize)] = &[\n");
     for (file, count) in &scan.arc_engine {
+        out.push_str(&format!("    ({file:?}, {count}),\n"));
+    }
+    out.push_str("];\nconst ABOVE_BASELINE: &[(&str, usize)] = &[\n");
+    for (file, count) in &scan.above {
         out.push_str(&format!("    ({file:?}, {count}),\n"));
     }
     out.push_str("];\nconst PEOPLE_BASELINE: &[(&str, usize)] = &[\n");
@@ -677,6 +699,12 @@ fn l4_code_holds_an_arc_engine_only_through_the_spawner_and_the_rest_only_shrink
             && !scan.arc_engine.contains_key("bench/engine.rs"),
         "verification and intake take an `L4Spawner`, bench an `L5Spawner`, never an `Arc<Engine>`"
     );
+}
+
+#[test]
+fn what_l4_asks_of_the_levels_above_only_shrinks() {
+    let scan = scan();
+    only_shrinks("`self.above.` capability calls", &scan.above, ABOVE_BASELINE, &scan);
 }
 
 #[test]

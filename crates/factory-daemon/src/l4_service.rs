@@ -40,6 +40,8 @@ pub(crate) struct L4Service<'a> {
     pub(crate) wiring: Wiring<'a, L4>,
     /// Transitional (S9a part 2): `Engine` methods the moved run-start code still calls. See `run_start.rs`.
     pub(crate) core: &'a crate::engine::Engine,
+    /// What L4 needs from above, supplied when the service is built (`factory_process::supplied`).
+    pub(crate) above: &'a dyn factory_process::supplied::SuppliedFromAbove,
 }
 
 impl crate::engine::Engine {
@@ -48,6 +50,7 @@ impl crate::engine::Engine {
             state: &self.l4,
             wiring: Wiring::new(self),
             core: self,
+            above: self,
         }
     }
 }

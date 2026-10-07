@@ -16,12 +16,15 @@ pub use store::PolicyStore;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
-use factory_core::config::{Factory, Scope};
+use factory_core::config::Factory;
+#[cfg(test)]
+use factory_core::config::Scope;
 use factory_core::error::{FactoryError, Result};
 use factory_core::policy::{Attestation, ControlRef};
 #[cfg(test)]
 use factory_core::policy;
 use factory_core::policy_export;
+#[cfg(test)]
 use factory_core::checks::CheckSource;
 use factory_core::protocol::{PolicyControlDetail, PolicyReport, WorkflowEnforcement, WorkflowEnforcementFinding};
 use factory_core::reporting_clock::{self, ClockMark};
@@ -90,23 +93,6 @@ impl<'s> L6Service<'s> {
             .await
     }
 
-    /// L6 alone owns authored monthly intent; no spend or verdict is
-    /// included in this downward input. Read lazily only for BudgetWithin.
-    pub(crate) async fn check_budget_config<S: CheckSource>(
-        &self,
-        per_scope: &[(&Scope, Vec<S>)],
-    ) -> Result<Option<factory_core::budget::PolicyConfig>> {
-        let snapshot = self.wiring.snapshot();
-        self.policy_intent_service(&snapshot)
-            .budget_for(
-                &per_scope
-                    .iter()
-                    .map(|(_, subjects)| subjects.as_slice())
-                    .collect::<Vec<_>>(),
-            )
-            .await
-    }
-
     /// Downward authored inputs only. Compliance is evaluated by L5, not
     /// obtained by asking for an upper-level Policy page.
     pub(crate) async fn metric_policy_inputs(
@@ -152,7 +138,9 @@ impl<'s> L6Service<'s> {
     )> {
         let targets: Vec<_> = per_scope_applied.iter().map(|(scope, applied)| (scope.name.as_str(), applied.as_slice())).collect();
         let shared = self.wiring.check_service(self.wiring.snapshot().scope_tree()).shared(&targets).await?;
-        let budget = self.check_budget_config(per_scope_applied).await?;
+        let budget = crate::intent::Intent::of(&self.wiring.snapshot())
+            .budget_for(&per_scope_applied.iter().map(|(_, subjects)| subjects.as_slice()).collect::<Vec<_>>())
+            .await?;
         Ok((shared.gates, shared.daemon, shared.credentials, shared.backup, budget))
     }
 

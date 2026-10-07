@@ -5,6 +5,7 @@ mod access;
 mod run_settle;
 mod run_start;
 mod scheduling;
+mod supplied;
 mod dispatch_port;
 mod harness_hold;
 mod runtime_events;

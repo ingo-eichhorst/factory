@@ -337,12 +337,12 @@ fn live_preview_and_plan_owners_do_not_reenter_engine_or_an_upper_report() {
     let direction = include_str!("../../factory-direction/src/policy_service.rs");
     assert!(direction.contains("get::<WorkflowTargetsFact"));
     assert!(direction.contains("get::<WorkflowPreviewFact"));
-    let wiring = include_str!("verification.rs");
+    let wiring = include_str!("supplied.rs");
     let lint = wiring
         .split("pub(crate) async fn workflow_lint(")
         .nth(1)
         .unwrap()
-        .split("\n}\n\n#[cfg(test)]")
+        .split("\n    }\n")
         .next()
         .unwrap();
     for escaped in [

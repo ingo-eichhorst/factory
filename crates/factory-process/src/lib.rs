@@ -24,6 +24,7 @@ pub mod ready;
 pub mod recovery_journal;
 pub mod run;
 pub mod store;
+pub mod supplied;
 pub mod task;
 pub mod usage;
 pub mod window;

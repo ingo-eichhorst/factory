@@ -206,6 +206,16 @@ impl Authored {
         })
     }
 
+    pub async fn budget_for<S: CheckSource>(
+        &self,
+        applied: &[&[S]],
+    ) -> Result<Option<budget::PolicyConfig>> {
+        if !applied.iter().any(|subjects| needs_budget_facts(subjects)) {
+            return Ok(None);
+        }
+        self.budget_config().await.map(Some)
+    }
+
     pub async fn quality_budgets(&self, needed: &[&str]) -> QualityBudgets {
         if needed.is_empty() {
             return Ok(BTreeMap::new());
@@ -297,10 +307,7 @@ impl<'a> Service<'a> {
         &self,
         applied: &[&[S]],
     ) -> Result<Option<budget::PolicyConfig>> {
-        if !applied.iter().any(|subjects| needs_budget_facts(subjects)) {
-            return Ok(None);
-        }
-        self.budget_config().await.map(Some)
+        self.authored().budget_for(applied).await
     }
 
     /// Fresh raw policy subjects, receipts and optional caps for the L5
