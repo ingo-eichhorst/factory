@@ -26,3 +26,9 @@ pub(crate) fn live_provider(engine: &Engine) -> factory_agents::store::LiveProvi
         agents: engine.l3.agents.clone(),
     }
 }
+
+pub(crate) fn harness_provider(engine: &Engine) -> crate::harness_health::HarnessProvider {
+    crate::harness_health::HarnessProvider {
+        health: engine.l3.harness.clone(),
+    }
+}

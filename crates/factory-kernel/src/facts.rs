@@ -121,6 +121,22 @@ pub struct StandingAgentLiveFact {
 }
 impl Fact for StandingAgentLiveFact { type Producer = L3; }
 
+/// Whether a harness's own binary starts, as L3's live probe answers it (`#131`): the
+/// resolved binary and what went wrong when it does not. A person's own `task run` asks
+/// afresh (L3's query says so); the answer is never inferred from a screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HarnessVerdict {
+    /// It answered (now or recently enough), or there is nothing to check.
+    Healthy,
+    /// It does not start. `problem` names the command and what went wrong.
+    Unhealthy { binary: String, problem: String },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessHealthFact {
+    pub verdict: HarnessVerdict,
+}
+impl Fact for HarnessHealthFact { type Producer = L3; }
+
 impl Fact for SandboxServiceEvidenceFact {
     type Producer = L2;
 }
@@ -759,6 +775,10 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
     FactCatalogueEntry {
         fact: "FunctionaryRosterFact", producer: "L3", readers: &["L5 independent preview binding"],
         lives_in_kernel: true, note: "declaration-order checker names and raw scope default; no arguments, role verdict or selection",
+    },
+    FactCatalogueEntry {
+        fact: "HarnessHealthFact", producer: "L3", readers: &["L4 harness gate and held-task release"],
+        lives_in_kernel: true, note: "whether one harness's binary starts, from L3's bounded, cached live probe; L4 holds and releases its own tasks on it",
     },
     FactCatalogueEntry {
         fact: "StandingAgentLiveFact", producer: "L3", readers: &["L4 admission capacity"],
