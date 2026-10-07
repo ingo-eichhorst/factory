@@ -364,7 +364,7 @@ impl Engine {
                     run.status.as_str()
                 )),
             };
-            if let Err(error) = self.deploy_finish(request).await {
+            if let Err(error) = self.l1_service().deploy_finish(request).await {
                 tracing::warn!(run = run.id, "could not settle unfinished deployment: {error}");
             }
         }

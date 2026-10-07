@@ -1,9 +1,77 @@
 //! A release comparison is captured once, at recording. Live build/SBOM reads
 //! belong to their producers and are composed only by the release-detail facade.
 use super::*;
-use crate::facts::{Facts, ReleaseBuildQuery, ReleaseSbomQuery};
-use factory_core::environments::{ReleaseChange, ReleaseChanges, ReleaseDetail, ReleaseQuery};
+use factory_core::environments::{ReleaseChange, ReleaseChanges};
 use tokio::io::AsyncReadExt;
+
+impl L1Service<'_> {
+    pub(super) async fn enrich_release(
+        &self,
+        scope: &str,
+        release: &mut ReleaseFacts,
+        previous: Option<&str>,
+    ) -> Result<()> {
+        let snapshot = self.wiring.snapshot();
+        if let Some(run) = &release.build_run {
+            if run.trim().is_empty() || run.len() > 200 {
+                return Err(FactoryError::BadRequest(
+                    "build_run must be a nonempty run id of at most 200 bytes".into(),
+                ));
+            }
+            let build_scope = release.build_scope.get_or_insert_with(|| scope.to_owned());
+            snapshot.scope(build_scope)?;
+        } else if release.build_scope.is_some() {
+            return Err(FactoryError::BadRequest("build_scope needs an explicit build_run".into()));
+        }
+        let mut evidence = ReleaseChanges {
+            base: release.compare_to.clone().or_else(|| previous.map(str::to_owned)),
+            commit: release.commit.clone(),
+            repository: None,
+            commits: vec![],
+            removed_commits: vec![],
+            diffstat: None,
+            truncated: false,
+            unavailable: None,
+        };
+        let capture = async {
+            let dir = snapshot.scope_path(scope).map_err(|_| "scope repository is unavailable".to_string())?;
+            let commit = resolve(&dir, &release.commit).await?;
+            release.commit = commit.clone();
+            evidence.commit = commit.clone();
+            if release.committed_at.is_none() {
+                release.committed_at = committed_at(dir.clone(), commit.clone()).await;
+            }
+            if let Ok(origin) = git(&dir, &["remote", "get-url", "origin"]).await {
+                evidence.repository = github_repository(&origin);
+            }
+            let asked = evidence
+                .base
+                .clone()
+                .ok_or_else(|| "no previous release; select --compare-to to capture a range".to_string())?;
+            let base = resolve(&dir, &asked).await?;
+            evidence.base = Some(base.clone());
+            let (commits, truncated) = comparison(&dir, &base, &commit).await?;
+            evidence.commits = commits;
+            let (removed, removed_truncated) = comparison(&dir, &commit, &base).await?;
+            evidence.removed_commits = removed;
+            evidence.truncated = truncated || removed_truncated;
+            evidence.diffstat = Some(
+                git(&dir, &["diff", "--shortstat", "--no-ext-diff", "--no-textconv", &base, &commit, "--"])
+                    .await?
+                    .trim()
+                    .into(),
+            );
+            Ok::<_, String>(())
+        }
+        .await;
+        if let Err(reason) = capture {
+            evidence.unavailable = Some(reason);
+        }
+        // A wire caller cannot supply a forged daemon-captured Git comparison.
+        release.changes = Some(evidence);
+        Ok(())
+    }
+}
 
 const MAX_CHANGES: usize = 200;
 const MAX_GIT_BYTES: u64 = 256 * 1024;
@@ -47,6 +115,7 @@ async fn git(dir: &std::path::Path, arguments: &[&str]) -> std::result::Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use factory_core::environments::ReleaseQuery;
 
     fn git_run(root: &std::path::Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git").arg("-C").arg(root).args(args).output().unwrap();
@@ -299,133 +368,3 @@ async fn comparison(
     Ok((changes, truncated))
 }
 
-impl Engine {
-    pub(super) async fn enrich_release(
-        &self,
-        scope: &str,
-        release: &mut ReleaseFacts,
-        previous: Option<&str>,
-    ) -> Result<()> {
-        let snapshot = self.factory_snapshot();
-        if let Some(run) = &release.build_run {
-            if run.trim().is_empty() || run.len() > 200 {
-                return Err(FactoryError::BadRequest(
-                    "build_run must be a nonempty run id of at most 200 bytes".into(),
-                ));
-            }
-            let build_scope = release.build_scope.get_or_insert_with(|| scope.to_owned());
-            snapshot.scope(build_scope)?;
-        } else if release.build_scope.is_some() {
-            return Err(FactoryError::BadRequest("build_scope needs an explicit build_run".into()));
-        }
-        let mut evidence = ReleaseChanges {
-            base: release.compare_to.clone().or_else(|| previous.map(str::to_owned)),
-            commit: release.commit.clone(),
-            repository: None,
-            commits: vec![],
-            removed_commits: vec![],
-            diffstat: None,
-            truncated: false,
-            unavailable: None,
-        };
-        let capture = async {
-            let dir = snapshot.scope_path(scope).map_err(|_| "scope repository is unavailable".to_string())?;
-            let commit = resolve(&dir, &release.commit).await?;
-            release.commit = commit.clone();
-            evidence.commit = commit.clone();
-            if release.committed_at.is_none() {
-                release.committed_at = committed_at(dir.clone(), commit.clone()).await;
-            }
-            if let Ok(origin) = git(&dir, &["remote", "get-url", "origin"]).await {
-                evidence.repository = github_repository(&origin);
-            }
-            let asked = evidence
-                .base
-                .clone()
-                .ok_or_else(|| "no previous release; select --compare-to to capture a range".to_string())?;
-            let base = resolve(&dir, &asked).await?;
-            evidence.base = Some(base.clone());
-            let (commits, truncated) = comparison(&dir, &base, &commit).await?;
-            evidence.commits = commits;
-            let (removed, removed_truncated) = comparison(&dir, &commit, &base).await?;
-            evidence.removed_commits = removed;
-            evidence.truncated = truncated || removed_truncated;
-            evidence.diffstat = Some(
-                git(&dir, &["diff", "--shortstat", "--no-ext-diff", "--no-textconv", &base, &commit, "--"])
-                    .await?
-                    .trim()
-                    .into(),
-            );
-            Ok::<_, String>(())
-        }
-        .await;
-        if let Err(reason) = capture {
-            evidence.unavailable = Some(reason);
-        }
-        // A wire caller cannot supply a forged daemon-captured Git comparison.
-        release.changes = Some(evidence);
-        Ok(())
-    }
-
-    pub(crate) async fn release_detail(&self, query: ReleaseQuery) -> Result<ReleaseDetail> {
-        let snapshot = self.factory_snapshot();
-        snapshot.scope(&query.scope)?;
-        let report = self.environment_report(Some(query.scope.clone()), false).await?;
-        let mut release = report
-            .releases
-            .into_iter()
-            .find(|release| release.scope == query.scope && release.facts.commit == query.commit)
-            .ok_or_else(|| FactoryError::BadRequest("release is not recorded in the selected scope".into()))?;
-        let facts = if let Some(id) = &query.deployment {
-            let deployment = self
-                .l1.environments
-                .deployment(id)
-                .await?
-                .filter(|deployment| deployment.scope == query.scope && deployment.release.commit == query.commit)
-                .ok_or_else(|| {
-                    FactoryError::BadRequest("deployment does not belong to the selected release and scope".into())
-                })?;
-            deployment.release
-        } else {
-            release.facts.clone()
-        };
-        // A selected attempt's version/build identity must agree with its evidence,
-        // even when the catalogue aggregates other attempts at the same commit.
-        release.facts = facts.clone();
-        let reader = Facts::<factory_kernel::People>::new(self);
-        let mut build = None;
-        let build_reason = if let Some(run_id) = &facts.build_run {
-            let asked = ReleaseBuildQuery {
-                scope: facts.build_scope.clone().unwrap_or_else(|| query.scope.clone()),
-                commit: query.commit.clone(),
-                run_id: run_id.clone(),
-            };
-            match reader.get::<factory_kernel::ReleaseBuildFact>(&asked).await {
-                Ok(evidence) => {
-                    build = evidence;
-                    build
-                        .is_none()
-                        .then(|| "selected run has no completed, clean, source-matching artifact provenance".into())
-                }
-                Err(error) => Some(format!("build evidence could not be read: {error}")),
-            }
-        } else {
-            Some("no producing build run was recorded; a deployment actor is not a build".into())
-        };
-        let asked = ReleaseSbomQuery {
-            scope: facts.build_scope.clone().unwrap_or_else(|| query.scope.clone()),
-            commit: query.commit,
-            version: facts.version.clone(),
-        };
-        let (sboms, sbom_reason) = match reader.get::<factory_kernel::ReleaseSbomFact>(&asked).await {
-            Ok(sboms) => {
-                let reason = sboms
-                    .is_empty()
-                    .then(|| "no build SBOM attachment matches this exact product commit/version".into());
-                (sboms, reason)
-            }
-            Err(error) => (vec![], Some(format!("SBOM evidence could not be read: {error}"))),
-        };
-        Ok(ReleaseDetail { changes: facts.changes, release, build, sboms, build_reason, sbom_reason })
-    }
-}

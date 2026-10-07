@@ -796,7 +796,7 @@ impl Engine {
             // covers what the caller's own run deploys and nothing else: it
             // may start one from a run, and finish only one its run started.
             Request::DeployStart(req) => {
-                in_scope(&self.deploy_scope(req, caller)?)?;
+                in_scope(&self.l1_service().deploy_scope(req, caller)?)?;
                 match def.reach {
                     Reach::Scope => Ok(()),
                     Reach::Own if run_id.is_some() => Ok(()),

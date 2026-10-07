@@ -2,7 +2,7 @@
 //! it never writes a deployment or silently dispatches from a health tick.
 use super::*;
 use factory_core::config::SHELL_HARNESS;
-use factory_core::environments::{Recover, RecoveryCommand, SamplePage, SampleQuery};
+use factory_core::environments::{Recover, RecoveryCommand};
 use factory_core::role::Grant;
 use factory_core::task::NewTask;
 use factory_core::workflow::{GateSpec, WorkflowDraft, WorkflowEdge, WorkflowNode, WorkflowNodeKind, WorkflowRun};
@@ -293,41 +293,5 @@ impl Engine {
         self.start_workflow(&definition.id, Default::default(), caller).await
     }
 
-    /// A run may verify the repaired environment using deploy.record's
-    /// existing scope/reach checks. Missing or paused checks are not success.
-    pub(crate) async fn check_environment(&self, environment: &str) -> Result<DeployVerification> {
-        self.verify_environment(environment)
-            .await
-            .ok_or_else(|| bad("verification needs declared, unpaused health checks"))
-    }
 
-    pub(crate) async fn environment_samples(&self, query: SampleQuery) -> Result<SamplePage> {
-        let snapshot = self.factory_snapshot();
-        let (scope, declaration) = snapshot
-            .config
-            .environments()
-            .into_iter()
-            .find(|(_, declaration)| declaration.name == query.environment)
-            .ok_or_else(|| bad("the environment is not declared"))?;
-        if !declaration.checks.iter().any(|check| check.display_name() == query.check) {
-            return Err(bad("the check is not declared on this environment"));
-        }
-        if let Some(asked) = &query.scope {
-            let (root, children) = factory_core::config::subtree_scopes(&snapshot, Some(asked))?;
-            if !root.iter().chain(&children).any(|member| member.name == scope) {
-                return Err(bad("the environment is outside the selected scope"));
-            }
-        }
-        let now = Utc::now();
-        let to = query.to.unwrap_or(now);
-        let from = query.from.unwrap_or(to - Duration::hours(24));
-        let limit = query.limit.unwrap_or(200);
-        if from >= to || from < now - Duration::days(env::SAMPLE_RETENTION_DAYS) || to > now + Duration::seconds(5) {
-            return Err(bad("sample window must be nonempty, within the retained 90 days and not in the future"));
-        }
-        if !(1..=500).contains(&limit) || query.before.is_some_and(|cursor| cursor <= 0) {
-            return Err(bad("sample limit is 1..500 and the before cursor must be positive"));
-        }
-        self.l1.environments.sample_page(query.environment, query.check, from, to, query.before, limit).await
-    }
 }
