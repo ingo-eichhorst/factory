@@ -138,6 +138,54 @@ impl Configuration {
     }
 }
 
+/// Authored budget intent as a pure read: the budget catalogue under the root plus the scope configuration. It holds no
+/// receipt store or other L6 state, so any level may be handed one (S9b: `Intent`); `Service` reads the same data through it.
+pub struct Authored {
+    pub(crate) root: PathBuf,
+    pub(crate) config: Configuration,
+}
+impl Authored {
+    pub fn new(root: PathBuf, config: Configuration) -> Self {
+        Self { root, config }
+    }
+
+    /// Preserve invalid authored limits as raw configuration error data.
+    /// Gathering/assessment of spend belongs to L5, never this method.
+    pub async fn budget_config(&self) -> Result<budget::PolicyConfig> {
+        let root = self.root.clone();
+        let loaded = tokio::task::spawn_blocking(move || budget::load(&root))
+            .await
+            .map_err(|error| FactoryError::Other(anyhow::anyhow!("budget intent read: {error}")))?;
+        Ok(match loaded {
+            Ok(catalogue) => budget::PolicyConfig {
+                catalogue: Some(catalogue),
+                error: None,
+            },
+            Err(error) => budget::PolicyConfig {
+                catalogue: None,
+                error: Some(error),
+            },
+        })
+    }
+
+    pub async fn quality_budgets(&self, needed: &[&str]) -> QualityBudgets {
+        if needed.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let config = self
+            .budget_config()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(self
+            .config
+            .scopes
+            .iter()
+            .filter(|scope| needed.contains(&scope.id.as_str()))
+            .map(|scope| (scope.id.clone(), self.config.budget_intent(scope, &config)))
+            .collect())
+    }
+}
+
 pub struct Service<'a> {
     pub(crate) root: PathBuf,
     pub(crate) config: Configuration,
@@ -214,20 +262,7 @@ impl<'a> Service<'a> {
     /// Preserve invalid authored limits as raw configuration error data.
     /// Gathering/assessment of spend belongs to L5, never this method.
     pub async fn budget_config(&self) -> Result<budget::PolicyConfig> {
-        let root = self.root.clone();
-        let loaded = tokio::task::spawn_blocking(move || budget::load(&root))
-            .await
-            .map_err(|error| FactoryError::Other(anyhow::anyhow!("budget intent read: {error}")))?;
-        Ok(match loaded {
-            Ok(catalogue) => budget::PolicyConfig {
-                catalogue: Some(catalogue),
-                error: None,
-            },
-            Err(error) => budget::PolicyConfig {
-                catalogue: None,
-                error: Some(error),
-            },
-        })
+        Authored::new(self.root.clone(), self.config.clone()).budget_config().await
     }
 
     pub async fn budget_for<S: CheckSource>(
@@ -285,20 +320,7 @@ impl<'a> Service<'a> {
     /// remain independently inherited, in the configured order. No metric
     /// result, Quality judgement or spend ever enters/leaves this method.
     pub async fn quality_budgets(&self, needed: &[&str]) -> QualityBudgets {
-        if needed.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        let config = self
-            .budget_config()
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(self
-            .config
-            .scopes
-            .iter()
-            .filter(|scope| needed.contains(&scope.id.as_str()))
-            .map(|scope| (scope.id.clone(), self.config.budget_intent(scope, &config)))
-            .collect())
+        Authored::new(self.root.clone(), self.config.clone()).quality_budgets(needed).await
     }
 }
 
@@ -498,6 +520,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["company", "work", "child", "work/side"]
         );
+    }
+
+    #[tokio::test]
+    async fn authored_budgets_need_no_store_and_carry_a_bad_file_as_data_for_only_the_scopes_asked() {
+        let root = Root::new();
+        root.limits("invalid: configuration\n");
+        let authored = Authored::new(root.0.clone(), configuration());
+        assert!(authored.quality_budgets(&[]).await.unwrap().is_empty(), "nothing asked, nothing read");
+        let asked = authored.quality_budgets(&["child-id"]).await.unwrap();
+        assert_eq!(asked.keys().map(String::as_str).collect::<Vec<_>>(), ["child-id"], "only the scope asked for");
+        assert!(authored.budget_config().await.unwrap().error.is_some());
     }
 
     #[tokio::test]
