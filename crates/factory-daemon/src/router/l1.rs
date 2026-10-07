@@ -26,12 +26,13 @@ impl Engine {
             }),
             Request::ImportantDates { scope } => Ok(Payload::ImportantDates { report: Box::new(self.important_dates(scope.as_deref()).await?) }),
             Request::Backup => Ok(Payload::Backup {
-                report: Box::new(self.backup_report().await?),
+                report: Box::new(self.l1_service().backup_report().await?),
             }),
             // `backup_completed`/`backup_failed`/`backup_verified` are
             // published inside, where the job's own backups publish them too.
             Request::BackupRun => Ok(Payload::BackupRun {
                 snapshot: self
+                    .l1_service()
                     .backup_run(
                         factory_core::backup::BackupTrigger::Manual,
                         crate::policies::caller_name(caller),
@@ -63,11 +64,12 @@ impl Engine {
             }
             Request::BackupVerify { snapshot, identity } => Ok(Payload::BackupVerify {
                 verification: self
+                    .l1_service()
                     .backup_verify(snapshot, identity, crate::policies::caller_name(caller))
                     .await?,
             }),
             Request::BackupRestore { snapshot, into, identity } => Ok(Payload::BackupRestore {
-                restoration: self.backup_restore(snapshot, into, identity).await?,
+                restoration: self.l1_service().backup_restore(snapshot, into, identity).await?,
             }),
             other => Err(misrouted(other.level())),
         }

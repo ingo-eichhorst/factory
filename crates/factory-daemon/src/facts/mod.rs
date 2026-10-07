@@ -11,9 +11,7 @@ pub(crate) use factory_process::facts::{
     NamedQuery, RecoveryQuery, ReleaseBuildQuery, TaskInventoryQuery,
 };
 pub(crate) use l1::selected_http_bind;
-pub(crate) use l1::{
-    backup_provider as infrastructure_backup, environment_provider as infrastructure_environments,
-};
+pub(crate) use l1::environment_provider as infrastructure_environments;
 pub(crate) use l2::{
     credentials_provider as environment_credentials,
     dependencies_provider as environment_dependencies,
@@ -98,6 +96,10 @@ impl<'a, L: Level> Wiring<'a, L> {
     /// The path of the running `factory` binary (instance-wide, not level state).
     pub(crate) fn factory_bin(&self) -> &'a std::path::Path {
         &self.engine.shared.factory_bin
+    }
+    /// When this daemon came up (instance-wide).
+    pub(crate) fn booted_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.engine.shared.booted_at
     }
     /// The observer bus: events are published here, never read as evidence.
     pub(crate) fn bus(&self) -> &'a factory_core::event::EventBus {
