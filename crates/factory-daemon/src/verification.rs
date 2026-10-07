@@ -1311,30 +1311,6 @@ impl L4Service<'_> {
         Ok(())
     }
 
-    /// `#158` phase 1: the one L4-owned read the `attested` policy check and
-    /// both `conformance_rate.<category>`/`gate_fail_rate` share -- every
-    /// finished run whose `ended_at` falls in `window` (`(from, to]`,
-    /// `operations::is_finished`), narrowed to `scopes` (canonical scope
-    /// names, no ancestor roll-up -- the caller already decided whether that
-    /// is one exact scope or a whole subtree) and to `categories` when
-    /// either is given, together with its `required_steps` (frozen at
-    /// dispatch, `Run::required_steps`), its `fail_kind` (`None` for a run
-    /// that ended `Done` -- `conformance_rate` reads this to exclude an
-    /// infrastructure failure from its ratio), and every attestation it
-    /// collected (`RunEvidenceStore::step_attestations_for`, one batch read). A
-    /// bench attempt's task (`Task::bench_origin`) is always left out -- its
-    /// own case gate judges it, the same rule `required_steps_for_task`
-    /// already applies, so a plan on top would never apply to it anyway.
-    /// Test compatibility entry point: production reads this through the
-    /// L4-owned fact provider in `facts/l4.rs`.
-    #[cfg(test)]
-    pub(crate) async fn attested_runs(
-        &self, scopes: Option<&BTreeSet<String>>, categories: Option<&BTreeSet<String>>, window: Window,
-    ) -> Result<Vec<AttestedRun>> {
-        crate::facts::Facts::<factory_kernel::L6>::new(self.core).get::<AttestedRun>(&crate::facts::AttestedQuery {
-            scopes: scopes.cloned(), categories: categories.cloned(), window,
-        }).await
-    }
 
     /// `factory workflow lint`: the plan, the injection and the ordering
     /// violations for a stored workflow, a task's implicit workflow, or --
@@ -1371,6 +1347,33 @@ mod tests {
     //! model and no terminal is involved -- only the gate commands run.
 
     use super::*;
+
+    impl L4Service<'_> {
+    /// `#158` phase 1: the one L4-owned read the `attested` policy check and
+        /// both `conformance_rate.<category>`/`gate_fail_rate` share -- every
+        /// finished run whose `ended_at` falls in `window` (`(from, to]`,
+        /// `operations::is_finished`), narrowed to `scopes` (canonical scope
+        /// names, no ancestor roll-up -- the caller already decided whether that
+        /// is one exact scope or a whole subtree) and to `categories` when
+        /// either is given, together with its `required_steps` (frozen at
+        /// dispatch, `Run::required_steps`), its `fail_kind` (`None` for a run
+        /// that ended `Done` -- `conformance_rate` reads this to exclude an
+        /// infrastructure failure from its ratio), and every attestation it
+        /// collected (`RunEvidenceStore::step_attestations_for`, one batch read). A
+        /// bench attempt's task (`Task::bench_origin`) is always left out -- its
+        /// own case gate judges it, the same rule `required_steps_for_task`
+        /// already applies, so a plan on top would never apply to it anyway.
+        /// Test compatibility entry point: production reads this through the
+        /// L4-owned fact provider in `facts/l4.rs`.
+    pub(crate) async fn attested_runs(
+            &self, scopes: Option<&BTreeSet<String>>, categories: Option<&BTreeSet<String>>, window: Window,
+        ) -> Result<Vec<AttestedRun>> {
+            crate::facts::Facts::<factory_kernel::L6>::new(self.core).get::<AttestedRun>(&crate::facts::AttestedQuery {
+                scopes: scopes.cloned(), categories: categories.cloned(), window,
+            }).await
+        }
+    }
+
     use crate::access::Caller;
     use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::{AgentRuntime, StartRequest};

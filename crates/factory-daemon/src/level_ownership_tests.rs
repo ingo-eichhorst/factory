@@ -169,6 +169,13 @@ const PULLS_BASELINE: &[(&str, usize)] = &[
     ("signposts.rs -> .l6_service()", 1),
 ];
 
+const IMPERSONATION_BASELINE: &[(&str, usize)] = &[];
+/// Direct `Port::provider` calls from level code: L4 reading L5-produced workflow facts, a downward read past the
+/// `Below` gate. S10 resolves them with commands or capabilities.
+const DIRECT_PROVIDER_BASELINE: &[(&str, usize)] = &[
+    ("verification.rs", 3),
+];
+
 /// `self.core.` call sites per file (the transitional `L4Service::core`). May only shrink; goes away with the handle.
 const CORE_BASELINE: &[(&str, usize)] = &[
     ("run_settle.rs", 8),
@@ -375,6 +382,31 @@ fn core_state_reaches(code: &str) -> usize {
         .count()
 }
 
+/// Fact reads that bypass the `Below` gate (S9b guard). Two shapes, both only in level-owned code (pages and wiring
+/// are exempt; S12's page ratchet covers them):
+/// - impersonation: `Facts::<Lx>::new(` where `Lx` is not the file's own level, so a level reads as another one;
+/// - a direct `...::provider(` call (`XFact::provider(engine)`, `<X as Port>::provider(..)`), which reaches a producer
+///   without the producer-below bound that `Wiring<L>::provider` carries.
+fn impersonated_readers(code: &str, own_level: &str) -> usize {
+    let squeezed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut count = 0;
+    for (at, _) in squeezed.match_indices("Facts::<") {
+        let rest = &squeezed[at + "Facts::<".len()..];
+        let Some(end) = rest.find(">::new(") else { continue };
+        let level = rest[..end].rsplit("::").next().unwrap_or("");
+        let is_level = matches!(level, "L1" | "L2" | "L3" | "L4" | "L5" | "L6");
+        if is_level && level != own_level {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn direct_provider_calls(code: &str) -> usize {
+    let squeezed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    squeezed.matches("::provider(").count() + squeezed.matches("::provider::<").count()
+}
+
 fn people_reach(code: &str) -> usize {
     ["Facts::<People>", "Facts::<factory_kernel::People>", ".facts::<People>", ".facts::<factory_kernel::People>"]
         .iter()
@@ -401,6 +433,8 @@ struct Scan {
     pulls: BTreeMap<String, usize>,
     core: BTreeMap<String, usize>,
     core_state: BTreeMap<String, usize>,
+    impersonation: BTreeMap<String, usize>,
+    direct_provider: BTreeMap<String, usize>,
 }
 
 fn scan() -> Scan {
@@ -408,7 +442,7 @@ fn scan() -> Scan {
     let mut files = Vec::new();
     rust_files(&root, &mut files);
     files.sort();
-    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new(), core: BTreeMap::new(), core_state: BTreeMap::new() };
+    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new(), core: BTreeMap::new(), core_state: BTreeMap::new(), impersonation: BTreeMap::new(), direct_provider: BTreeMap::new() };
     for file in files {
         let relative = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
         if is_test_file(&relative) {
@@ -430,6 +464,14 @@ fn scan() -> Scan {
         let Some(own_group) = level_group(owner) else {
             continue; // wiring and the entry point may reach any group
         };
+        let impersonated = impersonated_readers(&code, &own_group.to_uppercase());
+        if impersonated > 0 {
+            result.impersonation.insert(relative.clone(), impersonated);
+        }
+        let direct = direct_provider_calls(&code);
+        if direct > 0 {
+            result.direct_provider.insert(relative.clone(), direct);
+        }
         // A level service is entered by its router and by wiring. A lower level's
         // module calling into it is a pull against the ladder.
         for service in SERVICES {
@@ -465,6 +507,14 @@ fn describe(scan: &Scan) -> String {
     }
     out.push_str("];\nconst CORE_BASELINE: &[(&str, usize)] = &[\n");
     for (file, count) in &scan.core {
+        out.push_str(&format!("    ({file:?}, {count}),\n"));
+    }
+    out.push_str("];\nconst IMPERSONATION_BASELINE: &[(&str, usize)] = &[\n");
+    for (file, count) in &scan.impersonation {
+        out.push_str(&format!("    ({file:?}, {count}),\n"));
+    }
+    out.push_str("];\nconst DIRECT_PROVIDER_BASELINE: &[(&str, usize)] = &[\n");
+    for (file, count) in &scan.direct_provider {
         out.push_str(&format!("    ({file:?}, {count}),\n"));
     }
     out.push_str("];\nconst PEOPLE_BASELINE: &[(&str, usize)] = &[\n");
@@ -562,6 +612,44 @@ fn intent_stays_pure_and_never_reaches_an_l6_service_state_or_store() {
     for forbidden in ["l6_service", "L6Service", ".l6.", ".l6;", "Store", "self.engine", "Engine", "state."] {
         assert!(!squeezed.contains(forbidden), "intent.rs must stay pure; it names `{forbidden}`");
     }
+}
+
+fn only_shrinks(label: &str, found: &BTreeMap<String, usize>, baseline: &[(&str, usize)], scan: &Scan) {
+    let baseline: BTreeMap<&str, usize> = baseline.iter().copied().collect();
+    let mut bad = Vec::new();
+    for (file, count) in found {
+        match baseline.get(file.as_str()) {
+            None => bad.push(format!("{file}: {count} {label}, new")),
+            Some(allowed) if count > allowed => bad.push(format!("{file}: {count} {label} > {allowed}")),
+            Some(allowed) if count < allowed => bad.push(format!("{file}: {count} {label} < baseline {allowed}: lower it")),
+            _ => {}
+        }
+    }
+    for file in baseline.keys() {
+        if !found.contains_key(*file) {
+            bad.push(format!("{file}: no longer has {label}, remove it from the baseline"));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}\ncurrent state:\n{}", describe(scan));
+}
+
+#[test]
+fn a_level_never_reads_facts_as_another_level_and_only_shrinks() {
+    let scan = scan();
+    only_shrinks("`Facts::<Lx>::new` readers of another level", &scan.impersonation, IMPERSONATION_BASELINE, &scan);
+}
+
+#[test]
+fn direct_provider_calls_in_level_code_only_shrink() {
+    let scan = scan();
+    only_shrinks("direct `::provider(` calls", &scan.direct_provider, DIRECT_PROVIDER_BASELINE, &scan);
+}
+
+#[test]
+fn the_fact_guard_scanners_see_impersonation_and_direct_providers() {
+    assert_eq!(impersonated_readers("Facts::<L6>::new(self).get(); crate::facts::Facts::<factory_kernel::L5>::new(\n x)", "L4"), 2);
+    assert_eq!(impersonated_readers("Facts::<L4>::new(self); Facts::<People>::new(self)", "L4"), 0);
+    assert_eq!(direct_provider_calls("XFact::provider(engine); <Y as Port>::provider(&e); self.wiring.provider::<Z>()"), 2);
 }
 
 #[test]
