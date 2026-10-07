@@ -2175,7 +2175,7 @@ mod tests {
         git_ok(&remote, &["init", "-q", "--bare"]).await;
         git_ok(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]).await;
         git_ok(&integration_path, &["push", "-q", "-u", "origin", &integration.branch]).await;
-        engine.sweep_workspaces().await;
+        engine.l4_service().sweep_workspaces().await;
         assert!(engine.workflow_run(&workflow.id).await.unwrap().integration.unwrap().cleanup_complete,
             "retained receipts: {:?}", engine.l4.workspaces.records().await.unwrap());
         assert!(!integration_path.exists());
@@ -4372,7 +4372,7 @@ impl Engine {
             run.updated_at = Utc::now();
             self.l4.workflows.put_run(&run).await?;
             self.shared.bus.publish(Event::WorkflowRunUpdated { run });
-            self.sweep_workspaces().await;
+            self.l4_service().sweep_workspaces().await;
             return Ok(());
         }
 
@@ -4489,7 +4489,7 @@ impl Engine {
             self.close_workflow_waits(&run).await?;
             self.l4.workflows.put_run(&run).await?;
             self.shared.bus.publish(Event::WorkflowRunUpdated { run });
-            self.sweep_workspaces().await;
+            self.l4_service().sweep_workspaces().await;
             return Ok(());
         }
 
@@ -5060,7 +5060,7 @@ impl Engine {
                 "could not advance workflow: {error}"
             );
         }
-        self.sweep_workspaces().await;
+        self.l4_service().sweep_workspaces().await;
     }
 
     /// Mirror dispatch progress without recursively advancing the graph. The

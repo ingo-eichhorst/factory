@@ -409,7 +409,7 @@ impl Engine {
                 })
             }
             Request::TaskUsage { id } => Ok(Payload::TaskUsage {
-                usage: self.task_usage(&id).await?,
+                usage: self.l4_service().task_usage(&id).await?,
             }),
             Request::Costs { group_by, from, to, scope } => Ok(Payload::Costs {
                 report: crate::facts::Facts::<factory_kernel::People>::new(self)

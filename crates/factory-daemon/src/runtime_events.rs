@@ -79,7 +79,7 @@ impl Engine {
 
         // The occupancy chart's own record. This skips a sample when nothing
         // changed, which is right for a chart and wrong for what follows.
-        self.record_status(&subject, &scope, &agent, status).await;
+        self.l4_service().record_status(&subject, &scope, &agent, status).await;
 
         // Published separately, on the event itself: an agent that is
         // already `working` and keeps working is exactly the case this

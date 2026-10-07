@@ -82,18 +82,20 @@ const OWNERS: &[(&str, Owner)] = &[
     ("scheduler.rs", L4),
     ("schedule.rs", L4),
     ("occupancy.rs", L4),
+    ("operations_report.rs", Wiring),
     ("operations.rs", L4),
     ("costs.rs", L4),
     ("workspace_lifecycle.rs", L4),
     ("worktree.rs", L4),
     ("worktree/", L4),
     ("artifacts.rs", L4),
-    ("production.rs", L4),
+    ("production.rs", Wiring), // the People-side production endpoint: reads L4's fact as a page
     ("recovery_journal.rs", L4),
     ("admission.rs", L4),
+    ("l4_service.rs", L4),
     ("assignments.rs", L4),
     ("resume.rs", L4),
-    ("site.rs", L4),
+    ("site.rs", Wiring), // the site page: composes the roster and runs with a repository walk
     // L5 Improvement
     ("bench/", L5),
     ("datasets.rs", L5),
@@ -136,8 +138,6 @@ const BASELINE: &[(&str, &str, usize)] = &[
     ("bench/engine.rs", "l4", 8),
     ("datasets.rs", "l4", 2),
     ("dependencies.rs", "l4", 2),
-    ("operations.rs", "l2", 1),
-    ("operations.rs", "l3", 1),
     ("secrets.rs", "l4", 2),
     ("suggestions.rs", "l4", 3),
 ];
@@ -151,6 +151,7 @@ const SERVICES: &[ServiceEntry] = &[
     ServiceEntry { owner: L1, accessor: ".l1_service()" },
     ServiceEntry { owner: L2, accessor: ".l2_service()" },
     ServiceEntry { owner: L3, accessor: ".l3_service()" },
+    ServiceEntry { owner: L4, accessor: ".l4_service()" },
     ServiceEntry { owner: L6, accessor: ".l6_service()" },
 ];
 
@@ -167,7 +168,6 @@ const PULLS_BASELINE: &[(&str, usize)] = &[
 
 /// Files that name `Facts::<People>` today (count). May only shrink.
 const PEOPLE_BASELINE: &[(&str, usize)] = &[
-    ("production.rs", 1),
     ("signposts.rs", 1),
 ];
 

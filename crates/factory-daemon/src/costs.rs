@@ -31,12 +31,13 @@ use factory_core::usage::{
 #[cfg(test)]
 use factory_core::usage::{CostGroupBy, CostReport, SpendQuery};
 
+use crate::l4_service::L4Service;
 use crate::engine::Engine;
 
 #[cfg(test)]
 use factory_process::measurements::{NO_ISSUE, NO_WORKFLOW};
 
-impl Engine {
+impl L4Service<'_> {
     /// Ask the run's runtime what its session has used, keep the answer (or
     /// why there was none), and bring the run's derived `usage` up to date.
     /// A run with no session has nothing to ask about and gets no snapshot.
@@ -44,7 +45,7 @@ impl Engine {
         let Some(session) = &run.session else { return };
         let at = Utc::now();
         if point == SnapshotPoint::TurnEnded {
-            self.l4.turn_usage_pending
+            self.state.turn_usage_pending
                 .lock()
                 .unwrap()
                 .entry(run.id.clone())
@@ -54,7 +55,7 @@ impl Engine {
         self.capture_usage_snapshot(run, point, at, session).await;
         if point == SnapshotPoint::TurnEnded {
             let earliest_settled = {
-                let mut pending = self.l4.turn_usage_pending.lock().unwrap();
+                let mut pending = self.state.turn_usage_pending.lock().unwrap();
                 let times = pending.entry(run.id.clone()).or_default();
                 times.remove(&at);
                 let ready = !times.iter().any(|pending_at| *pending_at < at);
@@ -67,7 +68,7 @@ impl Engine {
                 // Serialize this with snapshot writes. A later turn or run-end
                 // may already be stored, so record_re_estimate independently
                 // selects and caps itself at the first turn observation.
-                let _guard = self.l4.usage_edit.lock().await;
+                let _guard = self.state.usage_edit.lock().await;
                 self.record_re_estimate(run).await;
             }
         }
@@ -80,7 +81,7 @@ impl Engine {
         at: DateTime<Utc>,
         session: &factory_core::task::SessionRef,
     ) {
-        let (usage, unknown) = match self.shared.registry.runtime(&session.runtime) {
+        let (usage, unknown) = match self.wiring.registry().runtime(&session.runtime) {
             Err(e) => (None, Some(e.to_string())),
             Ok(runtime) => match runtime.usage(session).await {
                 Ok(Some(u)) => (Some(u), None),
@@ -103,13 +104,13 @@ impl Engine {
         // Held across append, read and write-back, never across the runtime
         // call above: two snapshots of one run finishing together must not
         // leave the older sum written last.
-        let _guard = self.l4.usage_edit.lock().await;
-        if let Err(e) = self.l4.store.append_usage(&snapshot).await {
+        let _guard = self.state.usage_edit.lock().await;
+        if let Err(e) = self.state.store.append_usage(&snapshot).await {
             tracing::warn!(run = %run.id, point = point.as_str(), error = %e, "could not keep a usage snapshot");
             return;
         }
         let mut recent = match self
-            .l4.store
+            .state.store
             .runs_between(at - Duration::days(8), at + Duration::seconds(1))
             .await
         {
@@ -119,7 +120,7 @@ impl Engine {
                 return;
             }
         };
-        if let Ok(active) = self.l4.store.active_runs().await {
+        if let Ok(active) = self.state.store.active_runs().await {
             for active_run in active {
                 if !recent.iter().any(|candidate| candidate.id == active_run.id) {
                     recent.push(active_run);
@@ -128,7 +129,7 @@ impl Engine {
         }
         let mut snapshots_by_run = BTreeMap::new();
         for recent_run in &recent {
-            if let Ok(snapshots) = self.l4.store.usage_snapshots(&recent_run.id).await {
+            if let Ok(snapshots) = self.state.store.usage_snapshots(&recent_run.id).await {
                 snapshots_by_run.insert(recent_run.id.clone(), snapshots);
             }
         }
@@ -158,8 +159,8 @@ impl Engine {
                 });
             }
             let patch = RunPatch { usage: Some(usage), ..Default::default() };
-            match self.l4.store.update_run(&recent_run.id, &patch).await {
-                Ok(updated) => self.shared.bus.publish(Event::RunUpdated { run: updated.redacted() }),
+            match self.state.store.update_run(&recent_run.id, &patch).await {
+                Ok(updated) => self.wiring.bus().publish(Event::RunUpdated { run: updated.redacted() }),
                 Err(e) => tracing::warn!(run = %recent_run.id, error = %e, "could not record a run's usage"),
             }
         }
@@ -170,7 +171,7 @@ impl Engine {
     /// session's previous run ended long enough ago that it can easily sit
     /// outside `capture_usage_snapshot`'s own 8-day attribution window.
     async fn prior_run_end_usage(&self, session_id: &str, previous_run_id: &str) -> Option<HarnessUsage> {
-        let snapshots = self.l4.store.usage_snapshots(previous_run_id).await.ok()?;
+        let snapshots = self.state.store.usage_snapshots(previous_run_id).await.ok()?;
         let mut run_ends: Vec<&UsageSnapshot> =
             snapshots.iter().filter(|s| s.point == SnapshotPoint::RunEnd).collect();
         run_ends.sort_by_key(|s| s.at);
@@ -180,22 +181,22 @@ impl Engine {
     }
 
     async fn record_re_estimate(&self, run: &Run) {
-        let Ok(Some(current)) = self.l4.store.get_run(&run.id).await else { return };
+        let Ok(Some(current)) = self.state.store.get_run(&run.id).await else { return };
         if current.re_estimate.is_some() {
             return;
         }
-        let Ok(current_snapshots) = self.l4.store.usage_snapshots(&run.id).await else { return };
+        let Ok(current_snapshots) = self.state.store.usage_snapshots(&run.id).await else { return };
         let Some(first_at) = current_snapshots
             .iter()
             .filter(|snapshot| snapshot.point == SnapshotPoint::TurnEnded)
             .map(|snapshot| snapshot.at)
             .min()
         else { return };
-        let Ok(Some(task)) = self.l4.store.get(&run.task_id).await else { return };
-        let snapshot = self.factory_snapshot();
+        let Ok(Some(task)) = self.state.store.get(&run.task_id).await else { return };
+        let snapshot = self.wiring.snapshot();
         let scope = snapshot.canonical_scope_name(&task.scope);
         let category = factory_core::control_plan::effective_category(task.category.as_deref()).to_string();
-        let Ok(tasks) = self.l4.store.list(&factory_core::task::TaskFilter::default()).await else { return };
+        let Ok(tasks) = self.state.store.list(&factory_core::task::TaskFilter::default()).await else { return };
         let mut wall_ratios = Vec::new();
         let mut active_ratios = Vec::new();
         let mut cost_ratios = Vec::new();
@@ -204,7 +205,7 @@ impl Engine {
             snapshot.canonical_scope_name(&peer.scope) == scope
                 && factory_core::control_plan::effective_category(peer.category.as_deref()) == category
         }) {
-            let Ok(runs) = self.l4.store.runs(&peer.id, u32::MAX).await else { continue };
+            let Ok(runs) = self.state.store.runs(&peer.id, u32::MAX).await else { continue };
             for completed in runs
                 .into_iter()
                 .filter(|candidate| {
@@ -213,7 +214,7 @@ impl Engine {
                         && candidate.agent == current.agent
                 })
             {
-                let Ok(snapshots) = self.l4.store.usage_snapshots(&completed.id).await else { continue };
+                let Ok(snapshots) = self.state.store.usage_snapshots(&completed.id).await else { continue };
                 let Some(first_at) = snapshots
                     .iter()
                     .filter(|s| s.point == SnapshotPoint::TurnEnded)
@@ -277,11 +278,11 @@ impl Engine {
             reason,
         };
         let Ok(updated) = self
-            .l4.store
+            .state.store
             .update_run(&current.id, &RunPatch { re_estimate: Some(estimate.clone()), ..Default::default() })
             .await
         else { return };
-        self.shared.bus.publish(Event::RunUpdated { run: updated.redacted() });
+        self.wiring.bus().publish(Event::RunUpdated { run: updated.redacted() });
         self.entry(
             &current.task_id,
             factory_core::task::TaskEntry::new("daemon", "re_estimate", "recorded the first-turn re-estimate")
@@ -294,7 +295,7 @@ impl Engine {
     /// `Request::TaskUsage`: every run's usage and their sum.
     pub(crate) async fn task_usage(&self, task_id: &str) -> Result<TaskUsage> {
         let task = self.require(task_id).await?;
-        let runs = self.l4.store.runs(&task.id, u32::MAX).await?;
+        let runs = self.state.store.runs(&task.id, u32::MAX).await?;
         let now = Utc::now();
         let mut total = CostRow::new(task.id.clone(), Some(task.title.clone()));
         let mut entries = Vec::with_capacity(runs.len());
@@ -468,7 +469,7 @@ fn estimate_cost(observed: Option<f64>, ratios: &[f64]) -> Option<factory_core::
 /// off the hook's own request, so it is spawned from an `Arc`.
 pub(crate) fn spawn_snapshot(engine: &Arc<Engine>, run: Run, point: SnapshotPoint) {
     let engine = engine.clone();
-    tokio::spawn(async move { engine.snapshot_usage(&run, point).await });
+    tokio::spawn(async move { engine.l4_service().snapshot_usage(&run, point).await });
 }
 
 #[cfg(test)]
@@ -734,7 +735,7 @@ mod tests {
         assert_eq!(u.as_of_point, Some(SnapshotPoint::RunEnd));
         assert_eq!(u.pricing_sources, vec!["litellm@test".to_string()]);
 
-        let tu = engine.task_usage(&task.id).await.unwrap();
+        let tu = engine.l4_service().task_usage(&task.id).await.unwrap();
         assert_eq!(tu.total.runs, 1);
         assert!((tu.total.cost_usd - 0.40).abs() < 1e-9);
         assert_eq!(tu.runs[0].attempt, 1);
@@ -871,13 +872,13 @@ mod tests {
         let first_engine = engine.clone();
         let first_run = run.clone();
         let first = tokio::spawn(async move {
-            first_engine.snapshot_usage(&first_run, SnapshotPoint::TurnEnded).await;
+            first_engine.l4_service().snapshot_usage(&first_run, SnapshotPoint::TurnEnded).await;
         });
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let later_engine = engine.clone();
         let later_run = run.clone();
         let later = tokio::spawn(async move {
-            later_engine.snapshot_usage(&later_run, SnapshotPoint::TurnEnded).await;
+            later_engine.l4_service().snapshot_usage(&later_run, SnapshotPoint::TurnEnded).await;
         });
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let ended = done(&engine, &task, &run).await;
@@ -985,7 +986,7 @@ mod tests {
             .await
             .unwrap();
 
-        let usage = engine.task_usage(&task.id).await.unwrap();
+        let usage = engine.l4_service().task_usage(&task.id).await.unwrap();
         let entry = &usage.runs[0];
         assert!(!entry.status.is_terminal());
         assert_eq!(entry.time_comparison.as_ref().unwrap().actual, None);
@@ -1011,12 +1012,12 @@ mod tests {
             )
             .await
             .unwrap();
-        engine.snapshot_usage(&run, SnapshotPoint::TurnEnded).await;
+        engine.l4_service().snapshot_usage(&run, SnapshotPoint::TurnEnded).await;
         let ended = done(&engine, &task, &run).await;
         assert!(ended.usage.as_ref().unwrap().partial);
         assert!((ended.usage.as_ref().unwrap().cost_usd.unwrap() - 1.5).abs() < 1e-9);
 
-        let usage = engine.task_usage(&task.id).await.unwrap();
+        let usage = engine.l4_service().task_usage(&task.id).await.unwrap();
         let comparison = usage.runs[0].cost_comparison.as_ref().unwrap();
         assert_eq!(comparison.actual, None);
         assert_eq!(comparison.actual_over_expected, None);
@@ -1077,7 +1078,7 @@ mod tests {
         let second = done(&engine, &task, &second).await;
         engine.l4.store.update_run(&second.id, &ten_minutes(&second)).await.unwrap();
 
-        let usage = engine.task_usage(&task.id).await.unwrap();
+        let usage = engine.l4_service().task_usage(&task.id).await.unwrap();
         assert_eq!(usage.runs.len(), 2);
         for entry in &usage.runs {
             let comparison = entry.time_comparison.as_ref().unwrap();
