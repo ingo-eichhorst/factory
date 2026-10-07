@@ -66,6 +66,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("service_observations.rs", L2),
     // L3 Agent
     ("agent_rows.rs", L3),
+    ("dispatch_port.rs", L3),
     ("l3_service.rs", L3),
     ("agents.rs", L3),
     ("roles.rs", L3),
@@ -156,11 +157,10 @@ const SERVICES: &[ServiceEntry] = &[
 /// (file -> accessor, count): modules that reach into a level service from
 /// another level. Each is a pull the owning slice has to replace. May only shrink.
 const PULLS_BASELINE: &[(&str, usize)] = &[
-    ("harness_hold.rs -> .l3_service()", 10),
+    ("harness_hold.rs -> .l3_service()", 2),
     ("intake.rs -> .l3_service()", 1),
     ("metrics.rs -> .l6_service()", 3),
     ("quality/mod.rs -> .l6_service()", 1),
-    ("scheduler.rs -> .l3_service()", 1),
     ("signposts.rs -> .l6_service()", 2),
     ("verification.rs -> .l6_service()", 2),
 ];
