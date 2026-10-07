@@ -129,6 +129,12 @@ impl<'a, L: Level> Wiring<'a, L> {
         Facts::new(self.engine)
     }
 }
+impl<'a> Wiring<'a, L2> {
+    /// The command edge L2 holds to the level below it: `Commands<L2, L1Port>`.
+    pub(crate) fn host(&self) -> factory_kernel::Commands<L2, crate::dispatch_port::L1Port<'a>> {
+        factory_kernel::Commands::new(crate::dispatch_port::L1Port(self.engine.l1_service()))
+    }
+}
 impl<'a> Wiring<'a, L3> {
     /// The command edge L3 holds to the level below it: `Commands<L3, L2Port>`.
     pub(crate) fn provision(&self) -> factory_kernel::Commands<L3, crate::dispatch_port::L2Port<'a>> {
