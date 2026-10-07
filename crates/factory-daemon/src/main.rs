@@ -2,6 +2,7 @@
 //! runs until it is told to stop.
 
 mod access;
+mod agent_rows;
 mod state;
 mod l6_service;
 mod l2_service;

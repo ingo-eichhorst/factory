@@ -103,6 +103,8 @@ pub struct L3State {
     /// Whether each harness binary starts, probed before a dispatch and
     /// cached -- see `crate::harness_health` and issue #131.
     pub(crate) harness: crate::harness_health::HarnessHealth,
+    /// The standing-agent rows: L3's own handle (D3), not the task store.
+    pub(crate) agents: Arc<dyn factory_agents::store::AgentStore>,
 }
 
 /// L4 Process: tasks, runs, workflows, dispatch admission and scheduling.

@@ -14,4 +14,5 @@ pub mod role_chain;
 pub mod roster;
 pub mod selection;
 pub mod runtime;
+pub mod store;
 pub mod usage;

@@ -259,13 +259,13 @@ impl Engine {
     /// and every future lookup finds it on the first try.
     async fn existing_agent(&self, canonical_scope: &str, name: &str) -> Result<Option<AgentSession>> {
         let id = AgentSession::id_for(canonical_scope, name);
-        if let Some(found) = self.l4.store.get_agent(&id).await? {
+        if let Some(found) = self.l3.agents.get_agent(&id).await? {
             return Ok(Some(found));
         }
         let Some(legacy_id) = AgentSession::legacy_id_for(canonical_scope, name) else {
             return Ok(None);
         };
-        let Some(mut legacy) = self.l4.store.get_agent(&legacy_id).await? else {
+        let Some(mut legacy) = self.l3.agents.get_agent(&legacy_id).await? else {
             return Ok(None);
         };
         tracing::info!(
@@ -275,8 +275,8 @@ impl Engine {
         );
         legacy.id = id;
         legacy.scope = canonical_scope.to_string();
-        self.l4.store.put_agent(&legacy).await?;
-        let _ = self.l4.store.delete_agent(&legacy_id).await;
+        self.l3.agents.put_agent(&legacy).await?;
+        let _ = self.l3.agents.delete_agent(&legacy_id).await;
         Ok(Some(legacy))
     }
 
@@ -335,7 +335,7 @@ impl Engine {
         agent.state = AgentState::Starting;
         agent.started_at = Utc::now();
         agent.error = None;
-        self.l4.store.put_agent(&agent).await?;
+        self.l3.agents.put_agent(&agent).await?;
         self.shared.bus.publish(Event::AgentUpdated {
             agent: agent.clone(),
         });
@@ -397,7 +397,7 @@ impl Engine {
         agent.session = Some(session);
         agent.state = AgentState::Ready;
         agent.last_seen_at = Utc::now();
-        self.l4.store.put_agent(&agent).await?;
+        self.l3.agents.put_agent(&agent).await?;
         self.shared.bus.publish(Event::AgentUpdated {
             agent: agent.clone(),
         });
@@ -413,7 +413,7 @@ impl Engine {
         agent.state = AgentState::Gone;
         agent.error = Some(e.to_string());
         agent.session = None;
-        let _ = self.l4.store.put_agent(&agent).await;
+        let _ = self.l3.agents.put_agent(&agent).await;
         self.shared.bus.publish(Event::AgentUpdated { agent });
         Err(e)
     }
@@ -433,7 +433,7 @@ impl Engine {
         agent.token = None;
         agent.state = AgentState::Stopped;
         agent.last_seen_at = Utc::now();
-        self.l4.store.put_agent(&agent).await?;
+        self.l3.agents.put_agent(&agent).await?;
         self.shared.bus.publish(Event::AgentUpdated {
             agent: agent.clone(),
         });
@@ -472,7 +472,7 @@ impl Engine {
         agent.assigned_role = role;
         agent.role = agent.role_with(&declared);
         agent.last_seen_at = Utc::now();
-        self.l4.store.put_agent(&agent).await?;
+        self.l3.agents.put_agent(&agent).await?;
         self.shared.bus.publish(Event::AgentUpdated {
             agent: agent.clone(),
         });
@@ -540,7 +540,7 @@ impl Engine {
     }
 
     pub async fn require_agent(&self, id: &str) -> Result<AgentSession> {
-        self.l4.store
+        self.l3.agents
             .get_agent(id)
             .await?
             .ok_or_else(|| FactoryError::TaskNotFound(format!("agent {id}")))
@@ -567,7 +567,7 @@ impl Engine {
     /// and each needs its own answer.
     pub async fn reconcile_agents(self: &Arc<Self>) {
         let factory = self.factory_snapshot();
-        let stored = self.l4.store.agents().await.unwrap_or_default();
+        let stored = self.l3.agents.agents().await.unwrap_or_default();
         let mut seen = std::collections::BTreeSet::new();
 
         for scope in &factory.config.scopes {
@@ -614,7 +614,7 @@ impl Engine {
                         a.lifetime = decl.lifetime;
                         a.role = a.role_with(&decl.role);
                         a.last_seen_at = Utc::now();
-                        let _ = self.l4.store.put_agent(&a).await;
+                        let _ = self.l3.agents.put_agent(&a).await;
                         tracing::info!(agent = %id, "adopted a standing agent that outlived the daemon");
                     }
                     // Known but not running. Start it if it is meant to start
@@ -628,7 +628,7 @@ impl Engine {
                         if a.state != AgentState::Stopped {
                             a.state = AgentState::Gone;
                         }
-                        let _ = self.l4.store.put_agent(&a).await;
+                        let _ = self.l3.agents.put_agent(&a).await;
                         if decl.autostart() && a.state != AgentState::Stopped {
                             self.autostart(&scope.name, &decl.name()).await;
                         }
@@ -644,7 +644,7 @@ impl Engine {
                             decl.lifetime,
                             decl.role.clone(),
                         );
-                        let _ = self.l4.store.put_agent(&a).await;
+                        let _ = self.l3.agents.put_agent(&a).await;
                         if decl.autostart() {
                             self.autostart(&scope.name, &decl.name()).await;
                         }
@@ -652,7 +652,7 @@ impl Engine {
                 }
 
                 if let Some(lid) = migrated_from {
-                    let _ = self.l4.store.delete_agent(&lid).await;
+                    let _ = self.l3.agents.delete_agent(&lid).await;
                 }
             }
         }
@@ -670,7 +670,7 @@ impl Engine {
                     let _ = rt.stop(session).await;
                 }
             }
-            let _ = self.l4.store.delete_agent(&agent.id).await;
+            let _ = self.l3.agents.delete_agent(&agent.id).await;
             self.shared.bus.publish(Event::AgentRemoved { id: agent.id });
         }
     }
@@ -684,7 +684,7 @@ impl Engine {
     /// The standing-agent watchdog. Deliberately not the run watchdog: a
     /// permanent agent that has said nothing for an hour is doing its job.
     pub async fn supervise_agents(self: &Arc<Self>) {
-        let agents = self.l4.store.agents().await.unwrap_or_default();
+        let agents = self.l3.agents.agents().await.unwrap_or_default();
         for agent in agents {
             if !agent.declared || agent.state == AgentState::Stopped {
                 continue;
@@ -694,14 +694,14 @@ impl Engine {
                     let mut a = agent;
                     a.last_seen_at = Utc::now();
                     a.state = AgentState::Ready;
-                    let _ = self.l4.store.put_agent(&a).await;
+                    let _ = self.l3.agents.put_agent(&a).await;
                     continue;
                 }
                 let mut a = agent.clone();
                 a.state = AgentState::Gone;
                 a.session = None;
                 a.attach = None;
-                let _ = self.l4.store.put_agent(&a).await;
+                let _ = self.l3.agents.put_agent(&a).await;
                 self.shared.bus.publish(Event::AgentUpdated { agent: a });
                 tracing::warn!(agent = %agent.id, "standing agent's session is gone");
             }
@@ -787,7 +787,7 @@ impl Engine {
     /// does. `(subject, scope, agent name)` -- a standing agent's own id, or
     /// `run:<id>` for a task's session.
     async fn subject_for_session(&self, session: &SessionRef) -> Option<(String, String, String)> {
-        if let Ok(agents) = self.l4.store.agents().await {
+        if let Ok(agents) = self.l3.agents.agents().await {
             if let Some(agent) = agents.into_iter().find(|a| a.session.as_ref() == Some(session)) {
                 return Some((agent.id, agent.scope, agent.name));
             }
