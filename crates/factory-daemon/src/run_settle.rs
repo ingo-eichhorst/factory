@@ -638,8 +638,6 @@ impl L4Service<'_> {
         }
         self.mirror_to_task(&run).await;
         self.settle_retry(&run).await;
-        self.core.settle_run_deployments(&run).await;
-        self.core.settle_suggestion_ask(&run).await;
         self.sweep_workspaces().await;
         if status != RunStatus::Done {
             if let Ok(Some(task)) = self.state.store.get(&run.task_id).await {

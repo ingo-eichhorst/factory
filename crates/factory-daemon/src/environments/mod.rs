@@ -600,6 +600,100 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    /// A release run and the deployment it recorded, started by that run, plus a manual deployment that no run owns.
+    async fn a_release_run_with_a_running_deploy(engine: &Arc<Engine>) -> (factory_core::run::Run, String, String) {
+        use factory_core::{NewRun, Trigger};
+        let task = factory_core::adapter::store::task_from_new(
+            factory_core::task::NewTask { title: "release".into(), ..Default::default() },
+            "company".into(), "shell".into(), "shell".into(),
+        );
+        engine.l4.store.create(&task).await.unwrap();
+        let run = engine.l4.store.create_run(&NewRun {
+            task_id: task.id, trigger: Trigger::Manual, agent: "shell".into(), adapter: "shell".into(),
+            runtime: "herdr".into(), token: "run-test-token".into(), queued_at: None, scheduled_for: None,
+        }).await.unwrap();
+        let actor = Caller::Agent { scope: "company".into(), name: "shell".into(), role: Role::foreman(), run_id: Some(run.id.clone()) };
+        let recorded = engine.deploy_start(&actor, start("prod", "abc")).await.unwrap();
+        let manual = engine.deploy_start(&Caller::Owner, start("manual", "abc")).await.unwrap();
+        (run, recorded.id, manual.id)
+    }
+
+    async fn deploy_status_within(engine: &Arc<Engine>, id: &str, want: DeployStatus, limit: std::time::Duration) -> Option<std::time::Duration> {
+        let started = std::time::Instant::now();
+        while started.elapsed() < limit {
+            if engine.l1.environments.deployment(id).await.unwrap().is_some_and(|d| d.status == want) {
+                return Some(started.elapsed());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        None
+    }
+
+    /// D4's shape for deployments: a run that ends without a finish receipt fails its deployment because the observer
+    /// sees the run end, not because L4 tells it. A terminal run event does it at once, and with the event lost the
+    /// timer alone does it within about two intervals; a manual deployment is never touched.
+    #[tokio::test]
+    async fn the_observer_fails_a_deployment_when_its_run_ends_by_event_and_by_timer_alone() {
+        let end = |engine: &Arc<Engine>, run_id: String| {
+            let engine = engine.clone();
+            async move {
+                engine.l4.store.update_run(&run_id, &factory_core::run::RunPatch {
+                    status: Some(factory_core::RunStatus::Cancelled), ..Default::default()
+                }).await.unwrap();
+                engine.l4.store.get_run(&run_id).await.unwrap().unwrap()
+            }
+        };
+        // The event is enough with the backstop an hour away.
+        let (engine, root) = engine_with("  - name: prod\n  - name: manual\n");
+        let (run, recorded, manual) = a_release_run_with_a_running_deploy(&engine).await;
+        engine.spawn_deployment_observer_with(std::time::Duration::from_secs(3600));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let ended = end(&engine, run.id.clone()).await;
+        engine.shared.bus.publish(Event::RunUpdated { run: ended });
+        assert!(deploy_status_within(&engine, &recorded, DeployStatus::Failed, std::time::Duration::from_secs(2)).await.is_some());
+        assert_eq!(engine.l1.environments.deployment(&manual).await.unwrap().unwrap().status, DeployStatus::Running);
+        std::fs::remove_dir_all(root).ok();
+
+        // No event at all: the timer alone finds it.
+        let (engine, root) = engine_with("  - name: prod\n  - name: manual\n");
+        let (run, recorded, manual) = a_release_run_with_a_running_deploy(&engine).await;
+        let interval = std::time::Duration::from_millis(150);
+        engine.spawn_deployment_observer_with(interval);
+        end(&engine, run.id.clone()).await;
+        let landed = deploy_status_within(&engine, &recorded, DeployStatus::Failed, interval * 4)
+            .await
+            .expect("the timer alone settled the deployment");
+        assert!(landed <= interval * 3, "{landed:?}");
+        assert_eq!(engine.l1.environments.deployment(&manual).await.unwrap().unwrap().status, DeployStatus::Running);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Settle-latency probe for deployment status: from `fail_run` returning (the run ended) to the deployment the
+    /// run owned reading `failed`. Prints one line per sample; `--ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn deployment_settle_latency_probe() {
+        let mut samples = Vec::new();
+        for _ in 0..12 {
+            let (engine, root) = engine_with("  - name: prod\n  - name: manual\n");
+            engine.spawn_deployment_observer();
+            let (run, recorded, _manual) = a_release_run_with_a_running_deploy(&engine).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            engine.l4_service().fail_run(&run.id, factory_core::run::FailKind::SessionGone, "probe").await;
+            let ended = std::time::Instant::now();
+            loop {
+                if engine.l1.environments.deployment(&recorded).await.unwrap().is_some_and(|d| d.status == DeployStatus::Failed) {
+                    break;
+                }
+                assert!(ended.elapsed() < std::time::Duration::from_secs(10), "never settled");
+                tokio::time::sleep(std::time::Duration::from_micros(200)).await;
+            }
+            samples.push(ended.elapsed().as_micros());
+            std::fs::remove_dir_all(root).ok();
+        }
+        println!("DEPLOY_SETTLE_US {:?}", samples);
+    }
+
     #[tokio::test]
     async fn strict_verification_cannot_be_skipped_or_removed_during_a_deploy() {
         let (engine, root) = engine_with("  - name: prod\n    checks: [{ kind: command, command: 'true', name: api }]\n");

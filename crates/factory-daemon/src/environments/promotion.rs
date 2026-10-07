@@ -164,6 +164,11 @@ fn word(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\"'\"'"))
 }
 
+/// How often the deployment observer reconciles the whole history when no run-ended event told it to look: the
+/// backstop, not the normal path. Reading the history is one query; fifteen seconds bounds how long a failed run's
+/// deployment can read `running` after a missed event, and costs nothing measurable.
+pub(crate) const DEPLOYMENT_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(15);
+
 impl Engine {
     async fn promotion_recipe(&self, scope: &str, environment: &EnvironmentDecl) -> Result<env::ReleaseCommand> {
         let recipe = environment.deploy.clone().ok_or_else(|| bad("the target has no deploy recipe"))?;
@@ -384,5 +389,37 @@ impl Engine {
                 self.settle_run_deployments(&run).await;
             }
         }
+    }
+
+    /// A run that ended without a finish receipt fails its deployment (`settle_run_deployments`). L4 used to call this
+    /// at the end of every run; now this observer watches run completion instead (D4's shape, S12): a terminal
+    /// `Event::RunUpdated` settles that run's deployments at once, and every `interval` the whole history is
+    /// reconciled, which is all that is needed when an event is missed (the bus is lossy by design).
+    pub(crate) fn spawn_deployment_observer(self: &Arc<Self>) {
+        self.spawn_deployment_observer_with(DEPLOYMENT_BACKSTOP);
+    }
+
+    pub(crate) fn spawn_deployment_observer_with(self: &Arc<Self>, interval: std::time::Duration) {
+        use tokio::sync::broadcast::error::RecvError;
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let mut bus = engine.shared.bus.subscribe();
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await; // the first tick is immediate; startup reconciles once itself
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => engine.reconcile_run_deployments().await,
+                    event = bus.recv() => match event {
+                        Ok(factory_core::event::Event::RunUpdated { run }) if run.status.is_terminal() => {
+                            engine.settle_run_deployments(&run).await;
+                        }
+                        Ok(_) => {}
+                        Err(RecvError::Lagged(_)) => engine.reconcile_run_deployments().await,
+                        Err(RecvError::Closed) => return,
+                    },
+                }
+            }
+        });
     }
 }

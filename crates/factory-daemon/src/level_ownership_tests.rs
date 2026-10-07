@@ -193,7 +193,7 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("configuration.rs", "services", 1),
     ("doctor.rs", "reach", 2),
     ("engine.rs", "reach", 22),
-    ("engine.rs", "services", 12),
+    ("engine.rs", "services", 11),
     ("environments/promotion.rs", "reach", 6),
     ("environments/promotion.rs", "services", 3),
     ("environments/recovery.rs", "reach", 3),
@@ -239,7 +239,6 @@ const DIRECT_PROVIDER_BASELINE: &[(&str, usize)] = &[];
 
 /// `self.core.` call sites per file (the transitional `L4Service::core`). May only shrink; goes away with the handle.
 const CORE_BASELINE: &[(&str, usize)] = &[
-    ("run_settle.rs", 2),
     ("intake.rs", 1),
     ("l4_service.rs", 2),
 ];
