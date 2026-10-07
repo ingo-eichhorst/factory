@@ -3496,7 +3496,7 @@ impl Engine {
         {
             self.authorize_workflow_spawn(caller, &node.task).await?;
         }
-        let plans = self.control_plans(&definition).await?;
+        let plans = self.l4_service().control_plans(&definition).await?;
         let (definition, _) = definition.inject(&plans);
         definition.validate().map_err(FactoryError::BadRequest)?;
 
@@ -3647,10 +3647,7 @@ impl Engine {
     }
 
     pub(crate) async fn workflow_run(&self, id: &str) -> Result<WorkflowRun> {
-        self.l4.workflows
-            .get_run(id)
-            .await?
-            .ok_or_else(|| missing("workflow run", id))
+        self.l4_service().workflow_run(id).await
     }
 
     pub(crate) async fn create_workflow(&self, draft: WorkflowDraft) -> Result<WorkflowDefinition> {
@@ -3763,9 +3760,9 @@ impl Engine {
         // `#118`: the control plan's required steps merge into this run's
         // immutable snapshot as locked gate nodes. The stored definition is
         // untouched -- a later plan applies to later runs, never this one.
-        let plans = self.control_plans(&definition).await?;
+        let plans = self.l4_service().control_plans(&definition).await?;
         let (mut definition, _) = definition.inject(&plans);
-        self.bind_functionaries(&mut definition).await?;
+        self.l4_service().bind_functionaries(&mut definition).await?;
         self.freeze_workflow_workspace(&mut definition).await?;
         definition.validate().map_err(FactoryError::BadRequest)?;
         let mut run = WorkflowRun::new(definition, caller.as_workflow_actor());

@@ -358,10 +358,10 @@ impl Engine {
                 run: Box::pin(self.cancel_workflow(&id)).await?,
             }),
             Request::WorkflowLint { workflow, task, scope, category } => Ok(Payload::WorkflowLint {
-                lint: self.workflow_lint(workflow, task, scope, category).await?,
+                lint: self.l4_service().workflow_lint(workflow, task, scope, category).await?,
             }),
             Request::RunAttestations { id } => Ok(Payload::Attestations {
-                attestations: self.run_attestations(&id).await?,
+                attestations: self.l4_service().run_attestations(&id).await?,
             }),
             Request::RunProvenance { id } => Ok(Payload::RunProvenance {
                 records: crate::facts::Facts::<factory_kernel::People>::new(self).get::<factory_kernel::ArtifactProvenance>(&id).await?,

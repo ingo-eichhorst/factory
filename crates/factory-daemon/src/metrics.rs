@@ -2791,7 +2791,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let base = engine.run_attestations(&run.id).await.unwrap().remove(0);
+        let base = engine.l4_service().run_attestations(&run.id).await.unwrap().remove(0);
         for (round, verdict) in verdicts.iter().enumerate() {
             let mut a = base.clone();
             a.id = uuid::Uuid::new_v4().to_string();

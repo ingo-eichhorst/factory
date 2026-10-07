@@ -437,7 +437,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     engine.spawn_bench_judge();
     // `#118`'s verifier, and the runs a restart caught mid-verification.
     engine.spawn_verifier();
-    engine.recover_verifications().await;
+    engine.l4_service().recover_verifications().await;
     // `#179`'s admission queue: a run ending wakes whatever is waiting on
     // its (scope, agent) right away, rather than only on the next tick.
     engine.spawn_capacity_release_worker();
