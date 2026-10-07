@@ -41,18 +41,18 @@ use Owner::*;
 const OWNERS: &[(&str, Owner)] = &[
     // L1 Infrastructure
     ("backup/", L1),
-    ("environments/promotion.rs", Wiring),
-    ("intent.rs", Wiring),
-    ("environments/recovery.rs", Wiring),
-    ("environments/report.rs", Wiring),
+    ("environments/promotion.rs", Wiring), // composes L4 workflow/promotion over L1 deployments and L2 environments
+    ("intent.rs", Wiring), // authored L6 intent as plain input, read by any level
+    ("environments/recovery.rs", Wiring), // composes L4 recovery workflows over L1/L2 recovery evidence
+    ("environments/report.rs", Wiring), // the Operations environments report: L4 and L2 facts as one page
     ("environments/", L1),
     ("host.rs", L1),
     ("host_power.rs", L1),
-    ("host_power/page.rs", Wiring),
+    ("host_power/page.rs", Wiring), // the host power page: L1 assertion state beside L4 liveness
     ("host_power/", L1),
     ("power.rs", L1),
     ("github_deployments.rs", L4),
-    ("doctor.rs", Wiring),
+    ("doctor.rs", Wiring), // `factory doctor`: diagnostics across every level
     ("renewals/mod.rs", Wiring), // the Important Dates page: L1 and L2 caches plus L6 attestations and clock
     ("renewals/", L1),
     // L2 Environment
@@ -83,7 +83,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("scheduler.rs", L4),
     ("schedule.rs", L4),
     ("occupancy.rs", L4),
-    ("operations_report.rs", Wiring),
+    ("operations_report.rs", Wiring), // the Operations tab: L4 tasks and runs composed with L2/L3 attention
     ("operations.rs", L4),
     ("costs.rs", L4),
     ("workspace_lifecycle.rs", L4),
@@ -96,7 +96,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("run_settle.rs", L4),
     ("run_start.rs", L4),
     ("scheduling.rs", L4),
-    ("supplied.rs", Wiring),
+    ("supplied.rs", Wiring), // what L5/L6 supply to L4 (quality block, functionary binding) and workflow lint
     ("l4_port.rs", L4),
     ("l4_service.rs", L4),
     ("l4_spawner.rs", L4),
@@ -109,9 +109,9 @@ const OWNERS: &[(&str, Owner)] = &[
     ("l5_spawner.rs", L5),
     ("datasets.rs", L5),
     ("suggestions.rs", L5),
-    ("quality/", Wiring),
-    ("metrics.rs", Wiring),
-    ("signposts.rs", Wiring),
+    ("quality/", Wiring), // L5 quality evaluation composed over metrics and the cross-level check service
+    ("metrics.rs", Wiring), // L5 metrics composed with L6 policy inputs over L1 to L4 evidence
+    ("signposts.rs", Wiring), // L5 signposts composed the same way
     // L6 Direction
     ("policies/", L6),
     ("goals/", L6),
@@ -125,21 +125,21 @@ const OWNERS: &[(&str, Owner)] = &[
     ("router/l4.rs", L4),
     ("router/l5.rs", L5),
     ("router/l6.rs", L6),
-    ("router/mod.rs", Wiring),
-    ("router/own.rs", Wiring),
-    ("scope_views.rs", Wiring),
-    ("runtime_events.rs", Wiring),
-    ("engine.rs", Wiring),
-    ("access.rs", Wiring),
-    ("main.rs", Wiring),
-    ("state.rs", Wiring),
-    ("interfaces/", Wiring),
-    ("facts/", Wiring),
-    ("stores.rs", Wiring),
-    ("commands.rs", Wiring),
-    ("configuration.rs", Wiring),
-    ("discovery.rs", Wiring),
-    ("ui.rs", Wiring),
+    ("router/mod.rs", Wiring), // request routing: the entry point
+    ("router/own.rs", Wiring), // routing for requests no level owns
+    ("scope_views.rs", Wiring), // scope read views over L3 agents and L4 tasks
+    ("runtime_events.rs", Wiring), // L2 runtime push events fanned to L3 agents and L4 runs
+    ("engine.rs", Wiring), // the Engine: status and infrastructure composition, construction, the forwarders that remain
+    ("access.rs", Wiring), // authorization over every request: reads L3 roles and L4 tasks
+    ("main.rs", Wiring), // startup: builds the services and starts the workers
+    ("state.rs", Wiring), // the per-level state groups
+    ("interfaces/", Wiring), // socket and http: the entry points
+    ("facts/", Wiring), // the fact providers: the wiring that serves each level its facts
+    ("stores.rs", Wiring), // store construction
+    ("commands.rs", Wiring), // the command and port constructors between adjacent levels
+    ("configuration.rs", Wiring), // scope configuration edits (dashboard, roles, secrets, policies files)
+    ("discovery.rs", Wiring), // instance discovery
+    ("ui.rs", Wiring), // the embedded UI
 ];
 
 /// (file, group, count): today's cross-level reach. May only shrink.
@@ -180,6 +180,55 @@ const ARC_ENGINE_BASELINE: &[(&str, usize)] = &[
     ("scheduler.rs", 1),
 ];
 /// `self.above.` call sites per file (`SuppliedFromAbove`: the quality block at dispatch and functionary binding).
+/// (page, metric, count) for every Wiring-owned file that reaches level state (`reach`), calls a level service
+/// (`services`), reads `Facts::<People>` outside the routers (`people`) or calls `::provider(` directly (`providers`).
+/// May only shrink; what each page composes is named in its entry in `OWNERS`.
+const PAGE_BASELINE: &[(&str, &str, usize)] = &[
+    ("access.rs", "reach", 22),
+    ("access.rs", "services", 6),
+    ("commands.rs", "people", 1),
+    ("commands.rs", "providers", 2),
+    ("commands.rs", "reach", 2),
+    ("commands.rs", "services", 1),
+    ("configuration.rs", "reach", 1),
+    ("configuration.rs", "services", 1),
+    ("doctor.rs", "reach", 2),
+    ("engine.rs", "reach", 23),
+    ("engine.rs", "services", 13),
+    ("environments/promotion.rs", "reach", 6),
+    ("environments/promotion.rs", "services", 3),
+    ("environments/recovery.rs", "reach", 3),
+    ("environments/recovery.rs", "services", 2),
+    ("environments/report.rs", "people", 4),
+    ("environments/report.rs", "reach", 3),
+    ("environments/report.rs", "services", 1),
+    ("facts/checks.rs", "providers", 8),
+    ("facts/l1.rs", "reach", 3),
+    ("facts/l1.rs", "services", 1),
+    ("facts/l2.rs", "reach", 1),
+    ("facts/l3.rs", "reach", 2),
+    ("facts/l4.rs", "people", 1),
+    ("facts/l4.rs", "reach", 10),
+    ("facts/l5.rs", "providers", 1),
+    ("facts/l5.rs", "reach", 2),
+    ("facts/mod.rs", "providers", 2),
+    ("facts/mod.rs", "services", 5),
+    ("host_power/page.rs", "reach", 4),
+    ("main.rs", "services", 5),
+    ("metrics.rs", "services", 2),
+    ("operations_report.rs", "reach", 8),
+    ("production.rs", "people", 1),
+    ("quality/mod.rs", "reach", 3),
+    ("renewals/mod.rs", "reach", 8),
+    ("renewals/mod.rs", "services", 1),
+    ("runtime_events.rs", "reach", 3),
+    ("runtime_events.rs", "services", 2),
+    ("scope_views.rs", "reach", 6),
+    ("signposts.rs", "people", 1),
+    ("signposts.rs", "services", 1),
+    ("site.rs", "reach", 3),
+    ("supplied.rs", "providers", 3),
+];
 const ABOVE_BASELINE: &[(&str, usize)] = &[
     ("run_start.rs", 1),
     ("verification.rs", 1),
@@ -467,6 +516,7 @@ struct Scan {
     direct_provider: BTreeMap<String, usize>,
     arc_engine: BTreeMap<String, usize>,
     above: BTreeMap<String, usize>,
+    pages: BTreeMap<(String, &'static str), usize>,
 }
 
 fn scan() -> Scan {
@@ -474,7 +524,7 @@ fn scan() -> Scan {
     let mut files = Vec::new();
     rust_files(&root, &mut files);
     files.sort();
-    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new(), core: BTreeMap::new(), core_state: BTreeMap::new(), impersonation: BTreeMap::new(), direct_provider: BTreeMap::new(), arc_engine: BTreeMap::new(), above: BTreeMap::new() };
+    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new(), core: BTreeMap::new(), core_state: BTreeMap::new(), impersonation: BTreeMap::new(), direct_provider: BTreeMap::new(), arc_engine: BTreeMap::new(), above: BTreeMap::new(), pages: BTreeMap::new() };
     for file in files {
         let relative = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
         if is_test_file(&relative) {
@@ -498,7 +548,18 @@ fn scan() -> Scan {
             result.core.insert(relative.clone(), core);
         }
         let Some(own_group) = level_group(owner) else {
-            continue; // wiring and the entry point may reach any group
+            // A page (wiring, the entry point, composition over several levels) may reach any group today; what it
+            // does is counted per page and may only shrink (S12).
+            let reach: usize = group_reach(&code).values().sum();
+            let services: usize = SERVICES.iter().map(|service| code.matches(service.accessor).count()).sum();
+            let people = if relative.starts_with("router/") { 0 } else { people_reach(&code) };
+            let providers = direct_provider_calls(&code);
+            for (metric, count) in [("reach", reach), ("services", services), ("people", people), ("providers", providers)] {
+                if count > 0 {
+                    result.pages.insert((relative.clone(), metric), count);
+                }
+            }
+            continue;
         };
         let impersonated = impersonated_readers(&code, &own_group.to_uppercase());
         if impersonated > 0 {
@@ -562,6 +623,10 @@ fn describe(scan: &Scan) -> String {
     out.push_str("];\nconst ARC_ENGINE_BASELINE: &[(&str, usize)] = &[\n");
     for (file, count) in &scan.arc_engine {
         out.push_str(&format!("    ({file:?}, {count}),\n"));
+    }
+    out.push_str("];\nconst PAGE_BASELINE: &[(&str, &str, usize)] = &[\n");
+    for ((file, metric), count) in &scan.pages {
+        out.push_str(&format!("    ({file:?}, {metric:?}, {count}),\n"));
     }
     out.push_str("];\nconst ABOVE_BASELINE: &[(&str, usize)] = &[\n");
     for (file, count) in &scan.above {
@@ -699,6 +764,33 @@ fn l4_code_holds_an_arc_engine_only_through_the_spawner_and_the_rest_only_shrink
             && !scan.arc_engine.contains_key("bench/engine.rs"),
         "verification and intake take an `L4Spawner`, bench an `L5Spawner`, never an `Arc<Engine>`"
     );
+}
+
+/// The pages (Wiring-owned files: composition over several levels, wiring, the entry point) are the largest area the
+/// level ratchets do not see. Each page's reach into level state, calls into level services, People reads and raw
+/// provider calls are counted here and may only shrink (S12).
+#[test]
+fn pages_only_shrink() {
+    let scan = scan();
+    let baseline: BTreeMap<(String, &str), usize> =
+        PAGE_BASELINE.iter().map(|(file, metric, count)| ((file.to_string(), *metric), *count)).collect();
+    let mut bad = Vec::new();
+    for (key, count) in &scan.pages {
+        match baseline.get(&(key.0.clone(), key.1)) {
+            None => bad.push(format!("{}: {count} {} on a page, new", key.0, key.1)),
+            Some(allowed) if count > allowed => bad.push(format!("{}: {count} {} > {allowed}", key.0, key.1)),
+            Some(allowed) if count < allowed => {
+                bad.push(format!("{}: {count} {} < baseline {allowed}: lower PAGE_BASELINE", key.0, key.1))
+            }
+            _ => {}
+        }
+    }
+    for (file, metric) in baseline.keys() {
+        if !scan.pages.contains_key(&(file.clone(), metric)) {
+            bad.push(format!("{file}: no longer has {metric}: remove it from PAGE_BASELINE"));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}\ncurrent state:\n{}", describe(&scan));
 }
 
 #[test]
