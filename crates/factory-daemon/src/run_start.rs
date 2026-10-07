@@ -93,7 +93,6 @@ impl L4Service<'_> {
             Err(FactoryError::HarnessUnhealthy(reason)) => {
                 tracing::warn!(task = task_id, "held on its harness: {reason}");
                 self.record_workflow_task_state(task_id).await;
-                self.core.record_bench_task_state(task_id).await;
                 return;
             }
             // Held on `max_sessions` (`#179`), not failed either -- the task
@@ -151,7 +150,6 @@ impl L4Service<'_> {
                     }
                 }
                 self.record_workflow_task_state(task_id).await;
-                self.core.record_bench_task_state(task_id).await;
                 return;
             }
             Err(e) => {
@@ -191,13 +189,11 @@ impl L4Service<'_> {
                     self.publish_task(task_id).await;
                 }
                 self.record_workflow_task_state(task_id).await;
-                self.core.record_bench_task_state(task_id).await;
                 return;
             }
         };
         tracing::info!(task = task_id, run = %run.id, attempt = run.attempt, "dispatched");
         self.record_workflow_task_state(task_id).await;
-        self.core.record_bench_task_state(task_id).await;
     }
     pub(crate) async fn dispatch(&self, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) -> Result<Run> {
         Box::pin(self.dispatch_with(task_id, trigger, due, continue_from, Vec::new())).await

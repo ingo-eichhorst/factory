@@ -33,6 +33,12 @@ fn missing(kind: &str, id: &str) -> FactoryError {
     FactoryError::BadRequest(format!("no such {kind}: {id}"))
 }
 
+/// The backstop interval of the judge poller (D4). A poll reads, per in-flight attempt of an active bench run, the
+/// task and its newest run -- a few store reads -- and is skipped altogether when no bench run is active. Two seconds
+/// bounds the extra latency when a settle event is missed to about two seconds while costing nothing measurable; the
+/// settle event keeps the normal case near immediate.
+pub(crate) const BENCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// 10 minutes -- the reset timeout the issue names, and the gate's own
 /// fallback when a case sets no `timeout_seconds`. The same number
 /// `#118`'s required steps fall back to, from the same shared runner.
@@ -97,17 +103,9 @@ impl Engine {
         self.l5_service().recover_bench_runs(&self.l5_spawner()).await
     }
 
-    // L4's run path tells L5 a task settled, and `place_run` asks for a case's pinned base and reset command: page
-    // forwarders, because an L4 file calling `.l5_service()` would be a pull up the ladder. The D4 judge loop
-    // (S10 part 3) replaces the notification with L5 reading run completion.
-    pub(crate) async fn record_bench_task_state(&self, task_id: &str) {
-        self.l5_service().record_bench_task_state(task_id).await
-    }
-
-    pub(crate) async fn sync_bench_for_task(&self, task_id: &str) {
-        self.l5_service().sync_bench_for_task(task_id).await
-    }
-
+    // `place_run` asks for a case's pinned base and reset command: page forwarders, because an L4 file calling
+    // `.l5_service()` would be a pull up the ladder (they go when the bench origin carries them at creation). L4 no
+    // longer tells L5 that a task settled: the judge poller below reads run completion itself (D4).
     pub(crate) async fn bench_case_base(&self, origin: &factory_core::task::OriginRef) -> Result<Option<String>> {
         self.l5_service().bench_case_base(origin).await
     }
@@ -131,6 +129,17 @@ impl Engine {
     /// (there should never be one) is a no-op: the receiver is taken once,
     /// the first time, and `None` after.
     pub fn spawn_bench_judge(self: &Arc<Self>) {
+        self.spawn_bench_judge_with(BENCH_POLL_INTERVAL);
+    }
+
+    /// `spawn_bench_judge` with an explicit backstop interval (the tests shorten it).
+    ///
+    /// Two tasks start together: the worker that judges one enqueued attempt at a time, and the poller that decides
+    /// which attempts are ready (D4). The poller wakes on a settle event (`Event::RunUpdated` with a terminal run, or
+    /// `Event::TaskUpdated` of a settled bench task) and, regardless of events, every `interval`. The bus is lossy by
+    /// design, so the timer alone is enough; the event only brings the normal case back to where a direct
+    /// notification from L4 used to put it.
+    pub(crate) fn spawn_bench_judge_with(self: &Arc<Self>, interval: std::time::Duration) {
         let Some(mut rx) = self.l5.bench_judge_rx.lock().unwrap().take() else {
             return;
         };
@@ -139,6 +148,27 @@ impl Engine {
             let spawner = engine.l5_spawner();
             while let Some(task_id) = rx.recv().await {
                 engine.l5_service().judge_enqueued(&task_id, &spawner).await;
+            }
+        });
+        let engine = self.clone();
+        tokio::spawn(async move {
+            use tokio::sync::broadcast::error::RecvError;
+            let mut bus = engine.shared.bus.subscribe();
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await; // the first tick is immediate: nothing to poll yet
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    event = bus.recv() => match event {
+                        Ok(event) if crate::bench::settle_hint(&event) => {}
+                        Ok(_) => continue,
+                        // Missed events are what the timer exists for: poll now rather than wait.
+                        Err(RecvError::Lagged(_)) => {}
+                        Err(RecvError::Closed) => return,
+                    },
+                }
+                engine.l5_service().poll_bench_attempts().await;
             }
         });
     }
@@ -437,33 +467,55 @@ impl L5Service<'_> {
         }
     }
 
-    /// Enqueue `task_id` for the judge worker (`spawn_bench_judge`) to look
-    /// at once its task's run has settled. Judging -- which means running
-    /// the case's own `gate`, for up to its own timeout or the ten-minute
-    /// default -- must never run on the caller's own path: this used to
-    /// call `judge_bench_attempt` directly and was split from
-    /// `sync_bench_for_task` only to dodge an `E0391` compiler cycle
-    /// through `advance_bench_run`'s spawned continuations. Enqueueing
-    /// instead of calling removes the cycle at its root (nothing here calls
-    /// back into `advance_bench_run`'s own opaque future type at all), so
-    /// the split is kept only for the two names' separate call-site
-    /// histories -- both do exactly the same thing now.
-    ///
-    /// A no-op when the task carries no `bench_origin`, or when it is
-    /// already enqueued or being judged -- which is what makes calling this
-    /// (or `sync_bench_for_task`) more than once for the same settle safe,
-    /// without ever running the same case's gate command twice.
+    /// Enqueue `task_id` for the judge worker (`spawn_bench_judge`) to look at once its task's run has settled.
+    /// Judging -- which means running the case's own `gate`, for up to its own timeout or the ten-minute default --
+    /// never runs on a caller's own path: it is enqueued, and the worker judges. A no-op when the task carries no
+    /// `bench_origin`, or when it is already enqueued or being judged (`bench_judging`), which is what makes enqueueing
+    /// the same settle more than once (an event and the timer both firing) safe without ever running the same case's
+    /// gate twice.
+    #[cfg(test)]
     pub(crate) async fn record_bench_task_state(&self, task_id: &str) {
         self.enqueue_bench_judgement(task_id).await;
     }
 
-    /// The same enqueue. Kept as its own name for the call sites that used
-    /// to need it to also advance the run afterward (`TaskReport`,
-    /// `TaskCancel`, restart recovery) -- the worker does that unconditionally
-    /// now, for every enqueue, so there is nothing left for this to do that
-    /// `record_bench_task_state` does not.
+    #[cfg(test)]
     pub(crate) async fn sync_bench_for_task(&self, task_id: &str) {
         self.enqueue_bench_judgement(task_id).await;
+    }
+
+    /// D4: look at every in-flight attempt of the active bench runs and enqueue the ones whose task has settled.
+    /// Nothing is read when no bench run is active. "Settled" is the judge's own precondition, read from L4 as facts:
+    /// the task's newest run is terminal, or no run was ever created and the task is itself settled. An attempt still
+    /// in flight is left alone, so a poll costs two reads per in-flight attempt and never queues a no-op.
+    pub(crate) async fn poll_bench_attempts(&self) {
+        let runs = match self.state.bench.active_runs().await {
+            Ok(runs) if !runs.is_empty() => runs,
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!("could not list active bench runs: {error}");
+                return;
+            }
+        };
+        for run in runs {
+            for attempt in run.attempts.iter().filter(|attempt| attempt.verdict.is_none()) {
+                let Some(task_id) = &attempt.task_id else { continue };
+                if self.attempt_settled(task_id).await {
+                    self.enqueue_bench_judgement(task_id).await;
+                }
+            }
+        }
+    }
+
+    async fn attempt_settled(&self, task_id: &str) -> bool {
+        let Ok(Some(task)) = self.task_record(task_id).await else { return false };
+        if task.bench_origin.is_none() {
+            return false;
+        }
+        match self.latest_run(task_id).await {
+            Ok(Some(run)) => run.status.is_terminal(),
+            Ok(None) => task.is_settled(),
+            Err(_) => false,
+        }
     }
 
     async fn enqueue_bench_judgement(&self, task_id: &str) {
@@ -745,7 +797,7 @@ impl L5Service<'_> {
             // in `run_id` itself now, and `finish_bench_judgement` (see its
             // own doc comment) never overwrites a verdict this fallback
             // already gave it, whichever lands first.
-            self.record_bench_task_state(task_id).await;
+            self.enqueue_bench_judgement(task_id).await;
         }
 
         // Settle whatever the cancellation above did not already -- a task
@@ -847,14 +899,6 @@ impl L5Service<'_> {
             }
         };
         for run in runs {
-            for attempt in &run.attempts {
-                if attempt.verdict.is_some() {
-                    continue;
-                }
-                if let Some(task_id) = &attempt.task_id {
-                    self.record_bench_task_state(task_id).await;
-                }
-            }
             if let Err(e) = self.advance_bench_run(&run.id, spawner).await {
                 tracing::warn!(bench_run = run.id, "could not recover bench run: {e}");
             }
@@ -880,7 +924,7 @@ mod tests {
     use factory_core::task::{NewTask, TaskReport};
     use factory_plugins::{Registry, SqliteStore};
 
-    fn test_engine(scope_path: std::path::PathBuf) -> Arc<Engine> {
+    fn build_engine(scope_path: std::path::PathBuf) -> Arc<Engine> {
         let config = Config {
             version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
@@ -928,12 +972,147 @@ mod tests {
         let registry = Registry::with_builtins();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         let engine = Arc::new(Engine::new(factory, registry, store, std::path::PathBuf::from("factory"), Vec::new()));
-        // Judging happens off the caller's path now (see `spawn_bench_judge`),
+        engine
+    }
+
+    fn test_engine(scope_path: std::path::PathBuf) -> Arc<Engine> {
+        let engine = build_engine(scope_path);
+        // Judging happens off the caller's path (see `spawn_bench_judge`),
         // so any test that enqueues a judgement needs a worker actually
         // running to pick it up -- exactly what a real daemon does at
         // startup.
         engine.spawn_bench_judge();
         engine
+    }
+
+    // ------------------------------------------------------------------
+    // D4: the judge poller finds settled attempts itself
+    // ------------------------------------------------------------------
+
+    /// Seeds a bench run whose attempt (carrying its task id, as a real dispatch records it) has a finished run, and
+    /// returns the case-less pieces a test needs. Nothing is published on the bus.
+    async fn seed_settled_attempt(engine: &Arc<Engine>, run_id: &str, gate: Option<String>) -> (BenchOrigin, Task) {
+        let case = Case {
+            id: "case-1".into(),
+            title: "case one".into(),
+            scope: "demo".into(),
+            instructions: "do the thing".into(),
+            gate,
+            reset: None,
+            base: None,
+            timeout_seconds: None,
+            origin: None,
+        };
+        let (origin, task) = seed(engine, run_id, case, "shell").await;
+        let task_run = engine
+            .l4
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Bench,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "local".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        engine
+            .l4
+            .store
+            .update_run(
+                &task_run.id,
+                &RunPatch { status: Some(RunStatus::Done), ended_at: Some(Utc::now()), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        (origin, task)
+    }
+
+    async fn verdict_within(engine: &Arc<Engine>, run_id: &str, limit: std::time::Duration) -> Option<std::time::Duration> {
+        let started = std::time::Instant::now();
+        while started.elapsed() < limit {
+            if let Ok(Some(run)) = engine.l5.bench.get_run(run_id).await {
+                if run.attempts.iter().all(|a| a.verdict.is_some()) {
+                    return Some(started.elapsed());
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        None
+    }
+
+    /// The bus is lossy by design, so the timer must be enough on its own: nothing here ever publishes an event or
+    /// enqueues anything, and the verdict still lands within about two intervals.
+    #[tokio::test]
+    async fn the_timer_alone_judges_a_settled_attempt_within_about_two_intervals() {
+        let engine = build_engine(temp_dir("poll-timer-only"));
+        let interval = std::time::Duration::from_millis(200);
+        seed_settled_attempt(&engine, "run-timer-only", None).await;
+        engine.spawn_bench_judge_with(interval);
+        let landed = verdict_within(&engine, "run-timer-only", interval * 3)
+            .await
+            .expect("the verdict landed within three intervals with no event at all");
+        assert!(landed <= interval * 2 + std::time::Duration::from_millis(150), "{landed:?}");
+    }
+
+    /// The event is a hint: with the backstop set far away, a terminal run's event alone gets the attempt judged
+    /// promptly.
+    #[tokio::test]
+    async fn a_settle_event_judges_without_waiting_for_the_timer() {
+        let engine = build_engine(temp_dir("poll-event-hint"));
+        let (_origin, task) = seed_settled_attempt(&engine, "run-event-hint", None).await;
+        engine.spawn_bench_judge_with(std::time::Duration::from_secs(3600));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await; // the poller has subscribed
+        let run = engine.l4.store.runs(&task.id, 1).await.unwrap().remove(0);
+        engine.shared.bus.publish(Event::RunUpdated { run });
+        assert!(
+            verdict_within(&engine, "run-event-hint", std::time::Duration::from_secs(2)).await.is_some(),
+            "the hint brought the poll forward"
+        );
+    }
+
+    /// An event, the timer and a direct enqueue all landing on one settled attempt run its gate exactly once
+    /// (`bench_judging` is the single flight).
+    #[tokio::test]
+    async fn an_event_the_timer_and_an_enqueue_judge_an_attempt_exactly_once() {
+        let engine = build_engine(temp_dir("poll-single-flight"));
+        let marker = engine.factory_snapshot().root.join("gate-runs");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        let gate = format!("echo x >> {}; sleep 0.3", marker.display());
+        let (_origin, task) = seed_settled_attempt(&engine, "run-single-flight", Some(gate)).await;
+        // Give the gate somewhere to run: the run's worktree.
+        let dir = engine.factory_snapshot().root.join("wt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let task_run = engine.l4.store.runs(&task.id, 1).await.unwrap().remove(0);
+        engine
+            .l4
+            .store
+            .update_run(&task_run.id, &RunPatch { worktree_path: Some(dir.display().to_string()), ..Default::default() })
+            .await
+            .unwrap();
+        engine.spawn_bench_judge_with(std::time::Duration::from_millis(50));
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        for _ in 0..5 {
+            let run = engine.l4.store.runs(&task.id, 1).await.unwrap().remove(0);
+            engine.shared.bus.publish(Event::RunUpdated { run });
+            engine.l5_service().record_bench_task_state(&task.id).await;
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        verdict_within(&engine, "run-single-flight", std::time::Duration::from_secs(5)).await.expect("judged");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await; // more ticks after the verdict
+        let runs = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert_eq!(runs.lines().count(), 1, "the gate ran once, not {}: {runs:?}", runs.lines().count());
+    }
+
+    /// With no active bench run a poll reads nothing and does nothing.
+    #[tokio::test]
+    async fn a_poll_with_no_active_bench_run_is_a_no_op() {
+        let engine = build_engine(temp_dir("poll-idle"));
+        engine.l5_service().poll_bench_attempts().await;
+        assert!(engine.l5.bench_judging.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1094,6 +1273,10 @@ mod tests {
             )
             .await
             .unwrap();
+        // A real dispatch records the task id on the attempt; the judge poller finds attempts by it.
+        let mut attempt = run.attempts[0].clone();
+        attempt.task_id = Some(task.id.clone());
+        engine.l5.bench.put_attempt(run_id, &attempt).await.unwrap();
         (origin, task)
     }
 
@@ -1151,7 +1334,7 @@ mod tests {
         // Deliberately no agent-authored entry: nothing reported anything --
         // the daemon gave up before the agent ever ran.
 
-        engine.record_bench_task_state(&task.id).await;
+        engine.l5_service().record_bench_task_state(&task.id).await;
 
         let settled = wait_for_settled(&engine, &origin.bench_run_id).await;
         let attempt = &settled.attempts[0];
@@ -1214,7 +1397,7 @@ mod tests {
             .await
             .unwrap();
 
-        engine.record_bench_task_state(&task.id).await;
+        engine.l5_service().record_bench_task_state(&task.id).await;
 
         let settled = wait_for_settled(&engine, &origin.bench_run_id).await;
         let attempt = &settled.attempts[0];
@@ -1259,7 +1442,7 @@ mod tests {
             .await
             .unwrap();
 
-        engine.record_bench_task_state(&task.id).await;
+        engine.l5_service().record_bench_task_state(&task.id).await;
 
         let settled = wait_for_settled(&engine, &origin.bench_run_id).await;
         let attempt = &settled.attempts[0];
@@ -1328,7 +1511,7 @@ mod tests {
             .await
             .unwrap();
 
-        engine.record_bench_task_state(&task.id).await;
+        engine.l5_service().record_bench_task_state(&task.id).await;
 
         let settled = wait_for_settled(&engine, &origin.bench_run_id).await;
         let attempt = &settled.attempts[0];
@@ -1534,7 +1717,7 @@ mod tests {
         let judging_engine = engine.clone();
         let judging_task_id = task.id.clone();
         let handle = tokio::spawn(async move {
-            judging_engine.record_bench_task_state(&judging_task_id).await;
+            judging_engine.l5_service().record_bench_task_state(&judging_task_id).await;
         });
 
         // Give the gate time to actually be running before cancelling.
@@ -1628,7 +1811,7 @@ mod tests {
             )
             .await
             .unwrap();
-        engine.sync_bench_for_task(&task.id).await;
+        engine.l5_service().sync_bench_for_task(&task.id).await;
         let elapsed = started.elapsed();
 
         assert!(
@@ -1836,4 +2019,84 @@ mod tests {
             .unwrap();
         assert_eq!(run.case_bases.get("good-base"), Some(&head), "{run:?}");
     }
+    /// Settle-latency probe (D4): the time from an agent report settling an attempt's L4 run (`report` returning)
+    /// to L5 having recorded the verdict. Prints one line per sample; run with `--ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn settle_latency_probe() {
+        let scope_dir = temp_dir("settle-latency-probe");
+        let engine = test_engine(scope_dir.clone());
+        let mut samples = Vec::new();
+        for n in 0..12 {
+            let case = Case {
+                id: format!("probe-{n}"),
+                title: "probe".into(),
+                scope: "demo".into(),
+                instructions: "true".into(),
+                gate: Some("true".into()),
+                reset: None,
+                base: None,
+                timeout_seconds: Some(30),
+                origin: None,
+            };
+            let run_id = format!("run-probe-{n}");
+            let (_origin, task) = seed(&engine, &run_id, case, "shell").await;
+            let task_run = engine
+                .l4
+                .store
+                .create_run(&NewRun {
+                    task_id: task.id.clone(),
+                    trigger: Trigger::Bench,
+                    agent: "shell".into(),
+                    adapter: "shell".into(),
+                    runtime: "local".into(),
+                    token: "tok".into(),
+                    queued_at: None,
+                    scheduled_for: None,
+                })
+                .await
+                .unwrap();
+            engine
+                .l4
+                .store
+                .update_run(
+                    &task_run.id,
+                    &RunPatch { worktree_path: Some(scope_dir.to_string_lossy().to_string()), ..Default::default() },
+                )
+                .await
+                .unwrap();
+            // Let the system be idle between samples, so every sample starts from the same place.
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            engine
+                .l4_service()
+                .report(
+                    &task.id,
+                    TaskReport {
+                        artifacts: Vec::new(),
+                        status: Some(RunStatus::Done),
+                        message: None,
+                        result: Some("ok".into()),
+                        send_to: None,
+                        error: None,
+                        token: Some("tok".into()),
+                    },
+                )
+                .await
+                .unwrap();
+            let settled_at = std::time::Instant::now();
+            let deadline = settled_at + std::time::Duration::from_secs(10);
+            loop {
+                if let Ok(Some(run)) = engine.l5.bench.get_run(&run_id).await {
+                    if run.attempts.iter().all(|a| a.verdict.is_some()) {
+                        break;
+                    }
+                }
+                assert!(std::time::Instant::now() < deadline, "no verdict within 10s");
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            samples.push(settled_at.elapsed().as_millis());
+        }
+        println!("SETTLE_LATENCY_MS {:?}", samples);
+    }
+
 }
