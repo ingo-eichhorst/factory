@@ -1,5 +1,5 @@
 //! L4 releases intent through L3; L2 alone checks and removes owned workspaces.
-use crate::engine::Engine;
+use crate::l4_service::L4Service;
 use factory_core::adapter::runtime::RuntimeStatus;
 use factory_core::error::{FactoryError, Result};
 use factory_core::task::{TaskEntry, TaskFilter, TaskStatus};
@@ -7,15 +7,15 @@ use factory_core::workflow::WorkflowNodeStatus;
 use factory_kernel::WorkspaceLifetime;
 use std::path::Path;
 
-impl Engine {
+impl L4Service<'_> {
     /// Upgrade legacy ownership from authoritative run receipts, never from a
     /// directory/branch scan. Require the exact daemon-generated run directory.
     pub(crate) async fn recover_workspaces(&self) {
-        let factory = self.factory_snapshot();
-        let Ok(tasks) = self.l4.store.list(&TaskFilter::default()).await else {
+        let factory = self.wiring.snapshot();
+        let Ok(tasks) = self.state.store.list(&TaskFilter::default()).await else {
             return;
         };
-        let mut known = match self.l4.workspaces.records().await {
+        let mut known = match self.state.workspaces.records().await {
             Ok(records) => records
                 .into_iter()
                 .map(|record| record.path)
@@ -29,7 +29,7 @@ impl Engine {
             let Ok(scope) = factory.scope_path(&task.scope) else {
                 continue;
             };
-            let Ok(attempts) = self.l4.store.runs(&task.id, u32::MAX).await else {
+            let Ok(attempts) = self.state.store.runs(&task.id, u32::MAX).await else {
                 continue;
             };
             for attempt in attempts {
@@ -57,7 +57,7 @@ impl Engine {
                     },
                 };
                 match self
-                    .l4.workspaces
+                    .state.workspaces
                     .adopt(spec, &scope, path.clone(), branch)
                     .await
                 {
@@ -92,7 +92,7 @@ impl Engine {
         }
         // Integration workspaces have their own durable workflow receipt,
         // not an agent run. Apply the same exact-path ownership proof.
-        if let Ok(workflows) = self.l4.workflows.runs(None, None, u32::MAX).await {
+        if let Ok(workflows) = self.state.workflows.runs(None, None, u32::MAX).await {
             for workflow in workflows {
                 let Some(integration) = workflow.integration else {
                     continue;
@@ -116,7 +116,7 @@ impl Engine {
                     lifetime: WorkspaceLifetime::Task,
                 };
                 match self
-                    .l4.workspaces
+                    .state.workspaces
                     .adopt(spec, &scope, path.clone(), integration.branch)
                     .await
                 {
@@ -149,7 +149,7 @@ impl Engine {
         path: &Path,
         excluding: Option<&str>,
     ) -> Result<()> {
-        for attempt in self.l4.store.runs(task_id, u32::MAX).await? {
+        for attempt in self.state.store.runs(task_id, u32::MAX).await? {
             if excluding == Some(attempt.id.as_str())
                 || attempt
                     .worktree_path
@@ -165,7 +165,7 @@ impl Engine {
                 ));
             }
             if let Some(session) = attempt.last_session.as_ref().or(attempt.session.as_ref()) {
-                let runtime = self.shared.registry.runtime(&session.runtime)?;
+                let runtime = self.wiring.registry().runtime(&session.runtime)?;
                 if !matches!(runtime.status(session).await, Ok(RuntimeStatus::Gone)) {
                     return Err(FactoryError::BadRequest(format!(
                         "workspace retained: session for run {} is not confirmed gone",
@@ -187,17 +187,17 @@ impl Engine {
     }
 
     async fn release_closed_workspaces(&self) -> Result<()> {
-        let _admission = self.l4.admission_lock.lock().await;
+        let _admission = self.state.admission_lock.lock().await;
         let records = self
-            .l4.workspaces
+            .state.workspaces
             .records()
             .await
             .map_err(|e| FactoryError::adapter("workspace", e))?;
         if records.is_empty() {
             return Ok(());
         }
-        let tasks = self.l4.store.list(&TaskFilter::default()).await?;
-        let active = self.l4.store.active_runs().await?;
+        let tasks = self.state.store.list(&TaskFilter::default()).await?;
+        let active = self.state.store.active_runs().await?;
         let mut eligible = Vec::new();
         let mut completed_workflows = std::collections::BTreeSet::new();
         let mut workflow_eligibility = std::collections::BTreeMap::new();
@@ -215,7 +215,7 @@ impl Engine {
                     continue;
                 }
                 workflow_eligibility.insert(id.clone(), false);
-                let Some(workflow) = self.l4.workflows.get_run(id).await? else {
+                let Some(workflow) = self.state.workflows.get_run(id).await? else {
                     continue;
                 };
                 if !workflow.status.is_terminal() {
@@ -264,7 +264,7 @@ impl Engine {
                 }
                 let mut quiet = true;
                 for sibling in &siblings {
-                    for attempt in self.l4.store.runs(&sibling.id, u32::MAX).await? {
+                    for attempt in self.state.store.runs(&sibling.id, u32::MAX).await? {
                         if let Some(path) = attempt.worktree_path {
                             if self
                                 .require_workspace_quiet(&sibling.id, Path::new(&path), None)
@@ -309,7 +309,7 @@ impl Engine {
                 completed_workflows.insert(workflow.id);
             }
         }
-        for (record, outcome) in crate::assignments::release(&self.l4.workspaces, &eligible)
+        for (record, outcome) in crate::assignments::release(&self.state.workspaces, &eligible)
             .await
             .map_err(|e| FactoryError::adapter("workspace", e))?
         {
@@ -331,7 +331,7 @@ impl Engine {
                 .with_data(serde_json::json!({ "path": record.path, "branch": record.branch, "workflow_run_id": record.spec.workflow_run_id }))).await;
         }
         let remaining = self
-            .l4.workspaces
+            .state.workspaces
             .records()
             .await
             .map_err(|e| FactoryError::adapter("workspace", e))?;
@@ -342,8 +342,8 @@ impl Engine {
             {
                 continue;
             }
-            if let Some(workflow) = self.l4.workflows.mark_workspace_cleanup(&id).await? {
-                self.shared.bus
+            if let Some(workflow) = self.state.workflows.mark_workspace_cleanup(&id).await? {
+                self.wiring.bus()
                     .publish(factory_core::event::Event::WorkflowRunUpdated { run: workflow });
             }
         }

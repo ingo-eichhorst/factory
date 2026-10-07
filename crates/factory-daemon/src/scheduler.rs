@@ -113,7 +113,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         // release reaches its waiting task immediately through that channel
         // on its own.
         engine.enqueue_capacity_sweep();
-        engine.sweep_workspaces().await;
+        engine.l4_service().sweep_workspaces().await;
 
         // -- standing agents ---------------------------------------------
         // Their own rule: only ever checked for whether the session is still

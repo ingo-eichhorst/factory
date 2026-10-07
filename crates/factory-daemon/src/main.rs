@@ -6,6 +6,7 @@ mod dispatch_port;
 mod harness_hold;
 mod runtime_events;
 mod l3_service;
+mod l4_service;
 mod admission;
 mod agent_rows;
 mod state;
@@ -426,7 +427,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     // agents are available. Recovery reuses task ids recorded before a crash.
     engine.recover_workflows().await;
     for finding in recovery_journal::import(&engine).await { tracing::warn!("recovery journal: {finding}"); }
-    engine.recover_workspaces().await;
+    engine.l4_service().recover_workspaces().await;
     // The one place a bench attempt's gate actually runs -- started before
     // recovery below, so anything it enqueues has a consumer immediately.
     engine.spawn_bench_judge();
@@ -483,7 +484,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let _ = shutdown_tx.send(true);
     // Before the loops stop: nothing will be watching the agents from here, so
     // say so in the record rather than leaving a span open across the gap.
-    engine.close_liveness().await;
+    engine.l4_service().close_liveness().await;
 
     for (kind, handle) in mounted {
         if tokio::time::timeout(std::time::Duration::from_secs(5), handle)

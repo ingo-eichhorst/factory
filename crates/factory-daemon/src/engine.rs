@@ -2109,7 +2109,7 @@ impl Engine {
         // had already used -- a pane an earlier run left behind, a harness
         // that spent tokens coming up -- is not this run's (#117). Never a
         // `?`: a runtime with no usage to give must not fail the run.
-        Box::pin(self.snapshot_usage(&run, factory_core::usage::SnapshotPoint::Dispatch)).await;
+        Box::pin(self.l4_service().snapshot_usage(&run, factory_core::usage::SnapshotPoint::Dispatch)).await;
         drop(_launching);
         let current = self.require_run(&run.id).await?;
         if current.status.is_terminal() { return Ok(current); }
@@ -2324,7 +2324,7 @@ impl Engine {
             Workspace::Fresh => None,
         };
         if let Some((path, _)) = &previous {
-            self.require_workspace_quiet(&task.id, path, Some(&run.id)).await?;
+            self.l4_service().require_workspace_quiet(&task.id, path, Some(&run.id)).await?;
         }
         let branch = worktree::branch_name(&task.id, &task.title, run.attempt);
         let dir = self.factory_snapshot().worktrees_dir().join(&run.id);
@@ -2346,7 +2346,7 @@ impl Engine {
         };
         let (placed, reused) = assignment.provision(&self.l4.workspaces, scope_path).await
             .map_err(|e| FactoryError::adapter("workspace", e))?;
-        if reused { self.require_workspace_quiet(&task.id, &placed.path, Some(&run.id)).await?; }
+        if reused { self.l4_service().require_workspace_quiet(&task.id, &placed.path, Some(&run.id)).await?; }
         let dir = placed.path;
         let branch = placed.branch;
         let run = self
@@ -2644,7 +2644,7 @@ impl Engine {
         let artifacts = if report.artifacts.is_empty() {
             None
         } else {
-            Some(self.capture_artifacts(&run, &reporting_task, &report.artifacts).await?)
+            Some(self.l4_service().capture_artifacts(&run, &reporting_task, &report.artifacts).await?)
         };
 
         let message = report.message.clone().unwrap_or_else(|| {
@@ -2802,7 +2802,7 @@ impl Engine {
             if let Some(artifacts) = &patch.artifacts {
                 candidate.artifacts = artifacts.clone();
             }
-            if let Err(error) = self.publish_artifacts(&candidate, ended_at).await {
+            if let Err(error) = self.l4_service().publish_artifacts(&candidate, ended_at).await {
                 // Verification owns this hold. A failed publication must
                 // never leave a stopped coordinator stuck in `verifying`.
                 if candidate.status == RunStatus::Verifying && self.require_run(run_id).await?.status == RunStatus::Verifying {
@@ -2906,7 +2906,7 @@ impl Engine {
         // Close its liveness span now or the chart draws the agent as still
         // working, forever.
         if let Ok(Some(task)) = self.l4.store.get(&run.task_id).await {
-            self.record_gone(&format!("run:{}", run.id), &task.scope, &run.agent)
+            self.l4_service().record_gone(&format!("run:{}", run.id), &task.scope, &run.agent)
                 .await;
             // A slot just freed: wake whatever is waiting on this (scope,
             // agent) -- `close_session`, called just before this by every
@@ -2919,7 +2919,7 @@ impl Engine {
         self.settle_retry(&run).await;
         self.settle_run_deployments(&run).await;
         self.settle_suggestion_ask(&run).await;
-        self.sweep_workspaces().await;
+        self.l4_service().sweep_workspaces().await;
         if status != RunStatus::Done {
             if let Ok(Some(task)) = self.l4.store.get(&run.task_id).await {
                 if let Some(subject) = task.labels.get(crate::verification::REVIEW_RUN_LABEL) {
@@ -3386,7 +3386,7 @@ impl Engine {
                 }
             }
             // The last reading, while the session is still there to ask.
-            Box::pin(self.snapshot_usage(run, factory_core::usage::SnapshotPoint::RunEnd)).await;
+            Box::pin(self.l4_service().snapshot_usage(run, factory_core::usage::SnapshotPoint::RunEnd)).await;
             // `#178`: a failed stop used to be silently discarded here (`let
             // _ =`); journaled instead, since `resolve_continue`'s "never
             // run two processes on one conversation" check relies on the
@@ -3723,36 +3723,22 @@ impl Engine {
     // -- small helpers ------------------------------------------------------
 
     pub(crate) async fn require(&self, id: &str) -> Result<Task> {
-        self.l4.store
-            .get(id)
-            .await?
-            .ok_or_else(|| FactoryError::TaskNotFound(id.to_string()))
+        self.l4_service().require(id).await
     }
 
     pub(crate) async fn require_run(&self, id: &str) -> Result<Run> {
-        self.l4.store
-            .get_run(id)
-            .await?
-            .ok_or_else(|| FactoryError::TaskNotFound(format!("run {id}")))
+        self.l4_service().require_run(id).await
     }
 
     pub(crate) async fn publish_task(&self, id: &str) {
-        if let Ok(Some(task)) = self.l4.store.get(id).await {
-            self.shared.bus.publish(Event::TaskUpdated { task });
-        }
+        self.l4_service().publish_task(id).await
     }
 
     /// `pub(crate)`: `occupancy::record_run_liveness` journals a hook-reported
     /// block or unblock the same way any other daemon-caused change is
     /// journaled here.
     pub(crate) async fn entry(&self, task_id: &str, entry: TaskEntry) {
-        if let Err(e) = self.l4.store.append_entry(task_id, &entry).await {
-            tracing::warn!(task = task_id, "could not record journal entry: {e}");
-        }
-        self.shared.bus.publish(Event::TaskEntry {
-            id: task_id.to_string(),
-            entry,
-        });
+        self.l4_service().entry(task_id, entry).await
     }
 }
 
@@ -7739,7 +7725,7 @@ mod tests {
             // Remove only this fixture's ownership ledger to emulate an older
             // daemon. Recovery proves ownership from the recorded run path.
             std::fs::remove_file(engine.factory_snapshot().worktrees_dir().join(".workspace-owner.json")).unwrap();
-            engine.recover_workspaces().await;
+            engine.l4_service().recover_workspaces().await;
             assert_eq!(engine.l4.workspaces.records().await.unwrap().len(), 1);
             assert!(path.exists(), "recovering a failed task does not close it");
             let response = engine.handle_request(Request::TaskClose {
@@ -7752,7 +7738,7 @@ mod tests {
             // Simulate the person moving their unfinished data out of the tree.
             let saved = scope_dir.join("saved-work");
             std::fs::rename(path.join("unfinished"), &saved).unwrap();
-            engine.sweep_workspaces().await;
+            engine.l4_service().sweep_workspaces().await;
             assert!(!path.exists());
             assert_eq!(std::fs::read_to_string(saved).unwrap(), "keep across fresh sessions");
             assert!(engine.l4.store.entries(&task.id, 100).await.unwrap().iter().any(|entry| entry.kind == "workspace_released"));
@@ -7799,7 +7785,8 @@ mod tests {
             // A crash between closing intent and sending release leaves this
             // clean tree eligible for the next sweep, while manual retry races.
             engine.l4.store.update(&task.id, &TaskPatch { status: Some(TaskStatus::Done), ..Default::default() }).await.unwrap();
-            let (started, ()) = tokio::join!(engine.dispatch(&task.id, Trigger::Manual, Due::now(), None), engine.sweep_workspaces());
+            let l4 = engine.l4_service();
+            let (started, ()) = tokio::join!(engine.dispatch(&task.id, Trigger::Manual, Due::now(), None), l4.sweep_workspaces());
             let started = started.unwrap();
             let path = PathBuf::from(started.worktree_path.unwrap());
             assert!(path.exists());
@@ -7838,16 +7825,16 @@ edges: []
             engine.fail_run(&first.id, FailKind::AckTimeout, "upstream outage").await;
             engine.sync_workflow_for_task(&a.id).await;
             assert!(engine.workflow_run(&workflow.id).await.unwrap().status.is_terminal());
-            engine.sweep_workspaces().await;
+            engine.l4_service().sweep_workspaces().await;
             assert!(first_path.exists() && sibling_path.exists(), "terminal workflow must keep all trees while a sibling waits on a person");
             // Even a terminal report does not prove that a failed stop worked.
             *runtime.status.lock().unwrap() = RuntimeStatus::Working;
             engine.cancel_task_run(&b.id, None, FailKind::CancelledByPerson).await.unwrap();
             engine.sync_workflow_for_task(&b.id).await;
-            engine.sweep_workspaces().await;
+            engine.l4_service().sweep_workspaces().await;
             assert!(first_path.exists() && sibling_path.exists());
             *runtime.status.lock().unwrap() = RuntimeStatus::Gone;
-            engine.sweep_workspaces().await;
+            engine.l4_service().sweep_workspaces().await;
             assert!(!first_path.exists() && !sibling_path.exists());
             let root = engine.factory_snapshot().root;
             std::fs::remove_dir_all(root).ok();

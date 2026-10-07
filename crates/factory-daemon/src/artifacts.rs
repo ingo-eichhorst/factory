@@ -1,6 +1,6 @@
 //! L4's immutable release artifacts and their append-only provenance (#158).
 //! Artifact selection is explicit in a done report; statuses are never guessed.
-use crate::engine::Engine;
+use crate::l4_service::L4Service;
 use factory_core::{
     control_plan,
     error::{FactoryError, Result},
@@ -112,11 +112,11 @@ fn artifact_path(dir: &Path, asked: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-impl Engine {
+impl L4Service<'_> {
     fn artifact_workdir(&self, run: &Run, scope: &str) -> Result<PathBuf> {
         let dir = match &run.worktree_path {
             Some(path) => PathBuf::from(path),
-            None => self.factory_snapshot().scope_path(scope)?,
+            None => self.wiring.snapshot().scope_path(scope)?,
         };
         std::fs::canonicalize(dir).map_err(|e| refused(format!("artifact worktree: {e}")))
     }
@@ -147,7 +147,7 @@ impl Engine {
             }
         }
         let before = source(&dir).await?;
-        let root = self.factory_snapshot().root;
+        let root = self.wiring.snapshot().root;
         let run_id = run.id.clone();
         let scope = task.scope.clone();
         let category = control_plan::effective_category(task.category.as_deref()).to_string();
@@ -254,7 +254,7 @@ impl Engine {
             )));
         }
         let records = run.artifacts.clone();
-        let root = self.factory_snapshot().root;
+        let root = self.wiring.snapshot().root;
         tokio::task::spawn_blocking(move || {
             for a in records {
                 let original = artifact_path(&dir, &a.source_path)?;
@@ -283,7 +283,7 @@ impl Engine {
             return Ok(());
         }
         let attestations = self.validate_artifacts(run).await?;
-        let instance = self.factory_snapshot().config.instance.id;
+        let instance = self.wiring.snapshot().config.instance.id;
         for artifact in &run.artifacts {
             let record = factory_core::provenance::statement(
                 run,
@@ -292,7 +292,7 @@ impl Engine {
                 &instance,
                 finished_at,
             );
-            self.l4.run_evidence.append_provenance(&record).await?;
+            self.state.run_evidence.append_provenance(&record).await?;
         }
         Ok(())
     }
@@ -303,7 +303,7 @@ impl Engine {
         id: &str,
     ) -> Result<Vec<factory_kernel::ArtifactProvenance>> {
         factory_kernel::Provide::<factory_kernel::ArtifactProvenance>::get(
-            &factory_process::facts::ProvenanceProvider::new(self.l4.store.as_ref(), &self.l4.run_evidence),
+            &factory_process::facts::ProvenanceProvider::new(self.state.store.as_ref(), &self.state.run_evidence),
             &id.to_owned(),
         ).await
     }

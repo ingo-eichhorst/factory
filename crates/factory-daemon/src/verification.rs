@@ -1286,8 +1286,7 @@ impl Engine {
 
     /// Every attestation a run has collected, oldest first.
     pub(crate) async fn run_attestations(&self, run_id: &str) -> Result<Vec<StepAttestation>> {
-        self.require_run(run_id).await?;
-        self.l4.run_evidence.step_attestations(run_id).await
+        self.l4_service().run_attestations(run_id).await
     }
 
     /// `#158` phase 1: the one L4-owned read the `attested` policy check and
@@ -2585,7 +2584,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(held.status, RunStatus::Verifying);
-        assert!(engine.run_provenance(&held.id).await.unwrap().is_empty());
+        assert!(engine.l4_service().run_provenance(&held.id).await.unwrap().is_empty());
         assert!(engine
             .l4.run_evidence
             .provenance(&held.id)
@@ -2635,12 +2634,12 @@ mod tests {
         // Later task edits and file changes never rewrite historical evidence.
         std::fs::write(work.join("source.txt"), "source v2").unwrap();
         std::fs::write(work.join("release.bin"), "new output").unwrap();
-        assert_eq!(engine.run_provenance(&held.id).await.unwrap(), records);
+        assert_eq!(engine.l4_service().run_provenance(&held.id).await.unwrap(), records);
         engine.l4.run_evidence.append_provenance(record).await.unwrap();
         let mut changed = record.clone();
         changed.artifact.sha256 = "0".repeat(64);
         assert!(engine.l4.run_evidence.append_provenance(&changed).await.is_err());
-        assert_eq!(engine.run_provenance(&held.id).await.unwrap(), records);
+        assert_eq!(engine.l4_service().run_provenance(&held.id).await.unwrap(), records);
         let reopened = factory_process::evidence_store::RunEvidenceStore::open(
             &engine
                 .factory_snapshot()
@@ -2679,7 +2678,7 @@ mod tests {
             blocked.session.is_some(),
             "a publication hold keeps the session available for repair"
         );
-        assert!(engine.run_provenance(&held.id).await.unwrap().is_empty());
+        assert!(engine.l4_service().run_provenance(&held.id).await.unwrap().is_empty());
         assert!(engine
             .l4.store
             .run_entries(&held.id, 100)
@@ -2697,7 +2696,7 @@ mod tests {
             RunStatus::Done
         );
         assert_eq!(
-            engine.run_provenance(&held.id).await.unwrap()[0].id,
+            engine.l4_service().run_provenance(&held.id).await.unwrap()[0].id,
             retry.artifacts[0].id
         );
     }
@@ -2813,7 +2812,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(done.status, RunStatus::Done);
-        assert_eq!(engine.run_provenance(&done.id).await.unwrap().len(), 1);
+        assert_eq!(engine.l4_service().run_provenance(&done.id).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -2845,11 +2844,11 @@ mod tests {
             .await
             .unwrap();
         let review = review_task(&engine, &subject.id).await;
-        assert!(engine.run_provenance(&subject.id).await.unwrap().is_empty());
+        assert!(engine.l4_service().run_provenance(&subject.id).await.unwrap().is_empty());
         report_done(&engine, &review.id).await;
         let done = settled(&engine, &subject.id).await;
         assert_eq!(done.status, RunStatus::Done);
-        let record = &engine.run_provenance(&subject.id).await.unwrap()[0];
+        let record = &engine.l4_service().run_provenance(&subject.id).await.unwrap()[0];
         let evidence = &record.statement.predicate.evidence;
         assert_eq!(evidence.required_steps, subject.required_steps);
         assert_eq!(evidence.attestations.len(), 3);
@@ -2888,7 +2887,7 @@ mod tests {
         let held = provenance_done(&engine, &task, &["release.bin"])
             .await
             .unwrap();
-        assert!(engine.validate_artifacts(&held).await.is_err());
+        assert!(engine.l4_service().validate_artifacts(&held).await.is_err());
         let step = &held.required_steps[0];
         let mut evidence: StepAttestation = serde_json::from_value(serde_json::json!({
             "id": "self", "run_id": held.id, "task_id": task.id,
@@ -2902,7 +2901,7 @@ mod tests {
             .append_step_attestation(&evidence)
             .await
             .unwrap();
-        assert!(engine.validate_artifacts(&held).await.is_err());
+        assert!(engine.l4_service().validate_artifacts(&held).await.is_err());
         evidence.id = "foreign".into();
         evidence.actor = "not-the-frozen-reviewer".into();
         engine
@@ -2910,7 +2909,7 @@ mod tests {
             .append_step_attestation(&evidence)
             .await
             .unwrap();
-        assert!(engine.validate_artifacts(&held).await.is_err());
+        assert!(engine.l4_service().validate_artifacts(&held).await.is_err());
         evidence.id = "stale".into();
         evidence.actor = step.actor.clone().unwrap();
         evidence.worktree_digest = Some("old-source".into());
@@ -2919,7 +2918,7 @@ mod tests {
             .append_step_attestation(&evidence)
             .await
             .unwrap();
-        assert!(engine.validate_artifacts(&held).await.is_err());
+        assert!(engine.l4_service().validate_artifacts(&held).await.is_err());
         evidence.id = "current".into();
         evidence.worktree_digest = Some(held.artifacts[0].source.worktree_digest.clone());
         evidence.at = Utc::now();
@@ -2928,7 +2927,7 @@ mod tests {
             .append_step_attestation(&evidence)
             .await
             .unwrap();
-        assert!(engine.validate_artifacts(&held).await.is_ok());
+        assert!(engine.l4_service().validate_artifacts(&held).await.is_ok());
         evidence.id = "rejected".into();
         evidence.verdict = AttestationVerdict::Fail;
         evidence.at += chrono::Duration::seconds(1);
@@ -2937,8 +2936,8 @@ mod tests {
             .append_step_attestation(&evidence)
             .await
             .unwrap();
-        assert!(engine.validate_artifacts(&held).await.is_err());
-        assert!(engine.run_provenance(&held.id).await.unwrap().is_empty());
+        assert!(engine.l4_service().validate_artifacts(&held).await.is_err());
+        assert!(engine.l4_service().run_provenance(&held.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2950,7 +2949,7 @@ mod tests {
         engine.start_run(&task.id, Trigger::Manual).await;
         let mut run = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         run.artifacts = engine
-            .capture_artifacts(&run, &task, &["release.bin".into()])
+            .l4_service().capture_artifacts(&run, &task, &["release.bin".into()])
             .await
             .unwrap();
         engine
@@ -2968,7 +2967,7 @@ mod tests {
             factory_core::provenance::statement(&run, &run.artifacts[0], &[], "test", Utc::now());
         engine.l4.run_evidence.append_provenance(&record).await.unwrap();
         assert_eq!(engine.l4.run_evidence.provenance(&run.id).await.unwrap().len(), 1);
-        assert!(engine.run_provenance(&run.id).await.unwrap().is_empty());
+        assert!(engine.l4_service().run_provenance(&run.id).await.unwrap().is_empty());
         engine
             .cancel_task_run(
                 &task.id,
@@ -2990,7 +2989,7 @@ mod tests {
             engine.require_run(&run.id).await.unwrap().status,
             RunStatus::Cancelled
         );
-        assert!(engine.run_provenance(&run.id).await.unwrap().is_empty());
+        assert!(engine.l4_service().run_provenance(&run.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]

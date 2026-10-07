@@ -154,11 +154,11 @@ impl<'a> Wiring<'a, L3> {
         agent: &str,
         status: factory_core::adapter::runtime::RuntimeStatus,
     ) {
-        self.engine.record_status(subject, scope, agent, status).await
+        self.engine.l4_service().record_status(subject, scope, agent, status).await
     }
     /// A session that is no longer there closes its open span.
     pub(crate) async fn record_gone(&self, subject: &str, scope: &str, agent: &str) {
-        self.engine.record_gone(subject, scope, agent).await
+        self.engine.l4_service().record_gone(subject, scope, agent).await
     }
 }
 impl<'a> Wiring<'a, L6> {
@@ -1505,7 +1505,7 @@ mod tests {
         let compact_wiring: String = wiring.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(compact_wiring.contains("Facts::<People>::new(self).get::<SignpostFact>"));
         assert!(!wiring.contains("self.metrics("));
-        let operations = include_str!("../operations.rs")
+        let operations = include_str!("../operations_report.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();

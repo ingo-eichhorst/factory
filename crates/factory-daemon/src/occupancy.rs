@@ -239,74 +239,8 @@ impl Engine {
         })
     }
 
-    /// Write down that a session's liveness changed -- and only then.
-    ///
-    /// This is the whole of Factory's liveness history. The runtime has none:
-    /// herdr will say what an agent is doing now and has no idea what it was
-    /// doing an hour ago, so a status that is not appended here when it is
-    /// seen is gone for good. What that costs is honest to state: the runtime
-    /// is polled, so a flip and a flip back between two ticks leaves no trace.
-    ///
-    /// Skipping a sample when nothing changed is right for this record and
-    /// wrong for anything that wants to know an agent is still doing what it
-    /// was doing -- `agents.rs`'s pushed-event handler feeds this for the
-    /// chart and publishes on the bus separately, on purpose, rather than
-    /// folding that into here.
-    pub(crate) async fn record_status(
-        &self,
-        subject: &str,
-        scope: &str,
-        agent: &str,
-        status: RuntimeStatus,
-    ) {
-        {
-            let mut seen = match self.l4.seen_status.lock() {
-                Ok(seen) => seen,
-                // A poisoned lock is not a reason to take the daemon down over
-                // a chart. Skip the sample and carry on.
-                Err(_) => return,
-            };
-            if seen.get(subject) == Some(&status) {
-                return;
-            }
-            seen.insert(subject.to_string(), status);
-        }
-        let change = StatusChange {
-            subject: subject.to_string(),
-            scope: scope.to_string(),
-            agent: agent.to_string(),
-            status,
-            at: Utc::now(),
-        };
-        if let Err(e) = self.l4.store.append_status(&change).await {
-            tracing::debug!(subject, "could not record liveness: {e}");
-        }
-    }
 
-    /// A session that is not there any more. Closes the open span rather than
-    /// letting the chart draw it forward to now.
-    pub(crate) async fn record_gone(&self, subject: &str, scope: &str, agent: &str) {
-        self.record_status(subject, scope, agent, RuntimeStatus::Gone)
-            .await;
-    }
 
-    /// Close every open liveness span on the way out. Nothing observes an
-    /// agent while the daemon is down, and a span left open would be drawn
-    /// straight through the outage as though someone had been watching.
-    pub async fn close_liveness(self: &Arc<Self>) {
-        for agent in self.l4.store.agents().await.unwrap_or_default() {
-            if agent.session.is_some() {
-                self.record_gone(&agent.id, &agent.scope, &agent.name).await;
-            }
-        }
-        for run in self.l4.store.active_runs().await.unwrap_or_default() {
-            let Ok(Some(task)) = self.l4.store.get(&run.task_id).await else {
-                continue;
-            };
-            self.record_gone(&format!("run:{}", run.id), &task.scope, &run.agent)
-                .await;
-        }
-    }
 
     /// Poll every running run's session and write down what it says. The run
     /// itself is already a block on the chart; this is what the agent looked
@@ -331,7 +265,7 @@ impl Engine {
             };
             let report = self.session_status_report(&run).await;
             let subject = format!("run:{}", run.id);
-            self.record_status(&subject, &task.scope, &run.agent, report.status)
+            self.l4_service().record_status(&subject, &task.scope, &run.agent, report.status)
                 .await;
             let action = block_action(
                 &report,
