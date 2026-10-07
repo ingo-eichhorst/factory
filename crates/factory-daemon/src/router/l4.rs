@@ -26,7 +26,7 @@ impl Engine {
                 report: Box::new(self.operations_report(scope.as_deref(), window, detail).await?),
             }),
             Request::RunScreen { id } => {
-                let run = self.require_run(&id).await?;
+                let run = self.l4_service().require_run(&id).await?;
                 match self.run_screen(&run).await? {
                     Some(screen) => Ok(Payload::Screen { screen }),
                     None => Err(FactoryError::BadRequest(
@@ -40,15 +40,15 @@ impl Engine {
             }
             Request::RunAnswer { id, text, reason } => {
                 let asked = crate::operations::Asked::new(caller, Some(reason));
-                self.answer_run(&id, &text, &asked).await?;
+                self.l4_service().answer_run(&id, &text, &asked).await?;
                 Ok(Payload::Ok)
             }
 
             Request::TaskCreate(new) => Ok(Payload::Task {
-                task: self.create(new).await?,
+                task: self.l4_service().create(new).await?,
             }),
             Request::TaskGet { id } => Ok(Payload::Task {
-                task: self.require(&id).await?,
+                task: self.l4_service().require(&id).await?,
             }),
             Request::TaskList(filter) => Ok(Payload::Tasks {
                 tasks: self.l4.store.list(&filter).await?,
@@ -62,7 +62,7 @@ impl Engine {
             Request::TaskSkipNext { id, reason, slot } => {
                 let asked = crate::operations::Asked::new(caller, reason);
                 Ok(Payload::Task {
-                    task: self.skip_next(&id, slot, &asked).await?,
+                    task: self.l4_service().skip_next(&id, slot, &asked).await?,
                 })
             }
             Request::TaskDelete { id } => {
@@ -92,7 +92,7 @@ impl Engine {
                 Ok(Payload::Deleted { deleted })
             }
             Request::TaskRun { id, reason, continue_run, override_wait } => {
-                let task = self.require(&id).await?;
+                let task = self.l4_service().require(&id).await?;
                 // The gate (`#119`): an item still in intake has not been
                 // released, and nothing but a decision releases it.
                 if task.status == TaskStatus::Intake {
@@ -204,7 +204,7 @@ impl Engine {
                 } else {
                     asked.words()
                 };
-                self.entry(
+                self.l4_service().entry(
                     &id,
                     asked.entry(
                         crate::operations::RUN_REQUESTED_KIND,
@@ -234,7 +234,7 @@ impl Engine {
                 };
                 let run = self.l4_service().cancel_task_run(&id, run.as_deref(), kind).await?;
                 let asked = crate::operations::Asked::new(caller, reason);
-                self.entry(
+                self.l4_service().entry(
                     &id,
                     asked
                         .entry("cancel_requested", format!("cancelled {}", asked.words()), serde_json::json!({}))
@@ -246,13 +246,13 @@ impl Engine {
             }
             Request::TaskClose { id, reason, duplicate_of, note } => {
                 let asked = crate::operations::Asked::new(caller, note);
-                let task = self.close_task(&id, reason, duplicate_of, &asked).await?;
+                let task = self.l4_service().close_task(&id, reason, duplicate_of, &asked).await?;
                 self.sync_workflow_for_task(&id).await;
                 Ok(Payload::Task { task })
             }
             Request::TaskReopen { id, reason } => {
                 let asked = crate::operations::Asked::new(caller, reason);
-                let task = self.reopen_task(&id, &asked).await?;
+                let task = self.l4_service().reopen_task(&id, &asked).await?;
                 self.sync_workflow_for_task(&id).await;
                 Ok(Payload::Task { task })
             }
@@ -322,7 +322,7 @@ impl Engine {
                 reports: self.l4_service().confirmed_security_reports(scope.as_deref()).await?,
             }),
             Request::IntakePublish { id } => Ok(Payload::Task {
-                task: Box::pin(self.intake_publish(caller, &id)).await?,
+                task: Box::pin(self.l4_service().intake_publish(caller, &id)).await?,
             }),
 
             Request::WorkflowCreate(draft) => Ok(Payload::Workflow {
@@ -395,10 +395,10 @@ impl Engine {
                     .collect(),
             }),
             Request::RunGet { id } => Ok(Payload::Run {
-                run: self.require_run(&id).await?.redacted(),
+                run: self.l4_service().require_run(&id).await?.redacted(),
             }),
             Request::RunUsage { id } => {
-                let run = self.require_run(&id).await?;
+                let run = self.l4_service().require_run(&id).await?;
                 Ok(Payload::UsageSnapshots {
                     snapshots: self.l4.store.usage_snapshots(&run.id).await?,
                 })
@@ -415,7 +415,7 @@ impl Engine {
                 entries: self.l4.store.run_entries(&id, limit.unwrap_or(200)).await?,
             }),
             Request::RunOutput { id, lines } => {
-                let run = self.require_run(&id).await?;
+                let run = self.l4_service().require_run(&id).await?;
                 Ok(Payload::Text {
                     text: self.output(&run, lines.unwrap_or(200)).await,
                 })

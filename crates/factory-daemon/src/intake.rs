@@ -1547,7 +1547,7 @@ mod tests {
         );
         assert!(why.contains("still in intake"), "{why}");
         engine.l4_service().start_run(&item.id, Trigger::Manual).await;
-        let after = engine.require(&item.id).await.unwrap();
+        let after = engine.l4_service().require(&item.id).await.unwrap();
         assert_eq!(after.status, TaskStatus::Intake, "held, not failed");
         assert!(engine.l4.store.active_run(&item.id).await.unwrap().is_none());
     }
@@ -1836,7 +1836,7 @@ mod tests {
         // repository -- a released item keeps a task's default worktree.)
         engine.l4_service().start_run(&item.id, Trigger::Manual).await;
         assert!(!kinds(&engine, &item.id).await.contains(&"intake_held".to_string()));
-        let t = engine.require(&item.id).await.unwrap();
+        let t = engine.l4_service().require(&item.id).await.unwrap();
         assert!(t.error.as_deref().unwrap_or("").contains("git"), "{:?} {:?}", t.status, t.error);
     }
 
@@ -1861,6 +1861,7 @@ mod tests {
     /// only wall time (`#168`'s time dimension) is exercised here.
     async fn done_bugfix_task(engine: &Arc<Engine>, scope: &str, title: &str) {
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: title.into(),
                 instructions: "true".into(),
@@ -1973,7 +1974,7 @@ mod tests {
         a.routing.workflow = Some("no-such-flow".into());
         let why = engine.intake_assess(&Caller::Owner, &item.id, a, false).await.unwrap_err();
         assert!(why.to_string().contains("no workflow"), "{why}");
-        assert!(engine.require(&item.id).await.unwrap().intake.unwrap().triage.is_none());
+        assert!(engine.l4_service().require(&item.id).await.unwrap().intake.unwrap().triage.is_none());
     }
 
     #[tokio::test]
@@ -2026,7 +2027,7 @@ mod tests {
         assert_eq!(triage.scope, "demo");
         assert!(!triage.worktree, "triage reads; it gets no worktree of its own");
         assert!(triage.instructions.contains(&format!("/bin/factory intake assess {} --file", item.id)));
-        let record = engine.require(&item.id).await.unwrap().intake.unwrap();
+        let record = engine.l4_service().require(&item.id).await.unwrap().intake.unwrap();
         assert_eq!(record.stage, IntakeStage::Triaging);
         assert_eq!(record.triage_task.as_deref(), Some(triage.id.as_str()));
 
@@ -2048,7 +2049,7 @@ mod tests {
 
         let why = engine.intake_triage(&Caller::Owner, &item.id, Some("gatekeeper".into())).await.unwrap_err();
         assert!(why.to_string().contains("task.report"), "{why}");
-        assert!(engine.require(&item.id).await.unwrap().intake.unwrap().triage_task.is_none(), "nothing was started");
+        assert!(engine.l4_service().require(&item.id).await.unwrap().intake.unwrap().triage_task.is_none(), "nothing was started");
 
         // A bare adapter name with no declared role defaults to worker, which
         // may report -- unaffected by the scope's other declared agent.
@@ -2111,7 +2112,7 @@ mod tests {
 
         // Receipt already searched: the second item found the first by its
         // shared GitHub reference.
-        let record = engine.require(&second.id).await.unwrap().intake.unwrap();
+        let record = engine.l4_service().require(&second.id).await.unwrap().intake.unwrap();
         assert_eq!(record.candidates.len(), 1, "{:?}", record.candidates);
         assert_eq!(record.candidates[0].reference, first.id);
         assert_eq!(record.candidates[0].kind, DuplicateKind::IntakeItem);
@@ -2122,7 +2123,7 @@ mod tests {
         let triage = engine.intake_triage(&Caller::Owner, &second.id, Some("shell".into())).await.unwrap();
         assert!(triage.instructions.contains("Possible duplicates"));
         assert!(triage.instructions.contains(&first.id), "{}", triage.instructions);
-        let record = engine.require(&second.id).await.unwrap().intake.unwrap();
+        let record = engine.l4_service().require(&second.id).await.unwrap().intake.unwrap();
         assert_eq!(record.candidates.len(), 1);
 
         // Confirming it blocks the verdict -- `--decide` never releases it.
@@ -2162,7 +2163,7 @@ mod tests {
         let first = add_referencing(&engine, "Checkout crashes on coupon", "https://github.com/acme/shop/issues/42").await;
         let second =
             add_referencing(&engine, "Coupon code crash at checkout", "https://github.com/acme/shop/issues/42").await;
-        assert!(!engine.require(&second.id).await.unwrap().intake.unwrap().candidates.is_empty());
+        assert!(!engine.l4_service().require(&second.id).await.unwrap().intake.unwrap().candidates.is_empty());
 
         let why = engine.intake_assess(&Caller::Owner, &second.id, assessment("demo"), false).await.unwrap_err();
         assert!(why.to_string().contains("needs a verdict"), "{why}");
@@ -2257,8 +2258,8 @@ mod tests {
         assert!(kinds(&engine, &item.id).await.contains(&"intake_split".to_string()));
 
         // Written order is kept in the record; dependencies are made first.
-        let rework = engine.require(&parts[0]).await.unwrap();
-        let resume = engine.require(&parts[1]).await.unwrap();
+        let rework = engine.l4_service().require(&parts[0]).await.unwrap();
+        let resume = engine.l4_service().require(&parts[1]).await.unwrap();
         assert_eq!(rework.title, "Rework as a run");
         for part in [&rework, &resume] {
             assert_eq!(part.status, TaskStatus::Intake);
@@ -2326,7 +2327,7 @@ mod tests {
         assert_eq!(surface.status, TaskStatus::Pending);
         assert_eq!(surface.runs, 0);
         engine.l4_service().start_run_due(&surface.id, Trigger::Manual, Due::now()).await;
-        let still_waiting = engine.require(&surface.id).await.unwrap();
+        let still_waiting = engine.l4_service().require(&surface.id).await.unwrap();
         assert_eq!(still_waiting.status, TaskStatus::Pending);
         assert_eq!(still_waiting.runs, 0, "a direct run request cannot jump its dependency");
         assert!(kinds(&engine, &surface.id).await.contains(&"dependency_held".to_string()));
@@ -2351,7 +2352,7 @@ mod tests {
         let ready = engine.l4_service().dependency_ready_tasks().await.unwrap();
         assert!(ready.is_empty(), "workflow release is graph-owned, not the generic scheduler's");
         engine.sync_workflow_for_task(&foundation.id).await;
-        assert!(engine.require(&surface.id).await.unwrap().after.is_none(), "the graph consumes the upstream wait");
+        assert!(engine.l4_service().require(&surface.id).await.unwrap().after.is_none(), "the graph consumes the upstream wait");
     }
 
     /// A two-part plan (`surface` after `foundation`) routed to `workflow`.
@@ -2432,7 +2433,7 @@ mod tests {
         unknown_step.routing.agents.insert("ship".into(), "shell".into());
         let why = engine.intake_assess(&Caller::Owner, &item.id, unknown_step, true).await.unwrap_err();
         assert!(why.to_string().contains("no step \"ship\""), "{why}");
-        assert!(engine.require(&item.id).await.unwrap().intake.unwrap().triage.is_none(), "nothing was written");
+        assert!(engine.l4_service().require(&item.id).await.unwrap().intake.unwrap().triage.is_none(), "nothing was written");
 
         let mut plan = plan_through("part-flow");
         plan.routing.agents.insert("review".into(), "shell".into());
@@ -2478,7 +2479,7 @@ mod tests {
         assert_eq!(stored.intake.as_ref().unwrap().triage.as_ref().unwrap().verdict, Verdict::Ready);
         let why = engine.intake_decide(&Caller::Owner, &item.id, Decision::Ready { run: false }).await.unwrap_err();
         assert!(why.to_string().contains("Expand it instead"), "{why}");
-        let after = engine.require(&item.id).await.unwrap();
+        let after = engine.l4_service().require(&item.id).await.unwrap();
         assert_eq!(after.status, TaskStatus::Intake, "nothing was released");
         assert!(after.intake.as_ref().unwrap().decision.is_none());
         assert!(engine.l4.workflows.runs(None, None, 10).await.unwrap().is_empty(), "and no workflow started");
@@ -2560,7 +2561,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(why.to_string().contains("no-such-agent"), "{why}");
-        assert!(engine.require(&item.id).await.unwrap().intake.unwrap().triage.is_none());
+        assert!(engine.l4_service().require(&item.id).await.unwrap().intake.unwrap().triage.is_none());
 
         let released = engine
             .intake_assess(&Caller::Owner, &item.id, routed(&[("issue", "178")], &[("fix", "codex")]), true)
@@ -2775,7 +2776,7 @@ mod tests {
         assert!(why.contains("confirm or dismiss"), "{why}");
 
         // A second assessment never overwrites a flag already there.
-        let still = engine.require(&item.id).await.unwrap();
+        let still = engine.l4_service().require(&item.id).await.unwrap();
         assert_eq!(still.intake.unwrap().security.unwrap().state, SecurityState::Possible);
     }
 
@@ -2787,7 +2788,7 @@ mod tests {
         engine.l4_service().intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Confirm, "").await.unwrap();
         let why = refused(engine.handle_request(Request::TaskDelete { id: item.id.clone() }).await);
         assert!(why.contains("CRA evidence") && why.contains(&item.id), "{why}");
-        assert!(engine.require(&item.id).await.is_ok(), "never deleted");
+        assert!(engine.l4_service().require(&item.id).await.is_ok(), "never deleted");
 
         // An ordinary item, or one only possible or dismissed, deletes fine.
         let plain = add(&engine, "Ordinary").await;

@@ -26,7 +26,9 @@
 //! removing it is a person's own decision.
 
 use crate::access::Caller;
+#[cfg(test)]
 use crate::engine::Engine;
+use crate::l4_service::L4Service;
 use crate::github_intake::{parse_canonical_issue_url, GH_TIMEOUT};
 use crate::operations::Asked;
 use chrono::Utc;
@@ -80,7 +82,7 @@ pub(crate) fn awaiting_approval_outbound(record: &Intake, decided: &DecisionReco
     }))
 }
 
-impl Engine {
+impl L4Service<'_> {
     /// `Request::IntakePublish`, against the real `gh` on `PATH`.
     pub(crate) async fn intake_publish(&self, caller: &Caller, id: &str) -> Result<Task> {
         self.intake_publish_with_gh(caller, id, Path::new("gh")).await
@@ -219,7 +221,7 @@ impl Engine {
         };
         let mut next = record;
         next.outbound = Some(outbound);
-        self.l4_service().write_intake(&item.id, next, TaskPatch::default()).await
+        self.write_intake(&item.id, next, TaskPatch::default()).await
     }
 }
 
@@ -644,7 +646,7 @@ mod tests {
             ],
         ));
 
-        let published = engine.intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap();
+        let published = engine.l4_service().intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap();
         let outbound = outbound_of(&published);
         assert_eq!(outbound.state, OutboundState::Published);
         assert_eq!(outbound.comment_id, Some(501));
@@ -680,7 +682,7 @@ mod tests {
                 ("issue,edit,7,", "", 0),
             ],
         ));
-        let first = engine.intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap();
+        let first = engine.l4_service().intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap();
         assert_eq!(outbound_of(&first).comment_id, Some(900));
 
         // Re-triage: a fresh assessment and a fresh `NeedsInfo`, which clears
@@ -705,7 +707,7 @@ mod tests {
                 ("issue,edit,7,", "", 0),
             ],
         ));
-        let second = engine.intake_publish_with_gh(&Caller::Owner, &item.id, &gh2).await.unwrap();
+        let second = engine.l4_service().intake_publish_with_gh(&Caller::Owner, &item.id, &gh2).await.unwrap();
         let outbound = outbound_of(&second);
         assert_eq!(outbound.state, OutboundState::Published);
         assert_eq!(outbound.comment_id, Some(900), "the marker found the existing comment");
@@ -739,7 +741,7 @@ mod tests {
                 ("issue,edit,3,", "", 0),
             ],
         ));
-        let replayed = engine.intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap();
+        let replayed = engine.l4_service().intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap();
         let outbound = outbound_of(&replayed);
         assert_eq!(outbound.state, OutboundState::Published);
         assert_eq!(outbound.comment_id, Some(77));
@@ -764,7 +766,7 @@ mod tests {
                 ("api,repos/acme/widgets/issues/11/comments,--method,POST,", r#"{"id": 1}"#, 0),
             ],
         ));
-        let published = engine.intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap();
+        let published = engine.l4_service().intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap();
         let outbound = outbound_of(&published);
         assert_eq!(outbound.state, OutboundState::Published);
         assert!(outbound.labels_applied.is_empty());
@@ -785,7 +787,7 @@ mod tests {
         let log = scratch.0.join("args");
         let gh = scratch.fixture(&gh_script(&log, &[("label,list,", "not json", 1)]));
 
-        let result = engine.intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap();
+        let result = engine.l4_service().intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap();
         let outbound = outbound_of(&result);
         assert_eq!(outbound.state, OutboundState::Failed);
         assert!(outbound.last_error.is_some());
@@ -808,7 +810,7 @@ mod tests {
         let scratch = Scratch::new();
         let log = scratch.0.join("args");
         let gh = scratch.fixture("#!/bin/sh\nexit 9\n");
-        let why = engine.intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap_err().to_string();
+        let why = engine.l4_service().intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap_err().to_string();
         assert!(why.contains("not a GitHub"), "{why}");
         assert!(!log.exists());
     }
@@ -837,7 +839,7 @@ mod tests {
 
             let scratch = Scratch::new();
             let gh = scratch.fixture("#!/bin/sh\nexit 9\n");
-            let why = engine.intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap_err().to_string();
+            let why = engine.l4_service().intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap_err().to_string();
             assert!(why.contains("security report"), "{label}: {why}");
         }
     }
@@ -868,7 +870,7 @@ mod tests {
                 ("issue,edit,55,", "", 0),
             ],
         ));
-        engine.intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap();
+        engine.l4_service().intake_publish_with_gh(&Caller::Owner, &item.id, &gh).await.unwrap();
         let calls = calls_in(&log);
         let edit_call = calls.iter().find(|c| c.starts_with("issue edit")).unwrap();
         assert!(edit_call.contains("wontfix"), "{edit_call}");

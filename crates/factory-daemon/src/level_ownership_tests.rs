@@ -193,7 +193,7 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("configuration.rs", "services", 1),
     ("doctor.rs", "reach", 2),
     ("engine.rs", "reach", 22),
-    ("engine.rs", "services", 11),
+    ("engine.rs", "services", 9),
     ("environments/promotion.rs", "reach", 6),
     ("environments/promotion.rs", "services", 3),
     ("environments/recovery.rs", "reach", 3),
@@ -214,6 +214,7 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("facts/mod.rs", "services", 6),
     ("host_power/page.rs", "reach", 4),
     ("l2_pages.rs", "reach", 5),
+    ("l2_pages.rs", "services", 2),
     ("main.rs", "services", 5),
     ("metrics.rs", "services", 2),
     ("operations_report.rs", "reach", 8),
@@ -228,6 +229,11 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("signposts.rs", "services", 1),
     ("site.rs", "reach", 3),
     ("supplied.rs", "providers", 3),
+];
+/// L3's standing-agent liveness pushed into L4's record through `Wiring::record_status`/`record_gone`: the one upward
+/// call left behind a wiring method. Draining it means L4 reading L3's session state as a fact (D4's shape).
+const BRIDGE_BASELINE: &[(&str, usize)] = &[
+    ("agents.rs", 2),
 ];
 const ABOVE_BASELINE: &[(&str, usize)] = &[
     ("l4_service.rs", 1),
@@ -499,6 +505,14 @@ fn arc_engine_mentions(code: &str) -> usize {
     squeezed.matches("Arc<Engine>").count() + squeezed.matches("Arc<crate::engine::Engine>").count()
 }
 
+/// `wiring.record_status` / `wiring.record_gone`: L3 pushing a session's liveness into L4's record through
+/// `Wiring`. The one upward call left behind a wiring method (S9 meant to replace it by L4 reading L3), so it is
+/// counted where it is made, outside L4, and may only shrink.
+fn liveness_bridge_calls(code: &str) -> usize {
+    let squeezed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    squeezed.matches("wiring.record_status(").count() + squeezed.matches("wiring.record_gone(").count()
+}
+
 fn people_reach(code: &str) -> usize {
     ["Facts::<People>", "Facts::<factory_kernel::People>", ".facts::<People>", ".facts::<factory_kernel::People>"]
         .iter()
@@ -529,6 +543,7 @@ struct Scan {
     direct_provider: BTreeMap<String, usize>,
     arc_engine: BTreeMap<String, usize>,
     above: BTreeMap<String, usize>,
+    bridge: BTreeMap<String, usize>,
     pages: BTreeMap<(String, &'static str), usize>,
 }
 
@@ -537,7 +552,7 @@ fn scan() -> Scan {
     let mut files = Vec::new();
     rust_files(&root, &mut files);
     files.sort();
-    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new(), core: BTreeMap::new(), core_state: BTreeMap::new(), impersonation: BTreeMap::new(), direct_provider: BTreeMap::new(), arc_engine: BTreeMap::new(), above: BTreeMap::new(), pages: BTreeMap::new() };
+    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new(), core: BTreeMap::new(), core_state: BTreeMap::new(), impersonation: BTreeMap::new(), direct_provider: BTreeMap::new(), arc_engine: BTreeMap::new(), above: BTreeMap::new(), bridge: BTreeMap::new(), pages: BTreeMap::new() };
     for file in files {
         let relative = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
         if is_test_file(&relative) {
@@ -577,6 +592,12 @@ fn scan() -> Scan {
         let impersonated = impersonated_readers(&code, &own_group.to_uppercase());
         if impersonated > 0 {
             result.impersonation.insert(relative.clone(), impersonated);
+        }
+        if own_group != "l4" {
+            let bridge = liveness_bridge_calls(&code);
+            if bridge > 0 {
+                result.bridge.insert(relative.clone(), bridge);
+            }
         }
         if own_group == "l4" || own_group == "l5" {
             let arcs = arc_engine_mentions(&code);
@@ -636,6 +657,10 @@ fn describe(scan: &Scan) -> String {
     out.push_str("];\nconst PAGE_BASELINE: &[(&str, &str, usize)] = &[\n");
     for ((file, metric), count) in &scan.pages {
         out.push_str(&format!("    ({file:?}, {metric:?}, {count}),\n"));
+    }
+    out.push_str("];\nconst BRIDGE_BASELINE: &[(&str, usize)] = &[\n");
+    for (file, count) in &scan.bridge {
+        out.push_str(&format!("    ({file:?}, {count}),\n"));
     }
     out.push_str("];\nconst ABOVE_BASELINE: &[(&str, usize)] = &[\n");
     for (file, count) in &scan.above {
@@ -799,6 +824,12 @@ fn pages_only_shrink() {
         }
     }
     assert!(bad.is_empty(), "{bad:#?}\ncurrent state:\n{}", describe(&scan));
+}
+
+#[test]
+fn the_liveness_bridge_into_l4_only_shrinks() {
+    let scan = scan();
+    only_shrinks("`wiring.record_*` liveness bridge calls", &scan.bridge, BRIDGE_BASELINE, &scan);
 }
 
 #[test]

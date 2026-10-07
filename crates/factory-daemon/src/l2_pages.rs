@@ -31,7 +31,7 @@ impl Engine {
                 "task {task_id} has no run in progress; attachments are no longer accepted"
             ))
         })?;
-        self.check_run_token(&run, token, task_id)?;
+        self.l4_service().check_run_token(&run, token, task_id)?;
         let task = self
             .l4.store
             .get(task_id)
@@ -63,7 +63,7 @@ impl Engine {
             .await
             .map_err(|e| FactoryError::Other(anyhow::anyhow!("attachment writer: {e}")))?
             .map_err(FactoryError::BadRequest)?;
-        self.entry(
+        self.l4_service().entry(
             task_id,
             TaskEntry::new(
                 "agent",

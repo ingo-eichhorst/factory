@@ -660,6 +660,7 @@ mod tests {
 
     async fn dispatched(engine: &Arc<Engine>, issue: Option<&str>) -> (Task, Run) {
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "costly".into(),
                 instructions: "true".into(),
@@ -705,7 +706,7 @@ mod tests {
             )
             .await
             .unwrap();
-        engine.require_run(&run.id).await.unwrap()
+        engine.l4_service().require_run(&run.id).await.unwrap()
     }
 
     #[tokio::test]
@@ -725,7 +726,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(engine.require_run(&run.id).await.unwrap().original_estimate.unwrap().time.expected, 900);
+        assert_eq!(engine.l4_service().require_run(&run.id).await.unwrap().original_estimate.unwrap().time.expected, 900);
 
         let ended = done(&engine, &task, &run).await;
         let u = ended.usage.expect("the run carries its usage");
@@ -764,7 +765,7 @@ mod tests {
         // Written back after the snapshot is stored, so wait on the run.
         let mut u = None;
         for _ in 0..100 {
-            u = engine.require_run(&run.id).await.unwrap().usage;
+            u = engine.l4_service().require_run(&run.id).await.unwrap().usage;
             if u.as_ref().and_then(|u| u.as_of_point) == Some(SnapshotPoint::TurnEnded) {
                 break;
             }
@@ -774,7 +775,7 @@ mod tests {
         assert_eq!(u.as_of_point, Some(SnapshotPoint::TurnEnded), "{u:?}");
         assert_eq!(engine.l4.store.usage_snapshots(&run.id).await.unwrap().len(), 2);
         assert_eq!(u.tokens.input, Some(2_000));
-        let updated = engine.require_run(&run.id).await.unwrap();
+        let updated = engine.l4_service().require_run(&run.id).await.unwrap();
         assert!(updated.re_estimate.as_ref().unwrap().reason.as_deref().unwrap().contains("no completed runs"));
         let entries = engine.l4.store.entries(&task.id, 100).await.unwrap();
         assert_eq!(entries.iter().filter(|entry| entry.kind == "re_estimate").count(), 1);
@@ -808,7 +809,7 @@ mod tests {
             .await
             .unwrap();
         for _ in 0..100 {
-            if engine.require_run(&reference_run.id).await.unwrap().re_estimate.is_some() {
+            if engine.l4_service().require_run(&reference_run.id).await.unwrap().re_estimate.is_some() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -835,7 +836,7 @@ mod tests {
             .unwrap();
         let mut first = None;
         for _ in 0..100 {
-            first = engine.require_run(&run.id).await.unwrap().re_estimate;
+            first = engine.l4_service().require_run(&run.id).await.unwrap().re_estimate;
             if first.is_some() {
                 break;
             }
@@ -847,7 +848,7 @@ mod tests {
         assert!((first.cost.as_ref().unwrap().expected - 0.10).abs() < 1e-9, "{first:?}");
 
         done(&engine, &task, &run).await;
-        assert_eq!(engine.require_run(&run.id).await.unwrap().re_estimate, Some(first));
+        assert_eq!(engine.l4_service().require_run(&run.id).await.unwrap().re_estimate, Some(first));
         let entries = engine.l4.store.entries(&task.id, 100).await.unwrap();
         assert_eq!(entries.iter().filter(|entry| entry.kind == "re_estimate").count(), 1);
     }
@@ -887,7 +888,7 @@ mod tests {
         later.await.unwrap();
 
         assert!((ended.usage.as_ref().unwrap().cost_usd.unwrap() - 0.30).abs() < 1e-9);
-        let updated = engine.require_run(&run.id).await.unwrap();
+        let updated = engine.l4_service().require_run(&run.id).await.unwrap();
         let estimate = updated.re_estimate.expect("the first turn records a re-estimate");
         assert!((estimate.observed_cost_usd.unwrap() - 0.10).abs() < 1e-9, "{estimate:?}");
         assert!((estimate.observed_active_seconds.unwrap() - 10.0).abs() < 1e-9, "{estimate:?}");
@@ -922,7 +923,7 @@ mod tests {
             .await
             .unwrap();
         for _ in 0..100 {
-            if engine.require_run(&reference_run.id).await.unwrap().re_estimate.is_some() {
+            if engine.l4_service().require_run(&reference_run.id).await.unwrap().re_estimate.is_some() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -950,7 +951,7 @@ mod tests {
             .unwrap();
         let mut estimate = None;
         for _ in 0..100 {
-            estimate = engine.require_run(&run.id).await.unwrap().re_estimate;
+            estimate = engine.l4_service().require_run(&run.id).await.unwrap().re_estimate;
             if estimate.is_some() {
                 break;
             }
@@ -1036,6 +1037,7 @@ mod tests {
             Ok(Some(usage(1_000, 0.10))),
         ]);
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "recurring".into(),
                 instructions: "true".into(),
@@ -1332,6 +1334,7 @@ mod tests {
         // since a real test run may complete inside the same second it
         // started.
         let wide = engine
+            .l4_service()
             .create(NewTask {
                 title: "wide".into(),
                 instructions: "true".into(),

@@ -329,6 +329,7 @@ async fn sync_open_item(
     match engine.l4.store.update(&existing.id, &patch).await {
         Ok(_) => {
             engine
+                .l4_service()
                 .entry(
                     &existing.id,
                     TaskEntry::new(
@@ -342,7 +343,7 @@ async fn sync_open_item(
                     ),
                 )
                 .await;
-            engine.publish_task(&existing.id).await;
+            engine.l4_service().publish_task(&existing.id).await;
         }
         Err(error) => tracing::warn!(task = existing.id, "could not synchronize GitHub intake item: {error}"),
     }

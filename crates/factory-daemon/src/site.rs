@@ -705,6 +705,7 @@ mod tests {
         assert_eq!(idle.activity.queued_tasks, 0);
 
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "something to do".into(),
                 instructions: "true".into(),

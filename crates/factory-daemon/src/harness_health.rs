@@ -842,6 +842,7 @@ pub(crate) mod tests {
 
         async fn task(engine: &Arc<Engine>, agent: &str) -> Task {
             engine
+                .l4_service()
                 .create(NewTask {
                     title: format!("work for {agent}"),
                     instructions: "true".into(),
@@ -1017,6 +1018,7 @@ pub(crate) mod tests {
             let bin = fake_harness(&dir, "codex", &format!("[ -e '{}' ] && exit 1; echo ok", marker.display()));
             let engine = engine(&dir, &bin, HarnessHealthConfig { retry_seconds: 0, ..fast() });
             let t = engine
+                .l4_service()
                 .create(NewTask {
                     title: "every second".into(),
                     instructions: "true".into(),

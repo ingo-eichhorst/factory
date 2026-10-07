@@ -2628,6 +2628,7 @@ mod tests {
         registry.add_runtime(Arc::new(SlowStop), "test");
         let engine = Arc::new(Engine::new(base.factory_snapshot(), registry, base.l4.store.clone(), PathBuf::from("factory"), Vec::new()));
         let task = engine
+            .l4_service()
             .create(factory_core::task::NewTask {
                 title: "reports from a sandbox".into(),
                 instructions: "true".into(),
@@ -2666,6 +2667,7 @@ mod tests {
     async fn provenance_http_reads_the_completed_run_and_rejects_invalid_reports() {
         let engine = engine_with_quality();
         let task = engine
+            .l4_service()
             .create(factory_core::task::NewTask {
                 title: "release".into(),
                 instructions: "true".into(),
@@ -2841,6 +2843,7 @@ mod tests {
 
     async fn task_and_run(engine: &Arc<Engine>, scope: &str, token: &str) -> (factory_core::task::Task, factory_core::run::Run) {
         let task = engine
+            .l4_service()
             .create(factory_core::task::NewTask {
                 title: "friction".into(),
                 instructions: "true".into(),

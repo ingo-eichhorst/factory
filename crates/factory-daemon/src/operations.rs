@@ -69,6 +69,7 @@ use factory_core::task::{CloseReason, Task, TaskClosure, TaskEntry, TaskFilter, 
 
 use crate::access::Caller;
 use crate::engine::Engine;
+use crate::l4_service::L4Service;
 use crate::schedule;
 
 /// How far back the report reads finished runs when the window asks for
@@ -143,7 +144,7 @@ impl Asked {
 #[path = "operations_report.rs"]
 mod report;
 
-impl Engine {
+impl L4Service<'_> {
 
 
 
@@ -168,7 +169,7 @@ impl Engine {
     /// re-reads and fires a due task, so a slot is fired or skipped, never
     /// both.
     pub(crate) async fn skip_next(&self, id: &str, slot: Option<DateTime<Utc>>, asked: &Asked) -> Result<Task> {
-        let _slot = self.l4.schedule_lock.lock().await;
+        let _slot = self.state.schedule_lock.lock().await;
         let task = self.require(id).await?;
         let Some(s) = &task.schedule else {
             return Err(FactoryError::BadRequest("only a scheduled task has a next slot to skip".into()));
@@ -198,7 +199,7 @@ impl Engine {
         };
         let dropped_retry = task.pending_retry.is_some();
         let updated = self
-            .l4.store
+            .state.store
             .update(
                 id,
                 &TaskPatch {
@@ -224,7 +225,7 @@ impl Engine {
             ),
         )
         .await;
-        self.shared.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
+        self.wiring.bus().publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
         Ok(updated)
     }
 
@@ -249,14 +250,14 @@ impl Engine {
         duplicate_of: Option<String>,
         asked: &Asked,
     ) -> Result<Task> {
-        let _slot = self.l4.schedule_lock.lock().await;
+        let _slot = self.state.schedule_lock.lock().await;
         let task = self.require(id).await?;
         if task.status == TaskStatus::Intake {
             return Err(FactoryError::BadRequest(
                 "this task is still in intake: close it there (factory intake decide <id> wontfix)".into(),
             ));
         }
-        if let Some(run) = self.l4.store.active_run(id).await? {
+        if let Some(run) = self.state.store.active_run(id).await? {
             return Err(FactoryError::BadRequest(format!(
                 "attempt {} of this task is still {}; cancel it before closing the task",
                 run.attempt,
@@ -290,7 +291,7 @@ impl Engine {
             at: Utc::now(),
         };
         let updated = self
-            .l4.store
+            .state.store
             .update(
                 id,
                 &TaskPatch {
@@ -326,12 +327,12 @@ impl Engine {
             ),
         )
         .await;
-        self.shared.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
-        self.l4_service().sweep_workspaces().await;
+        self.wiring.bus().publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
+        self.sweep_workspaces().await;
         // `#274`: a closed task's sandboxed conversation, if it preserved
         // one, is released the same way its worktree is -- no new sweeper,
         // just the existing per-task release point.
-        self.l4_service().remove_preserved_session(id);
+        self.remove_preserved_session(id);
         Ok(updated)
     }
 
@@ -343,7 +344,7 @@ impl Engine {
     /// happened last. The failure it may have been closed on goes -- a
     /// pending task carrying one would read as a task waiting on a retry.
     pub(crate) async fn reopen_task(&self, id: &str, asked: &Asked) -> Result<Task> {
-        let _slot = self.l4.schedule_lock.lock().await;
+        let _slot = self.state.schedule_lock.lock().await;
         let task = self.require(id).await?;
         let Some(was) = task.close_reason() else {
             return Err(FactoryError::BadRequest(format!(
@@ -363,7 +364,7 @@ impl Engine {
             _ => None,
         };
         let updated = self
-            .l4.store
+            .state.store
             .update(
                 id,
                 &TaskPatch {
@@ -387,7 +388,7 @@ impl Engine {
             ),
         )
         .await;
-        self.shared.bus.publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
+        self.wiring.bus().publish(factory_core::event::Event::TaskUpdated { task: updated.clone() });
         Ok(updated)
     }
 
@@ -431,7 +432,7 @@ impl Engine {
         let Some(session) = run.session.as_ref() else {
             return Err(FactoryError::BadRequest(format!("run {run_id} has no session to answer into")));
         };
-        let runtime = self.shared.registry.runtime(&session.runtime)?;
+        let runtime = self.wiring.registry().runtime(&session.runtime)?;
         runtime.send_text(session, text).await?;
         self.entry(
             &run.task_id,
@@ -589,6 +590,7 @@ mod tests {
 
     async fn task_in(engine: &Engine, scope: &str, title: &str, schedule: Option<Schedule>) -> Task {
         engine
+            .l4_service()
             .create(NewTask {
                 title: title.into(),
                 instructions: "true".into(),
@@ -639,7 +641,7 @@ mod tests {
             )
             .await
             .unwrap();
-        engine.entry(task_id, TaskEntry::new("agent", "blocked", why).in_run(&run.id)).await;
+        engine.l4_service().entry(task_id, TaskEntry::new("agent", "blocked", why).in_run(&run.id)).await;
         run
     }
 
@@ -838,7 +840,7 @@ mod tests {
         let there = task_in(&engine, "other", "there", None).await;
         blocked_run(&engine, &nested.id, "nested needs a hand").await;
         blocked_run(&engine, &there.id, "not ours").await;
-        engine.entry(&nested.id, TaskEntry::new("owner", ANSWER_KIND, "answered").with_data(serde_json::json!({}))).await;
+        engine.l4_service().entry(&nested.id, TaskEntry::new("owner", ANSWER_KIND, "answered").with_data(serde_json::json!({}))).await;
 
         let report = engine.operations_report(Some("demo"), HealthWindow::Week, true).await.unwrap();
         assert_eq!(report.scope.as_deref(), Some("demo"));
@@ -967,7 +969,7 @@ mod tests {
         let task = task_in(&engine, "demo", "hourly", Some(Schedule::Every { seconds: 3600 })).await;
         let slot = task.next_run_at.unwrap();
 
-        let skipped = engine.skip_next(&task.id, None, &owner("the host is being moved")).await.unwrap();
+        let skipped = engine.l4_service().skip_next(&task.id, None, &owner("the host is being moved")).await.unwrap();
         let next = skipped.next_run_at.unwrap();
         assert!(next > slot, "past the skipped slot");
         assert!(next <= slot + Duration::seconds(3600) + Duration::seconds(5), "and no further than the one after it");
@@ -980,7 +982,7 @@ mod tests {
         assert!(!entries.iter().any(|e| e.kind == "schedule_skipped"), "a decision is not a missed slot");
 
         let one_off = task_in(&engine, "demo", "one-off", None).await;
-        let err = engine.skip_next(&one_off.id, None, &owner("x")).await.unwrap_err();
+        let err = engine.l4_service().skip_next(&one_off.id, None, &owner("x")).await.unwrap_err();
         assert!(err.to_string().contains("only a scheduled task"), "{err}");
         std::fs::remove_dir_all(root).ok();
     }
@@ -994,7 +996,7 @@ mod tests {
             .update(&task.id, &TaskPatch { next_run_at: Some(Utc::now() - Duration::hours(5)), ..Default::default() })
             .await
             .unwrap();
-        let skipped = engine.skip_next(&task.id, None, &owner("stale")).await.unwrap();
+        let skipped = engine.l4_service().skip_next(&task.id, None, &owner("stale")).await.unwrap();
         assert!(skipped.next_run_at.unwrap() > Utc::now(), "from now, not from the overdue slot");
         std::fs::remove_dir_all(root).ok();
     }
@@ -1021,7 +1023,7 @@ mod tests {
         assert_eq!(data_str(e, "reason"), Some("it asked which key"));
         assert!(!e.message.contains("staging"), "the text itself is not journaled: {}", e.message);
         assert_eq!(
-            engine.require_run(&run.id).await.unwrap().status,
+            engine.l4_service().require_run(&run.id).await.unwrap().status,
             RunStatus::Blocked,
             "whether it is unblocked is the agent's to say"
         );
@@ -1036,7 +1038,7 @@ mod tests {
         let (engine, runtime, root) = test_engine();
         let task = task_in(&engine, "demo", "t", None).await;
         let blocked = blocked_run(&engine, &task.id, "?").await;
-        let err = engine.answer_run(&blocked.id, "yes", &Asked::new(&Caller::Owner, Some("   ".into()))).await.unwrap_err();
+        let err = engine.l4_service().answer_run(&blocked.id, "yes", &Asked::new(&Caller::Owner, Some("   ".into()))).await.unwrap_err();
         assert!(err.to_string().contains("needs a reason"), "{err}");
 
         engine
@@ -1044,7 +1046,7 @@ mod tests {
             .update_run(&blocked.id, &RunPatch { status: Some(RunStatus::Running), clear_blocked: true, ..Default::default() })
             .await
             .unwrap();
-        let err = engine.answer_run(&blocked.id, "yes", &owner("r")).await.unwrap_err();
+        let err = engine.l4_service().answer_run(&blocked.id, "yes", &owner("r")).await.unwrap_err();
         assert!(err.to_string().contains("not blocked"), "{err}");
         assert!(runtime.typed.lock().unwrap().is_empty(), "nothing typed on a refusal");
         std::fs::remove_dir_all(root).ok();
@@ -1113,6 +1115,7 @@ mod tests {
             Some("tidying up".into()),
         );
         engine
+            .l4_service()
             .entry(
                 &task.id,
                 agent.entry(RUN_REQUESTED_KIND, "run requested".into(), serde_json::json!({ "queued_at": again.queued_at })),
@@ -1121,13 +1124,13 @@ mod tests {
         // And answers a blocked run of another task.
         let other = task_in(&engine, "demo", "asks", None).await;
         let blocked = blocked_run(&engine, &other.id, "?").await;
-        engine.entry(&other.id, agent.entry(ANSWER_KIND, "answered".into(), serde_json::json!({})).in_run(&blocked.id)).await;
+        engine.l4_service().entry(&other.id, agent.entry(ANSWER_KIND, "answered".into(), serde_json::json!({})).in_run(&blocked.id)).await;
 
         let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         assert_eq!(report.health.current.interventions, 0, "nothing here was the owner's doing");
 
         // The owner's answer is.
-        engine.answer_run(&blocked.id, "yes", &owner("it asked")).await.unwrap();
+        engine.l4_service().answer_run(&blocked.id, "yes", &owner("it asked")).await.unwrap();
         let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         assert_eq!(report.health.current.interventions, 1);
         std::fs::remove_dir_all(root).ok();
@@ -1151,7 +1154,7 @@ mod tests {
             .await
             .unwrap();
 
-        let skipped = engine.skip_next(&task.id, None, &owner("not today")).await.unwrap();
+        let skipped = engine.l4_service().skip_next(&task.id, None, &owner("not today")).await.unwrap();
         assert_eq!(skipped.next_run_at, Some(regular), "the regular slot, not one drifted by the backoff");
         assert!(skipped.pending_retry.is_none());
         let entries = engine.l4.store.entries(&task.id, 50).await.unwrap();
@@ -1173,7 +1176,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let skipped = engine.skip_next(&task.id, None, &owner("still not")).await.unwrap();
+        let skipped = engine.l4_service().skip_next(&task.id, None, &owner("still not")).await.unwrap();
         let next = skipped.next_run_at.unwrap();
         assert!(next > Utc::now() && next <= Utc::now() + Duration::seconds(3600), "{next}");
         std::fs::remove_dir_all(root).ok();
@@ -1186,15 +1189,15 @@ mod tests {
         let seen = task.next_run_at.unwrap();
 
         let stale = seen - Duration::hours(1);
-        let err = engine.skip_next(&task.id, Some(stale), &owner("x")).await.unwrap_err();
+        let err = engine.l4_service().skip_next(&task.id, Some(stale), &owner("x")).await.unwrap_err();
         assert!(err.to_string().contains("moved on"), "{err}");
-        assert_eq!(engine.require(&task.id).await.unwrap().next_run_at, Some(seen), "nothing moved");
+        assert_eq!(engine.l4_service().require(&task.id).await.unwrap().next_run_at, Some(seen), "nothing moved");
 
         // The scheduler read the task as due; a skip lands before it fires.
-        let as_the_scheduler_saw_it = engine.require(&task.id).await.unwrap();
-        engine.skip_next(&task.id, Some(seen), &owner("x")).await.unwrap();
+        let as_the_scheduler_saw_it = engine.l4_service().require(&task.id).await.unwrap();
+        engine.l4_service().skip_next(&task.id, Some(seen), &owner("x")).await.unwrap();
         assert!(engine.l4_service().still_due(&as_the_scheduler_saw_it).await.is_none(), "the skipped slot is not fired");
-        let fresh = engine.require(&task.id).await.unwrap();
+        let fresh = engine.l4_service().require(&task.id).await.unwrap();
         assert!(engine.l4_service().still_due(&fresh).await.is_some());
         std::fs::remove_dir_all(root).ok();
     }
@@ -1206,7 +1209,7 @@ mod tests {
         let run = blocked_run(&engine, &task.id, "?").await;
         runtime.keys_fail.store(true, std::sync::atomic::Ordering::SeqCst);
 
-        assert!(engine.answer_run(&run.id, "yes", &owner("it asked")).await.is_err());
+        assert!(engine.l4_service().answer_run(&run.id, "yes", &owner("it asked")).await.is_err());
         let kinds: Vec<String> = engine.l4.store.run_entries(&run.id, 50).await.unwrap().into_iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&ANSWER_KIND.to_string()), "{kinds:?}");
         assert!(kinds.contains(&"answer_unsent".to_string()), "{kinds:?}");

@@ -1513,6 +1513,7 @@ mod tests {
 
     async fn task(engine: &Arc<Engine>, category: Option<&str>) -> Task {
         engine
+            .l4_service()
             .create(NewTask {
                 title: "add the thing".into(),
                 instructions: "true".into(),
@@ -1553,7 +1554,7 @@ mod tests {
     /// of its own.
     async fn settled(engine: &Arc<Engine>, run_id: &str) -> Run {
         for _ in 0..400 {
-            let run = engine.require_run(run_id).await.unwrap();
+            let run = engine.l4_service().require_run(run_id).await.unwrap();
             if run.status != RunStatus::Verifying {
                 return run;
             }
@@ -1650,14 +1651,14 @@ mod tests {
         assert_eq!(queued.id, held.id);
         assert_eq!(queued.status, RunStatus::Blocked);
         assert!(queued.session.is_none());
-        assert!(engine.require(&subject.id).await.unwrap().slot_wait.is_some());
+        assert!(engine.l4_service().require(&subject.id).await.unwrap().slot_wait.is_some());
         assert_eq!(engine.l4_service().run_attestations(&held.id).await.unwrap().len(), 1);
 
         report_done(&engine, &holder.id).await;
         engine.l4_service().recheck_capacity().await;
-        let resumed = engine.require_run(&held.id).await.unwrap();
+        let resumed = engine.l4_service().require_run(&held.id).await.unwrap();
         assert!(resumed.session.is_some());
-        assert!(engine.require(&subject.id).await.unwrap().slot_wait.is_none());
+        assert!(engine.l4_service().require(&subject.id).await.unwrap().slot_wait.is_none());
         assert_eq!(engine.l4.store.runs(&subject.id, 10).await.unwrap().len(), 1);
         report_done(&engine, &subject.id).await;
         assert_eq!(settled(&engine, &held.id).await.status, RunStatus::Done);
@@ -1674,18 +1675,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(!error.to_string().is_empty());
-        let failed = engine.require_run(&held.id).await.unwrap();
+        let failed = engine.l4_service().require_run(&held.id).await.unwrap();
         assert_eq!(failed.status, RunStatus::Failed);
         assert_eq!(failed.fail_kind, Some(factory_core::run::FailKind::DispatchFailed));
         assert!(failed.session.is_none());
         assert!(engine.l4.store.active_run(&task.id).await.unwrap().is_none());
-        assert!(engine.require(&task.id).await.unwrap().blocked_by_failure());
+        assert!(engine.l4_service().require(&task.id).await.unwrap().blocked_by_failure());
     }
 
     #[tokio::test]
     async fn a_harness_failure_after_approval_settles_the_held_run() {
         let (engine, work) = engine("      - { applies_to: [feature], step: approval, by: person }");
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "use the probed harness".into(),
                 instructions: "true".into(),
@@ -1709,6 +1711,7 @@ mod tests {
     async fn a_worktree_failure_after_approval_settles_the_held_run() {
         let (engine, _) = engine("      - { applies_to: [feature], step: approval, by: person }");
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "needs a worktree".into(),
                 instructions: "true".into(),
@@ -1731,6 +1734,7 @@ mod tests {
     async fn a_runtime_start_failure_after_approval_settles_the_held_run() {
         let (engine, _) = engine("      - { applies_to: [feature], step: approval, by: person }");
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "uses a failing runtime".into(),
                 instructions: "true".into(),
@@ -1805,7 +1809,7 @@ mod tests {
             ..Default::default()
         };
         labelled.labels.insert(REVIEW_RUN_LABEL.into(), "forged".into());
-        let error = engine.create(labelled).await.unwrap_err();
+        let error = engine.l4_service().create(labelled).await.unwrap_err();
         assert!(error.to_string().contains("reserved"), "{error}");
 
         let ordinary = task(&engine, Some("feature")).await;
@@ -2030,12 +2034,12 @@ mod tests {
         // finish_run publishes the run before updating its task mirror.
         // Await the mirror too, with the same bounded polling as settled().
         for _ in 0..400 {
-            if engine.require(&task.id).await.unwrap().status == factory_core::task::TaskStatus::Done {
+            if engine.l4_service().require(&task.id).await.unwrap().status == factory_core::task::TaskStatus::Done {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert_eq!(engine.require(&task.id).await.unwrap().status, factory_core::task::TaskStatus::Done);
+        assert_eq!(engine.l4_service().require(&task.id).await.unwrap().status, factory_core::task::TaskStatus::Done);
     }
 
     #[tokio::test]
@@ -2053,7 +2057,7 @@ mod tests {
         };
         let error = engine.accept_rework(&executor, &failed.id).await.unwrap_err();
         assert!(error.to_string().contains("cannot accept rework"), "{error}");
-        assert_eq!(engine.require_run(&failed.id).await.unwrap().status, RunStatus::Blocked);
+        assert_eq!(engine.l4_service().require_run(&failed.id).await.unwrap().status, RunStatus::Blocked);
         let checker = Caller::Agent {
             scope: "demo".into(),
             name: "checker".into(),
@@ -2134,7 +2138,7 @@ mod tests {
                     result: None,
                     send_to: None,
                     error: None,
-                    token: engine.require_run(&run.id).await.unwrap().token,
+                    token: engine.l4_service().require_run(&run.id).await.unwrap().token,
                 },
             )
             .await
@@ -2180,7 +2184,7 @@ mod tests {
                 if let Some(task_id) = state.nodes.iter().find(|item| item.node_id == "a")
                     .and_then(|item| item.task_id.as_ref())
                 {
-                    let task = engine.require(task_id).await.unwrap();
+                    let task = engine.l4_service().require(task_id).await.unwrap();
                     if let Some(run) = engine.l4.store.active_run(task_id).await.unwrap() {
                         return (workflow, task, run);
                     }
@@ -2369,13 +2373,13 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         };
-        assert_eq!(engine.require(&a_task).await.unwrap().category.as_deref(), Some("feature"));
+        assert_eq!(engine.l4_service().require(&a_task).await.unwrap().category.as_deref(), Some("feature"));
         let run = report_done(&engine, &a_task).await;
         assert_eq!(run.required_steps.len(), 1);
         assert_eq!(run.required_steps[0].node_id.as_deref(), Some("a.tests"));
         let wf_now = engine.l4_service().workflow_run(&wf.id).await.unwrap();
         let waiting_id = wf_now.nodes.iter().find(|n| n.node_id == "b").unwrap().task_id.as_ref().unwrap();
-        assert!(engine.require(waiting_id).await.unwrap().after.is_some(), "b exists but is not released on a's word alone");
+        assert!(engine.l4_service().require(waiting_id).await.unwrap().after.is_some(), "b exists but is not released on a's word alone");
         assert!(engine.l4.store.active_run(waiting_id).await.unwrap().is_none());
         assert!(engine.l4_service().dependency_ready_tasks().await.unwrap().is_empty(), "the scheduler cannot bypass a running gate");
 
@@ -2489,7 +2493,7 @@ mod tests {
 
         let error = engine.accept_rework(&Caller::Owner, &failed.id).await.unwrap_err();
         assert!(error.to_string().contains("exhausted"), "{error}");
-        let still_blocked = engine.require_run(&failed.id).await.unwrap();
+        let still_blocked = engine.l4_service().require_run(&failed.id).await.unwrap();
         assert_eq!(still_blocked.status, RunStatus::Blocked);
         assert_eq!(still_blocked.blocked_source, Some(BlockSource::Verification));
         assert!(still_blocked.error.is_none(), "the blocked subject was not consumed");
@@ -2586,7 +2590,7 @@ mod tests {
             .unwrap()
             .is_empty());
         engine.verify_run(&held.id).await.unwrap();
-        let done = engine.require_run(&held.id).await.unwrap();
+        let done = engine.l4_service().require_run(&held.id).await.unwrap();
         assert_eq!(done.status, RunStatus::Done);
         let records = crate::facts::Facts::<factory_kernel::L5>::new(&engine)
             .get::<factory_kernel::ArtifactProvenance>(&held.id)
@@ -2664,7 +2668,7 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("source worktree changed"));
-        let blocked = engine.require_run(&held.id).await.unwrap();
+        let blocked = engine.l4_service().require_run(&held.id).await.unwrap();
         assert_eq!(blocked.status, RunStatus::Blocked);
         assert_eq!(blocked.blocked_source, Some(BlockSource::Verification));
         assert!(blocked.token.is_some());
@@ -2686,7 +2690,7 @@ mod tests {
         assert_ne!(retry.artifacts[0].id, held.artifacts[0].id);
         engine.verify_run(&held.id).await.unwrap();
         assert_eq!(
-            engine.require_run(&held.id).await.unwrap().status,
+            engine.l4_service().require_run(&held.id).await.unwrap().status,
             RunStatus::Done
         );
         assert_eq!(
@@ -2725,7 +2729,7 @@ mod tests {
                 .to_string()
                 .contains("artifact bytes changed"));
             assert_eq!(
-                engine.require_run(&held.id).await.unwrap().status,
+                engine.l4_service().require_run(&held.id).await.unwrap().status,
                 RunStatus::Blocked
             );
             assert!(engine
@@ -2830,7 +2834,7 @@ mod tests {
             .await
             .unwrap();
         for _ in 0..200 {
-            if engine.require_run(&held.id).await.unwrap().status == RunStatus::Running {
+            if engine.l4_service().require_run(&held.id).await.unwrap().status == RunStatus::Running {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -2984,7 +2988,7 @@ mod tests {
             .await
             .is_err());
         assert_eq!(
-            engine.require_run(&run.id).await.unwrap().status,
+            engine.l4_service().require_run(&run.id).await.unwrap().status,
             RunStatus::Cancelled
         );
         assert!(engine.l4_service().run_provenance(&run.id).await.unwrap().is_empty());

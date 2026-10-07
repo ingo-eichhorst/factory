@@ -281,7 +281,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        panic!("task {task_id} never acquired a worktree; task {:?}, runs {:?}", engine.require(task_id).await.unwrap(), engine.l4.store.runs(task_id, 10).await.unwrap());
+        panic!("task {task_id} never acquired a worktree; task {:?}, runs {:?}", engine.l4_service().require(task_id).await.unwrap(), engine.l4.store.runs(task_id, 10).await.unwrap());
     }
 
     async fn git_ok(dir: &Path, args: &[&str]) {
@@ -626,12 +626,12 @@ mod tests {
         assert!(matches!(response, factory_core::protocol::Response::Error { .. }));
         engine.recover_workflows().await;
         assert_eq!(tasks(&engine).await.len(), 3);
-        assert!(engine.require(&b.id).await.unwrap().after.is_some());
+        assert!(engine.l4_service().require(&b.id).await.unwrap().after.is_some());
         finish(&engine, &a.id, RunStatus::Done).await;
         let released = wait_for_tasks(&engine, 2).await;
         assert_eq!(of_node(&released, "b")[0].id, b.id);
-        assert!(engine.require(&b.id).await.unwrap().after.is_none());
-        assert!(engine.require(&c.id).await.unwrap().after.is_some());
+        assert!(engine.l4_service().require(&b.id).await.unwrap().after.is_none());
+        assert!(engine.l4_service().require(&c.id).await.unwrap().after.is_some());
         finish(&engine, &b.id, RunStatus::Done).await;
         finish(&engine, &c.id, RunStatus::Done).await;
         engine.recover_workflows().await;
@@ -647,7 +647,7 @@ mod tests {
         let all = tasks(&engine).await;
         let b = of_node(&all, "b")[0].clone();
         engine.l4_service().cancel_workflow(&run.id).await.unwrap();
-        let closed = engine.require(&b.id).await.unwrap();
+        let closed = engine.l4_service().require(&b.id).await.unwrap();
         assert_eq!(closed.status, TaskStatus::Cancelled);
         assert_eq!(closed.closure.unwrap().reason, factory_core::task::CloseReason::NotPlanned);
         assert!(closed.after.is_none());
@@ -672,17 +672,17 @@ mod tests {
     #[tokio::test]
     async fn waiting_override_requires_a_reason_and_records_the_early_release() {
         let engine = engine();
-        let parent = engine.create(node("parent").task).await.unwrap();
+        let parent = engine.l4_service().create(node("parent").task).await.unwrap();
         let mut new = node("child").task;
         new.after = Some(vec![parent.id.clone()]);
-        let task = engine.create(new).await.unwrap();
+        let task = engine.l4_service().create(new).await.unwrap();
         let request = |reason| factory_core::protocol::Request::TaskRun {
             id: task.id.clone(), reason, continue_run: false, override_wait: true,
         };
         assert!(matches!(engine.handle_request(request(None)).await, factory_core::protocol::Response::Error { .. }));
-        assert!(engine.require(&task.id).await.unwrap().after.is_some());
+        assert!(engine.l4_service().require(&task.id).await.unwrap().after.is_some());
         assert!(matches!(engine.handle_request(request(Some("manual investigation".into()))).await, factory_core::protocol::Response::Ok { .. }));
-        assert!(engine.require(&task.id).await.unwrap().after.is_none());
+        assert!(engine.l4_service().require(&task.id).await.unwrap().after.is_none());
         let entries = engine.l4.store.entries(&task.id, 50).await.unwrap();
         let entry = entries.iter().find(|entry| entry.kind == "waiting_override").unwrap();
         assert!(entry.message.contains("manual investigation"));
@@ -694,15 +694,15 @@ mod tests {
     #[tokio::test]
     async fn waiting_standalone_after_fires_once_and_validates_trigger_edits() {
         let engine = engine();
-        let parent = engine.create(node("parent").task).await.unwrap();
+        let parent = engine.l4_service().create(node("parent").task).await.unwrap();
         let mut new = node("child").task;
         new.after = Some(vec![parent.id.clone()]);
-        let child = engine.create(new.clone()).await.unwrap();
+        let child = engine.l4_service().create(new.clone()).await.unwrap();
         assert!(engine.l4_service().dependency_ready_tasks().await.unwrap().is_empty());
         let invalid = engine.update(&parent.id, TaskPatch { after: Some(vec![child.id.clone()]), ..Default::default() }, None).await;
         assert!(invalid.unwrap_err().to_string().contains("cycle"));
         new.schedule = Some(factory_core::task::Schedule::Every { seconds: 1 });
-        assert!(engine.create(new).await.unwrap_err().to_string().contains("exclusive"));
+        assert!(engine.l4_service().create(new).await.unwrap_err().to_string().contains("exclusive"));
         engine.l4_service().start_run(&parent.id, Trigger::Manual).await;
         finish(&engine, &parent.id, RunStatus::Done).await;
         let ready = engine.l4_service().dependency_ready_tasks().await.unwrap();
@@ -710,7 +710,7 @@ mod tests {
         assert_eq!(ready[0].id, child.id);
         engine.l4_service().start_run(&child.id, Trigger::Dependency).await;
         finish(&engine, &child.id, RunStatus::Done).await;
-        assert!(engine.require(&child.id).await.unwrap().after.is_none());
+        assert!(engine.l4_service().require(&child.id).await.unwrap().after.is_none());
         assert!(engine.l4_service().dependency_ready_tasks().await.unwrap().is_empty());
         assert_eq!(engine.l4.store.runs(&child.id, 10).await.unwrap().len(), 1);
     }
@@ -724,19 +724,19 @@ mod tests {
         let b = of_node(&all, "b")[0].clone();
         engine.l4_service().override_waiting(&b, &Caller::Owner, "inspect early").await.unwrap();
         engine.advance_workflow(&run.id).await.unwrap();
-        assert!(engine.require(&b.id).await.unwrap().after.is_none());
+        assert!(engine.l4_service().require(&b.id).await.unwrap().after.is_none());
         assert!(engine.l4.store.active_run(&b.id).await.unwrap().is_none(), "the graph does not automatically run an early override");
         engine.l4_service().cancel_workflow(&run.id).await.unwrap();
         engine.l4_service().start_run(&b.id, Trigger::Workflow).await;
         assert!(engine.l4.store.runs(&b.id, 10).await.unwrap().is_empty(), "a queued release cannot launch after cancellation");
-        assert_eq!(engine.require(&b.id).await.unwrap().closure.unwrap().reason, factory_core::task::CloseReason::NotPlanned);
+        assert_eq!(engine.l4_service().require(&b.id).await.unwrap().closure.unwrap().reason, factory_core::task::CloseReason::NotPlanned);
     }
 
     #[tokio::test]
     async fn waiting_trigger_edits_cannot_create_a_cycle_concurrently() {
         let engine = engine();
-        let a = engine.create(node("a").task).await.unwrap();
-        let b = engine.create(node("b").task).await.unwrap();
+        let a = engine.l4_service().create(node("a").task).await.unwrap();
+        let b = engine.l4_service().create(node("b").task).await.unwrap();
         let (left, right) = tokio::join!(
             engine.update(&a.id, TaskPatch { after: Some(vec![b.id.clone()]), ..Default::default() }, None),
             engine.update(&b.id, TaskPatch { after: Some(vec![a.id.clone()]), ..Default::default() }, None)
@@ -764,7 +764,7 @@ mod tests {
         let second = wait_for_attempt(&engine, &a.id, 2).await;
         assert_eq!(second.continued_from.as_deref(), Some(first.id.as_str()));
         finish(&engine, &a.id, RunStatus::Done).await;
-        assert_eq!(engine.require(&b.id).await.unwrap().runs, 0, "continuation never revives cancelled downstream work");
+        assert_eq!(engine.l4_service().require(&b.id).await.unwrap().runs, 0, "continuation never revives cancelled downstream work");
     }
 
     #[tokio::test]
@@ -1186,7 +1186,7 @@ mod tests {
         assert_eq!(run.failure_node_id.as_deref(), Some("b"));
         let b = run.nodes.iter().find(|n| n.node_id == "b").unwrap();
         assert_eq!(b.status, WorkflowNodeStatus::Failed);
-        let b_task = engine.require(b.task_id.as_ref().unwrap()).await.unwrap();
+        let b_task = engine.l4_service().require(b.task_id.as_ref().unwrap()).await.unwrap();
         assert_eq!(b_task.runs, 0, "revoked authority never dispatches the upfront task");
         assert_eq!(b_task.closure.as_ref().unwrap().reason, factory_core::task::CloseReason::NotPlanned);
         assert!(
@@ -1297,6 +1297,7 @@ mod tests {
         assert_eq!(origin.node_id, "a");
 
         let plain = engine
+            .l4_service()
             .create(NewTask {
                 title: "ordinary".into(),
                 scope: Some("demo".into()),
@@ -1653,7 +1654,7 @@ mod tests {
         assert!(refused.contains("implement (concrete findings the implementer can fix alone)"), "{refused}");
         review_fails(&engine, &review.id, "the parser test is missing").await;
 
-        let waiting_review = engine.require(&review.id).await.unwrap();
+        let waiting_review = engine.l4_service().require(&review.id).await.unwrap();
         assert!(waiting_review.after.is_some(), "the next review round waits on rework");
         assert_eq!(waiting_review.status, TaskStatus::Pending);
         let routed_review = engine.l4.store.runs(&review.id, 1).await.unwrap().pop().unwrap();
@@ -1674,7 +1675,7 @@ mod tests {
         }));
 
         let second_run = wait_for_attempt(&engine, &first.id, 2).await;
-        let again = engine.require(&first.id).await.unwrap();
+        let again = engine.l4_service().require(&first.id).await.unwrap();
         assert_eq!(again.title, "implement");
         assert_eq!(second_run.workflow_round, 1);
         assert!(second_run.feedback.as_ref().unwrap().feedback.as_deref().unwrap().contains("the parser test is missing"));
@@ -1699,7 +1700,7 @@ mod tests {
 
         finish_with_result(&engine, &again.id, "PR https://example.test/pr/1, fixed").await;
         let second_review_run = wait_for_attempt(&engine, &review.id, 2).await;
-        let second_review = engine.require(&review.id).await.unwrap();
+        let second_review = engine.l4_service().require(&review.id).await.unwrap();
         assert_eq!(second_review.title, "review");
         assert_eq!(second_review_run.workflow_round, 1);
         finish(&engine, &second_review.id, RunStatus::Done).await;
@@ -1734,10 +1735,10 @@ mod tests {
         let review = of_node(&wait_for_tasks(&engine, 2).await, "review")[0].clone();
         review_fails(&engine, &review.id, "still wrong").await;
         wait_for_attempt(&engine, &implement.id, 2).await;
-        let again = engine.require(&implement.id).await.unwrap();
+        let again = engine.l4_service().require(&implement.id).await.unwrap();
         finish(&engine, &again.id, RunStatus::Done).await;
         wait_for_attempt(&engine, &review.id, 2).await;
-        let last = engine.require(&review.id).await.unwrap();
+        let last = engine.l4_service().require(&review.id).await.unwrap();
         let active = loop {
             if let Some(active) = engine.l4.store.active_run(&last.id).await.unwrap() {
                 break active;
@@ -1879,7 +1880,7 @@ mod tests {
             node_run(&state, "b").skip_reason.as_deref(),
             Some("skipped (a -> c)")
         );
-        let closed = engine.require(&conditional_id).await.unwrap();
+        let closed = engine.l4_service().require(&conditional_id).await.unwrap();
         assert_eq!(closed.closure.unwrap().reason, factory_core::task::CloseReason::NotPlanned);
         assert_eq!(closed.runs, 0);
         assert!(closed.after.is_none());
@@ -1931,7 +1932,7 @@ mod tests {
     #[tokio::test]
     async fn exits_are_first_match_wins_and_send_to_refusals_name_alternatives() {
         let standalone_engine = engine();
-        let plain = standalone_engine.create(NewTask { title: "plain".into(), scope: Some("demo".into()), ..Default::default() }).await.unwrap();
+        let plain = standalone_engine.l4_service().create(NewTask { title: "plain".into(), scope: Some("demo".into()), ..Default::default() }).await.unwrap();
         let standalone = standalone_engine.l4_service().validate_workflow_send_to(&plain.id, Some(RunStatus::Done), Some("b"))
             .await.unwrap_err().to_string();
         assert!(standalone.contains("only available on a workflow node"), "{standalone}");
@@ -2076,6 +2077,7 @@ mod tests {
 
         let engine = engine_in_git_scope(root.clone(), repo.clone());
         let parent = engine
+            .l4_service()
             .create(NewTask {
                 title: "Build two slices".into(),
                 instructions: "one integrated result".into(),
@@ -2241,6 +2243,7 @@ mod tests {
         assert!(!foundation_path.exists());
         assert!(!surface_path.exists());
         assert!(engine
+            .l4_service()
             .require(&parent.id)
             .await
             .unwrap()
@@ -2279,6 +2282,7 @@ mod tests {
 
         let engine = engine_in_git_scope(root.clone(), repo.clone());
         let parent = engine
+            .l4_service()
             .create(NewTask {
                 title: "One reviewed change".into(),
                 scope: Some("demo".into()),
@@ -2500,6 +2504,7 @@ mod tests {
         let engine = engine();
         let template = part_workflow(&engine, 5).await;
         let parent = engine
+            .l4_service()
             .create(NewTask {
                 title: "Epic".into(),
                 instructions: "the whole change".into(),
@@ -2573,6 +2578,7 @@ mod tests {
         let repo = epic_repo(&root).await;
         let engine = engine_in_git_scope(root.clone(), repo);
         let parent = engine
+            .l4_service()
             .create(NewTask {
                 title: "Two slices".into(),
                 instructions: "one result".into(),
@@ -2632,6 +2638,7 @@ mod tests {
         engine.l4_service().update_workflow(&template.id, draft).await.unwrap();
 
         let parent = engine
+            .l4_service()
             .create(NewTask { title: "Epic".into(), scope: Some("demo".into()), worktree: Some(false), ..Default::default() })
             .await
             .unwrap();
@@ -2677,6 +2684,7 @@ mod tests {
         let engine = epic_engine_on_disk(&root, &repo);
         let template = part_workflow(&engine, 5).await;
         let parent = engine
+            .l4_service()
             .create(NewTask {
                 title: "Epic in three parts".into(),
                 instructions: "one integrated result".into(),
@@ -2814,7 +2822,7 @@ mod tests {
         assert_eq!(integration.merged_nodes, ["a-implement", "b-implement", "c-implement"]);
         assert!(integration.checks_passed);
         assert_eq!(merges_on(&integration_dir, &integration.branch).await, 4, "C was merged again after its fix");
-        assert!(engine.require(&parent.id).await.unwrap().result.unwrap().contains("Integrated on"));
+        assert!(engine.l4_service().require(&parent.id).await.unwrap().result.unwrap().contains("Integrated on"));
         let integration_dirs = std::fs::read_dir(engine.factory_snapshot().worktrees_dir())
             .unwrap()
             .filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().starts_with("integration-"))
@@ -2830,6 +2838,7 @@ mod tests {
         let engine = engine_in_git_scope(root.clone(), repo);
         let template = part_workflow(&engine, 5).await;
         let parent = engine
+            .l4_service()
             .create(NewTask { title: "Epic".into(), scope: Some("demo".into()), worktree: Some(false), ..Default::default() })
             .await
             .unwrap();
@@ -2891,6 +2900,7 @@ mod tests {
         let engine = epic_engine_on_disk(&root, &repo);
         let template = part_workflow(&engine, 5).await;
         let parent = engine
+            .l4_service()
             .create(NewTask { title: "Epic".into(), scope: Some("demo".into()), worktree: Some(false), ..Default::default() })
             .await
             .unwrap();
@@ -2969,6 +2979,7 @@ mod tests {
         let engine = engine();
         let template = part_workflow(&engine, 5).await;
         let parent = engine
+            .l4_service()
             .create(NewTask { title: "Epic".into(), scope: Some("demo".into()), worktree: Some(false), ..Default::default() })
             .await
             .unwrap();
@@ -3088,6 +3099,7 @@ mod tests {
     async fn a_dependant_hears_its_prerequisites_result_once() {
         let engine = engine();
         let parent = engine
+            .l4_service()
             .create(NewTask { title: "Two slices".into(), scope: Some("demo".into()), worktree: Some(false), ..Default::default() })
             .await
             .unwrap();
@@ -3100,7 +3112,7 @@ mod tests {
         assert_eq!(b.depends_on, vec![a.id.clone()], "a is b's dependency");
         assert!(run.definition.edges.iter().any(|edge| edge.from == "a" && edge.to == "b"), "and its workflow parent");
         report_done(&engine, &a.id, "A RESULT", None).await;
-        let outputs = engine.l4_service().upstream_outputs(&engine.require(&b.id).await.unwrap()).await;
+        let outputs = engine.l4_service().upstream_outputs(&engine.l4_service().require(&b.id).await.unwrap()).await;
         assert_eq!(outputs.iter().filter(|output| output.task_id == a.id).count(), 1, "{outputs:?}");
         assert_eq!(outputs[0].result.as_deref(), Some("A RESULT"));
         let _ = engine.l4_service().cancel_workflow(&run.id).await;
@@ -3110,6 +3122,7 @@ mod tests {
     async fn expand_join_can_tolerate_a_declared_number_of_failed_children() {
         let engine = engine();
         let parent = engine
+            .l4_service()
             .create(NewTask {
                 title: "Tolerant fan-out".into(),
                 scope: Some("demo".into()),
@@ -3160,6 +3173,7 @@ mod tests {
     async fn expand_abandon_cancel_leaves_dispatched_children_running() {
         let engine = engine();
         let parent = engine
+            .l4_service()
             .create(NewTask {
                 title: "Abandoned fan-out".into(),
                 scope: Some("demo".into()),
@@ -3210,7 +3224,7 @@ mod tests {
         let cancelled = engine.l4_service().cancel_workflow(&run.id).await.unwrap();
         assert_eq!(cancelled.status, WorkflowRunStatus::Cancelled);
         assert!(engine.l4.store.active_run(&child.id).await.unwrap().is_some());
-        assert_ne!(engine.require(&child.id).await.unwrap().status, TaskStatus::Cancelled);
+        assert_ne!(engine.l4_service().require(&child.id).await.unwrap().status, TaskStatus::Cancelled);
         let waiting = tasks(&engine).await.into_iter().find(|task| task.decomposition_part.as_deref() == Some("later")).unwrap();
         assert_eq!(waiting.runs, 0);
         assert!(waiting.after.is_none());
@@ -3220,7 +3234,7 @@ mod tests {
     #[tokio::test]
     async fn a_terminal_verifier_review_blocks_its_control_node_for_retry() {
         let engine = engine();
-        let mut review = engine.create(NewTask {
+        let mut review = engine.l4_service().create(NewTask {
             title: "review".into(),
             scope: Some("demo".into()),
             ..Default::default()
