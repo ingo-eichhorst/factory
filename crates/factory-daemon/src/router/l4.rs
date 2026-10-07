@@ -242,21 +242,18 @@ impl Engine {
                 )
                 .await;
                 self.sync_workflow_for_task(&id).await;
-                self.sync_bench_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
             }
             Request::TaskClose { id, reason, duplicate_of, note } => {
                 let asked = crate::operations::Asked::new(caller, note);
                 let task = self.close_task(&id, reason, duplicate_of, &asked).await?;
                 self.sync_workflow_for_task(&id).await;
-                self.sync_bench_for_task(&id).await;
                 Ok(Payload::Task { task })
             }
             Request::TaskReopen { id, reason } => {
                 let asked = crate::operations::Asked::new(caller, reason);
                 let task = self.reopen_task(&id, &asked).await?;
                 self.sync_workflow_for_task(&id).await;
-                self.sync_bench_for_task(&id).await;
                 Ok(Payload::Task { task })
             }
             Request::TaskReport { id, report } => {
@@ -265,13 +262,11 @@ impl Engine {
                 // including small reads on axum's default worker stack.
                 let run = Box::pin(self.l4_service().report(&id, report)).await?;
                 self.sync_workflow_for_task(&id).await;
-                self.sync_bench_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
             }
             Request::TaskTurnEnded { id, turn } => {
                 self.turn_ended(&id, turn).await?;
                 self.sync_workflow_for_task(&id).await;
-                self.sync_bench_for_task(&id).await;
                 Ok(Payload::Ok)
             }
             Request::TaskEntries { id, limit, task_only } => Ok(Payload::Entries {

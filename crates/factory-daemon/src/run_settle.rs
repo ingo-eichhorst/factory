@@ -919,7 +919,6 @@ impl L4Service<'_> {
             )
             .await;
         self.record_workflow_task_state(&run.task_id).await;
-        self.core.record_bench_task_state(&run.task_id).await;
     }
     /// Keep the last of what the agent saw, then let the session go. Every
     /// path that ends a run -- a terminal report, a cancel, a task deleted

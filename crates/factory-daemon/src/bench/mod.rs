@@ -22,3 +22,14 @@ pub(crate) async fn run(
     )
     .await;
 }
+
+/// A bus event that says an attempt's task may have settled: a terminal run, or a settled bench task. It is only a
+/// hint to poll sooner; the judge poller's timer finds the same thing without it.
+pub(crate) fn settle_hint(event: &factory_core::event::Event) -> bool {
+    use factory_core::event::Event;
+    match event {
+        Event::RunUpdated { run } => run.status.is_terminal(),
+        Event::TaskUpdated { task } => task.bench_origin.is_some() && task.is_settled(),
+        _ => false,
+    }
+}
