@@ -400,7 +400,7 @@ impl Engine {
             .or_else(|| declared.agent_adapter().map(str::to_string))
             .unwrap_or_else(|| factory.config.daemon.default_agent.clone());
         let (resolved, _, _) = self.resolve_agent(&item.scope, &requested)?;
-        let role = self.effective_role(&item.scope, &resolved).await;
+        let role = self.l3_service().effective_role(&item.scope, &resolved).await;
         let may_report = self
             .roles_for(&item.scope)
             .get(&role)

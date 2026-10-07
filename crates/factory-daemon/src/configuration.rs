@@ -1231,7 +1231,7 @@ impl Engine {
                     current.name
                 )));
             }
-            let dependents = self.dependents_of(factory, origin, &Role::new(name.clone()), &given)?;
+            let dependents = self.l3_service().dependents_of(factory, origin, &Role::new(name.clone()), &given)?;
             if !dependents.is_empty() {
                 return Err(bad(format!(
                     "{name:?} is still held by {}. Give them another role first",
@@ -2143,7 +2143,7 @@ mod tests {
             "demo", "watcher", "pi", "herdr", Lifetime::Permanent, Role::worker(),
         );
         engine.l4.store.put_agent(&watcher).await.unwrap();
-        engine.set_agent_role("demo/watcher", Some(Role::new("reviewer"))).await.unwrap();
+        engine.l3_service().set_agent_role("demo/watcher", Some(Role::new("reviewer"))).await.unwrap();
 
         let error = engine.delete_role("projects", "reviewer").await.unwrap_err().to_string();
         assert!(error.contains("critic in demo"), "{error}");

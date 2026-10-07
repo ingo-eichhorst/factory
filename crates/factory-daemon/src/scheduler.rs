@@ -120,7 +120,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         // there. A permanent agent that has said nothing all day is working
         // exactly as intended, and must never be caught by the run timeouts
         // below.
-        engine.supervise_agents().await;
+        engine.l3_service().supervise_agents().await;
         // What the runtime says the working agents are doing. Nothing else
         // keeps this: herdr answers "now" and forgets.
         engine.record_run_liveness().await;

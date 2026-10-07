@@ -15,7 +15,7 @@ impl Engine {
             }),
             Request::Agents => {
                 let (scopes, available) = self.scope_views().await?;
-                let (roles, scope_roles) = self.role_views();
+                let (roles, scope_roles) = self.l3_service().role_views();
                 Ok(Payload::Scopes {
                     scopes,
                     available,
@@ -24,7 +24,7 @@ impl Engine {
                 })
             }
             Request::RoleList { scope } => Ok(Payload::Roles {
-                board: self.role_board(scope.as_deref()).await?,
+                board: self.l3_service().role_board(scope.as_deref()).await?,
             }),
             Request::RoleDefine {
                 scope,
@@ -42,7 +42,7 @@ impl Engine {
                 Ok(Payload::Deleted { deleted: true })
             }
             Request::AgentStart { scope, name } => Ok(Payload::Agent {
-                agent: self.start_agent(&scope, &name).await?.redacted(),
+                agent: self.l3_service().start_agent(&scope, &name).await?.redacted(),
             }),
             Request::AgentConfigure { scope, agent } => {
                 let (scope, agent) = self.configure_agent(&scope, agent)?;
@@ -55,7 +55,7 @@ impl Engine {
                 if autostart {
                     let engine = self.clone();
                     tokio::spawn(async move {
-                        if let Err(error) = engine.start_agent(&scope, &name).await {
+                        if let Err(error) = engine.l3_service().start_agent(&scope, &name).await {
                             tracing::warn!(scope, name, "could not start newly configured agent: {error}");
                         }
                     });
@@ -66,26 +66,26 @@ impl Engine {
                 let (scope, removed) = self.delete_agent_declaration(&scope, &name)?;
                 let name = removed.name();
                 self.shared.bus.publish(Event::AgentDeleted { scope, name });
-                self.reconcile_agents().await;
+                self.l3_service().reconcile_agents().await;
                 Ok(Payload::Deleted { deleted: true })
             }
             Request::AgentStop { id } => Ok(Payload::Agent {
-                agent: self.stop_agent(&id).await?.redacted(),
+                agent: self.l3_service().stop_agent(&id).await?.redacted(),
             }),
             Request::AgentRole { id, role } => Ok(Payload::Agent {
                 agent: self
-                    .set_agent_role(&id, role.map(Role::new))
+                    .l3_service().set_agent_role(&id, role.map(Role::new))
                     .await?
                     .redacted(),
             }),
             Request::AgentInput { id, text, keys } => {
-                self.agent_input(&id, text.as_deref(), &keys).await?;
+                self.l3_service().agent_input(&id, text.as_deref(), &keys).await?;
                 Ok(Payload::Ok)
             }
             Request::AgentOutput { id, lines } => Ok(Payload::Text {
-                text: self.agent_output(&id, lines.unwrap_or(200)).await?,
+                text: self.l3_service().agent_output(&id, lines.unwrap_or(200)).await?,
             }),
-            Request::AgentScreen { id } => match self.agent_screen(&id).await? {
+            Request::AgentScreen { id } => match self.l3_service().agent_screen(&id).await? {
                 Some(screen) => Ok(Payload::Screen { screen }),
                 None => Err(FactoryError::BadRequest(
                     "this runtime cannot render a screen for that session".into(),

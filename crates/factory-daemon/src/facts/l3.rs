@@ -20,3 +20,9 @@ pub(crate) fn provider(engine: &Engine) -> factory_agents::roster::Provider {
         foreman: snapshot.config.daemon.foreman.clone(),
     }
 }
+
+pub(crate) fn live_provider(engine: &Engine) -> factory_agents::store::LiveProvider {
+    factory_agents::store::LiveProvider {
+        agents: engine.l3.agents.clone(),
+    }
+}

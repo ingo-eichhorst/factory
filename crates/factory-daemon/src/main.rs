@@ -2,6 +2,9 @@
 //! runs until it is told to stop.
 
 mod access;
+mod runtime_events;
+mod l3_service;
+mod admission;
 mod agent_rows;
 mod state;
 mod l6_service;
@@ -403,7 +406,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
 
     // Line up declared standing agents with whatever is still running before
     // anything else can look at them.
-    engine.reconcile_agents().await;
+    engine.l3_service().reconcile_agents().await;
 
     // And any OpenShell sandbox a run left behind (`#218`), once the store
     // can say which runs are still active.

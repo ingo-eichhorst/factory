@@ -97,6 +97,18 @@ impl<'a, L: Level> Wiring<'a, L> {
     pub(crate) fn factory_bin(&self) -> &'a std::path::Path {
         &self.engine.shared.factory_bin
     }
+    /// The adapter registry (agents, runtimes, task stores): instance-wide wiring.
+    pub(crate) fn registry(&self) -> &'a factory_plugins::registry::Registry {
+        &self.engine.shared.registry
+    }
+    /// The roles in effect in `scope` right now (resolved from the live snapshot).
+    pub(crate) fn roles_for(&self, scope: &str) -> factory_core::role::Roles {
+        self.engine.roles_for(scope)
+    }
+    /// Every policy layer in effect for `scope` (config; the guide names its frameworks).
+    pub(crate) fn policy_chain(&self, scope: &str) -> Vec<factory_core::policy::PolicyLayer> {
+        self.engine.policy_chain(scope)
+    }
     /// When this daemon came up (instance-wide).
     pub(crate) fn booted_at(&self) -> chrono::DateTime<chrono::Utc> {
         self.engine.shared.booted_at
@@ -115,6 +127,24 @@ impl<'a, L: Level> Wiring<'a, L> {
     /// The checked fact read for this level.
     pub(crate) fn facts(&self) -> Facts<'a, L> {
         Facts::new(self.engine)
+    }
+}
+impl<'a> Wiring<'a, L3> {
+    /// The liveness sample the occupancy chart keeps (L4's record). L3 reports what it
+    /// observed about a session; recording it is L4's. A transitional bridge, removed
+    /// when L4 reads it from L3 (S9).
+    pub(crate) async fn record_status(
+        &self,
+        subject: &str,
+        scope: &str,
+        agent: &str,
+        status: factory_core::adapter::runtime::RuntimeStatus,
+    ) {
+        self.engine.record_status(subject, scope, agent, status).await
+    }
+    /// A session that is no longer there closes its open span.
+    pub(crate) async fn record_gone(&self, subject: &str, scope: &str, agent: &str) {
+        self.engine.record_gone(subject, scope, agent).await
     }
 }
 impl<'a> Wiring<'a, L6> {
@@ -305,6 +335,13 @@ port!(
     l2::dependencies_provider
 );
 port!(AgentFact, factory_agents::roster::Provider, String, Vec<AgentFact>, l3::provider);
+port!(
+    StandingAgentLiveFact,
+    factory_agents::store::LiveProvider,
+    (String, String),
+    StandingAgentLiveFact,
+    l3::live_provider
+);
 port!(TaskFact, factory_process::facts::Provider<'a>, NamedQuery, BTreeMap<String, Vec<TaskFact>>, l4::provider);
 port!(TaskSnapshotFact, factory_process::facts::Provider<'a>, String, TaskSnapshotFact, l4::provider);
 port!(
@@ -722,6 +759,7 @@ mod tests {
         registered::<CompiledPlanFact>();
         registered::<WorkflowBlueprintFact>();
         registered::<FunctionaryRosterFact>();
+        registered::<StandingAgentLiveFact>();
         registered::<WorkflowTargetsFact>();
         registered::<WorkflowPreviewFact>();
         registered::<DaemonConfigFact>();

@@ -1116,7 +1116,7 @@ mod tests {
         let caller = Caller::Agent {
             scope: "demo".into(),
             name: "w".into(),
-            role: engine.effective_role("demo", "w").await,
+            role: engine.l3_service().effective_role("demo", "w").await,
             run_id: None,
         };
         let run = engine.start_workflow(&definition.id, Default::default(), &caller).await.unwrap();
@@ -1125,7 +1125,7 @@ mod tests {
         // The role changes while "a" is still in flight -- well after the
         // run started, well before "b" is ever considered.
         engine
-            .set_agent_role("demo/w", Some(Role::new("weak")))
+            .l3_service().set_agent_role("demo/w", Some(Role::new("weak")))
             .await
             .unwrap();
 

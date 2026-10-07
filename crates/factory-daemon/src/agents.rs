@@ -7,90 +7,24 @@
 
 use chrono::Utc;
 use factory_core::adapter::agent::AgentContext;
-use factory_core::adapter::runtime::{
-    RuntimeEvent, RuntimeEventKind, RuntimeEventStream, RuntimeStatus, Screen, StartRequest,
-};
+use factory_core::adapter::runtime::{RuntimeStatus, Screen, StartRequest};
 use factory_core::agent::{AgentSession, AgentState, Lifetime};
 use factory_core::role::Role;
 use factory_core::config::ScopeAgent;
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::Event;
 use factory_core::task::SessionRef;
-use std::sync::Arc;
 
-use crate::engine::{append_declared_args, Engine};
+use crate::engine::append_declared_args;
+use crate::l3_service::L3Service;
+#[cfg(test)]
+use crate::engine::Engine;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use factory_core::adapter::runtime::{RuntimeEvent, RuntimeEventKind, RuntimeEventStream};
 
 // ============================================================== capacity
-
-/// One (scope, agent)'s admission picture against its declared limits
-/// (`#179`): how many of its own non-terminal runs already use a slot,
-/// against its own cap, and the same for its scope as a whole. Pure -- the
-/// caller does the store reads and hands over just the counted (scope,
-/// agent) pairs of every run that uses a slot, plus whether a live
-/// permanent agent of this name is itself occupying one, so a test can
-/// build the numbers directly rather than dispatching real runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Capacity {
-    pub in_use: u32,
-    pub max: Option<u32>,
-    pub scope_in_use: u32,
-    pub scope_max: Option<u32>,
-}
-
-impl Capacity {
-    /// Whether admission should wait: the agent's own cap is already spent,
-    /// or its scope's is. Checked in that order only for the message a
-    /// caller builds from it -- both are enforced regardless of which is
-    /// named.
-    pub fn held(&self) -> bool {
-        self.max.is_some_and(|m| self.in_use >= m) || self.scope_max.is_some_and(|m| self.scope_in_use >= m)
-    }
-
-    /// The `(in_use, max)` pair a held answer should report: the agent's own
-    /// cap when that is the one that is full, otherwise the scope's.
-    pub fn holding_pair(&self) -> (u32, u32) {
-        if self.max.is_some_and(|m| self.in_use >= m) {
-            (self.in_use, self.max.unwrap())
-        } else {
-            (self.scope_in_use, self.scope_max.unwrap_or(self.scope_in_use))
-        }
-    }
-}
-
-/// Whether a run counts as using a slot: still being dispatched, or already
-/// holding a session. A run this daemon is holding open on someone's answer
-/// with no session of its own (an approval hold, `Blocked` with nothing
-/// dispatched) does not count -- it is not spending anything the harness or
-/// the account is charged for.
-pub fn run_uses_a_slot(status: factory_core::run::RunStatus, has_session: bool) -> bool {
-    use factory_core::run::RunStatus;
-    status == RunStatus::Dispatching || has_session
-}
-
-/// Build `Capacity` from the runs already known to use a slot -- each as
-/// `(scope, agent)`, the same two strings admission is keyed on -- plus
-/// whether a live permanent agent named `agent` is itself one of them.
-pub fn capacity(
-    scope: &str,
-    agent: &str,
-    agent_max: Option<u32>,
-    scope_max: Option<u32>,
-    counted: impl IntoIterator<Item = (String, String)>,
-    permanent_agent_live: bool,
-) -> Capacity {
-    let mut in_use = u32::from(permanent_agent_live);
-    let mut scope_in_use = u32::from(permanent_agent_live);
-    for (s, a) in counted {
-        if s != scope {
-            continue;
-        }
-        scope_in_use += 1;
-        if a == agent {
-            in_use += 1;
-        }
-    }
-    Capacity { in_use, max: agent_max, scope_in_use, scope_max }
-}
 
 /// Herdr names are lowercase identifiers of at most 32 characters, starting
 /// with a lowercase letter. `factory-` stays the outer namespace: herdr agent
@@ -193,41 +127,17 @@ fn runtime_name(scope: &str, name: &str) -> String {
     herdr_name(&format!("factory-{scope}-{name}"), None)
 }
 
-impl Engine {
-    /// The live admission picture for `scope`'s `agent`, gathered fresh: an
-    /// `active_runs` scan plus one standing-agent lookup, so this is only
-    /// ever right for the instant it was called at -- exactly why `dispatch`
-    /// calls it under `admission_lock`, with `create_run` still inside the
-    /// same critical section, rather than trusting an answer from before.
-    pub(crate) async fn capacity_for(
-        &self,
-        scope: &str,
-        agent: &str,
-        agent_max: Option<u32>,
-    ) -> Result<Capacity> {
-        let scope_max = self.factory_snapshot().scope(scope).ok().and_then(|s| s.max_sessions);
-        let runs = self.l4.store.active_runs().await?;
-        let mut counted = Vec::with_capacity(runs.len());
-        for run in &runs {
-            if !run_uses_a_slot(run.status, run.session.is_some()) {
-                continue;
-            }
-            if let Ok(Some(task)) = self.l4.store.get(&run.task_id).await {
-                counted.push((task.scope, run.agent.clone()));
-            }
-        }
-        let permanent_agent_live = self
-            .l4.store
-            .get_agent(&AgentSession::id_for(scope, agent))
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|a| a.state.is_live());
-        Ok(capacity(scope, agent, agent_max, scope_max, counted, permanent_agent_live))
+impl L3Service<'_> {
+    /// Which standing agent holds this session, if one does: `(subject, scope, name)`,
+    /// a standing agent's own id. A task run's session is L4's to say.
+    pub(crate) async fn agent_subject_for_session(&self, session: &SessionRef) -> Option<(String, String, String)> {
+        let agents = self.state.agents.agents().await.ok()?;
+        let agent = agents.into_iter().find(|a| a.session.as_ref() == Some(session))?;
+        Some((agent.id, agent.scope, agent.name))
     }
 
     fn declared(&self, scope: &str, name: &str) -> Result<ScopeAgent> {
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         factory
             .scope(scope)?
             .agents_with(&factory.config.daemon.foreman)
@@ -239,7 +149,7 @@ impl Engine {
     }
 
     fn runtime_for(&self, scope: &str) -> String {
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         factory
             .scope(scope)
             .ok()
@@ -259,13 +169,13 @@ impl Engine {
     /// and every future lookup finds it on the first try.
     async fn existing_agent(&self, canonical_scope: &str, name: &str) -> Result<Option<AgentSession>> {
         let id = AgentSession::id_for(canonical_scope, name);
-        if let Some(found) = self.l3.agents.get_agent(&id).await? {
+        if let Some(found) = self.state.agents.get_agent(&id).await? {
             return Ok(Some(found));
         }
         let Some(legacy_id) = AgentSession::legacy_id_for(canonical_scope, name) else {
             return Ok(None);
         };
-        let Some(mut legacy) = self.l3.agents.get_agent(&legacy_id).await? else {
+        let Some(mut legacy) = self.state.agents.get_agent(&legacy_id).await? else {
             return Ok(None);
         };
         tracing::info!(
@@ -275,15 +185,15 @@ impl Engine {
         );
         legacy.id = id;
         legacy.scope = canonical_scope.to_string();
-        self.l3.agents.put_agent(&legacy).await?;
-        let _ = self.l3.agents.delete_agent(&legacy_id).await;
+        self.state.agents.put_agent(&legacy).await?;
+        let _ = self.state.agents.delete_agent(&legacy_id).await;
         Ok(Some(legacy))
     }
 
     /// Bring a declared standing agent up. Idempotent: an agent already live is
     /// returned as it is rather than started twice.
     pub async fn start_agent(&self, scope: &str, name: &str) -> Result<AgentSession> {
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         // Canonical from here down, whatever the caller typed -- a bare name
         // from before a scope's identity became its path still resolves
         // (`Factory::scope`'s fallback), and a session started from it must
@@ -307,8 +217,8 @@ impl Engine {
         }
 
         let runtime_name_ = self.runtime_for(scope);
-        let adapter = self.shared.registry.agent(&decl.harness)?;
-        let runtime = self.shared.registry.runtime(&runtime_name_)?;
+        let adapter = self.wiring.registry().agent(&decl.harness)?;
+        let runtime = self.wiring.registry().runtime(&runtime_name_)?;
         let cwd = factory.scope_path(scope)?;
         if !cwd.is_dir() {
             return Err(FactoryError::BadRequest(format!(
@@ -335,8 +245,8 @@ impl Engine {
         agent.state = AgentState::Starting;
         agent.started_at = Utc::now();
         agent.error = None;
-        self.l3.agents.put_agent(&agent).await?;
-        self.shared.bus.publish(Event::AgentUpdated {
+        self.state.agents.put_agent(&agent).await?;
+        self.wiring.bus().publish(Event::AgentUpdated {
             agent: agent.clone(),
         });
 
@@ -345,18 +255,18 @@ impl Engine {
         // back the role the access check will actually apply rather than
         // whatever the agent was wearing before this start.
         let role = self.effective_role(scope, name).await;
-        let role = self.roles_for(scope).get(&role).cloned();
+        let role = self.wiring.roles_for(scope).get(&role).cloned();
 
         // No task: a standing agent is started to be there, and is told
         // nothing about one -- but it still gets the guide to Factory itself,
         // including which frameworks its scope is committed to (a permanent
         // agent gets this exactly once, at start, the same as its role).
-        let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.policy_chain(scope));
+        let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.wiring.policy_chain(scope));
         let ctx = AgentContext {
             scope: scope.to_string(),
             agent_name: name.to_string(),
             cwd: cwd.clone(),
-            factory_bin: self.shared.factory_bin.clone(),
+            factory_bin: self.wiring.factory_bin().to_path_buf(),
             socket: factory.socket_path(),
             callback_url: None,
             guides_dir: factory.guides_dir(),
@@ -397,8 +307,8 @@ impl Engine {
         agent.session = Some(session);
         agent.state = AgentState::Ready;
         agent.last_seen_at = Utc::now();
-        self.l3.agents.put_agent(&agent).await?;
-        self.shared.bus.publish(Event::AgentUpdated {
+        self.state.agents.put_agent(&agent).await?;
+        self.wiring.bus().publish(Event::AgentUpdated {
             agent: agent.clone(),
         });
         tracing::info!(agent = %agent.id, "standing agent is up");
@@ -413,8 +323,8 @@ impl Engine {
         agent.state = AgentState::Gone;
         agent.error = Some(e.to_string());
         agent.session = None;
-        let _ = self.l3.agents.put_agent(&agent).await;
-        self.shared.bus.publish(Event::AgentUpdated { agent });
+        let _ = self.state.agents.put_agent(&agent).await;
+        self.wiring.bus().publish(Event::AgentUpdated { agent });
         Err(e)
     }
 
@@ -424,7 +334,7 @@ impl Engine {
     pub async fn stop_agent(&self, id: &str) -> Result<AgentSession> {
         let mut agent = self.require_agent(id).await?;
         if let Some(session) = &agent.session {
-            if let Ok(runtime) = self.shared.registry.runtime(&session.runtime) {
+            if let Ok(runtime) = self.wiring.registry().runtime(&session.runtime) {
                 let _ = runtime.stop(session).await;
             }
         }
@@ -433,11 +343,11 @@ impl Engine {
         agent.token = None;
         agent.state = AgentState::Stopped;
         agent.last_seen_at = Utc::now();
-        self.l3.agents.put_agent(&agent).await?;
-        self.shared.bus.publish(Event::AgentUpdated {
+        self.state.agents.put_agent(&agent).await?;
+        self.wiring.bus().publish(Event::AgentUpdated {
             agent: agent.clone(),
         });
-        self.record_gone(&agent.id, &agent.scope, &agent.name).await;
+        self.wiring.record_gone(&agent.id, &agent.scope, &agent.name).await;
         tracing::info!(agent = %agent.id, "standing agent stopped");
         Ok(agent)
     }
@@ -458,7 +368,7 @@ impl Engine {
         if let Some(role) = &role {
             // The agent's own scope's roles: one defined in `projects/a` is
             // valid there and does not exist for an agent in `projects/b`.
-            let roles = self.roles_for(&agent.scope);
+            let roles = self.wiring.roles_for(&agent.scope);
             if !roles.contains(role) {
                 return Err(FactoryError::BadRequest(format!(
                     "no role named {:?} in {}. The roles available there are: {}",
@@ -472,8 +382,8 @@ impl Engine {
         agent.assigned_role = role;
         agent.role = agent.role_with(&declared);
         agent.last_seen_at = Utc::now();
-        self.l3.agents.put_agent(&agent).await?;
-        self.shared.bus.publish(Event::AgentUpdated {
+        self.state.agents.put_agent(&agent).await?;
+        self.wiring.bus().publish(Event::AgentUpdated {
             agent: agent.clone(),
         });
         tracing::info!(agent = %agent.id, role = %agent.role, "role set");
@@ -488,7 +398,7 @@ impl Engine {
         let session = agent.session.as_ref().ok_or_else(|| {
             FactoryError::BadRequest(format!("{id} has no session to type into"))
         })?;
-        let runtime = self.shared.registry.runtime(&session.runtime)?;
+        let runtime = self.wiring.registry().runtime(&session.runtime)?;
         if let Some(text) = text.filter(|t| !t.is_empty()) {
             runtime.send_text(session, text).await?;
         }
@@ -498,33 +408,13 @@ impl Engine {
         Ok(())
     }
 
-    /// The same for a task run's session, so the modal's terminal can be typed
-    /// into as well.
-    pub async fn run_input(&self, run_id: &str, text: Option<&str>, keys: &[String]) -> Result<()> {
-        let run = self
-            .l4.store
-            .get_run(run_id)
-            .await?
-            .ok_or_else(|| FactoryError::TaskNotFound(format!("run {run_id}")))?;
-        let session = run.session.as_ref().ok_or_else(|| {
-            FactoryError::BadRequest(format!("run {run_id} has no session to type into"))
-        })?;
-        let runtime = self.shared.registry.runtime(&session.runtime)?;
-        if let Some(text) = text.filter(|t| !t.is_empty()) {
-            runtime.send_text(session, text).await?;
-        }
-        if !keys.is_empty() {
-            runtime.send_keys(session, keys).await?;
-        }
-        Ok(())
-    }
 
     pub async fn agent_output(&self, id: &str, lines: u32) -> Result<String> {
         let agent = self.require_agent(id).await?;
         let Some(session) = &agent.session else {
             return Ok(String::new());
         };
-        let runtime = self.shared.registry.runtime(&session.runtime)?;
+        let runtime = self.wiring.registry().runtime(&session.runtime)?;
         Ok(runtime.read(session, lines).await.unwrap_or_default())
     }
 
@@ -535,12 +425,12 @@ impl Engine {
         let Some(session) = &agent.session else {
             return Ok(None);
         };
-        let runtime = self.shared.registry.runtime(&session.runtime)?;
+        let runtime = self.wiring.registry().runtime(&session.runtime)?;
         runtime.screen(session).await
     }
 
     pub async fn require_agent(&self, id: &str) -> Result<AgentSession> {
-        self.l3.agents
+        self.state.agents
             .get_agent(id)
             .await?
             .ok_or_else(|| FactoryError::TaskNotFound(format!("agent {id}")))
@@ -553,11 +443,11 @@ impl Engine {
         let Some(session) = &agent.session else {
             return false;
         };
-        let status = match self.shared.registry.runtime(&session.runtime) {
+        let status = match self.wiring.registry().runtime(&session.runtime) {
             Ok(rt) => rt.status(session).await.unwrap_or(RuntimeStatus::Gone),
             Err(_) => RuntimeStatus::Gone,
         };
-        self.record_status(&agent.id, &agent.scope, &agent.name, status)
+        self.wiring.record_status(&agent.id, &agent.scope, &agent.name, status)
             .await;
         status != RuntimeStatus::Gone
     }
@@ -565,9 +455,9 @@ impl Engine {
     /// Line up what the config declares with what is actually still running,
     /// after a restart or a config change. Three different things can be true
     /// and each needs its own answer.
-    pub async fn reconcile_agents(self: &Arc<Self>) {
-        let factory = self.factory_snapshot();
-        let stored = self.l3.agents.agents().await.unwrap_or_default();
+    pub async fn reconcile_agents(&self) {
+        let factory = self.wiring.snapshot();
+        let stored = self.state.agents.agents().await.unwrap_or_default();
         let mut seen = std::collections::BTreeSet::new();
 
         for scope in &factory.config.scopes {
@@ -614,7 +504,7 @@ impl Engine {
                         a.lifetime = decl.lifetime;
                         a.role = a.role_with(&decl.role);
                         a.last_seen_at = Utc::now();
-                        let _ = self.l3.agents.put_agent(&a).await;
+                        let _ = self.state.agents.put_agent(&a).await;
                         tracing::info!(agent = %id, "adopted a standing agent that outlived the daemon");
                     }
                     // Known but not running. Start it if it is meant to start
@@ -628,7 +518,7 @@ impl Engine {
                         if a.state != AgentState::Stopped {
                             a.state = AgentState::Gone;
                         }
-                        let _ = self.l3.agents.put_agent(&a).await;
+                        let _ = self.state.agents.put_agent(&a).await;
                         if decl.autostart() && a.state != AgentState::Stopped {
                             self.autostart(&scope.name, &decl.name()).await;
                         }
@@ -644,7 +534,7 @@ impl Engine {
                             decl.lifetime,
                             decl.role.clone(),
                         );
-                        let _ = self.l3.agents.put_agent(&a).await;
+                        let _ = self.state.agents.put_agent(&a).await;
                         if decl.autostart() {
                             self.autostart(&scope.name, &decl.name()).await;
                         }
@@ -652,7 +542,7 @@ impl Engine {
                 }
 
                 if let Some(lid) = migrated_from {
-                    let _ = self.l3.agents.delete_agent(&lid).await;
+                    let _ = self.state.agents.delete_agent(&lid).await;
                 }
             }
         }
@@ -666,16 +556,16 @@ impl Engine {
             }
             tracing::warn!(agent = %agent.id, "no longer declared; closing its session");
             if let Some(session) = &agent.session {
-                if let Ok(rt) = self.shared.registry.runtime(&session.runtime) {
+                if let Ok(rt) = self.wiring.registry().runtime(&session.runtime) {
                     let _ = rt.stop(session).await;
                 }
             }
-            let _ = self.l3.agents.delete_agent(&agent.id).await;
-            self.shared.bus.publish(Event::AgentRemoved { id: agent.id });
+            let _ = self.state.agents.delete_agent(&agent.id).await;
+            self.wiring.bus().publish(Event::AgentRemoved { id: agent.id });
         }
     }
 
-    async fn autostart(self: &Arc<Self>, scope: &str, name: &str) {
+    async fn autostart(&self, scope: &str, name: &str) {
         if let Err(e) = self.start_agent(scope, name).await {
             tracing::warn!(scope, name, "could not start standing agent: {e}");
         }
@@ -683,8 +573,8 @@ impl Engine {
 
     /// The standing-agent watchdog. Deliberately not the run watchdog: a
     /// permanent agent that has said nothing for an hour is doing its job.
-    pub async fn supervise_agents(self: &Arc<Self>) {
-        let agents = self.l3.agents.agents().await.unwrap_or_default();
+    pub async fn supervise_agents(&self) {
+        let agents = self.state.agents.agents().await.unwrap_or_default();
         for agent in agents {
             if !agent.declared || agent.state == AgentState::Stopped {
                 continue;
@@ -694,15 +584,15 @@ impl Engine {
                     let mut a = agent;
                     a.last_seen_at = Utc::now();
                     a.state = AgentState::Ready;
-                    let _ = self.l3.agents.put_agent(&a).await;
+                    let _ = self.state.agents.put_agent(&a).await;
                     continue;
                 }
                 let mut a = agent.clone();
                 a.state = AgentState::Gone;
                 a.session = None;
                 a.attach = None;
-                let _ = self.l3.agents.put_agent(&a).await;
-                self.shared.bus.publish(Event::AgentUpdated { agent: a });
+                let _ = self.state.agents.put_agent(&a).await;
+                self.wiring.bus().publish(Event::AgentUpdated { agent: a });
                 tracing::warn!(agent = %agent.id, "standing agent's session is gone");
             }
 
@@ -720,87 +610,9 @@ impl Engine {
         }
     }
 
-    /// Ask every registered runtime whether it can push, and listen if so.
-    /// One task per runtime that says yes; a runtime that answers `None`
-    /// changes nothing here -- the poll in `scheduler.rs` already covers it,
-    /// exactly as it did before this existed.
-    pub async fn watch_runtimes(self: &Arc<Self>) {
-        for runtime in self.shared.registry.runtimes() {
-            let name = runtime.name().to_string();
-            match runtime.watch().await {
-                Ok(Some(stream)) => {
-                    tracing::info!(runtime = %name, "listening for pushed status changes");
-                    let engine = self.clone();
-                    tokio::spawn(async move { engine.pump_runtime_events(stream).await });
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!(runtime = %name, "could not start watching: {e}"),
-            }
-        }
-    }
 
-    async fn pump_runtime_events(self: Arc<Self>, mut stream: RuntimeEventStream) {
-        while let Some(event) = stream.recv().await {
-            self.on_runtime_event(event).await;
-        }
-        // The channel closed: the runtime stopped pushing. Nothing to do --
-        // the poll never depended on this in the first place.
-    }
 
-    /// A push from a runtime, mapped onto whichever standing agent or run's
-    /// session it was about, and set loose on the bus. This must never move
-    /// a task or a run -- only the agent's own `factory task report` may do
-    /// that -- so all this does is feed the occupancy record and publish an
-    /// event; nothing here touches `self.l4.store.update` or a run's status.
-    async fn on_runtime_event(&self, event: RuntimeEvent) {
-        let Some((subject, scope, agent)) = self.subject_for_session(&event.session).await else {
-            // A push about a session Factory has no record of -- already
-            // stopped, or never one of ours. Nothing to attach it to.
-            return;
-        };
-        let status = match event.kind {
-            RuntimeEventKind::StatusChanged(status) => status,
-            RuntimeEventKind::SessionGone => RuntimeStatus::Gone,
-            // Not read yet: output is a second pass, coalesced, once there is
-            // something to judge the volume against.
-            RuntimeEventKind::OutputMoved => return,
-        };
 
-        // The occupancy chart's own record. This skips a sample when nothing
-        // changed, which is right for a chart and wrong for what follows.
-        self.record_status(&subject, &scope, &agent, status).await;
-
-        // Published separately, on the event itself: an agent that is
-        // already `working` and keeps working is exactly the case this
-        // exists for, and `record_status` above deliberately produces
-        // nothing for it.
-        self.shared.bus.publish(Event::AgentActivity {
-            subject,
-            scope,
-            agent,
-            status,
-            at: Utc::now(),
-        });
-    }
-
-    /// Which standing agent or run currently holds this session, if either
-    /// does. `(subject, scope, agent name)` -- a standing agent's own id, or
-    /// `run:<id>` for a task's session.
-    async fn subject_for_session(&self, session: &SessionRef) -> Option<(String, String, String)> {
-        if let Ok(agents) = self.l3.agents.agents().await {
-            if let Some(agent) = agents.into_iter().find(|a| a.session.as_ref() == Some(session)) {
-                return Some((agent.id, agent.scope, agent.name));
-            }
-        }
-        if let Ok(runs) = self.l4.store.active_runs().await {
-            if let Some(run) = runs.into_iter().find(|r| r.session.as_ref() == Some(session)) {
-                if let Ok(Some(task)) = self.l4.store.get(&run.task_id).await {
-                    return Some((format!("run:{}", run.id), task.scope, run.agent));
-                }
-            }
-        }
-        None
-    }
 }
 
 #[cfg(test)]
@@ -823,63 +635,6 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::mpsc;
-
-    // ================================================================ #179
-
-    #[test]
-    fn capacity_is_unlimited_when_neither_the_agent_nor_the_scope_declares_one() {
-        let cap = capacity("demo", "codex", None, None, [], false);
-        assert!(!cap.held());
-    }
-
-    #[test]
-    fn capacity_holds_once_the_agents_own_cap_is_spent() {
-        let counted = vec![("demo".to_string(), "codex".to_string()), ("demo".to_string(), "codex".to_string())];
-        let cap = capacity("demo", "codex", Some(2), None, counted, false);
-        assert_eq!(cap.in_use, 2);
-        assert!(cap.held());
-        assert_eq!(cap.holding_pair(), (2, 2));
-    }
-
-    #[test]
-    fn capacity_ignores_a_run_of_a_different_agent_or_scope() {
-        let counted = vec![
-            ("demo".to_string(), "other-agent".to_string()),
-            ("other-scope".to_string(), "codex".to_string()),
-        ];
-        let cap = capacity("demo", "codex", Some(1), None, counted, false);
-        assert_eq!(cap.in_use, 0, "neither run is this (scope, agent)");
-        assert!(!cap.held());
-    }
-
-    #[test]
-    fn capacity_counts_a_live_permanent_agent_of_the_same_name_as_one_slot() {
-        let cap = capacity("demo", "codex", Some(1), None, [], true);
-        assert_eq!(cap.in_use, 1);
-        assert!(cap.held(), "the standing agent itself already spends the only slot");
-    }
-
-    #[test]
-    fn capacity_the_scope_cap_holds_a_bare_adapter_with_no_declaration_of_its_own() {
-        // A task on an adapter the scope never declares has no agent cap to
-        // check -- only the scope's, counted the same way (#179).
-        let counted = vec![("demo".to_string(), "pi".to_string()), ("demo".to_string(), "codex".to_string())];
-        let cap = capacity("demo", "codex", None, Some(2), counted, false);
-        assert_eq!(cap.scope_in_use, 2);
-        assert!(cap.held());
-        assert_eq!(cap.holding_pair(), (2, 2), "the scope's own pair, since the agent has no cap of its own");
-    }
-
-    #[test]
-    fn capacity_run_uses_a_slot_excludes_a_session_less_blocked_run() {
-        // The #184 shape: `Blocked`, no session -- an approval hold, not a
-        // dispatch. `run_uses_a_slot` is what a caller filters runs through
-        // before ever building the counted list `capacity` sums, so this is
-        // the fixture built directly, per the triage's testing note.
-        assert!(!run_uses_a_slot(factory_core::run::RunStatus::Blocked, false));
-        assert!(run_uses_a_slot(factory_core::run::RunStatus::Blocked, true), "a session-holding block still counts");
-        assert!(run_uses_a_slot(factory_core::run::RunStatus::Dispatching, false));
-    }
 
     fn is_valid_herdr_name(name: &str) -> bool {
         (1..=32).contains(&name.len())
@@ -1352,7 +1107,7 @@ mod tests {
             "name: demo\npath: .\nruntime: stub\nagents:\n  - name: watcher\n    harness: configured\n    lifetime: permanent\n    args: [--model, opus]\n",
         );
 
-        engine.start_agent("demo", "watcher").await.unwrap();
+        engine.l3_service().start_agent("demo", "watcher").await.unwrap();
 
         let starts = stub.starts.lock().unwrap();
         let args = &starts[0].launch.args;
@@ -1384,7 +1139,7 @@ mod tests {
             "version: 1\nscope:\n  id: scope-id\n  name: demo\n  runtime: stub\n  agents:\n    - name: Watcher\n      harness: configured\n      lifetime: permanent\n",
         )
         .unwrap();
-        let standing = engine.start_agent("demo", "Watcher").await.unwrap();
+        let standing = engine.l3_service().start_agent("demo", "Watcher").await.unwrap();
         let session = standing.session.clone().unwrap();
 
         let response = engine
