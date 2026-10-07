@@ -97,6 +97,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("run_start.rs", L4),
     ("scheduling.rs", L4),
     ("l4_service.rs", L4),
+    ("l4_spawner.rs", L4),
     ("assignments.rs", L4),
     ("resume.rs", L4),
     ("site.rs", Wiring), // the site page: composes the roster and runs with a repository walk
@@ -168,6 +169,15 @@ const PULLS_BASELINE: &[(&str, usize)] = &[
     ("signposts.rs -> .l6_service()", 1),
 ];
 
+/// `Arc<Engine>` in L4-owned production code. `l4_spawner.rs` is the handle itself; the rest is workflows, which take an
+/// `L4Spawner` once they move (S9b part 3).
+const ARC_ENGINE_BASELINE: &[(&str, usize)] = &[
+    ("costs.rs", 1),
+    ("github_intake.rs", 1),
+    ("l4_spawner.rs", 1),
+    ("recovery_journal.rs", 1),
+    ("scheduler.rs", 1),
+];
 const IMPERSONATION_BASELINE: &[(&str, usize)] = &[];
 /// Direct `Port::provider` calls from level code: L4 reading L5-produced workflow facts, a downward read past the
 /// `Below` gate. S10 resolves them with commands or capabilities.
@@ -407,6 +417,13 @@ fn direct_provider_calls(code: &str) -> usize {
     squeezed.matches("::provider(").count() + squeezed.matches("::provider::<").count()
 }
 
+/// `Arc<Engine>` in a level file's production code. L4 code reaches the engine's `Arc` only through `L4Spawner`
+/// (`l4_spawner.rs`), so the type may appear nowhere else in L4-owned files (S9b).
+fn arc_engine_mentions(code: &str) -> usize {
+    let squeezed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    squeezed.matches("Arc<Engine>").count() + squeezed.matches("Arc<crate::engine::Engine>").count()
+}
+
 fn people_reach(code: &str) -> usize {
     ["Facts::<People>", "Facts::<factory_kernel::People>", ".facts::<People>", ".facts::<factory_kernel::People>"]
         .iter()
@@ -435,6 +452,7 @@ struct Scan {
     core_state: BTreeMap<String, usize>,
     impersonation: BTreeMap<String, usize>,
     direct_provider: BTreeMap<String, usize>,
+    arc_engine: BTreeMap<String, usize>,
 }
 
 fn scan() -> Scan {
@@ -442,7 +460,7 @@ fn scan() -> Scan {
     let mut files = Vec::new();
     rust_files(&root, &mut files);
     files.sort();
-    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new(), core: BTreeMap::new(), core_state: BTreeMap::new(), impersonation: BTreeMap::new(), direct_provider: BTreeMap::new() };
+    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new(), core: BTreeMap::new(), core_state: BTreeMap::new(), impersonation: BTreeMap::new(), direct_provider: BTreeMap::new(), arc_engine: BTreeMap::new() };
     for file in files {
         let relative = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
         if is_test_file(&relative) {
@@ -467,6 +485,12 @@ fn scan() -> Scan {
         let impersonated = impersonated_readers(&code, &own_group.to_uppercase());
         if impersonated > 0 {
             result.impersonation.insert(relative.clone(), impersonated);
+        }
+        if own_group == "l4" {
+            let arcs = arc_engine_mentions(&code);
+            if arcs > 0 {
+                result.arc_engine.insert(relative.clone(), arcs);
+            }
         }
         let direct = direct_provider_calls(&code);
         if direct > 0 {
@@ -515,6 +539,10 @@ fn describe(scan: &Scan) -> String {
     }
     out.push_str("];\nconst DIRECT_PROVIDER_BASELINE: &[(&str, usize)] = &[\n");
     for (file, count) in &scan.direct_provider {
+        out.push_str(&format!("    ({file:?}, {count}),\n"));
+    }
+    out.push_str("];\nconst ARC_ENGINE_BASELINE: &[(&str, usize)] = &[\n");
+    for (file, count) in &scan.arc_engine {
         out.push_str(&format!("    ({file:?}, {count}),\n"));
     }
     out.push_str("];\nconst PEOPLE_BASELINE: &[(&str, usize)] = &[\n");
@@ -637,6 +665,16 @@ fn only_shrinks(label: &str, found: &BTreeMap<String, usize>, baseline: &[(&str,
 fn a_level_never_reads_facts_as_another_level_and_only_shrinks() {
     let scan = scan();
     only_shrinks("`Facts::<Lx>::new` readers of another level", &scan.impersonation, IMPERSONATION_BASELINE, &scan);
+}
+
+#[test]
+fn l4_code_holds_an_arc_engine_only_through_the_spawner_and_the_rest_only_shrinks() {
+    let scan = scan();
+    only_shrinks("`Arc<Engine>` mentions", &scan.arc_engine, ARC_ENGINE_BASELINE, &scan);
+    assert!(
+        !scan.arc_engine.contains_key("verification.rs") && !scan.arc_engine.contains_key("intake.rs"),
+        "verification and intake take an `L4Spawner`, never an `Arc<Engine>`"
+    );
 }
 
 #[test]

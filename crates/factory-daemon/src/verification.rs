@@ -20,6 +20,7 @@
 
 use crate::engine::Engine;
 use crate::l4_service::L4Service;
+use crate::l4_spawner::L4Spawner;
 use chrono::Utc;
 #[cfg(test)]
 use factory_core::conformance::AttestedRun;
@@ -184,11 +185,11 @@ impl Engine {
         verdict: AttestationVerdict,
         reason: &str,
     ) -> Result<Run> {
-        self.l4_service().decide_approval(caller, run_id, verdict, reason, self).await
+        self.l4_service().decide_approval(caller, run_id, verdict, reason, &self.l4_spawner()).await
     }
 
     pub(crate) async fn verify_run(self: &Arc<Self>, run_id: &str) -> Result<()> {
-        self.l4_service().verify_run(run_id, self).await
+        self.l4_service().verify_run(run_id, &self.l4_spawner()).await
     }
 
     pub(crate) async fn accept_rework(
@@ -196,7 +197,7 @@ impl Engine {
         caller: &crate::access::Caller,
         run_id: &str,
     ) -> Result<Run> {
-        self.l4_service().accept_rework(caller, run_id, self).await
+        self.l4_service().accept_rework(caller, run_id, &self.l4_spawner()).await
     }
 
     /// Start the verifier: every enqueued run is verified on a task of its
@@ -240,7 +241,7 @@ impl L4Service<'_> {
         run_id: &str,
         verdict: AttestationVerdict,
         reason: &str,
-        engine: &Arc<Engine>,
+        spawner: &L4Spawner,
     ) -> Result<Run> {
         if reason.trim().is_empty() {
             return Err(FactoryError::BadRequest(
@@ -361,7 +362,7 @@ impl L4Service<'_> {
                         format!("approved; waiting for a {agent} slot ({in_use}/{max} in use)"),
                     ).in_run(&run.id)).await;
                     self.publish_task(&task.id).await;
-                    engine.sync_workflow_for_task(&task.id).await;
+                    spawner.sync_workflow_for_task(&task.id).await;
                     return Ok(run);
                 }
                 Err(error) => {
@@ -380,7 +381,7 @@ impl L4Service<'_> {
                     return Err(error);
                 }
             };
-            engine.sync_workflow_for_task(&task.id).await;
+            spawner.sync_workflow_for_task(&task.id).await;
             return Ok(resumed);
         }
         if verdict == AttestationVerdict::Pass
@@ -406,7 +407,7 @@ impl L4Service<'_> {
             self.enqueue_verification(&run.id);
             return Ok(updated);
         }
-        engine.sync_workflow_for_task(&task.id).await;
+        spawner.sync_workflow_for_task(&task.id).await;
         Ok(run)
     }
 
@@ -417,7 +418,7 @@ impl L4Service<'_> {
         &self,
         caller: &crate::access::Caller,
         run_id: &str,
-        engine: &Arc<Engine>,
+        spawner: &L4Spawner,
     ) -> Result<Run> {
         let run = self.require_run(run_id).await?;
         if run.status != RunStatus::Blocked || run.blocked_source != Some(BlockSource::Verification)
@@ -555,7 +556,7 @@ impl L4Service<'_> {
                 run: workflow.clone(),
             });
             drop(workflow_guard);
-            engine.advance_workflow(&workflow.id).await?;
+            spawner.advance_workflow(&workflow.id).await?;
         } else {
             let instructions = format!(
                 "{}\n\nRework requested from run {}:\n{}",
@@ -573,14 +574,7 @@ impl L4Service<'_> {
                     },
                 )
                 .await?;
-            let engine = engine.clone();
-            let task_id = task.id.clone();
-            tokio::spawn(async move {
-                engine
-                    .l4_service()
-                    .start_run(&task_id, factory_core::run::Trigger::Manual)
-                    .await;
-            });
+            spawner.spawn_start_run(task.id.clone(), factory_core::run::Trigger::Manual);
         }
         Ok(ended)
     }
@@ -781,7 +775,7 @@ impl L4Service<'_> {
     /// true while review evidence is still outstanding.
     async fn ensure_review_tasks(
         &self,
-        engine: &Arc<Engine>,
+        spawner: &L4Spawner,
         subject: &Run,
         task: &Task,
         dir: &Path,
@@ -938,14 +932,7 @@ impl L4Service<'_> {
                 .with_data(serde_json::json!({ "review_task": review.id, "step": step.step })),
             )
             .await;
-            let engine = engine.clone();
-            let review_task = review.id.clone();
-            tokio::spawn(async move {
-                engine
-                    .l4_service()
-                    .start_run(&review_task, factory_core::run::Trigger::Workflow)
-                    .await;
-            });
+            spawner.spawn_start_run(review.id.clone(), factory_core::run::Trigger::Workflow);
             waiting = true;
         }
         Ok(waiting)
@@ -1122,7 +1109,7 @@ impl L4Service<'_> {
     /// after a failed one (a publish after a failed scan) must not run on
     /// work that already failed. Re-reads the run before settling, so a
     /// cancel that landed while a gate ran stands.
-    pub(crate) async fn verify_run(&self, run_id: &str, engine: &Arc<Engine>) -> Result<()> {
+    pub(crate) async fn verify_run(&self, run_id: &str, spawner: &L4Spawner) -> Result<()> {
         let run = self.require_run(run_id).await?;
         if run.status != RunStatus::Verifying {
             self.release_verification(run_id);
@@ -1226,7 +1213,7 @@ impl L4Service<'_> {
         if after_gates != state {
             self.enqueue_verification(run_id);
             self.release_verification(run_id);
-            engine.sync_workflow_for_task(&task.id).await;
+            spawner.sync_workflow_for_task(&task.id).await;
             return Ok(());
         }
 
@@ -1241,9 +1228,9 @@ impl L4Service<'_> {
             &run.agent,
             chrono::DateTime::<Utc>::MIN_UTC,
         );
-        if gates.passed && self.ensure_review_tasks(engine, &run, &task, &dir, &state).await? {
+        if gates.passed && self.ensure_review_tasks(spawner, &run, &task, &dir, &state).await? {
             self.release_verification(run_id);
-            engine.sync_workflow_for_task(&task.id).await;
+            spawner.sync_workflow_for_task(&task.id).await;
             return Ok(());
         }
 
@@ -1270,7 +1257,7 @@ impl L4Service<'_> {
                 RunPatch { status: Some(RunStatus::Done), ..Default::default() },
                 "verified",
             ).await {
-                engine.sync_workflow_for_task(&task.id).await;
+                spawner.sync_workflow_for_task(&task.id).await;
                 return Err(error);
             }
             self.entry(
@@ -1307,7 +1294,7 @@ impl L4Service<'_> {
             self.wiring.bus().publish(Event::RunUpdated { run: blocked.clone() });
             self.mirror_to_task(&blocked).await;
         }
-        engine.sync_workflow_for_task(&task.id).await;
+        spawner.sync_workflow_for_task(&task.id).await;
         Ok(())
     }
 
