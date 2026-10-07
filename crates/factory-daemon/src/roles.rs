@@ -13,6 +13,8 @@ use factory_core::error::Result;
 use factory_core::protocol::{GrantView, RoleBoard, RoleHolder, RoleLayer, RoleView};
 use factory_core::role::{Grant, Role, RoleEntry, RoleOrigin, Roles};
 
+use crate::l3_service::L3Service;
+#[cfg(test)]
 use crate::engine::Engine;
 
 fn role_view(entry: &RoleEntry) -> RoleView {
@@ -61,13 +63,13 @@ pub(crate) fn layer_written_by(
     }
 }
 
-impl Engine {
+impl L3Service<'_> {
     /// The roles that hold in every scope, and each scope's own set where it
     /// differs because it, or a scope above it, writes roles of its own. The
     /// roster offers a scope exactly the roles `set_agent_role` will accept
     /// there, and nothing else.
     pub fn role_views(&self) -> (Vec<RoleView>, BTreeMap<String, Vec<RoleView>>) {
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         let everywhere = factory.config.roles().unwrap_or_else(|e| {
             tracing::error!("{e}; falling back to the built-in roles");
             Roles::presets()
@@ -83,7 +85,7 @@ impl Engine {
             if inherits_only {
                 continue;
             }
-            by_scope.insert(scope.name.clone(), views(&self.roles_for(&scope.name)));
+            by_scope.insert(scope.name.clone(), views(&self.wiring.roles_for(&scope.name)));
         }
         (views(&everywhere), by_scope)
     }
@@ -91,7 +93,7 @@ impl Engine {
     /// The Roles view in one answer: every role in effect in `scope` with who
     /// holds it, and every layer that writes roles across the tree.
     pub async fn role_board(&self, scope: Option<&str>) -> Result<RoleBoard> {
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         let grants = Grant::ALL
             .into_iter()
             .map(|grant| GrantView {
@@ -119,7 +121,7 @@ impl Engine {
                 let agent = declared.name();
                 // The same answer `effective_role` gives: a role somebody gave
                 // wins over the config until it is cleared.
-                let given = match self.l3.agents.get_agent(&AgentSession::id_for(name, &agent)).await {
+                let given = match self.state.agents.get_agent(&AgentSession::id_for(name, &agent)).await {
                     Ok(Some(session)) => session.assigned_role,
                     _ => None,
                 };
@@ -284,9 +286,9 @@ mod tests {
         let e = engine();
         let helper = AgentSession::new("demo-app", "helper", "pi", "herdr", Lifetime::Permanent, Role::worker());
         e.l4.store.put_agent(&helper).await.unwrap();
-        e.set_agent_role("demo-app/helper", Some(Role::new("runner"))).await.unwrap();
+        e.l3_service().set_agent_role("demo-app/helper", Some(Role::new("runner"))).await.unwrap();
 
-        let board = e.role_board(Some("demo-app")).await.unwrap();
+        let board = e.l3_service().role_board(Some("demo-app")).await.unwrap();
         assert_eq!(board.scope.as_deref(), Some("demo-app"));
         assert_eq!(board.writes, Some(RoleOrigin::Scope { scope: "demo-app".into() }));
         assert_eq!(board.grants.len(), Grant::ALL.len());
@@ -310,7 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_layers_nest_by_path_and_say_what_each_one_replaces() {
-        let board = engine().role_board(None).await.unwrap();
+        let board = engine().l3_service().role_board(None).await.unwrap();
         let origins: Vec<RoleOrigin> = board.layers.iter().map(|l| l.origin.clone()).collect();
         assert_eq!(
             origins,
@@ -333,7 +335,7 @@ mod tests {
 
     #[test]
     fn the_roster_is_offered_each_scopes_own_roles_only_where_they_differ() {
-        let (everywhere, by_scope) = engine().role_views();
+        let (everywhere, by_scope) = engine().l3_service().role_views();
         assert!(everywhere.iter().any(|r| r.name == "runner"));
         assert!(everywhere.iter().all(|r| r.name != "reviewer"));
         assert!(by_scope["plain"].iter().any(|r| r.name == "reviewer"), "plain inherits engineering's");

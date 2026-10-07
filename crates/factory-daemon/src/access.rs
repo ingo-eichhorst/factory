@@ -101,7 +101,7 @@ impl Engine {
                     .await?
                     .map(|t| t.scope)
                     .unwrap_or_default();
-                let role = self.effective_role(&scope, &run.agent).await;
+                let role = self.l3_service().effective_role(&scope, &run.agent).await;
                 return Ok(Caller::Agent {
                     scope,
                     name: run.agent.clone(),
@@ -129,7 +129,7 @@ impl Engine {
 
         for agent in self.l4.store.agents().await? {
             if agent.token.as_deref() == Some(token) {
-                let role = self.effective_role(&agent.scope, &agent.name).await;
+                let role = self.l3_service().effective_role(&agent.scope, &agent.name).await;
                 return Ok(Caller::Agent {
                     scope: agent.scope,
                     name: agent.name,
@@ -144,32 +144,7 @@ impl Engine {
         ))
     }
 
-    /// The role the config gives an agent. An agent nobody named -- a one-off
-    /// `--agent claude-code` -- is a worker.
-    pub fn role_of(&self, scope: &str, name: &str) -> Role {
-        let factory = self.factory_snapshot();
-        factory
-            .scope(scope)
-            .ok()
-            .map(|s| s.agents_with(&factory.config.daemon.foreman))
-            .unwrap_or_default()
-            .into_iter()
-            .find(|a| a.name() == name)
-            .map(|a| a.role)
-            .unwrap_or_default()
-    }
 
-    /// The role an agent is actually working under: the one somebody gave it
-    /// if there is one, and the config's otherwise. Every answer to "what may
-    /// this agent do" comes through here, so a standing agent and a run of the
-    /// same agent cannot be told two different things.
-    pub async fn effective_role(&self, scope: &str, name: &str) -> Role {
-        let declared = self.role_of(scope, name);
-        match self.l4.store.get_agent(&AgentSession::id_for(scope, name)).await {
-            Ok(Some(agent)) => agent.role_with(&declared),
-            _ => declared,
-        }
-    }
 
     /// A task belongs to a worker when it is in the worker's scope and names it.
     fn assigned_to(task: &Task, scope: &str, name: &str) -> bool {
@@ -858,7 +833,7 @@ impl Engine {
             WorkflowActor::Agent { scope, name } => Caller::Agent {
                 scope: scope.clone(),
                 name: name.clone(),
-                role: self.effective_role(scope, name).await,
+                role: self.l3_service().effective_role(scope, name).await,
                 run_id: None,
             },
         }
@@ -2893,13 +2868,13 @@ mod tests {
             e.l4.store.put_agent(&agent).await.unwrap();
         }
         let given = e
-            .set_agent_role("demo-app/watcher", Some(Role::new("reviewer")))
+            .l3_service().set_agent_role("demo-app/watcher", Some(Role::new("reviewer")))
             .await
             .unwrap();
         assert_eq!(given.role, Role::new("reviewer"));
 
         let err = e
-            .set_agent_role("engineering/outsider/watcher", Some(Role::new("reviewer")))
+            .l3_service().set_agent_role("engineering/outsider/watcher", Some(Role::new("reviewer")))
             .await
             .unwrap_err()
             .to_string();
@@ -3060,17 +3035,17 @@ mod tests {
         );
         let agent = AgentSession::new("demo", "watcher", "pi", "herdr", Lifetime::Permanent, Role::worker());
         e.l4.store.put_agent(&agent).await.unwrap();
-        assert_eq!(e.effective_role("demo", "watcher").await, Role::worker());
+        assert_eq!(e.l3_service().effective_role("demo", "watcher").await, Role::worker());
 
         let given = e
-            .set_agent_role("demo/watcher", Some(Role::new("runner")))
+            .l3_service().set_agent_role("demo/watcher", Some(Role::new("runner")))
             .await
             .unwrap();
         assert_eq!(given.role, Role::new("runner"));
-        assert_eq!(e.effective_role("demo", "watcher").await, Role::new("runner"));
+        assert_eq!(e.l3_service().effective_role("demo", "watcher").await, Role::new("runner"));
 
-        e.set_agent_role("demo/watcher", None).await.unwrap();
-        assert_eq!(e.effective_role("demo", "watcher").await, Role::worker());
+        e.l3_service().set_agent_role("demo/watcher", None).await.unwrap();
+        assert_eq!(e.l3_service().effective_role("demo", "watcher").await, Role::worker());
     }
 
     #[tokio::test]
@@ -3079,7 +3054,7 @@ mod tests {
         let agent = AgentSession::new("demo", "watcher", "pi", "herdr", Lifetime::Permanent, Role::worker());
         e.l4.store.put_agent(&agent).await.unwrap();
         let err = e
-            .set_agent_role("demo/watcher", Some(Role::new("ghost")))
+            .l3_service().set_agent_role("demo/watcher", Some(Role::new("ghost")))
             .await
             .unwrap_err()
             .to_string();

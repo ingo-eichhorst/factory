@@ -66,6 +66,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("service_observations.rs", L2),
     // L3 Agent
     ("agent_rows.rs", L3),
+    ("l3_service.rs", L3),
     ("agents.rs", L3),
     ("roles.rs", L3),
     ("harness_health.rs", L3),
@@ -87,6 +88,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("artifacts.rs", L4),
     ("production.rs", L4),
     ("recovery_journal.rs", L4),
+    ("admission.rs", L4),
     ("assignments.rs", L4),
     ("resume.rs", L4),
     ("site.rs", L4),
@@ -112,6 +114,8 @@ const OWNERS: &[(&str, Owner)] = &[
     ("router/l6.rs", L6),
     ("router/mod.rs", Wiring),
     ("router/own.rs", Wiring),
+    ("scope_views.rs", Wiring),
+    ("runtime_events.rs", Wiring),
     ("engine.rs", Wiring),
     ("access.rs", Wiring),
     ("main.rs", Wiring),
@@ -127,7 +131,6 @@ const OWNERS: &[(&str, Owner)] = &[
 
 /// (file, group, count): today's cross-level reach. May only shrink.
 const BASELINE: &[(&str, &str, usize)] = &[
-    ("agents.rs", "l4", 6),
     ("bench/engine.rs", "l4", 8),
     ("datasets.rs", "l4", 2),
     ("dependencies.rs", "l4", 2),
@@ -146,14 +149,17 @@ struct ServiceEntry {
 const SERVICES: &[ServiceEntry] = &[
     ServiceEntry { owner: L1, accessor: ".l1_service()" },
     ServiceEntry { owner: L2, accessor: ".l2_service()" },
+    ServiceEntry { owner: L3, accessor: ".l3_service()" },
     ServiceEntry { owner: L6, accessor: ".l6_service()" },
 ];
 
 /// (file -> accessor, count): modules that reach into a level service from
 /// another level. Each is a pull the owning slice has to replace. May only shrink.
 const PULLS_BASELINE: &[(&str, usize)] = &[
+    ("intake.rs -> .l3_service()", 1),
     ("metrics.rs -> .l6_service()", 3),
     ("quality/mod.rs -> .l6_service()", 1),
+    ("scheduler.rs -> .l3_service()", 1),
     ("signposts.rs -> .l6_service()", 2),
     ("verification.rs -> .l6_service()", 2),
 ];

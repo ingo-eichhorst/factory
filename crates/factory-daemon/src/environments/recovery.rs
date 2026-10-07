@@ -163,7 +163,7 @@ impl Engine {
         if harness != SHELL_HARNESS || declaration.is_none() {
             return Err(bad("the environment recipe must name a declared shell agent"));
         }
-        let role = self.effective_role(scope, &agent).await;
+        let role = self.l3_service().effective_role(scope, &agent).await;
         if self
             .roles_for(scope)
             .get(&role)
