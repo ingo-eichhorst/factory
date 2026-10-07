@@ -24,6 +24,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<WorkflowBlueprintFact, L4>("WorkflowBlueprintFact", "L4");
     assert_producer::<FunctionaryRosterFact, L3>("FunctionaryRosterFact", "L3");
     assert_producer::<StandingAgentLiveFact, L3>("StandingAgentLiveFact", "L3");
+    assert_producer::<HarnessHealthFact, L3>("HarnessHealthFact", "L3");
     assert_producer::<WorkflowTargetsFact, L5>("WorkflowTargetsFact", "L5");
     assert_producer::<WorkflowPreviewFact, L5>("WorkflowPreviewFact", "L5");
     assert_producer::<InfrastructureExpiryFact, L1>("InfrastructureExpiryFact", "L1");
@@ -224,6 +225,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "WorkflowBlueprintFact",
         "FunctionaryRosterFact",
         "StandingAgentLiveFact",
+        "HarnessHealthFact",
         "WorkflowTargetsFact",
         "WorkflowPreviewFact",
         "InfrastructureExpiryFact", "CredentialExpiryFact", "ScheduledRunDatesFact",

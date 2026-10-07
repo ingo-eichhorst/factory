@@ -2,6 +2,7 @@
 //! runs until it is told to stop.
 
 mod access;
+mod harness_hold;
 mod runtime_events;
 mod l3_service;
 mod admission;

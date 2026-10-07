@@ -130,6 +130,10 @@ impl<'a, L: Level> Wiring<'a, L> {
     }
 }
 impl<'a> Wiring<'a, L3> {
+    /// How a task's agent name resolves to an adapter (L3's own selection service).
+    pub(crate) fn resolve_agent(&self, scope: &str, name: &str) -> factory_core::error::Result<(String, String, Option<factory_core::config::ScopeAgent>)> {
+        crate::commands::agents(self.engine).resolve_agent(scope, name)
+    }
     /// The liveness sample the occupancy chart keeps (L4's record). L3 reports what it
     /// observed about a session; recording it is L4's. A transitional bridge, removed
     /// when L4 reads it from L3 (S9).
@@ -335,6 +339,13 @@ port!(
     l2::dependencies_provider
 );
 port!(AgentFact, factory_agents::roster::Provider, String, Vec<AgentFact>, l3::provider);
+port!(
+    HarnessHealthFact,
+    crate::harness_health::HarnessProvider,
+    crate::harness_health::HarnessCheck,
+    HarnessHealthFact,
+    l3::harness_provider
+);
 port!(
     StandingAgentLiveFact,
     factory_agents::store::LiveProvider,
@@ -760,6 +771,7 @@ mod tests {
         registered::<WorkflowBlueprintFact>();
         registered::<FunctionaryRosterFact>();
         registered::<StandingAgentLiveFact>();
+        registered::<HarnessHealthFact>();
         registered::<WorkflowTargetsFact>();
         registered::<WorkflowPreviewFact>();
         registered::<DaemonConfigFact>();
