@@ -27,10 +27,6 @@ const EXIT_CHECK_TIMEOUT_SECS: u64 = DEFAULT_GATE_TIMEOUT_SECS;
 #[cfg(test)]
 const EXIT_CHECK_TIMEOUT_SECS: u64 = 1;
 
-fn missing(kind: &str, id: &str) -> FactoryError {
-    FactoryError::BadRequest(format!("no such {kind}: {id}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3244,7 +3240,7 @@ impl Engine {
         // assessed: the template may have been edited since.
         let template = match &routing.workflow {
             Some(wanted) => {
-                let found = self.find_workflow(&scope.name, wanted).await?;
+                let found = self.l4_service().find_workflow(&scope.name, wanted).await?;
                 let shape = found
                     .validate()
                     .and_then(|_| found.part_shape())
@@ -3640,10 +3636,7 @@ impl Engine {
     }
 
     pub(crate) async fn workflow_definition(&self, id: &str) -> Result<WorkflowDefinition> {
-        self.l4.workflows
-            .get_definition(id)
-            .await?
-            .ok_or_else(|| missing("workflow", id))
+        self.l4_service().workflow_definition(id).await
     }
 
     pub(crate) async fn workflow_run(&self, id: &str) -> Result<WorkflowRun> {

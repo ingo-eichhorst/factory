@@ -301,9 +301,9 @@ impl Engine {
             // extractor-and-routing chain, on top of this dispatch, on top
             // of `intake_add`'s own chain, overflowed the default stack a
             // socket caller's shallower path did not.
-            Request::IntakeAdd(new) => Ok(Payload::Task { task: Box::pin(self.intake_add(caller, new)).await? }),
+            Request::IntakeAdd(new) => Ok(Payload::Task { task: Box::pin(self.l4_service().intake_add(caller, new)).await? }),
             Request::IntakeBoard { scope } => Ok(Payload::IntakeBoard {
-                board: Box::pin(self.intake_board(scope.as_deref())).await?,
+                board: Box::pin(self.l4_service().intake_board(scope.as_deref())).await?,
             }),
             Request::IntakeTriage { id, agent } => Ok(Payload::Task {
                 task: Box::pin(self.intake_triage(caller, &id, agent)).await?,
@@ -315,16 +315,16 @@ impl Engine {
                 task: Box::pin(self.intake_decide(caller, &id, decision)).await?,
             }),
             Request::IntakeInfo { id, text } => Ok(Payload::Task {
-                task: self.intake_info(caller, &id, &text).await?,
+                task: self.l4_service().intake_info(caller, &id, &text).await?,
             }),
             Request::IntakeFlagSecurity { id, reason } => Ok(Payload::Task {
-                task: self.intake_flag_security(caller, &id, &reason).await?,
+                task: self.l4_service().intake_flag_security(caller, &id, &reason).await?,
             }),
             Request::IntakeSecurity { id, verdict, evidence } => Ok(Payload::Task {
-                task: self.intake_security_decision(caller, &id, verdict, &evidence).await?,
+                task: self.l4_service().intake_security_decision(caller, &id, verdict, &evidence).await?,
             }),
             Request::IntakeSecurityReports { scope } => Ok(Payload::IntakeSecurityReports {
-                reports: self.confirmed_security_reports(scope.as_deref()).await?,
+                reports: self.l4_service().confirmed_security_reports(scope.as_deref()).await?,
             }),
             Request::IntakePublish { id } => Ok(Payload::Task {
                 task: Box::pin(self.intake_publish(caller, &id)).await?,

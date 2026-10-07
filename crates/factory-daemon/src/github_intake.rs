@@ -195,7 +195,7 @@ async fn poll_once_inner(
                 scope: Some(scope.name.clone()),
                 ..Default::default()
             };
-            match engine.receive_intake(new, record).await {
+            match engine.l4_service().receive_intake(new, record).await {
                 Ok(task) => {
                     received.insert(key, task);
                 }

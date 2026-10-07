@@ -556,7 +556,7 @@ impl Engine {
             // Releasing moves it, so the route has to be in reach as well.
             Request::IntakeAssess { id, assessment, .. } => {
                 let Some(item) = self.l4.store.get(id).await? else { return Ok(()) };
-                if task_in_reach(def, &item).is_err() && !self.is_items_triage_run(caller, &item).await? {
+                if task_in_reach(def, &item).is_err() && !self.l4_service().is_items_triage_run(caller, &item).await? {
                     return Err(deny("assess an intake item that is neither in its reach nor its own triage run's"));
                 }
                 in_scope(&assessment.routing.scope)
@@ -565,7 +565,7 @@ impl Engine {
             // the route -- there is none to be in scope of.
             Request::IntakeFlagSecurity { id, .. } => {
                 let Some(item) = self.l4.store.get(id).await? else { return Ok(()) };
-                if task_in_reach(def, &item).is_err() && !self.is_items_triage_run(caller, &item).await? {
+                if task_in_reach(def, &item).is_err() && !self.l4_service().is_items_triage_run(caller, &item).await? {
                     return Err(deny("flag an intake item that is neither in its reach nor its own triage run's"));
                 }
                 Ok(())
@@ -573,7 +573,7 @@ impl Engine {
             Request::IntakeDecide { id, decision } => {
                 let Some(item) = self.l4.store.get(id).await? else { return Ok(()) };
                 if task_in_reach(def, &item).is_err() {
-                    if !self.is_items_triage_run(caller, &item).await? {
+                    if !self.l4_service().is_items_triage_run(caller, &item).await? {
                         return Err(deny("decide an intake item that is neither in its reach nor its own triage run's"));
                     }
                     // Its triage run proposes a split; making the items is

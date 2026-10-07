@@ -219,7 +219,7 @@ impl Engine {
         };
         let mut next = record;
         next.outbound = Some(outbound);
-        self.write_intake(&item.id, next, TaskPatch::default()).await
+        self.l4_service().write_intake(&item.id, next, TaskPatch::default()).await
     }
 }
 
@@ -532,6 +532,7 @@ mod tests {
             outbound: None,
         };
         engine
+            .l4_service()
             .receive_intake(
                 NewTask { title: "Widget fails".into(), instructions: "It falls over".into(), scope: Some(scope.into()), ..Default::default() },
                 record,
@@ -799,6 +800,7 @@ mod tests {
     async fn a_non_github_item_is_refused_before_any_gh_call() {
         let engine = test_engine();
         let item = engine
+            .l4_service()
             .intake_add(&Caller::Owner, factory_core::intake::NewIntake { title: "x".into(), scope: Some("widgets".into()), ..Default::default() })
             .await
             .unwrap();
@@ -820,9 +822,9 @@ mod tests {
             // irrelevant to what this test checks.
             let engine = test_engine();
             let item = github_item(&engine, "widgets", if confirm { 20 } else { 21 }).await;
-            engine.intake_flag_security(&Caller::Owner, &item.id, "looks like an injection").await.unwrap();
+            engine.l4_service().intake_flag_security(&Caller::Owner, &item.id, "looks like an injection").await.unwrap();
             if confirm {
-                engine.intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Confirm, "").await.unwrap();
+                engine.l4_service().intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Confirm, "").await.unwrap();
             }
             // NeedsInfo is the one decision allowed while `possible`, and
             // `Confirmed` allows it too -- only wontfix is refused for a
