@@ -187,6 +187,23 @@ impl Provide<factory_kernel::RunSnapshotFact> for Provider<'_> {
 }
 
 #[async_trait]
+impl Provide<factory_kernel::AgentReportedFact> for Provider<'_> {
+    type Query = String;
+    type Value = factory_kernel::AgentReportedFact;
+    type Error = FactoryError;
+    async fn get(&self, run_id: &String) -> Result<Self::Value> {
+        let reported = self
+            .store
+            .run_entries(run_id, 500)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|e| e.source == "agent" && (e.kind == "done" || e.kind == "failed"));
+        Ok(factory_kernel::AgentReportedFact(reported))
+    }
+}
+
+#[async_trait]
 impl Provide<factory_kernel::ScheduledRunDatesFact> for Provider<'_> {
     type Query = ();
     type Value = factory_kernel::ScheduledRunDatesFact;

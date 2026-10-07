@@ -401,16 +401,8 @@ impl Engine {
         self.l4_service().check_run_token(run, given, task_id)
     }
 
-    pub(crate) async fn cancel_task_run(&self, task_id: &str, expected: Option<&str>, kind: FailKind) -> Result<Run> {
-        self.l4_service().cancel_task_run(task_id, expected, kind).await
-    }
-
     // L5 (bench, suggestions) starts runs through these two until S10 gives it a command port down to L4;
     // an L5 file calling `.l4_service()` itself would be a new pull.
-    pub async fn start_run(&self, task_id: &str, trigger: Trigger) {
-        self.l4_service().start_run(task_id, trigger).await
-    }
-
     // -- reaches the run-start path makes into other levels (S9a part 2) -------
     // Kept here, on the page, so the L4 code that moved out carries no level reach of its own.
 
@@ -1181,15 +1173,6 @@ impl Engine {
     /// `.l5_service()` would be a pull up the ladder; the answer arrives as an event once L5 reads run completion).
     pub(crate) async fn settle_suggestion_ask(&self, run: &Run) {
         self.l5_service().settle_suggestion_ask(run).await
-    }
-
-    pub(crate) async fn create_bench_task(
-        &self,
-        new: NewTask,
-        origin: factory_core::bench::BenchOrigin,
-        id: String,
-    ) -> Result<Task> {
-        self.l4_service().create_bench_task(new, origin, id).await
     }
 
     pub async fn create(&self, new: NewTask) -> Result<Task> {

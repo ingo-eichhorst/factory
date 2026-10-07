@@ -372,6 +372,7 @@ port!(
 );
 port!(TaskFact, factory_process::facts::Provider<'a>, NamedQuery, BTreeMap<String, Vec<TaskFact>>, l4::provider);
 port!(TaskSnapshotFact, factory_process::facts::Provider<'a>, String, TaskSnapshotFact, l4::provider);
+port!(AgentReportedFact, factory_process::facts::Provider<'a>, String, AgentReportedFact, l4::provider);
 port!(
     RunSnapshotFact,
     factory_process::facts::Provider<'a>,
@@ -811,6 +812,7 @@ mod tests {
         registered::<TaskInventoryFact>();
         registered::<TaskSnapshotFact>();
         registered::<RunSnapshotFact>();
+        registered::<AgentReportedFact>();
         registered::<WorkflowFact>();
         registered::<EnvironmentRecoveryFact>();
         registered::<RecoveryJournalFact>();
@@ -1420,6 +1422,7 @@ mod tests {
             "BoxFuture",
             "TaskSnapshotFact",
             "RunSnapshotFact",
+            "AgentReportedFact",
         ] {
             assert!(
                 !owner.contains(forbidden),
