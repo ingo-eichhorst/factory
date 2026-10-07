@@ -456,7 +456,6 @@ impl L4Service<'_> {
             .map(|r| r.definition.clone())
             .unwrap_or_default();
         let triage = self
-            .core
             .create(NewTask {
                 title: format!("Triage: {}", item.title),
                 instructions: intake::triage_instructions(

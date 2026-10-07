@@ -178,7 +178,8 @@ const ARC_ENGINE_BASELINE: &[(&str, usize)] = &[
     ("recovery_journal.rs", 1),
     ("scheduler.rs", 1),
 ];
-/// `self.above.` call sites per file (`SuppliedFromAbove`: the quality block at dispatch and functionary binding).
+/// `self.above.` and `self.authority.` call sites per file (`SuppliedFromAbove`: the quality block at dispatch and
+/// functionary binding; `SpawnAuthority`: may this caller spawn a workflow node).
 /// (page, metric, count) for every Wiring-owned file that reaches level state (`reach`), calls a level service
 /// (`services`), reads `Facts::<People>` outside the routers (`people`) or calls `::provider(` directly (`providers`).
 /// May only shrink; what each page composes is named in its entry in `OWNERS`.
@@ -229,6 +230,7 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("supplied.rs", "providers", 3),
 ];
 const ABOVE_BASELINE: &[(&str, usize)] = &[
+    ("l4_service.rs", 1),
     ("run_start.rs", 1),
     ("verification.rs", 1),
 ];
@@ -236,12 +238,6 @@ const IMPERSONATION_BASELINE: &[(&str, usize)] = &[];
 /// Direct `Port::provider` calls from level code, which reach a producer without the `Below` bound. Empty since S10
 /// part 4 moved the last ones (L4 reading L5-produced workflow facts) behind `SuppliedFromAbove` and a page.
 const DIRECT_PROVIDER_BASELINE: &[(&str, usize)] = &[];
-
-/// `self.core.` call sites per file (the transitional `L4Service::core`). May only shrink; goes away with the handle.
-const CORE_BASELINE: &[(&str, usize)] = &[
-    ("intake.rs", 1),
-    ("l4_service.rs", 2),
-];
 
 /// Files that name `Facts::<People>` today (count). May only shrink.
 const PEOPLE_BASELINE: &[(&str, usize)] = &[
@@ -439,7 +435,27 @@ fn core_calls(code: &str) -> usize {
 /// `self.above.` call sites: what L4 asks of the levels above, through `SuppliedFromAbove` (S10 part 4). The trait is
 /// the whole list; each call site is counted so a new one is a visible decision.
 fn above_calls(code: &str) -> usize {
-    handle_fields(code, "above").len()
+    handle_fields(code, "above").len() + handle_fields(code, "authority").len()
+}
+
+/// Every `self.core` in production code, with or without a field after it (`foo(self.core)` counts). The transitional
+/// `L4Service::core` handle is gone (S12), and this is what keeps it gone.
+fn core_mentions(code: &str) -> usize {
+    let mut found = 0;
+    for (at, _) in code.match_indices("self") {
+        let before_ok = !code[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if !before_ok {
+            continue;
+        }
+        let Some((dot, p)) = next_token(code, at + 4) else { continue };
+        if dot != "." {
+            continue;
+        }
+        if let Some(("core", _)) = next_token(code, p) {
+            found += 1;
+        }
+    }
+    found
 }
 
 /// `core.l1`..`core.l6` and `core.shared`: the handle must never be a way to reach a level's state or the shared
@@ -605,10 +621,6 @@ fn describe(scan: &Scan) -> String {
     for (file, count) in &scan.pulls {
         out.push_str(&format!("    ({file:?}, {count}),\n"));
     }
-    out.push_str("];\nconst CORE_BASELINE: &[(&str, usize)] = &[\n");
-    for (file, count) in &scan.core {
-        out.push_str(&format!("    ({file:?}, {count}),\n"));
-    }
     out.push_str("];\nconst IMPERSONATION_BASELINE: &[(&str, usize)] = &[\n");
     for (file, count) in &scan.impersonation {
         out.push_str(&format!("    ({file:?}, {count}),\n"));
@@ -678,37 +690,36 @@ fn cross_level_reach_only_shrinks() {
     );
 }
 
+/// `L4Service::core`, the transitional handle on `Engine`, no longer exists, and nothing may bring it back: no
+/// `self.core` anywhere in production code, and no `core` field on the L4 service.
 #[test]
-fn the_core_handle_is_counted_only_shrinks_and_never_reaches_state() {
-    let scan = scan();
-    assert!(
-        scan.core_state.is_empty(),
-        "`core.l1`..`core.l6` and `core.shared` are forbidden: {:?}",
-        scan.core_state
-    );
-    let baseline: BTreeMap<&str, usize> = CORE_BASELINE.iter().copied().collect();
-    let mut bad = Vec::new();
-    for (file, count) in &scan.core {
-        match baseline.get(file.as_str()) {
-            None => bad.push(format!("{file}: {count} `self.core.` call sites, new")),
-            Some(allowed) if count > allowed => bad.push(format!("{file}: {count} `self.core.` call sites > {allowed}")),
-            Some(allowed) if count < allowed => {
-                bad.push(format!("{file}: {count} `self.core.` call sites < baseline {allowed}: lower CORE_BASELINE"))
-            }
-            _ => {}
+fn l4_service_has_no_core_handle() {
+    let root = src_root();
+    let mut files = Vec::new();
+    rust_files(&root, &mut files);
+    let mut found = Vec::new();
+    for file in files {
+        let relative = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        if is_test_file(&relative) {
+            continue;
+        }
+        let code = production_code(&std::fs::read_to_string(&file).unwrap());
+        let mentions = core_mentions(&code);
+        if mentions > 0 {
+            found.push(format!("{relative}: {mentions} `self.core`"));
+        }
+        if relative == "l4_service.rs" {
+            let squeezed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(!squeezed.contains("core:&'a"), "L4Service must not have a `core` field");
         }
     }
-    for file in baseline.keys() {
-        if !scan.core.contains_key(*file) {
-            bad.push(format!("{file}: no longer calls `self.core.`, remove it from CORE_BASELINE"));
-        }
-    }
-    assert!(bad.is_empty(), "{bad:#?}\ncurrent state:\n{}", describe(&scan));
+    assert!(found.is_empty(), "the `core` handle is gone; do not bring it back: {found:#?}");
 }
 
 #[test]
 fn the_core_scanner_counts_split_calls_and_catches_state_reaches() {
     assert_eq!(core_calls("self.core.a(); self\n    .core\n    .b(); other_core.c(); itself.core.d();"), 2);
+    assert_eq!(core_mentions("f(self.core); self . core . g(); itself.core; self.corex; self.core_handle"), 2);
     assert_eq!(core_state_reaches("self.core.l3.x; self.core\n.shared.y; self.core.l3_service(); self.core.shared_thing()"), 2);
     assert_eq!(core_state_reaches("score.l3.x; self.core.state()"), 0);
 }

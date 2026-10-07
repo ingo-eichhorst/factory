@@ -95,6 +95,20 @@ type Inventory<'a> = factory_process::facts::Provider<'a>;
 type Assurance<'a> = factory_assurance::remediation::Service<Process<'a>, Inventory<'a>>;
 pub(crate) type Direction<'a> = factory_direction::remediation::Service<Assurance<'a>, Inventory<'a>>;
 
+/// The remediation service over the pieces it needs, so the L4 port builds it from L4's own state.
+pub(crate) fn assurance_with<'a>(
+    store: &'a dyn factory_core::adapter::TaskStore,
+    registry: &'a factory_plugins::registry::Registry,
+    workflows: &'a factory_process::workflow_store::WorkflowStore,
+    snapshot: &factory_core::config::Factory,
+    observer: &'a CreationObserver,
+) -> Assurance<'a> {
+    Assurance {
+        tasks: Commands::new(process_with(store, registry, snapshot, observer)),
+        inventory: factory_process::facts::Provider::new(store, workflows, snapshot.scope_tree(), snapshot.root.clone()),
+    }
+}
+
 pub(crate) fn assurance<'a>(engine: &'a Engine, observer: &'a CreationObserver) -> Assurance<'a> {
     Assurance {
         tasks: Commands::new(process(engine, observer)),

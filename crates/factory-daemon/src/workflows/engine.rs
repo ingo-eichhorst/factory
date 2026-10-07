@@ -1089,6 +1089,54 @@ mod tests {
         assert!(tasks(&engine).await.is_empty());
     }
 
+    /// The spawn authority L4 is handed is exactly `access.rs`'s check, with nothing added or dropped: for every kind
+    /// of caller it answers what a hand-typed `task.create` followed by `task.run` would be answered, and a worker or
+    /// any role short of both grants still cannot spawn a node.
+    #[tokio::test]
+    async fn the_spawn_authority_is_exactly_the_access_check_and_a_limited_role_still_cannot_spawn() {
+        use factory_core::protocol::Request;
+        let engine = engine_with_roles(
+            "instance:\n  id: test\n  name: test\nscopes:\n  - id: demo-id\n    name: demo\n    runtime: quiet\nroles:\n  both:\n    grants: [task.create, task.run]\n    reach: scope\n  maker:\n    grants: [task.create]\n    reach: scope\n  runner:\n    grants: [task.run]\n    reach: scope\n  limited:\n    grants: [workflow.create, workflow.edit, workflow.run]\n    reach: scope\n",
+        );
+        let template = NewTask { title: "node".into(), scope: Some("demo".into()), ..Default::default() };
+        let callers = [
+            ("owner", Caller::Owner),
+            ("both", wearing("both")),
+            ("maker", wearing("maker")),
+            ("runner", wearing("runner")),
+            ("limited", wearing("limited")),
+            ("worker", wearing("worker")),
+        ];
+        for (name, caller) in &callers {
+            let by_capability = engine.l4_service().authorize_workflow_spawn(caller, &template).await;
+            // The same decision, taken the long way, straight from the single check.
+            let direct = match engine.authorize(caller, &Request::TaskCreate(template.clone())).await {
+                Ok(()) => engine
+                    .authorize(
+                        caller,
+                        &Request::TaskRun { override_wait: false, id: "nothing-created".into(), reason: None, continue_run: false },
+                    )
+                    .await,
+                refused => refused,
+            };
+            assert_eq!(by_capability.is_ok(), direct.is_ok(), "{name}");
+            assert_eq!(
+                by_capability.as_ref().err().map(|e| e.code()),
+                direct.as_ref().err().map(|e| e.code()),
+                "{name}: the same refusal"
+            );
+        }
+        let allowed = |name: &str| callers.iter().find(|(n, _)| *n == name).map(|(_, c)| c.clone()).unwrap();
+        assert!(engine.l4_service().authorize_workflow_spawn(&allowed("owner"), &template).await.is_ok());
+        assert!(engine.l4_service().authorize_workflow_spawn(&allowed("both"), &template).await.is_ok());
+        for refused in ["maker", "runner", "limited", "worker"] {
+            assert!(
+                engine.l4_service().authorize_workflow_spawn(&allowed(refused), &template).await.is_err(),
+                "{refused} cannot spawn a workflow node"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn the_owner_may_start_a_workflow_under_any_role_configuration() {
         let engine = engine_with_roles(

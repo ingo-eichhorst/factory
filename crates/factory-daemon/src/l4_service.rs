@@ -31,17 +31,27 @@ use factory_core::event::Event;
 use factory_core::run::Run;
 use crate::access::Caller;
 use factory_core::task::{NewTask, Task, TaskEntry, WorkflowOrigin};
-use factory_core::protocol::Request;
 use factory_core::workflow::WorkflowActor;
 use factory_kernel::L4;
 
 pub(crate) struct L4Service<'a> {
     pub(crate) state: &'a L4State,
     pub(crate) wiring: Wiring<'a, L4>,
-    /// Transitional (S9a part 2): `Engine` methods the moved run-start code still calls. See `run_start.rs`.
-    pub(crate) core: &'a crate::engine::Engine,
     /// What L4 needs from above, supplied when the service is built (`factory_process::supplied`).
     pub(crate) above: &'a dyn factory_process::supplied::SuppliedFromAbove,
+    /// The one authorization check, which only the access page can run (`access.rs`): L4 asks whether a caller may
+    /// spawn a workflow node and is told yes or no.
+    pub(crate) authority: &'a dyn SpawnAuthority,
+}
+
+/// What L4 asks of the authorization check: may this caller spawn a workflow node's task? The implementation
+/// (`Engine`, in `supplied.rs`) delegates to `access.rs`'s `authorize`, the single check; nothing here, and nothing in
+/// L4, reimplements it. Counted by the `above` scanner like `SuppliedFromAbove`.
+#[async_trait::async_trait]
+pub(crate) trait SpawnAuthority: Send + Sync {
+    /// The authority a hand-typed `task.create` immediately followed by `task.run` would need from `caller`:
+    /// exactly what a workflow node's spawn must never exceed.
+    async fn authorize_workflow_spawn(&self, caller: &Caller, template: &NewTask) -> Result<()>;
 }
 
 impl crate::engine::Engine {
@@ -49,8 +59,8 @@ impl crate::engine::Engine {
         L4Service {
             state: &self.l4,
             wiring: Wiring::new(self),
-            core: self,
             above: self,
+            authority: self,
         }
     }
 }
@@ -269,30 +279,9 @@ impl L4Service<'_> {
         }
     }
 
-    /// The authority a hand-typed `task.create` immediately followed by
-    /// `task.run` would need from `caller` -- exactly what a workflow node's
-    /// spawn must never exceed. The task does not exist yet when a node
-    /// becomes eligible, so `TaskRun` is checked against an id nothing has
-    /// created: `authorize` already treats an unknown id as "let the engine
-    /// report `no such task`" rather than as anybody's, which is task.run's
-    /// grant-and-scope shape with no task-specific reach left to weigh in.
-    pub(crate) async fn authorize_workflow_spawn(
-        &self,
-        caller: &Caller,
-        template: &NewTask,
-    ) -> Result<()> {
-        self.core.authorize(caller, &Request::TaskCreate(template.clone()))
-            .await?;
-        self.core.authorize(
-            caller,
-            &Request::TaskRun {
-                override_wait: false,
-                id: uuid::Uuid::new_v4().to_string(),
-                reason: None,
-                continue_run: false,
-            },
-        )
-        .await
+    /// May `caller` spawn this workflow node's task? Asked of the authorization check; see [`SpawnAuthority`].
+    pub(crate) async fn authorize_workflow_spawn(&self, caller: &Caller, template: &NewTask) -> Result<()> {
+        self.authority.authorize_workflow_spawn(caller, template).await
     }
 }
 

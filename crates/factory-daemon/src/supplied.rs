@@ -25,6 +25,28 @@ impl factory_process::supplied::SuppliedFromAbove for Engine {
     }
 }
 
+/// The authorization capability L4 is handed. It runs `access.rs`'s `authorize` -- the single check -- for the two
+/// requests a hand-typed `task.create` then `task.run` would make, and adds nothing of its own.
+#[async_trait::async_trait]
+impl crate::l4_service::SpawnAuthority for Engine {
+    async fn authorize_workflow_spawn(&self, caller: &crate::access::Caller, template: &factory_core::task::NewTask) -> Result<()> {
+        use factory_core::protocol::Request;
+        self.authorize(caller, &Request::TaskCreate(template.clone())).await?;
+        // `TaskRun` is checked against an id nothing has created: `authorize` already treats an unknown id as "let the
+        // engine report `no such task`", which leaves task.run's grant-and-scope shape with no task-specific reach.
+        self.authorize(
+            caller,
+            &Request::TaskRun {
+                override_wait: false,
+                id: uuid::Uuid::new_v4().to_string(),
+                reason: None,
+                continue_run: false,
+            },
+        )
+        .await
+    }
+}
+
 impl Engine {
     /// `factory workflow lint`: the plan, the injection and the ordering
     /// violations for a stored workflow, a task's implicit workflow, or --
