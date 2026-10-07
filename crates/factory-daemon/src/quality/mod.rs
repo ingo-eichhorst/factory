@@ -239,7 +239,9 @@ impl Engine {
         now: DateTime<Utc>,
     ) -> Result<(Vec<ScopeReport>, Vec<quality::Finding>)> {
         let per_scope_applied: Vec<_> = inputs.trees.iter().map(|(scope, tree)| (scope, quality::check_subjects(tree))).collect();
-        let budget = self.l6_service().check_budget_config(&per_scope_applied).await?;
+        let budget = crate::intent::Intent::of(&inputs.snapshot)
+            .budget_for(&per_scope_applied.iter().map(|(_, subjects)| subjects.as_slice()).collect::<Vec<_>>())
+            .await?;
         let scopes: Vec<_> = inputs.trees.iter().map(|(scope, tree)| factory_assurance::evidence::QualityScope {
             scope: factory_kernel::ScopeNode { name: scope.name.clone(), path: scope.path.clone() },
             tree,
@@ -365,6 +367,8 @@ impl Engine {
             }
         }
         let fp = inputs.fingerprint;
+        #[cfg(test)]
+        self.l5.guide_judgements.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self.quality_for_scope(inputs, true).await {
             Ok(report) => {
                 let block = report.as_ref().map(guide_context).unwrap_or_default();
@@ -948,5 +952,25 @@ mod tests {
         assert_ne!(fresh, first, "a profile edit changes the fingerprint, so the block is judged again");
         let gate_line = fresh[1].scenarios.iter().find(|s| s.scenario == "gate").unwrap();
         assert_eq!(gate_line.status, None, "and now reads the finished task: met");
+    }
+
+    /// The guide's single flight: a burst of dispatches into one scope (a bench run, a workflow fanning out) judges
+    /// its block once, because the cache's lock is held across the judging and the others wait for its answer. It
+    /// protects dispatch latency; this pins it.
+    #[tokio::test]
+    async fn a_burst_of_dispatches_into_one_scope_judges_its_guide_block_once() {
+        use std::sync::atomic::Ordering;
+        let engine = test_engine();
+        assert_eq!(engine.l5.guide_judgements.load(Ordering::SeqCst), 0);
+        let blocks = futures_util::future::join_all((0..8).map(|_| engine.quality_context("projects"))).await;
+        assert!(blocks.windows(2).all(|pair| pair[0] == pair[1]), "everyone in the burst got the same block");
+        assert_eq!(engine.l5.guide_judgements.load(Ordering::SeqCst), 1, "eight concurrent dispatches, one judgement");
+
+        // Still one within the TTL, and a profile edit (a new fingerprint) is the only thing that judges it again.
+        engine.quality_context("projects").await;
+        assert_eq!(engine.l5.guide_judgements.load(Ordering::SeqCst), 1);
+        write_profile(&engine, "service", &SERVICE.replace("right-first-time", "first-time"));
+        engine.quality_context("projects").await;
+        assert_eq!(engine.l5.guide_judgements.load(Ordering::SeqCst), 2);
     }
 }

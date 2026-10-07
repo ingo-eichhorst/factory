@@ -240,6 +240,9 @@ pub struct L5State {
     pub(crate) quality_guide_cache: tokio::sync::Mutex<crate::quality::GuideCache>,
     /// L5's signpost fact provider owns its short cache.
     pub(crate) signpost_cache: factory_assurance::signposts::Cache,
+    /// Test-only: how many times a guide block was actually judged (as opposed to served from the cache).
+    #[cfg(test)]
+    pub(crate) guide_judgements: std::sync::atomic::AtomicUsize,
 }
 
 /// L6 Direction: policy receipts, goals and renewal push receipts.

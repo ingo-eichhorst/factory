@@ -34,7 +34,7 @@ use factory_core::operations::Window;
 use factory_core::run::{BlockSource, Run, RunPatch, RunStatus};
 use factory_core::task::{NewTask, Task, TaskEntry, TaskFilter, WorkflowOrigin};
 use factory_core::workflow::{
-    WorkflowDefinition, WorkflowLint, WorkflowNodeStatus, IMPLICIT_NODE,
+    WorkflowDefinition, WorkflowNodeStatus, IMPLICIT_NODE,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -686,8 +686,7 @@ impl L4Service<'_> {
     /// snapshot. Scope declaration order is stable and deliberate; the first
     /// concrete agent different from the subject executor is the checker.
     pub(crate) async fn bind_functionaries(&self, definition: &mut WorkflowDefinition) -> Result<()> {
-        use crate::facts::Port;
-        factory_kernel::WorkflowTargetsFact::provider(self.core).bind_functionaries(definition).await
+        self.above.bind_functionaries(definition).await
     }
 
     /// The agent reported `done` on a run with required steps: hold it in
@@ -1296,33 +1295,6 @@ impl L4Service<'_> {
         }
         self.sync_workflow_for_task(&task.id, spawner).await;
         Ok(())
-    }
-
-
-    /// `factory workflow lint`: the plan, the injection and the ordering
-    /// violations for a stored workflow, a task's implicit workflow, or --
-    /// with neither -- just a scope's plan for one category.
-    pub(crate) async fn workflow_lint(
-        &self,
-        workflow: Option<String>,
-        task: Option<String>,
-        scope: Option<String>,
-        category: Option<String>,
-    ) -> Result<WorkflowLint> {
-        use crate::facts::Port;
-        let blueprints = factory_kernel::WorkflowBlueprintFact::provider(self.core);
-        let preview = factory_kernel::WorkflowTargetsFact::provider(self.core);
-        let prepared = preview.prepare(
-            factory_assurance::workflow_preview::Subject { workflow, task, scope, category },
-            &blueprints,
-        ).await?;
-        let snapshot = self.wiring.snapshot();
-        let intent = crate::intent::Intent::of(&snapshot);
-        let mut requirements = Vec::new();
-        for category in prepared.categories() {
-            requirements.push(intent.plan_input(prepared.scope(), category).await);
-        }
-        preview.finish(prepared, requirements).await
     }
 }
 
@@ -2259,7 +2231,7 @@ mod tests {
     async fn lint_shows_a_part_workflow_as_every_part_gets_it() {
         let (engine, _) = engine(TESTS_FOR_FEATURES);
         let template = feature_part_workflow(&engine).await;
-        let lint = engine.l4_service().workflow_lint(Some(template.id.clone()), None, None, None).await.unwrap();
+        let lint = engine.workflow_lint(Some(template.id.clone()), None, None, None).await.unwrap();
         let part = lint.part.clone().unwrap();
         assert_eq!((part.entry.as_str(), part.deliverable.as_str(), part.terminal.as_str()), ("implement", "implement", "review"));
         let mut gated: Vec<&str> = lint.injections.iter().map(|i| i.node_id.as_str()).collect();
@@ -2298,7 +2270,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let lint = engine.l4_service().workflow_lint(Some(template.id.clone()), None, None, None).await.unwrap();
+        let lint = engine.workflow_lint(Some(template.id.clone()), None, None, None).await.unwrap();
         assert!(lint.violations.iter().any(|v| v.starts_with("a-publish ")), "{:?}", lint.violations);
         let report = engine.policy_report(Some("demo")).await.unwrap();
         assert!(
@@ -2381,7 +2353,7 @@ mod tests {
             .unwrap();
         let stored_nodes = definition.nodes.len();
 
-        let lint = engine.l4_service().workflow_lint(Some(definition.id.clone()), None, None, None).await.unwrap();
+        let lint = engine.workflow_lint(Some(definition.id.clone()), None, None, None).await.unwrap();
         assert_eq!(lint.injections.len(), 2, "one gate after each task node: {:#?}", lint.injections);
 
         let wf = engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();

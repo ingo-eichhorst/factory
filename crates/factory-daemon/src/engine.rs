@@ -316,6 +316,8 @@ impl Engine {
                 signpost_cache: factory_assurance::signposts::Cache::default(),
                 quality_seen: Default::default(),
                 quality_guide_cache: Default::default(),
+                #[cfg(test)]
+                guide_judgements: Default::default(),
             },
             l6: crate::state::L6State {
                 policies: crate::policies::PolicyStore::in_memory()

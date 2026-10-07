@@ -77,6 +77,15 @@ impl Intent {
         self.budgets.plan_input(scope, category).await
     }
 
+    /// The authored budget configuration, read only when some subject needs budget facts (`BudgetWithin`): a pure read
+    /// of the budget catalogue, no spend and no verdict.
+    pub(crate) async fn budget_for<S: factory_core::checks::CheckSource>(
+        &self,
+        applied: &[&[S]],
+    ) -> factory_core::error::Result<Option<factory_core::budget::PolicyConfig>> {
+        self.budgets.budget_for(applied).await
+    }
+
     /// The authored budget caps a metric plan needs: a pure read of the budget catalogue and the scope
     /// configuration (no spend, no verdict, no receipt).
     pub(crate) async fn quality_budgets(
