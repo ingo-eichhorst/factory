@@ -63,7 +63,7 @@ impl Engine {
         } else {
             None
         };
-        let budgets = self.l6_service().metric_quality_budgets(&snapshot, &plan).await;
+        let budgets = crate::intent::Intent::of(&snapshot).quality_budgets(&plan).await;
         Facts::<People>::new(self)
             .get::<SignpostFact>(&Read {
                 now,

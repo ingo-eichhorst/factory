@@ -60,7 +60,7 @@ impl Engine {
             self.l6_service().metric_policy_preflight(&snapshot, plan.scope(), !policy.scopes.is_empty())
                 .await?;
         }
-        let budgets = self.l6_service().metric_quality_budgets(&snapshot, &plan).await;
+        let budgets = crate::intent::Intent::of(&snapshot).quality_budgets(&plan).await;
         service.finish(&plan, gathered, &budgets, now, window).await
     }
 
@@ -3078,7 +3078,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let budgets = engine.l6_service().metric_quality_budgets(&snapshot, &plan).await;
+        let budgets = crate::intent::Intent::of(&snapshot).quality_budgets(&plan).await;
         let query = factory_assurance::metric_values::Read {
             plan,
             policy: Ok(policy),

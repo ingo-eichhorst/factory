@@ -15,14 +15,54 @@
 //! L6 service calls until they are made inputs of the downward command that needs them (S9b/S10 PR bodies).
 use crate::facts::Wiring;
 use factory_core::adapter::agent::GoalContext;
+use factory_core::config::Factory;
 use factory_kernel::Level;
 use std::path::PathBuf;
 
 pub(crate) struct Intent {
     root: PathBuf,
+    budgets: factory_direction::policy_intent::Authored,
+}
+
+/// The scope configuration the policy intent readers work from, as plain data out of the snapshot.
+pub(crate) fn policy_configuration(snapshot: &Factory) -> factory_direction::policy_intent::Configuration {
+    use factory_direction::policy_intent::{Configuration, Scope};
+    Configuration {
+        scopes: snapshot
+            .config
+            .scopes
+            .iter()
+            .map(|scope| Scope {
+                id: scope.id.clone(),
+                name: scope.name.clone(),
+                path: scope.path.clone(),
+                policies: scope.policies.clone(),
+            })
+            .collect(),
+        root_policies: snapshot.config.policies.clone(),
+        root_name: snapshot.config.scope.as_ref().map(|scope| scope.name.clone()),
+        instance_name: snapshot.config.instance.name.clone(),
+    }
 }
 
 impl Intent {
+    /// What was authored, as of this snapshot.
+    pub(crate) fn of(snapshot: &Factory) -> Self {
+        Self {
+            root: snapshot.root.clone(),
+            budgets: factory_direction::policy_intent::Authored::new(snapshot.root.clone(), policy_configuration(snapshot)),
+        }
+    }
+
+    /// The authored budget caps a metric plan needs: a pure read of the budget catalogue and the scope
+    /// configuration (no spend, no verdict, no receipt).
+    pub(crate) async fn quality_budgets(
+        &self,
+        plan: &factory_assurance::metrics_service::Plan,
+    ) -> factory_assurance::metrics_service::QualityBudgets {
+        self.budgets.quality_budgets(&plan.quality_budget_ids()).await
+    }
+
     /// The goal context a task's `goal` label resolves to in the authored catalogue; `None` for no label or one
     /// that names nothing.
     pub(crate) async fn goal_context(&self, label: Option<String>) -> Option<GoalContext> {
@@ -35,7 +75,7 @@ impl Intent {
 impl<L: Level> Wiring<'_, L> {
     /// What was authored for this instance, readable from any level as plain input.
     pub(crate) fn intent(&self) -> Intent {
-        Intent { root: self.snapshot().root }
+        Intent::of(&self.snapshot())
     }
 }
 
@@ -58,7 +98,13 @@ mod tests {
              \x20\x20\x20\x20\x20\x20- {id: kr, title: KR Title, kind: committed, manual: true, baseline: 0, target: 1}\n",
         )
         .unwrap();
-        let intent = Intent { root };
+        let configuration = factory_direction::policy_intent::Configuration {
+            scopes: Vec::new(),
+            root_policies: Default::default(),
+            root_name: None,
+            instance_name: "test".into(),
+        };
+        let intent = Intent { root: root.clone(), budgets: factory_direction::policy_intent::Authored::new(root, configuration) };
 
         let found = intent.goal_context(Some("obj/kr".to_string())).await.unwrap();
         assert_eq!((found.objective_title.as_str(), found.kr_title.as_str()), ("Objective Title", "KR Title"));

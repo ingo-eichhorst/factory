@@ -164,9 +164,9 @@ const SERVICES: &[ServiceEntry] = &[
 const PULLS_BASELINE: &[(&str, usize)] = &[
     ("harness_hold.rs -> .l3_service()", 2),
     ("intake.rs -> .l3_service()", 1),
-    ("metrics.rs -> .l6_service()", 3),
+    ("metrics.rs -> .l6_service()", 2),
     ("quality/mod.rs -> .l6_service()", 1),
-    ("signposts.rs -> .l6_service()", 2),
+    ("signposts.rs -> .l6_service()", 1),
     ("verification.rs -> .l6_service()", 2),
 ];
 

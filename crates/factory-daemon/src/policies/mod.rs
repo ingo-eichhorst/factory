@@ -57,29 +57,10 @@ impl<'s> L6Service<'s> {
         &self,
         snapshot: &Factory,
     ) -> factory_direction::policy_intent::Service<'s> {
-        use factory_direction::policy_intent::{Configuration, Scope, Service};
+        use factory_direction::policy_intent::Service;
         Service::new(
             snapshot.root.clone(),
-            Configuration {
-                scopes: snapshot
-                    .config
-                    .scopes
-                    .iter()
-                    .map(|scope| Scope {
-                        id: scope.id.clone(),
-                        name: scope.name.clone(),
-                        path: scope.path.clone(),
-                        policies: scope.policies.clone(),
-                    })
-                    .collect(),
-                root_policies: snapshot.config.policies.clone(),
-                root_name: snapshot
-                    .config
-                    .scope
-                    .as_ref()
-                    .map(|scope| scope.name.clone()),
-                instance_name: snapshot.config.instance.name.clone(),
-            },
+            crate::intent::policy_configuration(snapshot),
             &self.state.policies,
         )
     }
@@ -89,9 +70,7 @@ impl<'s> L6Service<'s> {
         snapshot: &Factory,
         plan: &factory_assurance::metrics_service::Plan,
     ) -> factory_assurance::metrics_service::QualityBudgets {
-        self.policy_intent_service(snapshot)
-            .quality_budgets(&plan.quality_budget_ids())
-            .await
+        crate::intent::Intent::of(snapshot).quality_budgets(plan).await
     }
 
     /// Own catalogue read plus the L5 knowledge-tag port. Both filesystem
