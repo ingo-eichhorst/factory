@@ -441,7 +441,7 @@ impl L4Service<'_> {
             // its agent's word. The session stays open -- see
             // `verification.rs`.
             Some(RunStatus::Done) if !run.required_steps.is_empty() => {
-                self.core.begin_verification(&run, patch).await?
+                self.begin_verification(&run, patch).await?
             }
             Some(status) if status.is_terminal() => {
                 if status != RunStatus::Done {
@@ -458,7 +458,7 @@ impl L4Service<'_> {
             }
         };
         if review_report && report.status == Some(RunStatus::Done) {
-            self.core.settle_review_task(&reporting_task, &updated).await?;
+            self.settle_review_task(&reporting_task, &updated).await?;
         }
         Ok(updated)
     }
@@ -636,7 +636,7 @@ impl L4Service<'_> {
         if status != RunStatus::Done {
             if let Ok(Some(task)) = self.state.store.get(&run.task_id).await {
                 if let Some(subject) = task.labels.get(crate::verification::REVIEW_RUN_LABEL) {
-                    self.core.enqueue_verification(subject);
+                    self.enqueue_verification(subject);
                 }
             }
         }

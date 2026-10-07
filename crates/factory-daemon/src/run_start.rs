@@ -320,7 +320,7 @@ impl L4Service<'_> {
         // What `done` will need, fixed now (`#118`) -- before the run row
         // exists, so a plan that cannot be resolved fails the dispatch
         // rather than letting the work start unplanned.
-        let required_steps = self.core.required_steps_for_task(&task, &agent_name).await?;
+        let required_steps = self.required_steps_for_task(&task, &agent_name).await?;
 
         // An approval-held run already exists but has never launched. Once
         // approved, resume that exact frozen snapshot instead of creating a
@@ -352,7 +352,7 @@ impl L4Service<'_> {
                 return Err(FactoryError::DispatchSuperseded("this one-shot dependency already has an attempt".into()));
             }
             if let Some(origin) = &admitted_task.workflow_origin {
-                let ended = self.core.workflow_run(&origin.workflow_run_id).await?.status.is_terminal();
+                let ended = self.workflow_run(&origin.workflow_run_id).await?.status.is_terminal();
                 let unadmitted = admitted_task.runs == 0 || admitted_task.closure.as_ref()
                     .is_some_and(|closure| closure.reason == factory_core::task::CloseReason::NotPlanned);
                 // An approval-held run was already admitted. Ending the

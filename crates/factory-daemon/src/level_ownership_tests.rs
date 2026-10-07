@@ -171,8 +171,9 @@ const PULLS_BASELINE: &[(&str, usize)] = &[
 
 /// `self.core.` call sites per file (the transitional `L4Service::core`). May only shrink; goes away with the handle.
 const CORE_BASELINE: &[(&str, usize)] = &[
-    ("run_settle.rs", 11),
-    ("run_start.rs", 15),
+    ("run_settle.rs", 8),
+    ("run_start.rs", 13),
+    ("verification.rs", 1),
 ];
 
 /// Files that name `Facts::<People>` today (count). May only shrink.
