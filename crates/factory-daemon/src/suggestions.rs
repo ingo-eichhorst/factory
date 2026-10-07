@@ -341,6 +341,7 @@ impl L5Service<'_> {
         let now = Utc::now();
         suggestion.ask(question, &crate::policies::caller_name(caller), &run.id, now);
         self.state.suggestions.put(&suggestion).await?;
+        self.state.pending_asks.lock().unwrap_or_else(|p| p.into_inner()).insert(run.id.clone());
         Ok(suggestion)
     }
 
@@ -349,25 +350,62 @@ impl L5Service<'_> {
     /// the answer. A no-op for every other run (`find_by_ask_run` matches
     /// nothing) and never fails the run it is settling for -- a suggestion
     /// is evidence, not part of any run's own outcome.
-    pub(crate) async fn settle_suggestion_ask(&self, run: &Run) {
+    pub(crate) async fn settle_suggestion_ask(&self, run: &Run) -> bool {
         let found = match self.state.suggestions.find_by_ask_run(&run.id).await {
             Ok(found) => found,
             Err(e) => {
                 tracing::warn!(run = run.id, "could not look up a pending suggestion ask: {e}");
-                return;
+                return false;
             }
         };
-        let Some(mut suggestion) = found else { return };
+        let Some(mut suggestion) = found else { return true };
         let answer = run
             .result
             .clone()
             .or_else(|| run.error.clone())
             .unwrap_or_else(|| format!("(the run ended {} with no result or error message)", run.status.as_str()));
         if !suggestion.answer(&run.id, answer, Utc::now()) {
-            return;
+            return true;
         }
         if let Err(e) = self.state.suggestions.put(&suggestion).await {
             tracing::warn!(suggestion = suggestion.id, run = run.id, "could not record a suggestion's answer: {e}");
+            return false;
+        }
+        true
+    }
+
+    /// The observer's side of an ask: look at every ask run still waiting for its answer and record the answer of the
+    /// ones that have ended. Reads nothing when no ask is pending. Replaces L4's call at the end of a run (D4's
+    /// shape: L5 reads run completion as a fact, with the bus only as a hint that it may be time to look).
+    pub(crate) async fn poll_suggestion_asks(&self) {
+        let pending: Vec<String> = self.state.pending_asks.lock().unwrap_or_else(|p| p.into_inner()).iter().cloned().collect();
+        for run_id in pending {
+            let run = match self.run_record(factory_kernel::RunSnapshotQuery::ById(run_id.clone())).await {
+                Ok(Some(run)) if run.status.is_terminal() => run,
+                Ok(None) => {
+                    self.state.pending_asks.lock().unwrap_or_else(|p| p.into_inner()).remove(&run_id);
+                    continue;
+                }
+                _ => continue,
+            };
+            if self.settle_suggestion_ask(&run).await {
+                self.state.pending_asks.lock().unwrap_or_else(|p| p.into_inner()).remove(&run_id);
+            }
+        }
+    }
+
+    /// At startup: every ask whose answer was not recorded before the last stop is pending again.
+    pub(crate) async fn seed_pending_asks(&self) {
+        match self.state.suggestions.all().await {
+            Ok(all) => {
+                let mut pending = self.state.pending_asks.lock().unwrap_or_else(|p| p.into_inner());
+                for suggestion in all {
+                    if let Some(ask) = suggestion.ask.as_ref().filter(|ask| ask.answer.is_none()) {
+                        pending.insert(ask.run_id.clone());
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("could not look for suggestion asks awaiting an answer: {e}"),
         }
     }
 }
@@ -549,6 +587,106 @@ mod tests {
         assert_eq!(l5.latest_run(&task.id).await.unwrap().unwrap().id, run.id);
         let by_id = l5.run_record(factory_kernel::RunSnapshotQuery::ById(run.id.clone())).await.unwrap().unwrap();
         assert_eq!((by_id.id, by_id.token), (run.id, run.token), "the whole record comes through");
+    }
+
+    // ------------------------------------------------------------------
+    // The L5 observer settles an ask's answer by watching its run complete
+    // ------------------------------------------------------------------
+
+    /// A suggestion filed against a finished run, asked about by a second run that has ended with `result`, with
+    /// nothing published on the bus: the observer has only the store to look at.
+    async fn an_ask_whose_run_has_ended(engine: &Arc<Engine>, result: &str) -> (Suggestion, Run) {
+        let task = task_in(engine, "demo", "nogrant-worker").await;
+        let filed_against = active_run(engine, &task.id, "nogrant-worker", "tok-1").await;
+        let mut suggestion = engine.l5_service().file_suggestion(&task.id, report(Some("tok-1"))).await.unwrap();
+        engine
+            .l4
+            .store
+            .update_run(&filed_against.id, &factory_core::run::RunPatch { status: Some(factory_core::run::RunStatus::Done), ..Default::default() })
+            .await
+            .unwrap();
+        let ask_run = active_run(engine, &task.id, "nogrant-worker", "tok-2").await;
+        suggestion.ask("why did this fail?".into(), "owner", &ask_run.id, Utc::now());
+        engine.l5.suggestions.put(&suggestion).await.unwrap();
+        engine.l5.pending_asks.lock().unwrap().insert(ask_run.id.clone());
+        engine
+            .l4
+            .store
+            .update_run(
+                &ask_run.id,
+                &factory_core::run::RunPatch {
+                    status: Some(factory_core::run::RunStatus::Done),
+                    result: Some(result.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        (suggestion, ask_run)
+    }
+
+    async fn answer_within(engine: &Arc<Engine>, id: &str, limit: std::time::Duration) -> Option<String> {
+        let started = std::time::Instant::now();
+        while started.elapsed() < limit {
+            if let Some(answer) = engine.l5_service().suggestion_get(id).await.unwrap().ask.and_then(|ask| ask.answer) {
+                return Some(answer);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        None
+    }
+
+    /// The bus is lossy by design: with no event at all, the timer finds the ended ask run.
+    #[tokio::test]
+    async fn the_timer_alone_settles_an_asks_answer() {
+        let engine = test_engine(None, true);
+        let (suggestion, _) = an_ask_whose_run_has_ended(&engine, "it needed a different grant").await;
+        let interval = std::time::Duration::from_millis(150);
+        engine.spawn_bench_judge_with(interval);
+        let answer = answer_within(&engine, &suggestion.id, interval * 4).await.expect("the answer landed");
+        assert_eq!(answer, "it needed a different grant");
+        assert!(engine.l5.pending_asks.lock().unwrap().is_empty());
+    }
+
+    /// With the backstop an hour away, the ended run's event alone settles it promptly.
+    #[tokio::test]
+    async fn an_ended_ask_runs_event_settles_the_answer_without_the_timer() {
+        let engine = test_engine(None, true);
+        let (suggestion, ask_run) = an_ask_whose_run_has_ended(&engine, "answered").await;
+        engine.spawn_bench_judge_with(std::time::Duration::from_secs(3600));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let run = engine.l4.store.get_run(&ask_run.id).await.unwrap().unwrap();
+        engine.shared.bus.publish(factory_core::event::Event::RunUpdated { run });
+        assert_eq!(answer_within(&engine, &suggestion.id, std::time::Duration::from_secs(2)).await.as_deref(), Some("answered"));
+    }
+
+    /// Polling again, and an event and the timer together, never overwrite the first answer.
+    #[tokio::test]
+    async fn an_answer_is_recorded_once_however_many_polls_look() {
+        let engine = test_engine(None, true);
+        let (suggestion, ask_run) = an_ask_whose_run_has_ended(&engine, "first answer").await;
+        engine.l5_service().poll_suggestion_asks().await;
+        let first = engine.l5_service().suggestion_get(&suggestion.id).await.unwrap().ask.unwrap();
+        engine
+            .l4
+            .store
+            .update_run(&ask_run.id, &factory_core::run::RunPatch { result: Some("a later edit".into()), ..Default::default() })
+            .await
+            .unwrap();
+        let l5 = engine.l5_service();
+        tokio::join!(l5.poll_suggestion_asks(), l5.poll_suggestion_asks());
+        let after = engine.l5_service().suggestion_get(&suggestion.id).await.unwrap().ask.unwrap();
+        assert_eq!((after.answer.as_deref(), after.answered_at), (Some("first answer"), first.answered_at));
+    }
+
+    /// A restart forgets nothing: asks still waiting in the store are watched again.
+    #[tokio::test]
+    async fn pending_asks_are_seeded_from_the_store_at_startup() {
+        let engine = test_engine(None, true);
+        let (_suggestion, ask_run) = an_ask_whose_run_has_ended(&engine, "x").await;
+        engine.l5.pending_asks.lock().unwrap().clear();
+        engine.l5_service().seed_pending_asks().await;
+        assert!(engine.l5.pending_asks.lock().unwrap().contains(&ask_run.id));
     }
 
     fn report(token: Option<&str>) -> SuggestionReport {

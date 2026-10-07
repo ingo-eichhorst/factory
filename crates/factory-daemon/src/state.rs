@@ -240,6 +240,10 @@ pub struct L5State {
     pub(crate) quality_guide_cache: tokio::sync::Mutex<crate::quality::GuideCache>,
     /// L5's signpost fact provider owns its short cache.
     pub(crate) signpost_cache: factory_assurance::signposts::Cache,
+    /// Ask runs (`Request::SuggestionAsk`) whose answer has not been recorded yet. Seeded from the store at startup,
+    /// added when an ask is recorded and removed once settled; the L5 observer polls these runs' completion, so L4
+    /// never has to tell L5 that a run ended.
+    pub(crate) pending_asks: std::sync::Mutex<std::collections::BTreeSet<String>>,
     /// Test-only: how many times a guide block was actually judged (as opposed to served from the cache).
     #[cfg(test)]
     pub(crate) guide_judgements: std::sync::atomic::AtomicUsize,

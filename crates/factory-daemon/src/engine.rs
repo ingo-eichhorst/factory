@@ -316,6 +316,7 @@ impl Engine {
                 signpost_cache: factory_assurance::signposts::Cache::default(),
                 quality_seen: Default::default(),
                 quality_guide_cache: Default::default(),
+                pending_asks: Default::default(),
                 #[cfg(test)]
                 guide_judgements: Default::default(),
             },
@@ -1155,12 +1156,6 @@ impl Engine {
     }
 
     // -- creating ----------------------------------------------------------
-
-    /// L4's settling path asks L5 to record the answer to a suggestion's ask (a page forwarder: an L4 file calling
-    /// `.l5_service()` would be a pull up the ladder; the answer arrives as an event once L5 reads run completion).
-    pub(crate) async fn settle_suggestion_ask(&self, run: &Run) {
-        self.l5_service().settle_suggestion_ask(run).await
-    }
 
     pub async fn create(&self, new: NewTask) -> Result<Task> {
         self.l4_service().create(new).await
@@ -5299,8 +5294,8 @@ mod tests {
             assert!(text.contains("blocked outbound call"), "{text}");
             assert!(text.contains("Report done"), "{text}");
 
-            // And once that resumed run reports, the answer settles onto
-            // the suggestion (`Engine::finish_run` -> `settle_suggestion_ask`).
+            // And once that resumed run reports, the L5 observer settles the answer onto the suggestion (it polls the
+            // ask run's completion; this test drives one poll instead of waiting for the timer).
             engine
                 .l4_service()
                 .report(&task.id, TaskReport {
@@ -5314,8 +5309,10 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            engine.l5_service().poll_suggestion_asks().await;
             let settled = engine.l5_service().suggestion_get(&suggestion.id).await.unwrap();
             assert_eq!(settled.ask.as_ref().unwrap().answer.as_deref(), Some("it needed a different grant"));
+            assert!(engine.l5.pending_asks.lock().unwrap().is_empty(), "a settled ask is no longer watched");
 
             std::fs::remove_dir_all(&scope_dir).ok();
         }

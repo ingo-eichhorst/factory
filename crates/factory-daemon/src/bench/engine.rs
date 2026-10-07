@@ -141,6 +141,7 @@ impl Engine {
         let engine = self.clone();
         tokio::spawn(async move {
             use tokio::sync::broadcast::error::RecvError;
+            engine.l5_service().seed_pending_asks().await;
             let mut bus = engine.shared.bus.subscribe();
             let mut tick = tokio::time::interval(interval);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -156,7 +157,9 @@ impl Engine {
                         Err(RecvError::Closed) => return,
                     },
                 }
-                engine.l5_service().poll_bench_attempts().await;
+                let l5 = engine.l5_service();
+                l5.poll_bench_attempts().await;
+                l5.poll_suggestion_asks().await;
             }
         });
     }
