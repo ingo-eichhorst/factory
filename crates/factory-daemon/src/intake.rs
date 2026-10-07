@@ -17,6 +17,7 @@
 
 use crate::access::Caller;
 use crate::engine::{Due, Engine};
+use crate::l4_service::L4Service;
 use crate::operations::Asked;
 use chrono::{DateTime, Utc};
 use factory_core::config::Factory;
@@ -37,6 +38,32 @@ use std::sync::Arc;
 pub(crate) use factory_process::intake::TRIAGE_VERDICT_KIND;
 
 impl Engine {
+    pub(crate) async fn intake_triage(
+        self: &Arc<Self>,
+        caller: &Caller,
+        id: &str,
+        agent: Option<String>,
+    ) -> Result<Task> {
+        self.l4_service().intake_triage(caller, id, agent, self).await
+    }
+
+    pub(crate) async fn intake_assess(
+        self: &Arc<Self>,
+        caller: &Caller,
+        id: &str,
+        assessment: intake::Assessment,
+        decide: bool,
+    ) -> Result<Task> {
+        self.l4_service().intake_assess(caller, id, assessment, decide, self).await
+    }
+
+    pub(crate) async fn intake_decide(self: &Arc<Self>, caller: &Caller, id: &str, decision: Decision) -> Result<Task> {
+        self.l4_service().intake_decide(caller, id, decision, self).await
+    }
+
+}
+
+impl L4Service<'_> {
     /// `Request::IntakeAdd`. A relayed `email` or `chat` item (`#167`) is
     /// its own path, open to Owner and Agent alike; every other kind keeps
     /// exactly the per-caller provenance it always had.
@@ -69,7 +96,7 @@ impl Engine {
             // claim, and the run it came out of is the natural reference.
             Caller::Agent { run_id, .. } => {
                 let from_run = match run_id {
-                    Some(run) => self.l4.store.get_run(run).await?.map(|r| format!("task {}", r.task_id)),
+                    Some(run) => self.state.store.get_run(run).await?.map(|r| format!("task {}", r.task_id)),
                     None => None,
                 };
                 let requester = match clean(new.requester) {
@@ -212,8 +239,8 @@ impl Engine {
     /// duplicate candidate search, below, is its only signal that a repeat
     /// came in.
     pub(crate) async fn receive_intake(&self, new: NewTask, record: Intake) -> Result<Task> {
-        let _guard = self.l4.intake_receipt_lock.lock().await;
-        let all = self.l4.store.list(&TaskFilter::default()).await?;
+        let _guard = self.state.intake_receipt_lock.lock().await;
+        let all = self.state.store.list(&TaskFilter::default()).await?;
         if let Some(identity) = record.source.identity() {
             if let Some(existing) =
                 all.iter().find(|t| t.intake.as_ref().and_then(|i| i.source.identity()) == Some(identity.clone()))
@@ -221,7 +248,7 @@ impl Engine {
                 return Ok(existing.clone());
             }
         }
-        let task = self.create_intake_task(new, record.clone()).await?;
+        let task = self.core.create_intake_task(new, record.clone()).await?;
         // `all` was read before `task` was created, so it never contains
         // `task` itself -- the same set `duplicate_candidates` would search
         // after excluding the item by id, one list call doing both jobs.
@@ -252,7 +279,7 @@ impl Engine {
 
     /// `Request::IntakeBoard`.
     pub(crate) async fn intake_board(&self, scope: Option<&str>) -> Result<IntakeBoard> {
-        let snapshot = self.factory_snapshot();
+        let snapshot = self.wiring.snapshot();
         let members: Option<BTreeSet<String>> = match scope {
             None => None,
             Some(name) => {
@@ -264,7 +291,7 @@ impl Engine {
                 Some(members)
             }
         };
-        let all = self.l4.store.list(&TaskFilter::default()).await?;
+        let all = self.state.store.list(&TaskFilter::default()).await?;
         // Items are filtered by scope; a triage task is looked up by id, so
         // it stays in the list whatever scope it ran in.
         let tasks: Vec<Task> = all
@@ -318,7 +345,7 @@ impl Engine {
     /// it has -- what a triager, a run or a person, chooses the route from.
     /// Standing agents are left out: they are not given tasks.
     pub(crate) async fn intake_routes(&self) -> Result<Vec<RouteOptions>> {
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         let ready = self.ready_definitions(&factory);
         self.intake_routes_with(&factory, &ready).await
     }
@@ -344,7 +371,7 @@ impl Engine {
                 agents.insert(0, AgentOption { name: default_agent.clone(), harness: default_agent.clone(), model: None });
             }
             let workflows = self
-                .l4.workflows
+                .state.workflows
                 .definitions(Some(&scope.name))
                 .await?
                 .iter()
@@ -368,15 +395,14 @@ impl Engine {
     /// its own, in the item's scope, run at once; the item waits in
     /// `triaging` until the run submits an assessment.
     pub(crate) async fn intake_triage(
-        self: &Arc<Self>,
+        &self,
         caller: &Caller,
         id: &str,
-        agent: Option<String>,
-    ) -> Result<Task> {
+        agent: Option<String>, engine: &Arc<Engine>) -> Result<Task> {
         let item = self.require(id).await?;
         let record = open_record(&item)?.clone();
         if let Some(running) = &record.triage_task {
-            if let Some(t) = self.l4.store.get(running).await? {
+            if let Some(t) = self.state.store.get(running).await? {
                 // Settled rather than closed: a triage run that failed
                 // leaves its task blocked on the failure (`#122`), and
                 // nothing is working on the item then.
@@ -393,15 +419,16 @@ impl Engine {
         // -- otherwise it starts and can never close the loop (`#172`).
         // Resolve exactly the agent `create` below would land it on, named
         // or not, and check the role it would actually run under.
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         let declared = factory.scope(&item.scope)?.clone();
         let requested = agent
             .clone()
             .or_else(|| declared.agent_adapter().map(str::to_string))
             .unwrap_or_else(|| factory.config.daemon.default_agent.clone());
-        let (resolved, _, _) = self.resolve_agent(&item.scope, &requested)?;
-        let role = self.l3_service().effective_role(&item.scope, &resolved).await;
+        let (resolved, _, _) = crate::commands::agents(self.core).resolve_agent(&item.scope, &requested)?;
+        let role = self.core.effective_role_for(&item.scope, &resolved).await;
         let may_report = self
+            .wiring
             .roles_for(&item.scope)
             .get(&role)
             .is_some_and(|def| def.allows(Grant::TaskReport));
@@ -415,7 +442,7 @@ impl Engine {
         }
         // Search again: fresh candidates for the run's instructions and the
         // record, in case something new has appeared since receipt.
-        let all = self.l4.store.list(&TaskFilter::default()).await?;
+        let all = self.state.store.list(&TaskFilter::default()).await?;
         let candidates = intake::duplicate_candidates(&item, &all);
         let mut record_now = record.clone();
         record_now.candidates = candidates;
@@ -428,6 +455,7 @@ impl Engine {
             .map(|r| r.definition.clone())
             .unwrap_or_default();
         let triage = self
+            .core
             .create(NewTask {
                 title: format!("Triage: {}", item.title),
                 instructions: intake::triage_instructions(
@@ -435,7 +463,7 @@ impl Engine {
                     &record_now,
                     &definition,
                     &routes,
-                    &self.shared.factory_bin.display().to_string(),
+                    &self.wiring.factory_bin().display().to_string(),
                 ),
                 scope: Some(item.scope.clone()),
                 agent,
@@ -463,7 +491,7 @@ impl Engine {
             ),
         )
         .await;
-        let engine = self.clone();
+        let engine = engine.clone();
         let triage_id = triage.id.clone();
         tokio::spawn(async move {
             engine.l4_service().start_run_due(&triage_id, Trigger::Manual, Due::now()).await;
@@ -473,12 +501,11 @@ impl Engine {
 
     /// `Request::IntakeAssess`.
     pub(crate) async fn intake_assess(
-        self: &Arc<Self>,
+        &self,
         caller: &Caller,
         id: &str,
         mut assessment: intake::Assessment,
-        decide: bool,
-    ) -> Result<Task> {
+        decide: bool, engine: &Arc<Engine>) -> Result<Task> {
         let item = self.require(id).await?;
         let record = open_record(&item)?;
         // A blank route is the assessment's own problem, refused by
@@ -493,7 +520,7 @@ impl Engine {
         // definition of ready (`#169`) is what `validate` and `evaluate`
         // hold the assessment to, resolved fresh (no cache, same as
         // quality and policies).
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         let routed_scope = factory.scope(&assessment.routing.scope)?.clone();
         let definition = self.ready_definition_for(&factory, &routed_scope);
         intake::validate(&assessment, &definition).map_err(FactoryError::BadRequest)?;
@@ -517,7 +544,7 @@ impl Engine {
         let scope = routed_scope.name.clone();
         assessment.routing.scope = scope.clone();
         if let Some(agent) = &assessment.routing.agent {
-            let (name, _, _) = self.resolve_agent(&scope, agent)?;
+            let (name, _, _) = crate::commands::agents(self.core).resolve_agent(&scope, agent)?;
             assessment.routing.agent = Some(name);
         }
         if let Some(workflow) = &assessment.routing.workflow {
@@ -572,7 +599,7 @@ impl Engine {
                         ))
                     })?;
                 let node_scope = node.task.scope.clone().unwrap_or_else(|| found.scope.clone());
-                let (name, _, _) = self.resolve_agent(&node_scope, agent)?;
+                let (name, _, _) = crate::commands::agents(self.core).resolve_agent(&node_scope, agent)?;
                 agents.insert(step.clone(), name);
             }
             assessment.routing.agents = agents;
@@ -654,9 +681,9 @@ impl Engine {
             return Ok(item);
         }
         if executable_plan && intake::plan_is_ready(&assessment, &definition) {
-            return self.intake_expand_plan(caller, &item).await;
+            return self.intake_expand_plan(caller, &item, engine).await;
         }
-        self.intake_decide(caller, id, decision).await
+        self.intake_decide(caller, id, decision, engine).await
     }
 
     /// `#168`'s reference class for `scope`+`category` (narrowed to `agent`
@@ -675,9 +702,9 @@ impl Engine {
         agent: Option<&str>,
         at: DateTime<Utc>,
     ) -> Result<intake::ReferenceEstimate> {
-        let snapshot = self.factory_snapshot();
+        let snapshot = self.wiring.snapshot();
         let target = snapshot.canonical_scope_name(scope);
-        let tasks = self.l4.store.list(&TaskFilter::default()).await?;
+        let tasks = self.state.store.list(&TaskFilter::default()).await?;
         let mut sample_tasks = Vec::new();
         let mut sample_runs = Vec::new();
         for task in tasks {
@@ -693,7 +720,7 @@ impl Engine {
             if control_plan::effective_category(task.category.as_deref()) != category {
                 continue;
             }
-            let Ok(runs) = self.l4.store.runs(&task.id, u32::MAX).await else { continue };
+            let Ok(runs) = self.state.store.runs(&task.id, u32::MAX).await else { continue };
             sample_runs.extend(runs);
             sample_tasks.push(task);
         }
@@ -703,7 +730,7 @@ impl Engine {
     }
 
     /// `Request::IntakeDecide`.
-    pub(crate) async fn intake_decide(self: &Arc<Self>, caller: &Caller, id: &str, decision: Decision) -> Result<Task> {
+    pub(crate) async fn intake_decide(&self, caller: &Caller, id: &str, decision: Decision, engine: &Arc<Engine>) -> Result<Task> {
         let item = self.require(id).await?;
         let record = open_record(&item)?.clone();
         let questions = intake::check_decision(&record, &decision).map_err(FactoryError::BadRequest)?;
@@ -723,7 +750,7 @@ impl Engine {
             Decision::Ready { run } => {
                 let triage = record.triage.clone().expect("check_decision requires one");
                 let routing = &triage.assessment.routing;
-                let factory = self.factory_snapshot();
+                let factory = self.wiring.snapshot();
                 let declared = factory.scope(&routing.scope)?.clone();
                 let moved = declared.name != item.scope;
                 let agent = match &routing.agent {
@@ -734,7 +761,7 @@ impl Engine {
                         .unwrap_or_else(|| factory.config.daemon.default_agent.clone()),
                     None => item.agent.clone(),
                 };
-                let (agent, _, _) = self.resolve_agent(&declared.name, &agent)?;
+                let (agent, _, _) = crate::commands::agents(self.core).resolve_agent(&declared.name, &agent)?;
                 let mut labels = item.labels.clone();
                 labels.extend(intake::release_labels(&triage));
                 // The full range, not just its midpoint (`estimate_seconds`
@@ -782,7 +809,7 @@ impl Engine {
                     // left to do itself. `start_workflow` checks the caller
                     // could create and run every node by hand.
                     Some(workflow) => {
-                        let run = self
+                        let run = engine
                             .start_workflow_with_agents(workflow, routing.inputs.clone(), &routing.agents, caller)
                             .await?;
                         decided.workflow_run = Some(run.id.clone());
@@ -815,7 +842,7 @@ impl Engine {
                         ),
                     )
                     .await;
-                    let engine = self.clone();
+                    let engine = engine.clone();
                     let id = task.id.clone();
                     tokio::spawn(async move {
                         engine.l4_service().start_run_due(&id, Trigger::Manual, due).await;
@@ -878,7 +905,7 @@ impl Engine {
     /// Execute a complete plan as one generated workflow.  Its expand node
     /// materialises every internal child, roots start at once, dependants
     /// remain scheduled, and the workflow owns integration through one PR.
-    async fn intake_expand_plan(self: &Arc<Self>, caller: &Caller, item: &Task) -> Result<Task> {
+    async fn intake_expand_plan(&self, caller: &Caller, item: &Task, engine: &Arc<Engine>) -> Result<Task> {
         if item.parent_task_id.is_some() {
             return Err(FactoryError::BadRequest(
                 "automatic decomposition is one level deep; finish this child as a bounded task".into(),
@@ -892,11 +919,11 @@ impl Engine {
             .map_err(|error| FactoryError::BadRequest(format!("the executable plan: {error}")))?;
         let parts = intake::split_parts(&record, &triage.assessment.split)
             .map_err(FactoryError::BadRequest)?;
-        let workflow = self
+        let workflow = engine
             .start_decomposition_workflow(item, &parts, &triage.assessment.routing, caller)
             .await?;
         let children = self
-            .l4.store
+            .state.store
             .list(&TaskFilter { parent_task_id: Some(item.id.clone()), ..Default::default() })
             .await?;
         // `#235`: which part workflow every part ran through, by name.
@@ -996,7 +1023,7 @@ impl Engine {
             labels.insert(intake::PARENT_LABEL.into(), item.id.clone());
             labels.insert(intake::PART_LABEL.into(), part.id.clone());
             let child = self
-                .create_intake_task(
+                .core.create_intake_task(
                     NewTask {
                         title: part.title.clone(),
                         instructions: text,
@@ -1167,7 +1194,7 @@ impl Engine {
         &self,
         scope: Option<&str>,
     ) -> Result<Vec<intake::ConfirmedSecurityReport>> {
-        crate::facts::process_security_reports(self, scope).await
+        crate::facts::process_security_reports(self.core, scope).await
     }
 
     /// Whether `caller` is the run of this item's own triage task -- the one
@@ -1178,11 +1205,11 @@ impl Engine {
         let Some(triage_task) = item.intake.as_ref().and_then(|i| i.triage_task.as_deref()) else {
             return Ok(false);
         };
-        Ok(self.l4.store.get_run(run_id).await?.is_some_and(|run| run.task_id == triage_task))
+        Ok(self.state.store.get_run(run_id).await?.is_some_and(|run| run.task_id == triage_task))
     }
 
     pub(crate) async fn find_workflow(&self, scope: &str, wanted: &str) -> Result<factory_core::WorkflowDefinition> {
-        let definitions = self.l4.workflows.definitions(Some(scope)).await?;
+        let definitions = self.state.workflows.definitions(Some(scope)).await?;
         definitions
             .iter()
             .find(|d| d.id == wanted)
@@ -1203,14 +1230,14 @@ impl Engine {
     /// rather than duplicate the store-write and event-publish it does.
     pub(crate) async fn write_intake(&self, id: &str, record: Intake, mut patch: TaskPatch) -> Result<Task> {
         patch.intake = Some(record);
-        let task = self.l4.store.update(id, &patch).await?;
+        let task = self.state.store.update(id, &patch).await?;
         if task.intake.is_none() {
             return Err(FactoryError::adapter(
-                self.l4.store.name(),
+                self.state.store.name(),
                 "the task store did not keep the intake record; it may predate intake",
             ));
         }
-        self.shared.bus.publish(Event::TaskUpdated { task: task.clone() });
+        self.wiring.bus().publish(Event::TaskUpdated { task: task.clone() });
         Ok(task)
     }
 
@@ -1478,6 +1505,7 @@ mod tests {
 
     async fn add(engine: &Arc<Engine>, title: &str) -> Task {
         engine
+            .l4_service()
             .intake_add(
                 &Caller::Owner,
                 NewIntake { title: title.into(), instructions: "fix it".into(), scope: Some("demo".into()), ..Default::default() },
@@ -1538,6 +1566,7 @@ mod tests {
     async fn an_agents_item_is_recorded_as_its_delegation_whatever_it_claims() {
         let engine = engine();
         let item = engine
+            .l4_service()
             .intake_add(
                 &worker(None),
                 NewIntake {
@@ -1558,6 +1587,7 @@ mod tests {
     async fn a_public_receipt_cannot_claim_trusted_github_provenance() {
         let engine = engine();
         let item = engine
+            .l4_service()
             .intake_add(
                 &Caller::Owner,
                 NewIntake {
@@ -1588,7 +1618,7 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            let why = engine.intake_add(&Caller::Owner, new).await.unwrap_err().to_string();
+            let why = engine.l4_service().intake_add(&Caller::Owner, new).await.unwrap_err().to_string();
             assert!(why.contains("only apply to a relayed"), "{why}");
         }
         // The daemon keeps serving after every refusal.
@@ -1613,7 +1643,7 @@ mod tests {
     async fn an_owner_relayed_email_item_carries_its_own_provenance_and_who_relayed_it() {
         let engine = engine();
         let at = Utc::now() - chrono::Duration::hours(2);
-        let item = engine.intake_add(&Caller::Owner, email_relay("Invoice question", "<abc@x>", "a@b.c", at)).await.unwrap();
+        let item = engine.l4_service().intake_add(&Caller::Owner, email_relay("Invoice question", "<abc@x>", "a@b.c", at)).await.unwrap();
         let record = item.intake.unwrap();
         assert_eq!(record.source.kind, SourceKind::Email);
         assert_eq!(record.source.provider.as_deref(), Some("apple-mail"));
@@ -1637,7 +1667,7 @@ mod tests {
             received_at: Some(at),
             ..Default::default()
         };
-        let item = engine.intake_add(&worker(None), new).await.unwrap();
+        let item = engine.l4_service().intake_add(&worker(None), new).await.unwrap();
         let record = item.intake.unwrap();
         assert_eq!(record.source.kind, SourceKind::Chat);
         assert_eq!(record.source.provider.as_deref(), Some("imessage"));
@@ -1658,7 +1688,7 @@ mod tests {
             requester: Some("a@b.c".into()),
             ..Default::default()
         };
-        let item = engine.intake_add(&Caller::Owner, new).await.unwrap();
+        let item = engine.l4_service().intake_add(&Caller::Owner, new).await.unwrap();
         let record = item.intake.unwrap();
         assert!(record.received_at >= before, "defaulted to now");
     }
@@ -1672,7 +1702,7 @@ mod tests {
             requester: Some("a@b.c".into()),
             ..Default::default()
         };
-        let why = engine.intake_add(&Caller::Owner, new).await.unwrap_err().to_string();
+        let why = engine.l4_service().intake_add(&Caller::Owner, new).await.unwrap_err().to_string();
         assert!(why.contains("message id"), "{why}");
         add(&engine, "still fine").await;
     }
@@ -1682,7 +1712,7 @@ mod tests {
         let engine = engine();
         let new =
             NewIntake { title: "x".into(), source: Some(SourceKind::Chat), reference: Some("m1".into()), ..Default::default() };
-        let why = engine.intake_add(&Caller::Owner, new).await.unwrap_err().to_string();
+        let why = engine.l4_service().intake_add(&Caller::Owner, new).await.unwrap_err().to_string();
         assert!(why.contains("--requester"), "{why}");
         add(&engine, "still fine").await;
     }
@@ -1692,6 +1722,7 @@ mod tests {
         let engine = engine();
         let future = Utc::now() + chrono::Duration::days(1);
         let why = engine
+            .l4_service()
             .intake_add(&Caller::Owner, email_relay("x", "<future@x>", "a@b.c", future))
             .await
             .unwrap_err()
@@ -1707,8 +1738,8 @@ mod tests {
     async fn replaying_a_relayed_receipt_returns_the_same_item_with_no_second_receipt() {
         let engine = engine();
         let at = Utc::now() - chrono::Duration::hours(1);
-        let first = engine.intake_add(&Caller::Owner, email_relay("Invoice question", "<abc@x>", "a@b.c", at)).await.unwrap();
-        let second = engine.intake_add(&Caller::Owner, email_relay("Invoice question", "<abc@x>", "a@b.c", at)).await.unwrap();
+        let first = engine.l4_service().intake_add(&Caller::Owner, email_relay("Invoice question", "<abc@x>", "a@b.c", at)).await.unwrap();
+        let second = engine.l4_service().intake_add(&Caller::Owner, email_relay("Invoice question", "<abc@x>", "a@b.c", at)).await.unwrap();
         assert_eq!(first.id, second.id);
         let receipts = kinds(&engine, &first.id).await.into_iter().filter(|k| k == "intake_received").count();
         assert_eq!(receipts, 1, "the replay wrote nothing new");
@@ -1726,7 +1757,7 @@ mod tests {
     async fn a_relayed_item_is_decided_ready_but_never_gets_outbound_state() {
         let engine = engine();
         let at = Utc::now() - chrono::Duration::hours(1);
-        let item = engine.intake_add(&Caller::Owner, email_relay("Invoice question", "<outbound@x>", "a@b.c", at)).await.unwrap();
+        let item = engine.l4_service().intake_add(&Caller::Owner, email_relay("Invoice question", "<outbound@x>", "a@b.c", at)).await.unwrap();
         let released =
             engine.intake_assess(&Caller::Owner, &item.id, assessment("demo"), true).await.unwrap();
         let record = released.intake.unwrap();
@@ -1746,7 +1777,7 @@ mod tests {
         for _ in 0..2 {
             let engine = engine.clone();
             let new = email_relay("Race", "<race@x>", "a@b.c", at);
-            handles.push(tokio::spawn(async move { engine.intake_add(&Caller::Owner, new).await.unwrap() }));
+            handles.push(tokio::spawn(async move { engine.l4_service().intake_add(&Caller::Owner, new).await.unwrap() }));
         }
         let mut ids = Vec::new();
         for h in handles {
@@ -1896,7 +1927,7 @@ mod tests {
         let why = engine.intake_decide(&Caller::Owner, &item.id, Decision::Ready { run: false }).await.unwrap_err();
         assert!(why.to_string().contains("needs-info"), "{why}");
 
-        let answered = engine.intake_info(&Caller::Owner, &item.id, "It shows the order list.").await.unwrap();
+        let answered = engine.l4_service().intake_info(&Caller::Owner, &item.id, "It shows the order list.").await.unwrap();
         let record = answered.intake.as_ref().unwrap();
         assert_eq!(record.stage, IntakeStage::Received);
         assert!(record.questions.is_empty());
@@ -1999,9 +2030,9 @@ mod tests {
 
         let again = engine.intake_triage(&Caller::Owner, &item.id, None).await.unwrap_err();
         assert!(again.to_string().contains("already working"), "{again}");
-        let board = engine.intake_board(None).await.unwrap();
+        let board = engine.l4_service().intake_board(None).await.unwrap();
         assert_eq!(board.columns.triaging.len(), 1);
-        assert_eq!(engine.intake_board(Some("web")).await.unwrap().columns.triaging.len(), 0);
+        assert_eq!(engine.l4_service().intake_board(Some("web")).await.unwrap().columns.triaging.len(), 0);
     }
 
     #[tokio::test]
@@ -2054,6 +2085,7 @@ mod tests {
 
     async fn add_referencing(engine: &Arc<Engine>, title: &str, reference: &str) -> Task {
         engine
+            .l4_service()
             .intake_add(
                 &Caller::Owner,
                 NewIntake {
@@ -2111,7 +2143,7 @@ mod tests {
         };
         assert!(blockers[0].contains("confirmed duplicate"), "{blockers:?}");
 
-        let board = engine.intake_board(None).await.unwrap();
+        let board = engine.l4_service().intake_board(None).await.unwrap();
         let card = board.columns.needs_info.iter().find(|c| c.id == second.id).expect("still needs-info");
         assert!(
             card.next_actions.iter().any(|n| n.action == NextActionKind::CloseDuplicate
@@ -2192,6 +2224,7 @@ mod tests {
     async fn a_red_item_says_what_moves_it_and_splitting_hands_its_parts_back_into_intake() {
         let engine = engine();
         let item = engine
+            .l4_service()
             .intake_add(
                 &Caller::Owner,
                 NewIntake {
@@ -2207,7 +2240,7 @@ mod tests {
             .unwrap();
         let back = engine.intake_assess(&Caller::Owner, &item.id, too_big(), true).await.unwrap();
         assert_eq!(back.intake.as_ref().unwrap().stage, IntakeStage::NeedsInfo, "a proposal does not split by itself");
-        let board = engine.intake_board(None).await.unwrap();
+        let board = engine.l4_service().intake_board(None).await.unwrap();
         let card = &board.columns.needs_info[0];
         assert_eq!(card.next_actions[0].action, factory_core::intake::NextActionKind::Split);
         assert!(card.next_actions[0].hint.contains("Resume mechanism"), "{:?}", card.next_actions);
@@ -2239,7 +2272,7 @@ mod tests {
         assert!(resume.instructions.contains("Done when: cargo test resume_"));
         assert!(resume.instructions.contains("Part 1 of 2"), "dependencies first");
 
-        let board = engine.intake_board(None).await.unwrap();
+        let board = engine.l4_service().intake_board(None).await.unwrap();
         assert_eq!(board.split, 1);
         assert_eq!(board.columns.received.len(), 2);
         assert!(board.columns.received.iter().all(|c| c.parent.as_deref() == Some(item.id.as_str())));
@@ -2405,7 +2438,7 @@ mod tests {
         let result = expanded.result.as_deref().unwrap();
         assert!(result.starts_with("expanded into 4 tasks"), "{result}");
         assert!(result.contains("every part through part workflow part-flow"), "{result}");
-        let template = engine.find_workflow("demo", "part-flow").await.unwrap();
+        let template = engine.l4_service().find_workflow("demo", "part-flow").await.unwrap();
         let decision = expanded.intake.as_ref().unwrap().decision.clone().unwrap();
         assert_eq!(decision.part_workflow.as_deref(), Some(template.id.as_str()), "the decision says which template");
         assert_eq!(decision.parts.len(), 4);
@@ -2536,7 +2569,7 @@ mod tests {
         let fix = run.definition.nodes.iter().find(|n| n.id == "fix").unwrap();
         assert_eq!(fix.task.title, "Fix #178");
         assert_eq!(fix.task.agent.as_deref(), Some("codex"), "the route's agent, not the definition's");
-        let stored = engine.find_workflow("demo", "issue-flow").await.unwrap();
+        let stored = engine.l4_service().find_workflow("demo", "issue-flow").await.unwrap();
         assert_eq!(stored.nodes[0].task.agent.as_deref(), Some("shell"), "the definition is untouched");
     }
 
@@ -2544,7 +2577,7 @@ mod tests {
     async fn the_board_lists_every_route_with_agents_and_workflows() {
         let engine = engine();
         issue_flow(&engine).await;
-        let board = engine.intake_board(None).await.unwrap();
+        let board = engine.l4_service().intake_board(None).await.unwrap();
         let names: Vec<&str> = board.routes.iter().map(|r| r.scope.as_str()).collect();
         assert_eq!(names, vec!["demo", "web"]);
         let demo = &board.routes[0];
@@ -2656,7 +2689,7 @@ mod tests {
     async fn flag_confirm_gates_release_and_both_are_journaled() {
         let engine = engine();
         let item = add(&engine, "Possible RCE").await;
-        let flagged = engine.intake_flag_security(&Caller::Owner, &item.id, "looks like an injection").await.unwrap();
+        let flagged = engine.l4_service().intake_flag_security(&Caller::Owner, &item.id, "looks like an injection").await.unwrap();
         let flag = flagged.intake.as_ref().unwrap().security.as_ref().expect("flagged");
         assert_eq!(flag.state, SecurityState::Possible);
         assert_eq!(flag.flagged_by, "the owner");
@@ -2673,6 +2706,7 @@ mod tests {
         assert!(why.contains("confirm or dismiss"), "{why}");
 
         let confirmed = engine
+            .l4_service()
             .intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Confirm, "")
             .await
             .unwrap();
@@ -2689,8 +2723,9 @@ mod tests {
     async fn dismissing_without_evidence_is_refused_and_with_it_is_journaled() {
         let engine = engine();
         let item = add(&engine, "False alarm").await;
-        engine.intake_flag_security(&Caller::Owner, &item.id, "maybe").await.unwrap();
+        engine.l4_service().intake_flag_security(&Caller::Owner, &item.id, "maybe").await.unwrap();
         let why = engine
+            .l4_service()
             .intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Dismiss, "  ")
             .await
             .unwrap_err()
@@ -2699,6 +2734,7 @@ mod tests {
         assert!(!kinds(&engine, &item.id).await.contains(&"intake_security_dismissed".to_string()));
 
         let dismissed = engine
+            .l4_service()
             .intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Dismiss, "false positive")
             .await
             .unwrap();
@@ -2743,8 +2779,8 @@ mod tests {
     async fn task_delete_refuses_a_task_carrying_a_confirmed_security_report() {
         let engine = engine();
         let item = add(&engine, "Possible RCE").await;
-        engine.intake_flag_security(&Caller::Owner, &item.id, "looks bad").await.unwrap();
-        engine.intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Confirm, "").await.unwrap();
+        engine.l4_service().intake_flag_security(&Caller::Owner, &item.id, "looks bad").await.unwrap();
+        engine.l4_service().intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Confirm, "").await.unwrap();
         let why = refused(engine.handle_request(Request::TaskDelete { id: item.id.clone() }).await);
         assert!(why.contains("CRA evidence") && why.contains(&item.id), "{why}");
         assert!(engine.require(&item.id).await.is_ok(), "never deleted");
@@ -2789,6 +2825,7 @@ mod tests {
                 outbound: None,
             };
             let item = engine
+                .l4_service()
                 .receive_intake(
                     NewTask { title: "Unauthenticated RCE".into(), scope: Some("demo".into()), ..Default::default() },
                     record,
@@ -2796,8 +2833,9 @@ mod tests {
                 .await
                 .unwrap();
             item_id = item.id.clone();
-            engine.intake_flag_security(&Caller::Owner, &item.id, "reported upstream").await.unwrap();
+            engine.l4_service().intake_flag_security(&Caller::Owner, &item.id, "reported upstream").await.unwrap();
             let confirmed = engine
+                .l4_service()
                 .intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Confirm, "")
                 .await
                 .unwrap();
@@ -2806,7 +2844,7 @@ mod tests {
         }
         // A fresh engine over the same store -- what a restart looks like.
         let restarted = engine_at(&db, scopes());
-        let reports = restarted.confirmed_security_reports(None).await.unwrap();
+        let reports = restarted.l4_service().confirmed_security_reports(None).await.unwrap();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].item, item_id);
         assert_eq!(reports[0].awareness_at, received_at, "never the confirmation time");
@@ -2814,7 +2852,7 @@ mod tests {
         assert_eq!(reports[0].source.kind, SourceKind::Github);
 
         // Scoped the same way `intake_board` is: a sibling scope sees none.
-        let none = restarted.confirmed_security_reports(Some("web")).await.unwrap();
+        let none = restarted.l4_service().confirmed_security_reports(Some("web")).await.unwrap();
         assert!(none.is_empty());
     }
 
@@ -2827,8 +2865,9 @@ mod tests {
     async fn a_split_confirmed_report_carries_parent_and_the_clock_counts_it_once() {
         let engine = engine();
         let item = add(&engine, "Everything at once, and it's exploited").await;
-        engine.intake_flag_security(&Caller::Owner, &item.id, "reported upstream").await.unwrap();
+        engine.l4_service().intake_flag_security(&Caller::Owner, &item.id, "reported upstream").await.unwrap();
         let confirmed = engine
+            .l4_service()
             .intake_security_decision(&Caller::Owner, &item.id, SecurityVerdict::Confirm, "verified")
             .await
             .unwrap();
@@ -2839,7 +2878,7 @@ mod tests {
         let parts = split.intake.as_ref().unwrap().decision.as_ref().unwrap().parts.clone();
         assert_eq!(parts.len(), 2);
 
-        let reports = engine.confirmed_security_reports(None).await.unwrap();
+        let reports = engine.l4_service().confirmed_security_reports(None).await.unwrap();
         assert_eq!(reports.len(), 3, "the root and both parts are each their own confirmed report");
         let root_report = reports.iter().find(|r| r.item == item.id).unwrap();
         assert_eq!(root_report.parent, None);

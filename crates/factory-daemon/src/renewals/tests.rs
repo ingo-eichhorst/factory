@@ -516,6 +516,7 @@ async fn native_attestations_and_cra_keep_their_own_validity_and_fulfillment() {
     };
     let task = f
         .engine
+        .l4_service()
         .receive_intake(
             NewTask {
                 title: "confirmed security issue".into(),
@@ -527,10 +528,12 @@ async fn native_attestations_and_cra_keep_their_own_validity_and_fulfillment() {
         .await
         .unwrap();
     f.engine
+        .l4_service()
         .intake_flag_security(&Caller::Owner, &task.id, "upstream evidence")
         .await
         .unwrap();
     f.engine
+        .l4_service()
         .intake_security_decision(&Caller::Owner, &task.id, SecurityVerdict::Confirm, "")
         .await
         .unwrap();

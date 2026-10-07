@@ -232,7 +232,7 @@ impl L4Service<'_> {
         // Resolve again rather than trusting what was written down: the config
         // may have changed since the task was created.
         let (agent_name, adapter_name, declaration) =
-            self.core.resolve_agent(&task.scope, &task.agent)?;
+            crate::commands::agents(self.core).resolve_agent(&task.scope, &task.agent)?;
         let agent = self.wiring.registry().agent(&adapter_name)?;
         let runtime = self.wiring.registry().runtime(&task.runtime)?;
         // Before anything else exists (`#131`): a harness that does not

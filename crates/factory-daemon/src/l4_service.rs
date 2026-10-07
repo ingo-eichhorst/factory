@@ -66,6 +66,14 @@ impl L4Service<'_> {
             .ok_or_else(|| FactoryError::BadRequest(format!("no such workflow run: {id}")))
     }
 
+    pub(crate) async fn workflow_definition(&self, id: &str) -> Result<factory_core::workflow::WorkflowDefinition> {
+        self.state
+            .workflows
+            .get_definition(id)
+            .await?
+            .ok_or_else(|| FactoryError::BadRequest(format!("no such workflow: {id}")))
+    }
+
     pub(crate) async fn require_run(&self, id: &str) -> Result<Run> {
         self.state
             .store

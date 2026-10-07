@@ -2405,6 +2405,7 @@ mod tests {
 
     async fn add_intake_item(engine: &Arc<Engine>, scope: &str, title: &str) -> factory_core::task::Task {
         engine
+            .l4_service()
             .intake_add(
                 &Caller::Owner,
                 factory_core::intake::NewIntake {
