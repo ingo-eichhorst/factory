@@ -75,7 +75,16 @@ impl L4Port<'_> {
         intent: factory_assurance::remediation::Intent,
     ) -> Result<String> {
         let observer = crate::commands::CreationObserver(self.0.wiring.bus().clone());
-        let receipt = crate::commands::assurance(self.0.core, &observer).remediate(intent).await?;
+        let snapshot = self.0.wiring.snapshot();
+        let receipt = crate::commands::assurance_with(
+            self.0.state.store.as_ref(),
+            self.0.wiring.registry(),
+            &self.0.state.workflows,
+            &snapshot,
+            &observer,
+        )
+        .remediate(intent)
+        .await?;
         Ok(receipt.id)
     }
 

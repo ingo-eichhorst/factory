@@ -1307,7 +1307,7 @@ mod tests {
 
     use super::*;
 
-    impl L4Service<'_> {
+    impl Engine {
     /// `#158` phase 1: the one L4-owned read the `attested` policy check and
         /// both `conformance_rate.<category>`/`gate_fail_rate` share -- every
         /// finished run whose `ended_at` falls in `window` (`(from, to]`,
@@ -1327,7 +1327,7 @@ mod tests {
     pub(crate) async fn attested_runs(
             &self, scopes: Option<&BTreeSet<String>>, categories: Option<&BTreeSet<String>>, window: Window,
         ) -> Result<Vec<AttestedRun>> {
-            crate::facts::Facts::<factory_kernel::L6>::new(self.core).get::<AttestedRun>(&crate::facts::AttestedQuery {
+            crate::facts::Facts::<factory_kernel::L6>::new(self).get::<AttestedRun>(&crate::facts::AttestedQuery {
                 scopes: scopes.cloned(), categories: categories.cloned(), window,
             }).await
         }
@@ -3065,7 +3065,7 @@ mod tests {
             from: now - chrono::Duration::days(1),
             to: now + chrono::Duration::minutes(1),
         };
-        let all = engine.l4_service().attested_runs(None, None, window).await.unwrap();
+        let all = engine.attested_runs(None, None, window).await.unwrap();
         let run_ids: BTreeSet<&str> = all.iter().map(|r| r.run_id.as_str()).collect();
         assert!(run_ids.contains(feature_run.id.as_str()));
         assert!(run_ids.contains(docs_run.id.as_str()));
@@ -3076,7 +3076,6 @@ mod tests {
 
         // Category narrows to the one feature run, with its attestation.
         let feature_only = engine
-            .l4_service()
             .attested_runs(None, Some(&BTreeSet::from(["feature".to_string()])), window)
             .await
             .unwrap();
@@ -3096,7 +3095,6 @@ mod tests {
             to: feature_run.ended_at.unwrap(),
         };
         assert!(engine
-            .l4_service()
             .attested_runs(None, None, exact_from)
             .await
             .unwrap()
@@ -3106,7 +3104,6 @@ mod tests {
             to: now - chrono::Duration::days(20),
         };
         assert!(engine
-            .l4_service()
             .attested_runs(None, None, too_early)
             .await
             .unwrap()
@@ -3115,13 +3112,11 @@ mod tests {
         // Scope filter: a scope name nothing here canonicalises to excludes
         // everything; the fixture's own scope keeps the two non-bench runs.
         let other_scope = engine
-            .l4_service()
             .attested_runs(Some(&BTreeSet::from(["other".to_string()])), None, window)
             .await
             .unwrap();
         assert!(other_scope.is_empty());
         let demo_scope = engine
-            .l4_service()
             .attested_runs(Some(&BTreeSet::from(["demo".to_string()])), None, window)
             .await
             .unwrap();
