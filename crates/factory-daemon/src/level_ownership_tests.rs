@@ -42,6 +42,7 @@ const OWNERS: &[(&str, Owner)] = &[
     // L1 Infrastructure
     ("backup/", L1),
     ("environments/promotion.rs", Wiring),
+    ("intent.rs", Wiring),
     ("environments/recovery.rs", Wiring),
     ("environments/report.rs", Wiring),
     ("environments/", L1),
@@ -172,7 +173,7 @@ const PULLS_BASELINE: &[(&str, usize)] = &[
 /// `self.core.` call sites per file (the transitional `L4Service::core`). May only shrink; goes away with the handle.
 const CORE_BASELINE: &[(&str, usize)] = &[
     ("run_settle.rs", 11),
-    ("run_start.rs", 16),
+    ("run_start.rs", 15),
 ];
 
 /// Files that name `Facts::<People>` today (count). May only shrink.
@@ -548,6 +549,19 @@ fn the_core_scanner_counts_split_calls_and_catches_state_reaches() {
     assert_eq!(core_calls("self.core.a(); self\n    .core\n    .b(); other_core.c(); itself.core.d();"), 2);
     assert_eq!(core_state_reaches("self.core.l3.x; self.core\n.shared.y; self.core.l3_service(); self.core.shared_thing()"), 2);
     assert_eq!(core_state_reaches("score.l3.x; self.core.state()"), 0);
+}
+
+/// `Intent` is the one way a level reads what L6 authored (S9b design step). It may only call pure functions over the
+/// authored files and the snapshot: it must never name an L6 service, an L6 state group or a store type, or it would
+/// become a back door around the ladder. Consumers that need L6 computation over runtime state are inputs of the
+/// downward command instead.
+#[test]
+fn intent_stays_pure_and_never_reaches_an_l6_service_state_or_store() {
+    let code = production_code(&std::fs::read_to_string(src_root().join("intent.rs")).unwrap());
+    let squeezed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    for forbidden in ["l6_service", "L6Service", ".l6.", ".l6;", "Store", "self.engine", "Engine", "state."] {
+        assert!(!squeezed.contains(forbidden), "intent.rs must stay pure; it names `{forbidden}`");
+    }
 }
 
 #[test]

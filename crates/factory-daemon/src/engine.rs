@@ -444,11 +444,6 @@ impl Engine {
         self.l3_service().effective_role(scope, agent).await
     }
 
-    /// The goal context L6 renders for a task's `goal` label.
-    pub(crate) async fn goal_context_for(&self, root: PathBuf, goal: Option<String>) -> Option<factory_core::adapter::agent::GoalContext> {
-        self.l6_service().goal_context(root, goal).await
-    }
-
     /// The version L3's harness health last observed for this adapter's probe.
     pub(crate) fn harness_version_of(&self, adapter_name: &str, probe: &factory_agents::harness::HealthProbe) -> Option<String> {
         self.l3
@@ -4967,11 +4962,13 @@ mod tests {
             /// (`upstream_section`, tested on its own in
             /// `factory-plugins/src/builtin/agents.rs`).
             captured_upstream: Mutex<Option<Vec<UpstreamOutput>>>,
+            /// The goal context on the most recent `launch_spec` call: what dispatch resolved from the task's `goal` label.
+            captured_goal: Mutex<Option<factory_core::adapter::agent::GoalContext>>,
         }
 
         impl RecordingAgent {
             fn new(resumable: bool) -> Self {
-                Self { resumable, captured_upstream: Mutex::new(None) }
+                Self { resumable, captured_upstream: Mutex::new(None), captured_goal: Mutex::new(None) }
             }
         }
 
@@ -4982,6 +4979,7 @@ mod tests {
             }
             async fn launch_spec(&self, ctx: &AgentContext) -> Result<LaunchSpec> {
                 *self.captured_upstream.lock().unwrap() = ctx.task.as_ref().map(|t| t.upstream.clone());
+                *self.captured_goal.lock().unwrap() = ctx.goal.clone();
                 Ok(LaunchSpec { kind: LaunchKind::Command(vec!["true".into()]), args: Vec::new(), env: Default::default(), agent_kind: None })
             }
             async fn prompt(&self, _ctx: &AgentContext) -> Result<String> {
@@ -5258,6 +5256,50 @@ mod tests {
             assert_eq!(start.launch.args.first().map(String::as_str), Some("--resume"), "{:?}", start.launch.args);
             assert_eq!(start.launch.args.get(1).map(String::as_str), Some("sess-123"), "{:?}", start.launch.args);
             assert_eq!(start.cwd, PathBuf::from(prev.worktree_path.clone().unwrap()));
+
+            std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        // ==============================================================
+        // #193 S9b design step: a task's `goal` label reaches the agent's context
+        // through `Wiring::intent()`, with no call up into L6
+        // ==============================================================
+
+        #[tokio::test]
+        async fn a_goal_label_reaches_the_agents_context_from_the_authored_catalogue() {
+            let scope_dir = git_scope_dir("goal-label-intent").await;
+            let (engine, agent) = continue_engine_recording_upstream(scope_dir.clone());
+            let goals = factory_direction::goals::goals_dir(&engine.factory_snapshot().root);
+            std::fs::create_dir_all(&goals).unwrap();
+            std::fs::write(
+                goals.join("2026-q4.yaml"),
+                "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
+                 objectives:\n\
+                 \x20\x20- id: obj\n\x20\x20\x20\x20title: Objective Title\n\x20\x20\x20\x20key_results:\n\
+                 \x20\x20\x20\x20\x20\x20- {id: kr, title: KR Title, kind: committed, manual: true, baseline: 0, target: 1}\n",
+            )
+            .unwrap();
+
+            let labelled = engine
+                .create(NewTask {
+                    title: "labelled".into(),
+                    instructions: "true".into(),
+                    scope: Some("demo".into()),
+                    agent: Some("recording".into()),
+                    runtime: Some("stub-run".into()),
+                    worktree: Some(false),
+                    labels: [("goal".to_string(), "obj/kr".to_string())].into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            engine.l4_service().dispatch(&labelled.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            let goal = agent.captured_goal.lock().unwrap().clone().expect("the label resolved to a goal context");
+            assert_eq!((goal.objective_title.as_str(), goal.kr_title.as_str()), ("Objective Title", "KR Title"));
+
+            let plain = task_for(&engine, false).await;
+            engine.l4_service().dispatch(&plain.id, Trigger::Manual, Due::now(), None).await.unwrap();
+            assert!(agent.captured_goal.lock().unwrap().is_none(), "a task without a goal label carries none");
 
             std::fs::remove_dir_all(&scope_dir).ok();
         }

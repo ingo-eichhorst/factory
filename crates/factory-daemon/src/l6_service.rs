@@ -107,13 +107,6 @@ mod test_forwarders {
         ) -> Result<factory_core::goals::CheckIn> {
             self.l6_service().goals_checkin(caller, kr, value, confidence, note).await
         }
-        pub(crate) async fn goal_context(
-            &self,
-            root: std::path::PathBuf,
-            label: Option<String>,
-        ) -> Option<factory_core::adapter::agent::GoalContext> {
-            self.l6_service().goal_context(root, label).await
-        }
         pub(crate) async fn scenarios_report(&self, scope: Option<&str>) -> Result<ScenariosReport> {
             self.l6_service().scenarios_report(scope).await
         }
