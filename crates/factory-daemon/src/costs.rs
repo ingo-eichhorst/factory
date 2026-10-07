@@ -690,6 +690,7 @@ mod tests {
 
     async fn done(engine: &Arc<Engine>, task: &Task, run: &Run) -> Run {
         engine
+            .l4_service()
             .report(
                 &task.id,
                 TaskReport {

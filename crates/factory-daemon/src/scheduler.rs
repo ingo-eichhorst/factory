@@ -172,7 +172,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 if kind == FailKind::AckTimeout {
                     engine.doubt_harness_of(task.as_ref());
                 }
-                engine.fail_run(&run.id, kind, &why).await;
+                engine.l4_service().fail_run(&run.id, kind, &why).await;
                 continue;
             }
 
@@ -189,6 +189,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 && engine.session_status(&run).await == RuntimeStatus::Gone
             {
                 engine
+                    .l4_service()
                     .fail_run(
                         &run.id,
                         FailKind::SessionGone,

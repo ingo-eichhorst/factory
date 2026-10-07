@@ -309,10 +309,10 @@ impl Engine {
             // the run there and then; a `Stop` is only held on the run, and
             // stands here, below, once `settle_turn_end` says it has.
             if turn_ended_action(&report, run.status) == TurnEndedAction::Fail {
-                self.fail_run(&run.id, FailKind::TurnEnded, TURN_ENDED_REASON).await;
+                self.l4_service().fail_run(&run.id, FailKind::TurnEnded, TURN_ENDED_REASON).await;
             } else if settle_turn_end(run.status, run.turn_ended_at, report.status, Utc::now()) {
                 let why = run.turn_end_reason.as_deref().unwrap_or(TURN_ENDED_REASON);
-                self.fail_run(&run.id, FailKind::TurnEnded, why).await;
+                self.l4_service().fail_run(&run.id, FailKind::TurnEnded, why).await;
             }
         }
     }
@@ -333,7 +333,7 @@ impl Engine {
         let Some(run) = self.l4.store.active_run(task_id).await? else {
             return Ok(());
         };
-        self.check_run_token(&run, turn.token.as_deref(), task_id)?;
+        self.l4_service().check_run_token(&run, turn.token.as_deref(), task_id)?;
         // `#178`: Claude Code's own session id, when the hook payload names
         // one -- `--continue`'s fallback source for which session to resume,
         // kept even though this particular turn end may settle into nothing.
@@ -351,7 +351,7 @@ impl Engine {
         }
         match action {
             HookTurnAction::FailNow => {
-                self.fail_run(&run.id, FailKind::StopFailure, &hook_turn_ended_reason(&turn)).await;
+                self.l4_service().fail_run(&run.id, FailKind::StopFailure, &hook_turn_ended_reason(&turn)).await;
             }
             HookTurnAction::Settle => {
                 self.patch_run(
@@ -429,7 +429,7 @@ impl Engine {
                     .in_run(&run.id),
                 )
                 .await;
-                self.mirror_to_task(&updated).await;
+                self.l4_service().mirror_to_task(&updated).await;
                 self.record_workflow_task_state(&run.task_id).await;
             }
             // The same hook that set this block says the session is active
@@ -461,7 +461,7 @@ impl Engine {
                     .in_run(&run.id),
                 )
                 .await;
-                self.mirror_to_task(&updated).await;
+                self.l4_service().mirror_to_task(&updated).await;
                 self.record_workflow_task_state(&run.task_id).await;
             }
         }

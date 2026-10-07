@@ -1563,6 +1563,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         engine
+            .l4_service()
             .report(
                 &task.id,
                 TaskReport {
@@ -1661,7 +1662,7 @@ mod tests {
             .unwrap();
 
         let started = std::time::Instant::now();
-        engine.fail_run(&task_run.id, factory_core::run::FailKind::SessionGone, "the agent's session is gone").await;
+        engine.l4_service().fail_run(&task_run.id, factory_core::run::FailKind::SessionGone, "the agent's session is gone").await;
         let elapsed = started.elapsed();
 
         assert!(

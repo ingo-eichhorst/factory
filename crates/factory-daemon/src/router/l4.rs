@@ -75,7 +75,7 @@ impl Engine {
                     }
                 }
                 if let Some(run) = self.l4.store.active_run(&id).await? {
-                    self.close_session(&run).await;
+                    self.l4_service().close_session(&run).await;
                     // Deleting the task ends the run without ever reaching
                     // `finish_run` (there is no row left to mirror), so the
                     // slot it held is freed here instead (`#179`).
@@ -84,7 +84,7 @@ impl Engine {
                     }
                 }
                 // `#274`: released with the task, not by a periodic sweep.
-                self.remove_preserved_session(&id);
+                self.l4_service().remove_preserved_session(&id);
                 let deleted = self.l4.store.delete(&id).await?;
                 if deleted {
                     self.shared.bus.publish(Event::TaskDeleted { id });
@@ -232,7 +232,7 @@ impl Engine {
                     crate::access::Caller::Owner => FailKind::CancelledByPerson,
                     crate::access::Caller::Agent { .. } => FailKind::CancelledByAgent,
                 };
-                let run = self.cancel_task_run(&id, run.as_deref(), kind).await?;
+                let run = self.l4_service().cancel_task_run(&id, run.as_deref(), kind).await?;
                 let asked = crate::operations::Asked::new(caller, reason);
                 self.entry(
                     &id,
@@ -263,7 +263,7 @@ impl Engine {
                 // Feedback now carries a richer run snapshot. Keep the
                 // report/verification chain off every request's future,
                 // including small reads on axum's default worker stack.
-                let run = Box::pin(self.report(&id, report)).await?;
+                let run = Box::pin(self.l4_service().report(&id, report)).await?;
                 self.sync_workflow_for_task(&id).await;
                 self.sync_bench_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })

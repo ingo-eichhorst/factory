@@ -331,7 +331,7 @@ impl Engine {
         // `#274`: a closed task's sandboxed conversation, if it preserved
         // one, is released the same way its worktree is -- no new sweeper,
         // just the existing per-task release point.
-        self.remove_preserved_session(id);
+        self.l4_service().remove_preserved_session(id);
         Ok(updated)
     }
 
@@ -697,7 +697,7 @@ mod tests {
         let (engine, _, root) = test_engine();
         let task = task_in(&engine, "demo", "breaks", None).await;
         let run = run_of(&engine, &task.id).await;
-        engine.fail_run(&run.id, FailKind::AgentFailed, "exit 1").await;
+        engine.l4_service().fail_run(&run.id, FailKind::AgentFailed, "exit 1").await;
 
         let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         let e = report.attention.iter().find(|e| e.kind == ExceptionKind::FailedExhausted).expect("exhausted");
@@ -1104,7 +1104,7 @@ mod tests {
         let (engine, _, root) = test_engine();
         let task = task_in(&engine, "demo", "flaky", None).await;
         let first = run_of(&engine, &task.id).await;
-        engine.fail_run(&first.id, FailKind::AgentFailed, "exit 1").await;
+        engine.l4_service().fail_run(&first.id, FailKind::AgentFailed, "exit 1").await;
         // An agent asks for the run again: journaled with its queued_at,
         // exactly as `task.run` writes it.
         let again = run_of(&engine, &task.id).await;

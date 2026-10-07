@@ -157,7 +157,7 @@ impl L4Service<'_> {
             Err(e) => {
                 // The run may or may not exist yet; if it does, close it.
                 if let Ok(Some(run)) = self.state.store.active_run(task_id).await {
-                    self.core.fail_run(&run.id, FailKind::DispatchFailed, &format!("dispatch failed: {e}"))
+                    self.fail_run(&run.id, FailKind::DispatchFailed, &format!("dispatch failed: {e}"))
                         .await;
                 } else {
                     self.entry(
@@ -300,7 +300,7 @@ impl L4Service<'_> {
             // `resolve_continue` like everything else; it decides, from
             // what was actually preserved, whether resuming is possible.
             Some(prev) => Some(
-                self.core.resolve_continue(
+                self.resolve_continue(
                     &task,
                     (&agent_name, &adapter_name),
                     agent.as_ref(),
@@ -575,7 +575,7 @@ impl L4Service<'_> {
                 )
                 .await;
                 self.wiring.bus().publish(Event::RunUpdated { run: held.clone() });
-                self.core.mirror_to_task(&held).await;
+                self.mirror_to_task(&held).await;
                 return Ok(held);
         }
 
@@ -599,7 +599,7 @@ impl L4Service<'_> {
             },
             _ => Workspace::Fresh,
         };
-        let (cwd, run) = self.core.place_run(&task, run, &scope_path, workspace).await?;
+        let (cwd, run) = self.place_run(&task, run, &scope_path, workspace).await?;
         let resumes = if run.resumed_session.is_some() {
             continue_from.as_ref().and_then(|previous| previous.resume_context.as_ref())
                 .map_or(1, |previous| previous.resumes.saturating_add(1))

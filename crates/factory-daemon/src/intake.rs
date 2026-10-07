@@ -1843,6 +1843,7 @@ mod tests {
         engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let run = engine.l4.store.active_run(&task.id).await.unwrap().expect("dispatched");
         engine
+            .l4_service()
             .report(
                 &task.id,
                 TaskReport {
