@@ -79,6 +79,8 @@ impl Engine {
 
         // The occupancy chart's own record. This skips a sample when nothing
         // changed, which is right for a chart and wrong for what follows.
+        // Anything L3 observed before this push goes into the record first, so it stays in the order things happened.
+        self.l4_service().sample_standing_agents().await;
         self.l4_service().record_status(&subject, &scope, &agent, status).await;
 
         // Published separately, on the event itself: an agent that is

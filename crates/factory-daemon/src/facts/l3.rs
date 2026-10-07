@@ -42,3 +42,7 @@ pub(crate) fn version_provider(engine: &Engine) -> crate::harness_health::Versio
         health: engine.l3.harness.clone(),
     }
 }
+
+pub(crate) fn liveness_provider(engine: &Engine) -> crate::l3_service::LivenessProvider {
+    crate::l3_service::LivenessProvider(engine.l3.liveness.clone())
+}

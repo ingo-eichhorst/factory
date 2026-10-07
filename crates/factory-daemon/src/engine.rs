@@ -279,9 +279,11 @@ impl Engine {
             l3: crate::state::L3State {
                 harness: crate::harness_health::HarnessHealth::new(),
                 agents: Arc::new(crate::agent_rows::AgentRows(store.clone())),
+                liveness: Default::default(),
             },
             l4: crate::state::L4State {
                 store,
+                standing_cursor: Default::default(),
                 workflows: crate::workflows::WorkflowStore::in_memory()
                     .expect("an in-memory workflow store should open"),
                 workflow_edit: tokio::sync::Mutex::new(()),

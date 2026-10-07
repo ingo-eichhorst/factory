@@ -347,7 +347,7 @@ impl L3Service<'_> {
         self.wiring.bus().publish(Event::AgentUpdated {
             agent: agent.clone(),
         });
-        self.wiring.record_gone(&agent.id, &agent.scope, &agent.name).await;
+        self.observe(&agent.id, &agent.scope, &agent.name, RuntimeStatus::Gone);
         tracing::info!(agent = %agent.id, "standing agent stopped");
         Ok(agent)
     }
@@ -447,8 +447,7 @@ impl L3Service<'_> {
             Ok(rt) => rt.status(session).await.unwrap_or(RuntimeStatus::Gone),
             Err(_) => RuntimeStatus::Gone,
         };
-        self.wiring.record_status(&agent.id, &agent.scope, &agent.name, status)
-            .await;
+        self.observe(&agent.id, &agent.scope, &agent.name, status);
         status != RuntimeStatus::Gone
     }
 

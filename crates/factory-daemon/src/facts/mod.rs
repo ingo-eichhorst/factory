@@ -145,22 +145,6 @@ impl<'a> Wiring<'a, L3> {
     pub(crate) fn provision(&self) -> factory_kernel::Commands<L3, crate::dispatch_port::L2Port<'a>> {
         factory_kernel::Commands::new(crate::dispatch_port::L2Port(self.engine.l2_service()))
     }
-    /// The liveness sample the occupancy chart keeps (L4's record). L3 reports what it
-    /// observed about a session; recording it is L4's. A transitional bridge, removed
-    /// when L4 reads it from L3 (S9).
-    pub(crate) async fn record_status(
-        &self,
-        subject: &str,
-        scope: &str,
-        agent: &str,
-        status: factory_core::adapter::runtime::RuntimeStatus,
-    ) {
-        self.engine.l4_service().record_status(subject, scope, agent, status).await
-    }
-    /// A session that is no longer there closes its open span.
-    pub(crate) async fn record_gone(&self, subject: &str, scope: &str, agent: &str) {
-        self.engine.l4_service().record_gone(subject, scope, agent).await
-    }
 }
 impl<'a> Wiring<'a, factory_kernel::L4> {
     /// The command edge L4 holds to the level below it: `Commands<L4, L3Port>`.
@@ -360,6 +344,13 @@ port!(
     String,
     Vec<ExploitedFinding>,
     l2::dependencies_provider
+);
+port!(
+    StandingAgentObservationsFact,
+    crate::l3_service::LivenessProvider,
+    u64,
+    StandingAgentObservationsFact,
+    l3::liveness_provider
 );
 port!(EffectiveRoleFact, crate::l3_service::RoleProvider<'a>, (String, String), EffectiveRoleFact, l3::role_provider);
 port!(
@@ -828,6 +819,7 @@ mod tests {
         registered::<RunSnapshotFact>();
         registered::<AgentReportedFact>();
         registered::<EffectiveRoleFact>();
+        registered::<StandingAgentObservationsFact>();
         registered::<HarnessVersionFact>();
         registered::<WorkflowFact>();
         registered::<EnvironmentRecoveryFact>();
@@ -1440,6 +1432,7 @@ mod tests {
             "RunSnapshotFact",
             "AgentReportedFact",
             "EffectiveRoleFact",
+            "StandingAgentObservationsFact",
             "HarnessVersionFact",
         ] {
             assert!(
