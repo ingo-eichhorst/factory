@@ -249,7 +249,7 @@ impl L4Service<'_> {
                 return Ok(existing.clone());
             }
         }
-        let task = self.core.create_intake_task(new, record.clone()).await?;
+        let task = self.create_intake_task(new, record.clone()).await?;
         // `all` was read before `task` was created, so it never contains
         // `task` itself -- the same set `duplicate_candidates` would search
         // after excluding the item by id, one list call doing both jobs.
@@ -806,8 +806,8 @@ impl L4Service<'_> {
                     // left to do itself. `start_workflow` checks the caller
                     // could create and run every node by hand.
                     Some(workflow) => {
-                        let run = spawner
-                            .start_workflow_with_agents(workflow, routing.inputs.clone(), &routing.agents, caller)
+                        let run = self
+                            .start_workflow_with_agents(workflow, routing.inputs.clone(), &routing.agents, caller, spawner)
                             .await?;
                         decided.workflow_run = Some(run.id.clone());
                         patch.status = Some(TaskStatus::Done);
@@ -912,8 +912,8 @@ impl L4Service<'_> {
             .map_err(|error| FactoryError::BadRequest(format!("the executable plan: {error}")))?;
         let parts = intake::split_parts(&record, &triage.assessment.split)
             .map_err(FactoryError::BadRequest)?;
-        let workflow = spawner
-            .start_decomposition_workflow(item, &parts, &triage.assessment.routing, caller)
+        let workflow = self
+            .start_decomposition_workflow(item, &parts, &triage.assessment.routing, caller, spawner)
             .await?;
         let children = self
             .state.store
@@ -1016,7 +1016,7 @@ impl L4Service<'_> {
             labels.insert(intake::PARENT_LABEL.into(), item.id.clone());
             labels.insert(intake::PART_LABEL.into(), part.id.clone());
             let child = self
-                .core.create_intake_task(
+                .create_intake_task(
                     NewTask {
                         title: part.title.clone(),
                         instructions: text,
@@ -1972,6 +1972,7 @@ mod tests {
     async fn routed_to_a_workflow_it_is_released_by_starting_that_workflow() {
         let engine = engine();
         engine
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: "fix-flow".into(),
                 scope: "demo".into(),
@@ -2003,7 +2004,7 @@ mod tests {
         assert_eq!(released.status, TaskStatus::Done);
         let run_id = released.intake.as_ref().unwrap().decision.as_ref().unwrap().workflow_run.clone().unwrap();
         assert!(released.result.as_deref().unwrap().contains(&run_id));
-        assert!(engine.workflow_run(&run_id).await.is_ok());
+        assert!(engine.l4_service().workflow_run(&run_id).await.is_ok());
         assert!(released.labels.contains_key("workflow"));
     }
 
@@ -2385,6 +2386,7 @@ mod tests {
             expand: None,
         };
         engine
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: "part-flow".into(),
                 scope: "demo".into(),
@@ -2496,6 +2498,7 @@ mod tests {
 
     async fn issue_flow(engine: &Arc<Engine>) {
         engine
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: "issue-flow".into(),
                 scope: "demo".into(),
@@ -2557,7 +2560,7 @@ mod tests {
             .unwrap();
         assert_eq!(released.status, TaskStatus::Done, "released by starting the workflow");
         let run_id = released.intake.as_ref().unwrap().decision.as_ref().unwrap().workflow_run.clone().unwrap();
-        let run = engine.workflow_run(&run_id).await.unwrap();
+        let run = engine.l4_service().workflow_run(&run_id).await.unwrap();
         assert_eq!(run.inputs["issue"], "178");
         let fix = run.definition.nodes.iter().find(|n| n.id == "fix").unwrap();
         assert_eq!(fix.task.title, "Fix #178");

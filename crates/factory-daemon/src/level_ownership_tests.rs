@@ -187,10 +187,10 @@ const DIRECT_PROVIDER_BASELINE: &[(&str, usize)] = &[
 
 /// `self.core.` call sites per file (the transitional `L4Service::core`). May only shrink; goes away with the handle.
 const CORE_BASELINE: &[(&str, usize)] = &[
-    ("run_settle.rs", 8),
-    ("run_start.rs", 12),
-    ("intake.rs", 4),
-    ("verification.rs", 1),
+    ("run_settle.rs", 6),
+    ("run_start.rs", 8),
+    ("intake.rs", 2),
+    ("l4_service.rs", 3),
 ];
 
 /// Files that name `Facts::<People>` today (count). May only shrink.

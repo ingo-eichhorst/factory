@@ -233,6 +233,7 @@ impl Engine {
             word(&environment.name), word(reason), word(expected.as_deref().unwrap_or("")), word(&recipe.command), word(&self.shared.factory_bin.to_string_lossy()), word(&environment.name),
         );
         let definition = self
+            .l4_service()
             .create_workflow(WorkflowDraft {
                 name: format!("Recover {}", environment.name),
                 description: format!(

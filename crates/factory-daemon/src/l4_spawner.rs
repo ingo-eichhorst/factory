@@ -10,16 +10,10 @@
 //! - `spawn_start_run*`: a command from the scheduling owner (L4 starting its own run later) once the run-start path
 //!   owns a work queue instead of detached tasks (S10/S12: the L5 service issues these as commands down to L4, and L4's
 //!   own callers use a channel to a worker);
-//! - `advance_workflow`, `sync_workflow_for_task`, `start_workflow_with_agents`, `start_decomposition_workflow`: they
-//!   move into `L4Service` with the workflows (S9b part 3) and then need only this handle's spawn methods.
-use crate::access::Caller;
+//! - the workflow calls (`advance_workflow`, `sync_workflow_for_task`, `start_workflow_with_agents`,
+//!   `start_decomposition_workflow`) now live in `L4Service` (S9b part 3) and take this handle for their spawns.
 use crate::engine::{Due, Engine};
-use factory_core::error::Result;
-use factory_core::intake::{Routing, SplitPart};
 use factory_core::run::{Run, Trigger};
-use factory_core::task::Task;
-use factory_core::workflow::WorkflowRun;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -56,33 +50,5 @@ impl L4Spawner {
         tokio::spawn(async move {
             engine.l4_service().start_run_due_continue(&task_id, due, previous).await;
         });
-    }
-
-    pub(crate) async fn advance_workflow(&self, id: &str) -> Result<()> {
-        self.engine.advance_workflow(id).await
-    }
-
-    pub(crate) async fn sync_workflow_for_task(&self, task_id: &str) {
-        self.engine.sync_workflow_for_task(task_id).await
-    }
-
-    pub(crate) async fn start_workflow_with_agents(
-        &self,
-        id: &str,
-        inputs: BTreeMap<String, String>,
-        agents: &BTreeMap<String, String>,
-        caller: &Caller,
-    ) -> Result<WorkflowRun> {
-        self.engine.start_workflow_with_agents(id, inputs, agents, caller).await
-    }
-
-    pub(crate) async fn start_decomposition_workflow(
-        &self,
-        item: &Task,
-        parts: &[SplitPart],
-        routing: &Routing,
-        caller: &Caller,
-    ) -> Result<WorkflowRun> {
-        self.engine.start_decomposition_workflow(item, parts, routing, caller).await
     }
 }

@@ -193,7 +193,7 @@ impl Engine {
                     if reason.as_deref().is_none_or(|reason| reason.trim().is_empty()) {
                         return Err(FactoryError::BadRequest("--override-wait requires a non-empty --reason".into()));
                     }
-                    self.override_waiting(&task, caller, reason.as_deref().expect("checked reason")).await?;
+                    self.l4_service().override_waiting(&task, caller, reason.as_deref().expect("checked reason")).await?;
                 }
                 // `queued_at` is what ties this entry to the run it starts,
                 // which does not exist yet: the Operations report leaves a
@@ -331,31 +331,31 @@ impl Engine {
             }),
 
             Request::WorkflowCreate(draft) => Ok(Payload::Workflow {
-                workflow: self.create_workflow(draft).await?,
+                workflow: self.l4_service().create_workflow(draft).await?,
             }),
             Request::WorkflowGet { id } => Ok(Payload::Workflow {
-                workflow: self.workflow_definition(&id).await?,
+                workflow: self.l4_service().workflow_definition(&id).await?,
             }),
             Request::WorkflowList { scope } => Ok(Payload::Workflows {
                 workflows: self.l4.workflows.definitions(scope.as_deref()).await?,
             }),
             Request::WorkflowUpdate { id, workflow } => Ok(Payload::Workflow {
-                workflow: self.update_workflow(&id, workflow).await?,
+                workflow: self.l4_service().update_workflow(&id, workflow).await?,
             }),
             Request::WorkflowDelete { id } => Ok(Payload::Deleted {
-                deleted: self.delete_workflow(&id).await?,
+                deleted: self.l4_service().delete_workflow(&id).await?,
             }),
             Request::WorkflowStart { id, inputs } => Ok(Payload::WorkflowRun {
                 run: Box::pin(self.start_workflow(&id, inputs, caller)).await?,
             }),
             Request::WorkflowRunGet { id } => Ok(Payload::WorkflowRun {
-                run: self.workflow_run(&id).await?,
+                run: self.l4_service().workflow_run(&id).await?,
             }),
             Request::WorkflowRunList { workflow_id, scope, limit } => Ok(Payload::WorkflowRuns {
                 runs: self.l4.workflows.runs(workflow_id.as_deref(), scope.as_deref(), limit.unwrap_or(50)).await?,
             }),
             Request::WorkflowRunCancel { id } => Ok(Payload::WorkflowRun {
-                run: Box::pin(self.cancel_workflow(&id)).await?,
+                run: Box::pin(self.l4_service().cancel_workflow(&id)).await?,
             }),
             Request::WorkflowLint { workflow, task, scope, category } => Ok(Payload::WorkflowLint {
                 lint: self.l4_service().workflow_lint(workflow, task, scope, category).await?,

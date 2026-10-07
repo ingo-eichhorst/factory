@@ -333,12 +333,12 @@ impl Engine {
         // behind. start_workflow freezes it again before persisting the run.
         let mut definition = factory_core::workflow::WorkflowDefinition::from_draft(draft.clone());
         definition.validate().map_err(bad)?;
-        self.freeze_workflow_workspace(&mut definition).await?;
+        self.l4_service().freeze_workflow_workspace(&mut definition).await?;
         if definition.workspace_ref.as_deref() != Some(commit) {
             return Err(bad("target repository resolved another commit"));
         }
         draft.workspace_ref = definition.workspace_ref;
-        let definition = self.create_workflow(draft).await?;
+        let definition = self.l4_service().create_workflow(draft).await?;
         self.start_workflow(&definition.id, Default::default(), caller).await
     }
 
