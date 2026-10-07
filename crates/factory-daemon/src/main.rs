@@ -36,6 +36,7 @@ mod commands;
 #[cfg(test)]
 mod evidence_store_tests;
 mod facts;
+mod intent;
 mod goals;
 mod github_intake;
 mod github_outbound;

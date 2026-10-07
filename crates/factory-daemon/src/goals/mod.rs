@@ -114,20 +114,6 @@ impl L6Service<'_> {
         )
         .await
     }
-    pub(crate) async fn goal_context(
-        &self,
-        root: std::path::PathBuf,
-        label: Option<String>,
-    ) -> Option<factory_core::adapter::agent::GoalContext> {
-        let (objective_id, objective_title, kr_id, kr_title) =
-            factory_direction::goals_service::context(root, label).await?;
-        Some(factory_core::adapter::agent::GoalContext {
-            objective_id,
-            objective_title,
-            kr_id,
-            kr_title,
-        })
-    }
 }
 
 #[cfg(test)]
@@ -524,27 +510,6 @@ mod tests {
         let kr_result = &report.report.as_ref().unwrap().objectives[0].key_results[0];
         assert_eq!(kr_result.value, Some(0.6), "the latest check-in wins the key result's own current value");
         assert_eq!(kr_result.confidence, Some(8));
-    }
-
-    #[tokio::test]
-    async fn goal_context_resolves_a_known_label_and_is_none_for_an_unknown_one() {
-        let engine = test_engine();
-        write(
-            &goals::goals_dir(&engine.factory_snapshot().root),
-            "2026-q4.yaml",
-            "cycle: { id: 2026-q4, from: 2026-10-01, to: 2026-12-31 }\n\
-             objectives:\n\
-             \x20\x20- id: obj\n\x20\x20\x20\x20title: Objective Title\n\x20\x20\x20\x20key_results:\n\
-             \x20\x20\x20\x20\x20\x20- {id: kr, title: KR Title, kind: committed, manual: true, baseline: 0, target: 1}\n",
-        );
-        let root = engine.factory_snapshot().root.clone();
-
-        let found = engine.goal_context(root.clone(), Some("obj/kr".to_string())).await.unwrap();
-        assert_eq!(found.objective_title, "Objective Title");
-        assert_eq!(found.kr_title, "KR Title");
-
-        assert!(engine.goal_context(root.clone(), Some("obj/nope".to_string())).await.is_none());
-        assert!(engine.goal_context(root, None).await.is_none());
     }
 
     /// `#158`: a key result over `conformance_rate.<category>` scores off a

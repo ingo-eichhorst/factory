@@ -266,7 +266,7 @@ impl L4Service<'_> {
         let role_name = self.core.effective_role_for(&task.scope, &agent_name).await;
         let role = self.wiring.roles_for(&task.scope).get(&role_name).cloned();
         let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.wiring.policy_chain(&task.scope));
-        let goal = self.core.goal_context_for(factory.root.clone(), task.labels.get("goal").cloned()).await;
+        let goal = self.wiring.intent().goal_context(task.labels.get("goal").cloned()).await;
         let quality = self.core.quality_context(&task.scope).await;
         let probe = agent.health_probe();
         let version = probe.as_ref().and_then(|probe| self.core.harness_version_of(&adapter_name, probe));

@@ -444,11 +444,6 @@ impl Engine {
         self.l3_service().effective_role(scope, agent).await
     }
 
-    /// The goal context L6 renders for a task's `goal` label.
-    pub(crate) async fn goal_context_for(&self, root: PathBuf, goal: Option<String>) -> Option<factory_core::adapter::agent::GoalContext> {
-        self.l6_service().goal_context(root, goal).await
-    }
-
     /// The version L3's harness health last observed for this adapter's probe.
     pub(crate) fn harness_version_of(&self, adapter_name: &str, probe: &factory_agents::harness::HealthProbe) -> Option<String> {
         self.l3
