@@ -267,6 +267,7 @@ impl Engine {
             },
             l3: crate::state::L3State {
                 harness: crate::harness_health::HarnessHealth::new(),
+                agents: Arc::new(crate::agent_rows::AgentRows(store.clone())),
             },
             l4: crate::state::L4State {
                 store,

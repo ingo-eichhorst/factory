@@ -65,6 +65,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("openshell.rs", L2),
     ("service_observations.rs", L2),
     // L3 Agent
+    ("agent_rows.rs", L3),
     ("agents.rs", L3),
     ("roles.rs", L3),
     ("harness_health.rs", L3),
@@ -126,14 +127,13 @@ const OWNERS: &[(&str, Owner)] = &[
 
 /// (file, group, count): today's cross-level reach. May only shrink.
 const BASELINE: &[(&str, &str, usize)] = &[
-    ("agents.rs", "l4", 26),
+    ("agents.rs", "l4", 6),
     ("bench/engine.rs", "l4", 8),
     ("datasets.rs", "l4", 2),
     ("dependencies.rs", "l4", 2),
     ("harness_health.rs", "l4", 7),
     ("operations.rs", "l2", 1),
     ("operations.rs", "l3", 1),
-    ("roles.rs", "l4", 1),
     ("secrets.rs", "l4", 2),
     ("suggestions.rs", "l4", 3),
 ];

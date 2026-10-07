@@ -119,7 +119,7 @@ impl Engine {
                 let agent = declared.name();
                 // The same answer `effective_role` gives: a role somebody gave
                 // wins over the config until it is cleared.
-                let given = match self.l4.store.get_agent(&AgentSession::id_for(name, &agent)).await {
+                let given = match self.l3.agents.get_agent(&AgentSession::id_for(name, &agent)).await {
                     Ok(Some(session)) => session.assigned_role,
                     _ => None,
                 };
