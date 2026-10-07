@@ -160,6 +160,7 @@ async fn observed_expiry_wins_the_documented_claude_alias_and_forecasts_the_exac
         .unwrap();
     let task = f
         .engine
+        .l4_service()
         .create(NewTask {
             title: "future audit".into(),
             instructions: "true".into(),

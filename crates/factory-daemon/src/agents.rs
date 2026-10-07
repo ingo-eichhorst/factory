@@ -1166,6 +1166,7 @@ mod tests {
             "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n    args: [--model, opus]\n",
         );
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "exercise configured args".into(),
                 instructions: "true".into(),
@@ -1196,7 +1197,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_legacy_named_tasks_run_lands_in_the_scopes_canonical_workspace() {
-        // `engine.create()` already canonicalizes a task's scope on the way
+        // `engine.l4_service().create()` already canonicalizes a task's scope on the way
         // in (see its own comment), so a legacy-named row can only exist the
         // way an old one on disk would: written directly, bypassing it.
         //
@@ -1273,6 +1274,7 @@ mod tests {
             "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n    args: [--model, opus]\n",
         );
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "use the adapter directly".into(),
                 instructions: "true".into(),
@@ -1310,6 +1312,7 @@ mod tests {
             "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n",
         );
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "exercise guide cleanup".into(),
                 instructions: "true".into(),
@@ -1357,6 +1360,7 @@ mod tests {
             "name: demo\npath: .\nruntime: stub\nagents:\n  - name: builder\n    harness: configured\n",
         );
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "exercise watchdog cleanup".into(),
                 instructions: "true".into(),

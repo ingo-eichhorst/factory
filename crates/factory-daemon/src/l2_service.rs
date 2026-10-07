@@ -12,13 +12,11 @@
 //!
 //! Page or service (D5), module by module:
 //! - `provision.rs`: service.
-//! - `secrets.rs`: the catalogue rows and metadata write are L2; the journal of
-//!   changes lives in L4's task store and the `Request::Environment`/`SecretSet`
-//!   answers are composed from both, so the Secrets tab is a **page** and stays
-//!   `impl Engine` (its two `l4` reaches stay in the ratchet baseline).
-//! - `dependencies.rs`: the report/VEX/document reads are provider wrappers
-//!   (page); `attach_dependency` is a command a run's token authorises and
-//!   journals in L4: composition at the router, not L2 state.
+//! - `secrets.rs`: the catalogue rows and their pure helpers are L2. The journal of changes lives in L4's task store
+//!   and the `Request::Environment`/`SecretSet` answers are composed from both, so those methods are a **page**
+//!   (`l2_pages.rs`).
+//! - `dependencies.rs`: the report/VEX/document reads are provider wrappers; `attach_dependency` is a command a
+//!   run's token authorises and journals in L4, so it is composition too (`l2_pages.rs`).
 //! - `openshell.rs`, `service_observations.rs`: re-exports of the L2 crate.
 //! - `prepare_sandbox`, `reconcile_openshell`, the sandbox discard and the teardown in
 //!   `close_session` (S8b): now L2's `provision` module (`factory_environment::provision`),

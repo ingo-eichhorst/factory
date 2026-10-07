@@ -20,9 +20,9 @@ use factory_core::protocol::{
 use factory_core::agent::{AgentSession, AgentState};
 use factory_core::role::{Role, Roles};
 use factory_core::run::{FailKind, Run, Trigger};
-use factory_core::task::{
-    NewTask, Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus,
-};
+use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch, TaskStatus};
+#[cfg(test)]
+use factory_core::task::NewTask;
 use factory_plugins::registry::Registry;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -400,10 +400,6 @@ impl Engine {
     /// from taking the daemon down with it.
     // L5 files (bench, dependencies, suggestions) reach these four through the page until S10 gives L5 a command port down to L4;
     // an L5 file calling `.l4_service()` itself would be a new pull.
-    pub(crate) fn check_run_token(&self, run: &Run, given: Option<&str>, task_id: &str) -> Result<()> {
-        self.l4_service().check_run_token(run, given, task_id)
-    }
-
     // L5 (bench, suggestions) starts runs through these two until S10 gives it a command port down to L4;
     // an L5 file calling `.l4_service()` itself would be a new pull.
     // -- reaches the run-start path makes into other levels (S9a part 2) -------
@@ -945,7 +941,7 @@ impl Engine {
             None
         };
         let factory = self.factory_snapshot();
-        let current = self.require(id).await?;
+        let current = self.l4_service().require(id).await?;
         if current.workflow_origin.is_some() && (patch.after.is_some() || patch.clear_after || patch.after_condition.is_some()) {
             return Err(FactoryError::BadRequest("workflow waits are released by the graph or an explicit --override-wait, not task edits".into()));
         }
@@ -1138,10 +1134,10 @@ impl Engine {
                 Some(asked) => asked.entry(kind, message, serde_json::json!({})),
                 None => TaskEntry::new("daemon", kind, message),
             };
-            self.entry(&task.id, entry).await;
+            self.l4_service().entry(&task.id, entry).await;
         }
         if clears_wait && task.slot_wait.is_none() {
-            self.entry(
+            self.l4_service().entry(
                 &task.id,
                 TaskEntry::new(
                     "daemon",
@@ -1156,10 +1152,6 @@ impl Engine {
     }
 
     // -- creating ----------------------------------------------------------
-
-    pub async fn create(&self, new: NewTask) -> Result<Task> {
-        self.l4_service().create(new).await
-    }
 
     // -- running -----------------------------------------------------------
 
@@ -1309,24 +1301,6 @@ impl Engine {
 
     // -- small helpers ------------------------------------------------------
 
-    pub(crate) async fn require(&self, id: &str) -> Result<Task> {
-        self.l4_service().require(id).await
-    }
-
-    pub(crate) async fn require_run(&self, id: &str) -> Result<Run> {
-        self.l4_service().require_run(id).await
-    }
-
-    pub(crate) async fn publish_task(&self, id: &str) {
-        self.l4_service().publish_task(id).await
-    }
-
-    /// `pub(crate)`: `occupancy::record_run_liveness` journals a hook-reported
-    /// block or unblock the same way any other daemon-caused change is
-    /// journaled here.
-    pub(crate) async fn entry(&self, task_id: &str, entry: TaskEntry) {
-        self.l4_service().entry(task_id, entry).await
-    }
 }
 
 /// One provider rate-limit window as one run's snapshot saw it -- what the
@@ -1453,7 +1427,7 @@ impl Engine {
             .await
             .unwrap();
         self.l4_service().fail_run(&run.id, kind, "the remediation run failed").await;
-        let task = self.require(task_id).await.unwrap();
+        let task = self.l4_service().require(task_id).await.unwrap();
         assert!(task.blocked_by_failure(), "sanity: {:?}", task.status);
         task
     }
@@ -1763,6 +1737,7 @@ mod tests {
 
         async fn task(engine: &Arc<Engine>, title: &str, agent_name: &str) -> Task {
             engine
+                .l4_service()
                 .create(NewTask {
                     title: title.into(),
                     instructions: "true".into(),
@@ -2280,6 +2255,7 @@ mod tests {
             .unwrap();
         }
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "plan share".into(),
                 instructions: "true".into(),
@@ -2983,6 +2959,7 @@ mod tests {
         let engine = test_engine(scope_dir.clone());
 
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "try the worktree".into(),
                 instructions: "true".into(),
@@ -3040,6 +3017,7 @@ mod tests {
         let engine = test_engine(scope_dir.clone());
 
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "try the worktree".into(),
                 instructions: "true".into(),
@@ -3079,6 +3057,7 @@ mod tests {
         let engine = test_engine(scope_dir.clone());
 
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "asks a question and is given up on".into(),
                 instructions: "true".into(),
@@ -3157,7 +3136,7 @@ mod tests {
     #[tokio::test]
     async fn a_task_with_a_zoned_schedule_is_next_due_on_that_wall_clock() {
         let engine = test_engine(temp_dir("tz-create"));
-        let task = engine.create(scheduled(berlin_monday_nine())).await.unwrap();
+        let task = engine.l4_service().create(scheduled(berlin_monday_nine())).await.unwrap();
         let next = task.next_run_at.unwrap().with_timezone(&chrono_tz::Europe::Berlin);
         assert_eq!(next.format("%a %H:%M").to_string(), "Mon 09:00", "{next}");
     }
@@ -3169,11 +3148,11 @@ mod tests {
             expr: "0 9 * * 1".into(),
             timezone: Some("Europe/Berln".into()),
         });
-        let err = engine.create(scheduled(typo.clone())).await.unwrap_err().to_string();
+        let err = engine.l4_service().create(scheduled(typo.clone())).await.unwrap_err().to_string();
         assert!(err.contains("Europe/Berln"), "{err}");
 
         // And by an edit, which leaves the task as it was.
-        let task = engine.create(scheduled(Schedule::Cron("0 7 * * 1".into()))).await.unwrap();
+        let task = engine.l4_service().create(scheduled(Schedule::Cron("0 7 * * 1".into()))).await.unwrap();
         let err = engine
             .update(&task.id, TaskPatch { schedule: Some(typo), ..Default::default() }, None)
             .await
@@ -3188,7 +3167,7 @@ mod tests {
     async fn editing_a_utc_schedule_into_a_zoned_one_moves_its_next_firing() {
         // The live audit's fix, in miniature: 07:00 UTC becomes 09:00 Berlin.
         let engine = test_engine(temp_dir("tz-edit"));
-        let task = engine.create(scheduled(Schedule::Cron("0 7 * * 1".into()))).await.unwrap();
+        let task = engine.l4_service().create(scheduled(Schedule::Cron("0 7 * * 1".into()))).await.unwrap();
         let edited = engine
             .update(&task.id, TaskPatch { schedule: Some(berlin_monday_nine()), ..Default::default() }, None)
             .await
@@ -3198,11 +3177,12 @@ mod tests {
         assert_eq!(next.format("%a %H:%M").to_string(), "Mon 09:00", "{next}");
     }
 
-    /// A weekly-scheduled task, freshly created -- `engine.create()` has
+    /// A weekly-scheduled task, freshly created -- `engine.l4_service().create()` has
     /// already set `next_run_at` to the coming Monday, exactly as
     /// `advance_schedule` would before a real dispatch.
     async fn weekly_task(engine: &Engine, retry: Option<RetryPolicy>) -> Task {
         engine
+            .l4_service()
             .create(NewTask {
                 title: "the weekly audit".into(),
                 instructions: "true".into(),
@@ -3255,6 +3235,7 @@ mod tests {
     /// daemon sees it mid-turn.
     async fn running_run(engine: &Engine, status: RunStatus) -> (Task, Run) {
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "a turn that ends quietly".into(),
                 instructions: "true".into(),
@@ -3628,6 +3609,7 @@ mod tests {
         let engine = test_engine(scope_dir.clone());
 
         let err = engine
+            .l4_service()
             .create(NewTask {
                 title: "a one-off with a retry policy that would never apply".into(),
                 instructions: "true".into(),
@@ -3673,6 +3655,7 @@ mod tests {
         let scope_dir = temp_dir("resume-from-retry");
         let engine = test_engine(scope_dir.clone());
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "a tight interval".into(),
                 instructions: "true".into(),
@@ -3720,6 +3703,7 @@ mod tests {
         let engine = test_engine(scope_dir.clone());
 
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "stay in the scope".into(),
                 instructions: "true".into(),
@@ -3812,6 +3796,7 @@ mod tests {
             (serde_json::json!({"bench_run_id":"b","case_id":"c","agent":"shell","attempt":1,"reset":5}), "invalid origin placement"),
         ] {
             let mut task = engine
+                .l4_service()
                 .create(NewTask { title: "placed".into(), instructions: "true".into(), scope: Some("demo".into()), agent: Some("shell".into()), ..Default::default() })
                 .await
                 .unwrap();
@@ -3856,6 +3841,7 @@ mod tests {
         let engine = test_engine(scope_dir.clone());
         let root = engine.factory_snapshot().root.clone();
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "do the thing".into(),
                 instructions: "true".into(),
@@ -4050,6 +4036,7 @@ mod tests {
         // A worktree task in a scope that is not a git repository: the run
         // row exists, and then `place_run` refuses.
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "fires on a slot".into(),
                 instructions: "true".into(),
@@ -4077,6 +4064,7 @@ mod tests {
         let scope_dir = temp_dir("skipped");
         let engine = test_engine(scope_dir.clone());
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "every minute".into(),
                 instructions: "true".into(),
@@ -4423,6 +4411,7 @@ mod tests {
         let scope_dir = temp_dir("pause-unscheduled");
         let engine = test_engine(scope_dir.clone());
         let task = engine
+            .l4_service()
             .create(NewTask {
                 title: "one-off".into(),
                 instructions: "true".into(),
@@ -4446,6 +4435,7 @@ mod tests {
 
     async fn one_off_task(engine: &Engine, title: &str) -> Task {
         engine
+            .l4_service()
             .create(NewTask {
                 title: title.into(),
                 instructions: "true".into(),
@@ -4494,7 +4484,7 @@ mod tests {
             let run = run_for(&engine, &task.id, Trigger::Manual).await;
             engine.l4_service().fail_run(&run.id, kind, "it went wrong").await;
 
-            let task = engine.require(&task.id).await.unwrap();
+            let task = engine.l4_service().require(&task.id).await.unwrap();
             assert_eq!(task.status, TaskStatus::Blocked, "{kind:?}: never closed by a failure");
             assert!(task.blocked_by_failure(), "{kind:?}");
             assert!(!task.status.is_terminal(), "{kind:?}: a failure is an open item");
@@ -4505,7 +4495,7 @@ mod tests {
             assert_eq!(failure.attempt, Some(1));
             assert_eq!(task.error.as_deref(), Some("it went wrong"));
 
-            let run = engine.require_run(&run.id).await.unwrap();
+            let run = engine.l4_service().require_run(&run.id).await.unwrap();
             assert_eq!(run.status, RunStatus::Failed, "the run keeps its meaning");
             assert!(run.status.is_terminal());
             assert_eq!(run.fail_kind, Some(kind));
@@ -4526,7 +4516,7 @@ mod tests {
 
         engine.l4_service().start_run_due(&task.id, Trigger::Manual, Due::now()).await;
 
-        let task = engine.require(&task.id).await.unwrap();
+        let task = engine.l4_service().require(&task.id).await.unwrap();
         assert!(engine.l4.store.runs(&task.id, 5).await.unwrap().is_empty(), "sanity: no run was made");
         assert!(task.blocked_by_failure(), "{:?}", task.status);
         let failure = task.failure.unwrap();
@@ -4545,7 +4535,7 @@ mod tests {
         engine.l4_service().fail_run(&first.id, FailKind::AgentFailed, "boom").await;
 
         let second = run_for(&engine, &task.id, Trigger::Manual).await;
-        let mid = engine.require(&task.id).await.unwrap();
+        let mid = engine.l4_service().require(&task.id).await.unwrap();
         assert_eq!(mid.status, TaskStatus::Dispatching);
         assert!(mid.failure.is_none(), "a new attempt is newer than the failure it follows");
 
@@ -4554,7 +4544,7 @@ mod tests {
             .finish_run(&second.id, RunStatus::Done, RunPatch { result: Some("fine".into()), ..Default::default() }, "ended")
             .await
             .unwrap();
-        let task = engine.require(&task.id).await.unwrap();
+        let task = engine.l4_service().require(&task.id).await.unwrap();
         assert_eq!(task.status, TaskStatus::Done);
         assert!(task.failure.is_none());
         assert!(task.error.is_none());
@@ -4594,7 +4584,7 @@ mod tests {
         // What the scheduler does with it, once.
         engine.l4_service().fail_run(&run.id, FailKind::BlockedTimeout, "nobody answered").await;
 
-        let task = engine.require(&task.id).await.unwrap();
+        let task = engine.l4_service().require(&task.id).await.unwrap();
         assert!(task.blocked_by_failure());
         assert_eq!(task.failure.as_ref().and_then(|f| f.kind), Some(FailKind::BlockedTimeout));
         let active = engine.l4_service().active_runs().await.unwrap();
@@ -4677,7 +4667,7 @@ mod tests {
         run_for(&engine, &busy.id, Trigger::Manual).await;
         let why = refusal(engine.handle_request(close(&busy.id, NotPlanned)).await);
         assert!(why.contains("cancel it before closing"), "{why}");
-        assert_eq!(engine.require(&busy.id).await.unwrap().status, TaskStatus::Dispatching, "untouched");
+        assert_eq!(engine.l4_service().require(&busy.id).await.unwrap().status, TaskStatus::Dispatching, "untouched");
 
         let done = one_off_task(&engine, "done").await;
         task_of(engine.handle_request(close(&done.id, Completed)).await);
@@ -4718,7 +4708,7 @@ mod tests {
                 .await,
         );
         assert!(why.contains("no-such-task"), "{why}");
-        assert_eq!(engine.require(&other.id).await.unwrap().status, TaskStatus::Pending);
+        assert_eq!(engine.l4_service().require(&other.id).await.unwrap().status, TaskStatus::Pending);
         std::fs::remove_dir_all(&scope_dir).ok();
     }
 
@@ -4747,7 +4737,7 @@ mod tests {
         // A run on a task closed on purpose clears the close record with it.
         task_of(engine.handle_request(close(&task.id, factory_core::task::CloseReason::Completed)).await);
         run_for(&engine, &task.id, Trigger::Manual).await;
-        let task = engine.require(&task.id).await.unwrap();
+        let task = engine.l4_service().require(&task.id).await.unwrap();
         assert_eq!(task.status, TaskStatus::Dispatching);
         assert!(task.closure.is_none());
         std::fs::remove_dir_all(&scope_dir).ok();
@@ -4763,7 +4753,7 @@ mod tests {
             .handle_request(Request::TaskCancel { id: task.id.clone(), reason: None, run: None })
             .await;
         assert!(matches!(response, factory_core::protocol::Response::Ok { .. }), "{response:?}");
-        let task = engine.require(&task.id).await.unwrap();
+        let task = engine.l4_service().require(&task.id).await.unwrap();
         assert_eq!(task.status, TaskStatus::Cancelled);
         assert_eq!(task.close_reason(), Some(factory_core::task::CloseReason::NotPlanned));
         assert!(task.failure.is_none(), "a cancel is not a failure");
@@ -4786,9 +4776,9 @@ mod tests {
             .update_run(&run.id, &RunPatch { status: Some(RunStatus::Blocked), ..Default::default() })
             .await
             .unwrap();
-        let asking_now = engine.require(&asking.id).await.unwrap();
-        engine.l4_service().mirror_to_task(&engine.require_run(&run.id).await.unwrap()).await;
-        assert_eq!(engine.require(&asking.id).await.unwrap().status, TaskStatus::Blocked, "sanity");
+        let asking_now = engine.l4_service().require(&asking.id).await.unwrap();
+        engine.l4_service().mirror_to_task(&engine.l4_service().require_run(&run.id).await.unwrap()).await;
+        assert_eq!(engine.l4_service().require(&asking.id).await.unwrap().status, TaskStatus::Blocked, "sanity");
         let _ = asking_now;
 
         let past = Utc::now() - chrono::Duration::minutes(1);
@@ -4800,7 +4790,7 @@ mod tests {
         assert_eq!(due, vec![blocked.id.clone()], "the failure keeps firing; the close and the question do not");
 
         // Closed between `due_now` and the scheduler's locked re-read: not fired.
-        let seen = engine.require(&blocked.id).await.unwrap();
+        let seen = engine.l4_service().require(&blocked.id).await.unwrap();
         assert!(engine.l4_service().still_due(&seen).await.is_some());
         task_of(engine.handle_request(close(&blocked.id, factory_core::task::CloseReason::NotPlanned)).await);
         assert!(engine.l4_service().still_due(&seen).await.is_none(), "closed in between, so nothing fires it");
@@ -4857,19 +4847,19 @@ mod tests {
 
         assert_eq!(engine.l4_service().migrate_failed_tasks().await, 2);
 
-        let old = engine.require(&old.id).await.unwrap();
+        let old = engine.l4_service().require(&old.id).await.unwrap();
         assert!(old.blocked_by_failure());
         assert_eq!(old.failure.as_ref().and_then(|f| f.kind), Some(FailKind::RunTimeout));
         assert_eq!(old.failure.as_ref().and_then(|f| f.run_id.clone()), Some(run.id.clone()));
         let entries = engine.l4.store.entries(&old.id, 20).await.unwrap();
         assert!(entries.iter().any(|e| e.kind == "migrated"), "{entries:?}");
 
-        let never = engine.require(&never.id).await.unwrap();
+        let never = engine.l4_service().require(&never.id).await.unwrap();
         assert!(never.blocked_by_failure());
         assert_eq!(never.failure.as_ref().and_then(|f| f.kind), Some(FailKind::DispatchFailed));
         assert!(never.next_run_at.unwrap() > Utc::now(), "a migrated schedule does not fire a burst");
 
-        assert_eq!(engine.require(&fine.id).await.unwrap().status, TaskStatus::Pending);
+        assert_eq!(engine.l4_service().require(&fine.id).await.unwrap().status, TaskStatus::Pending);
         assert_eq!(engine.l4_service().migrate_failed_tasks().await, 0, "nothing writes failed any more, so a second start finds none");
         std::fs::remove_dir_all(&scope_dir).ok();
     }
@@ -5089,6 +5079,7 @@ mod tests {
 
         async fn task_for(engine: &Arc<Engine>, worktree: bool) -> Task {
             engine
+                .l4_service()
                 .create(NewTask {
                     title: "resume me".into(),
                     instructions: "true".into(),
@@ -5218,6 +5209,7 @@ mod tests {
             .unwrap();
 
             let labelled = engine
+                .l4_service()
                 .create(NewTask {
                     title: "labelled".into(),
                     instructions: "true".into(),
@@ -5401,11 +5393,11 @@ mod tests {
             launched.await.unwrap().unwrap();
             let cancelled = cancelled.await.unwrap().unwrap();
             assert_eq!(cancelled.status, RunStatus::Cancelled);
-            let final_run = engine.require_run(&cancelled.id).await.unwrap();
+            let final_run = engine.l4_service().require_run(&cancelled.id).await.unwrap();
             assert!(final_run.last_session.is_some(), "the session that came up late is still recorded for safety checks");
             assert!(final_run.session.is_none(), "no late launch reattaches a pane after completion");
             engine.l4_service().fail_run(&cancelled.id, FailKind::DispatchFailed, "late submit failed").await;
-            assert_eq!(engine.require_run(&cancelled.id).await.unwrap().status, RunStatus::Cancelled);
+            assert_eq!(engine.l4_service().require_run(&cancelled.id).await.unwrap().status, RunStatus::Cancelled);
             std::fs::remove_dir_all(scope_dir).ok();
         }
 
@@ -5424,7 +5416,7 @@ mod tests {
             let path = PathBuf::from(started.worktree_path.unwrap());
             assert!(path.exists());
             assert!(worktree::is_registered(&scope_dir, &path).await);
-            assert!(!engine.require_run(&started.id).await.unwrap().status.is_terminal());
+            assert!(!engine.l4_service().require_run(&started.id).await.unwrap().status.is_terminal());
             assert!(previous.worktree_path.is_some());
             engine.l4_service().cancel_task_run(&task.id, None, FailKind::CancelledByPerson).await.unwrap();
             std::fs::remove_dir_all(engine.factory_snapshot().root).ok();
@@ -5571,7 +5563,7 @@ edges: [{id: next, from: implement, to: review}]
                 .current_dir(&directory).status().await.unwrap().success());
             seed_session_id(&engine, &first, "recorded-session").await;
             engine.l4_service().fail_run(&first.id, FailKind::AckTimeout, "outage").await;
-            let previous = engine.require_run(&first.id).await.unwrap();
+            let previous = engine.l4_service().require_run(&first.id).await.unwrap();
             assert_ne!(previous.resume_context.as_ref().unwrap().branch_head, first.resume_context.as_ref().unwrap().branch_head);
             let current = crate::resume::checkpoint(&directory, "unused".into(), 0).await;
             assert_eq!(previous.resume_context.as_ref().unwrap().branch_head, current.branch_head);
@@ -5605,7 +5597,7 @@ edges: [{id: next, from: implement, to: review}]
             assert_eq!(runtime.starts.lock().unwrap().len(), 2);
             assert_eq!(engine.l4.store.active_run(&task.id).await.unwrap().unwrap().id, winner.id);
             engine.l4_service().start_run_due_continue(&task.id, Due::now(), previous.clone()).await;
-            assert!(!engine.require_run(&winner.id).await.unwrap().status.is_terminal(), "the loser cannot fail the winner");
+            assert!(!engine.l4_service().require_run(&winner.id).await.unwrap().status.is_terminal(), "the loser cannot fail the winner");
             engine.l4_service().fail_run(&winner.id, FailKind::AckTimeout, "next outage").await;
             let stale = engine.l4_service().dispatch(&task.id, Trigger::Manual, Due::now(), Some(previous)).await.unwrap_err();
             assert!(matches!(stale, FactoryError::DispatchSuperseded(_)));
@@ -5620,7 +5612,7 @@ edges: [{id: next, from: implement, to: review}]
             let task = task_for(&engine, false).await;
             let previous = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
             seed_session_id(&engine, &previous, "recorded-session").await;
-            let mut previous = engine.require_run(&previous.id).await.unwrap();
+            let mut previous = engine.l4_service().require_run(&previous.id).await.unwrap();
             previous.resume_context.as_mut().unwrap().resumes = 8;
             let next = engine.l4_service().dispatch(&task.id, Trigger::Manual, Due::now(), Some(previous)).await.unwrap();
             assert!(next.resumed_session.is_none());
@@ -5628,7 +5620,7 @@ edges: [{id: next, from: implement, to: review}]
             assert!(continue_fallback_reasons(&engine, &task.id).await.iter().any(|reason| reason.contains("eight-round")));
             engine.l4_service().fail_run(&next.id, FailKind::AckTimeout, "another outage").await;
             seed_session_id(&engine, &next, "fresh-session").await;
-            let mut previous = engine.require_run(&next.id).await.unwrap();
+            let mut previous = engine.l4_service().require_run(&next.id).await.unwrap();
             previous.resume_context.as_mut().unwrap().fingerprint = "old-guide".into();
             let fresh = engine.l4_service().dispatch(&task.id, Trigger::Manual, Due::now(), Some(previous)).await.unwrap();
             assert!(fresh.resumed_session.is_none());
@@ -6041,6 +6033,7 @@ edges: [{id: next, from: implement, to: review}]
 
         async fn boxed_task(engine: &Arc<Engine>) -> Task {
             engine
+                .l4_service()
                 .create(NewTask {
                     title: "in the box".into(),
                     instructions: "echo hi".into(),
@@ -6059,6 +6052,7 @@ edges: [{id: next, from: implement, to: review}]
         /// preserve.
         async fn boxed_claude_task(engine: &Arc<Engine>) -> Task {
             engine
+                .l4_service()
                 .create(NewTask {
                     title: "resume me".into(),
                     instructions: "say".into(),
@@ -6139,6 +6133,7 @@ edges: [{id: next, from: implement, to: review}]
             let cli = fake_cli(&tools);
             let (engine, runtime) = engine_with(scope_dir.clone(), &cli.display().to_string());
             let task = engine
+                .l4_service()
                 .create(NewTask {
                     title: "where am i".into(),
                     instructions: "say".into(),
@@ -6287,6 +6282,7 @@ edges: [{id: next, from: implement, to: review}]
             };
             engine.l2.provision.set_for_test(&key, readiness(ReadinessState::Needs, Some("the credential for factory-claude from the file /nonexistent/token"), None));
             let task = engine
+                .l4_service()
                 .create(NewTask {
                     title: "managed".into(),
                     instructions: "echo hi".into(),

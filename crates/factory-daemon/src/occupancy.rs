@@ -416,7 +416,7 @@ impl Engine {
                 else {
                     return;
                 };
-                self.entry(
+                self.l4_service().entry(
                     &run.task_id,
                     TaskEntry::new(
                         "daemon",
@@ -451,7 +451,7 @@ impl Engine {
                 else {
                     return;
                 };
-                self.entry(
+                self.l4_service().entry(
                     &run.task_id,
                     TaskEntry::new(
                         "daemon",
