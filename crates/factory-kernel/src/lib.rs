@@ -83,7 +83,7 @@ mod stats;
 mod workspace;
 pub use facts::DeploymentPublicationFact;
 pub use facts::{DeploymentMirrorFact, DeploymentMirrorPhase, DeploymentMirrorPlan};
-pub use facts::{EnvironmentMetricFact, FunctionaryRosterFact, KnowledgeTags, ScopeCapacityFact, StandingAgentLiveFact, HarnessHealthFact, HarnessVerdict};
+pub use facts::{EnvironmentMetricFact, FunctionaryRosterFact, KnowledgeTags, ScopeCapacityFact, StandingAgentLiveFact, HarnessHealthFact, HarnessVerdict, EffectiveRoleFact, HarnessVersionFact};
 pub use facts::{
     EnvironmentRecoveryFact, RECOVERY_COMMIT_LABEL, RECOVERY_ENVIRONMENT_LABEL,
     RECOVERY_REASON_LABEL,

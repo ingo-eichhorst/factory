@@ -32,3 +32,13 @@ pub(crate) fn harness_provider(engine: &Engine) -> crate::harness_health::Harnes
         health: engine.l3.harness.clone(),
     }
 }
+
+pub(crate) fn role_provider(engine: &Engine) -> crate::l3_service::RoleProvider<'_> {
+    crate::l3_service::RoleProvider(engine.l3_service())
+}
+
+pub(crate) fn version_provider(engine: &Engine) -> crate::harness_health::VersionProvider {
+    crate::harness_health::VersionProvider {
+        health: engine.l3.harness.clone(),
+    }
+}

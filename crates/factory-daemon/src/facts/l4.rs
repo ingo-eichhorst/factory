@@ -1,6 +1,5 @@
 //! Process-owned providers. Ambiguous names never acquire run history.
 use crate::engine::Engine;
-use factory_core::error::Result;
 
 pub(super) fn blueprint_provider(engine: &Engine) -> factory_process::workflow_blueprints::Provider<'_> {
     factory_process::workflow_blueprints::Provider {tasks: engine.l4.store.as_ref(), workflows: &engine.l4.workflows}
@@ -28,15 +27,6 @@ pub(super) fn provider(engine: &Engine) -> factory_process::facts::Provider<'_> 
 
 pub(crate) async fn import_recovery_journal(engine: &Engine) -> Vec<String> {
     provider(engine).import_recovery_journal().await
-}
-
-pub(crate) async fn process_security_reports(
-    engine: &Engine,
-    scope: Option<&str>,
-) -> Result<Vec<factory_kernel::ConfirmedSecurityReport>> {
-    super::Facts::<factory_kernel::People>::new(engine)
-        .get::<factory_kernel::ConfirmedSecurityReport>(&scope.map(str::to_owned))
-        .await
 }
 
 /// Capture current scope identities for each read; no hub enters the owner.

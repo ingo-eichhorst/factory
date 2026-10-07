@@ -47,14 +47,22 @@ pub(crate) fn process<'a>(
     engine: &'a Engine,
     observer: &'a CreationObserver,
 ) -> factory_process::creation::Service<'a, factory_agents::selection::Service<'a>> {
-    let snapshot = engine.factory_snapshot();
+    process_with(engine.l4.store.as_ref(), &engine.shared.registry, &engine.factory_snapshot(), observer)
+}
+/// The task creation service over the pieces it needs, so the L4 service can build it from its own state.
+pub(crate) fn process_with<'a>(
+    store: &'a dyn factory_core::adapter::TaskStore,
+    registry: &'a factory_plugins::registry::Registry,
+    snapshot: &factory_core::config::Factory,
+    observer: &'a CreationObserver,
+) -> factory_process::creation::Service<'a, factory_agents::selection::Service<'a>> {
     let agents = factory_agents::selection::Service {
-        catalog: &engine.shared.registry,
-        scopes: agent_inputs(&snapshot),
+        catalog: registry,
+        scopes: agent_inputs(snapshot),
         foreman: snapshot.config.daemon.foreman.clone(),
     };
     factory_process::creation::Service {
-        store: engine.l4.store.as_ref(),
+        store,
         observer,
         agents: Commands::new(agents),
         inputs: factory_process::creation::Inputs {
@@ -112,7 +120,11 @@ pub(crate) struct EntryNotes {
 }
 impl EntryNotes {
     pub(crate) fn of(engine: &Engine) -> Self {
-        Self { store: engine.l4.store.clone(), bus: engine.shared.bus.clone() }
+        Self::new(engine.l4.store.clone(), engine.shared.bus.clone())
+    }
+
+    pub(crate) fn new(store: std::sync::Arc<dyn factory_core::adapter::TaskStore>, bus: EventBus) -> Self {
+        Self { store, bus }
     }
 }
 #[async_trait::async_trait]

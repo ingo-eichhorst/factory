@@ -71,3 +71,18 @@ impl L3Service<'_> {
         }
     }
 }
+
+/// L3's provider for `EffectiveRoleFact`: the role an agent runs under right now.
+pub(crate) struct RoleProvider<'a>(pub(crate) L3Service<'a>);
+impl factory_kernel::FactProvider for RoleProvider<'_> {
+    type Level = factory_kernel::L3;
+}
+#[async_trait::async_trait]
+impl factory_kernel::Provide<factory_kernel::EffectiveRoleFact> for RoleProvider<'_> {
+    type Query = (String, String);
+    type Value = factory_kernel::EffectiveRoleFact;
+    type Error = factory_core::error::FactoryError;
+    async fn get(&self, (scope, name): &(String, String)) -> factory_core::error::Result<Self::Value> {
+        Ok(factory_kernel::EffectiveRoleFact(self.0.effective_role(scope, name).await.as_str().to_string()))
+    }
+}

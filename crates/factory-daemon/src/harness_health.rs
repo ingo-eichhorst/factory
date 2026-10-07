@@ -445,12 +445,6 @@ pub fn harness_name(probe: &HealthProbe) -> String {
 /// (`harness_hold.rs`) asks and tells. The hold and release of a task are L4's; the probe,
 /// the cache, the repair and the list the Infrastructure page shows are L3's.
 impl L3Service<'_> {
-    /// The probe the agent a task would run on declares, if it declares one.
-    pub(crate) fn probe_for(&self, scope: &str, agent: &str) -> Option<HealthProbe> {
-        let (_, adapter, _) = self.wiring.resolve_agent(scope, agent).ok()?;
-        self.wiring.registry().agent(&adapter).ok()?.health_probe()
-    }
-
     /// A reason to doubt whatever the cache says about this harness's binary, so the next
     /// ask probes it again.
     pub(crate) fn doubt(&self, binary: &str) {
@@ -526,6 +520,29 @@ impl factory_kernel::Provide<factory_kernel::HarnessHealthFact> for HarnessProvi
     async fn get(&self, query: &HarnessCheck) -> Result<Self::Value> {
         let verdict = self.health.check(&query.harness, &query.probe, &query.config, query.trust_failure).await;
         Ok(factory_kernel::HarnessHealthFact { verdict })
+    }
+}
+
+/// L3's provider for `HarnessVersionFact`: the last observed version of an adapter's harness binary.
+pub(crate) struct VersionProvider {
+    pub(crate) health: HarnessHealth,
+}
+impl factory_kernel::FactProvider for VersionProvider {
+    type Level = factory_kernel::L3;
+}
+#[async_trait::async_trait]
+impl factory_kernel::Provide<factory_kernel::HarnessVersionFact> for VersionProvider {
+    type Query = (String, HealthProbe);
+    type Value = factory_kernel::HarnessVersionFact;
+    type Error = FactoryError;
+    async fn get(&self, (adapter, probe): &(String, HealthProbe)) -> Result<Self::Value> {
+        let version = self
+            .health
+            .rows(&[(adapter.clone(), probe.clone())], None)
+            .into_iter()
+            .next()
+            .and_then(|row| row.version);
+        Ok(factory_kernel::HarnessVersionFact(version))
     }
 }
 

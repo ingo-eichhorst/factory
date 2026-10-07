@@ -932,7 +932,7 @@ impl L4Service<'_> {
         // `power.release` is the counterpart to `dispatch`'s own
         // `power.acquire`, and every run that reaches this function reaches
         // it regardless of whether it ever had a session to close.
-        crate::commands::l3(self.core).port().allow_sleep(&run.id).await;
+        self.wiring.l3().port().allow_sleep(&run.id).await;
 
         // The guide file, if this run's harness wrote one, is named after the
         // task rather than the run and nothing else removes it. It cannot be
@@ -1013,11 +1013,11 @@ impl L4Service<'_> {
         // that already reported `done` looking active with its pane gone,
         // which the watchdog fails as `session_gone`. Claimed per sandbox,
         // so a run closed twice (a report racing a cancel) is torn down once.
-        crate::commands::l3(self.core).port().release_environment(
+        self.wiring.l3().port().release_environment(
             &session.meta,
             run.task_id.clone(),
             run.id.clone(),
-            Arc::new(crate::commands::EntryNotes::of(self.core)),
+            Arc::new(crate::commands::EntryNotes::new(self.state.store.clone(), self.wiring.bus().clone())),
         );
     }
     /// The daemon's own http bind, when it serves the http interface at
@@ -1026,6 +1026,6 @@ impl L4Service<'_> {
     /// is released the same moment its other per-task state is -- closing
     /// or deleting the task, never a periodic sweep of its own.
     pub(crate) fn remove_preserved_session(&self, task_id: &str) {
-        crate::commands::l3(self.core).port().forget_preserved(task_id);
+        self.wiring.l3().port().forget_preserved(task_id);
     }
 }

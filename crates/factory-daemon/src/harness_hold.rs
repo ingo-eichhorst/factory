@@ -8,7 +8,8 @@
 //! tick calls `recheck_harnesses`, which looks at every held task in a task of its own, in
 //! the same call chain as before (no polling was added).
 use crate::engine::Engine;
-use crate::facts::Facts;
+use crate::l4_service::L4Service;
+use crate::l4_spawner::L4Spawner;
 use factory_agents::dispatch::HarnessCommands;
 use crate::harness_health::{binary_of, harness_name, HarnessCheck, Verdict, HELD_LOOKBACK_DAYS};
 use chrono::Utc;
@@ -25,62 +26,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 impl Engine {
-    /// L3's verdict on one harness, read as the level above it.
-    async fn harness_verdict(&self, check: HarnessCheck) -> Result<Verdict> {
-        Ok(Facts::<factory_kernel::L4>::new(self)
-            .get::<factory_kernel::HarnessHealthFact>(&check)
-            .await?
-            .verdict)
-    }
-
-    /// Before a run exists (`#131`): whether `task`'s harness starts. When it
-    /// does not, the task is blocked with a reason naming the binary and the
-    /// repair, and this answers `HarnessUnhealthy` so `dispatch` stops before
-    /// making a run row -- nothing is failed and no session is opened. A
-    /// person's own `task run` probes afresh rather than trusting a cached
-    /// failure: it is what they do right after running the repair.
-    pub(crate) async fn harness_gate(&self, task: &Task, adapter: &dyn Agent, trigger: Trigger) -> Result<()> {
-        let Some(probe) = adapter.health_probe() else {
-            return Ok(());
-        };
-        let config = self.factory_snapshot().config.daemon.harness_health.clone();
-        let harness = harness_name(&probe);
-        let trust_failure = trigger != Trigger::Manual;
-        let Verdict::Unhealthy { binary, problem } = self.harness_verdict(HarnessCheck { harness: harness.clone(), probe, config: config.clone(), trust_failure }).await?
-        else {
-            return Ok(());
-        };
-        let repair = repair_command(config.repair_script.as_deref(), &harness);
-        let reason = blocked_reason(&harness, &problem, &repair);
-        self.entry(
-            &task.id,
-            TaskEntry::new("daemon", HELD_ENTRY, reason.clone()).with_data(serde_json::json!({
-                "harness": harness,
-                "binary": binary,
-                "repair": repair,
-                "trigger": trigger,
-            })),
-        )
-        .await;
-        if let Err(e) = self
-            .l4.store
-            .update(
-                &task.id,
-                &TaskPatch { status: Some(TaskStatus::Blocked), error: Some(reason.clone()), ..Default::default() },
-            )
-            .await
-        {
-            tracing::warn!(task = task.id, "could not block the task on its harness: {e}");
-        }
-        self.publish_task(&task.id).await;
-        crate::commands::l3(self).port().hold(
-            &binary,
-            HeldTask { task_id: task.id.clone(), scope: task.scope.clone(), title: task.title.clone() },
-        );
-        crate::commands::l3(self).port().auto_repair(&harness, &binary, config.auto_repair, config.repair_script.clone());
-        Err(FactoryError::HarnessUnhealthy(reason))
-    }
-
     /// From the scheduler's tick: at most every `retry_seconds`, look again
     /// at every task held on a harness, and dispatch the ones whose harness
     /// answers now. In a task of its own -- a harness that is still down
@@ -102,8 +47,67 @@ impl Engine {
     }
 
     pub(crate) async fn release_recovered(self: &Arc<Self>, config: &HarnessHealthConfig) {
+        self.l4_service().release_recovered(config, &self.l4_spawner()).await
+    }
+}
+
+impl L4Service<'_> {
+    /// L3's verdict on one harness, read as the level above it.
+    async fn harness_verdict(&self, check: HarnessCheck) -> Result<Verdict> {
+        Ok(self.wiring.facts().get::<factory_kernel::HarnessHealthFact>(&check).await?.verdict)
+    }
+
+    /// Before a run exists (`#131`): whether `task`'s harness starts. When it
+    /// does not, the task is blocked with a reason naming the binary and the
+    /// repair, and this answers `HarnessUnhealthy` so `dispatch` stops before
+    /// making a run row -- nothing is failed and no session is opened. A
+    /// person's own `task run` probes afresh rather than trusting a cached
+    /// failure: it is what they do right after running the repair.
+    pub(crate) async fn harness_gate(&self, task: &Task, adapter: &dyn Agent, trigger: Trigger) -> Result<()> {
+        let Some(probe) = adapter.health_probe() else {
+            return Ok(());
+        };
+        let config = self.wiring.snapshot().config.daemon.harness_health.clone();
+        let harness = harness_name(&probe);
+        let trust_failure = trigger != Trigger::Manual;
+        let Verdict::Unhealthy { binary, problem } = self.harness_verdict(HarnessCheck { harness: harness.clone(), probe, config: config.clone(), trust_failure }).await?
+        else {
+            return Ok(());
+        };
+        let repair = repair_command(config.repair_script.as_deref(), &harness);
+        let reason = blocked_reason(&harness, &problem, &repair);
+        self.entry(
+            &task.id,
+            TaskEntry::new("daemon", HELD_ENTRY, reason.clone()).with_data(serde_json::json!({
+                "harness": harness,
+                "binary": binary,
+                "repair": repair,
+                "trigger": trigger,
+            })),
+        )
+        .await;
+        if let Err(e) = self
+            .state.store
+            .update(
+                &task.id,
+                &TaskPatch { status: Some(TaskStatus::Blocked), error: Some(reason.clone()), ..Default::default() },
+            )
+            .await
+        {
+            tracing::warn!(task = task.id, "could not block the task on its harness: {e}");
+        }
+        self.publish_task(&task.id).await;
+        self.wiring.l3().port().hold(
+            &binary,
+            HeldTask { task_id: task.id.clone(), scope: task.scope.clone(), title: task.title.clone() },
+        );
+        self.wiring.l3().port().auto_repair(&harness, &binary, config.auto_repair, config.repair_script.clone());
+        Err(FactoryError::HarnessUnhealthy(reason))
+    }
+
+    pub(crate) async fn release_recovered(&self, config: &HarnessHealthConfig, spawner: &L4Spawner) {
         let since = Utc::now() - chrono::Duration::days(HELD_LOOKBACK_DAYS);
-        let entries = match self.l4.store.entries_of_kinds(&[HELD_ENTRY], since).await {
+        let entries = match self.state.store.entries_of_kinds(&[HELD_ENTRY], since).await {
             Ok(entries) => entries,
             Err(e) => {
                 tracing::warn!("could not look for tasks held on a harness: {e}");
@@ -114,10 +118,10 @@ impl Engine {
         let newest: BTreeMap<String, TaskEntry> = entries.into_iter().collect();
         let mut held: Vec<(Task, Trigger, Option<HealthProbe>)> = Vec::new();
         for (task_id, entry) in newest {
-            let Ok(Some(task)) = self.l4.store.get(&task_id).await else {
+            let Ok(Some(task)) = self.state.store.get(&task_id).await else {
                 continue;
             };
-            if task.status != TaskStatus::Blocked || !matches!(self.l4.store.active_run(&task_id).await, Ok(None)) {
+            if task.status != TaskStatus::Blocked || !matches!(self.state.store.active_run(&task_id).await, Ok(None)) {
                 continue;
             }
             let trigger = entry
@@ -128,7 +132,7 @@ impl Engine {
                 .unwrap_or(Trigger::Manual);
             // The task may have been moved to an agent with nothing to
             // check since; then there is nothing to wait for.
-            let probe = self.l3_service().probe_for(&task.scope, &task.agent);
+            let probe = self.probe_for(&task.scope, &task.agent);
             held.push((task, trigger, probe));
         }
         // This is the recheck: every binary something waits on is probed
@@ -137,7 +141,7 @@ impl Engine {
         let binaries: std::collections::BTreeSet<String> =
             held.iter().filter_map(|(_, _, p)| p.as_ref().map(binary_of)).collect();
         for binary in &binaries {
-            crate::commands::l3(self).port().doubt(binary);
+            self.wiring.l3().port().doubt(binary);
         }
         let mut still_held: BTreeMap<String, Vec<HeldTask>> = BTreeMap::new();
         for (task, trigger, probe) in held {
@@ -149,10 +153,10 @@ impl Engine {
                 None => Verdict::Healthy,
             };
             match verdict {
-                Verdict::Healthy => self.release_held(&task, trigger).await,
+                Verdict::Healthy => self.release_held(&task, trigger, spawner).await,
                 Verdict::Unhealthy { binary, .. } => {
                     if let Some(probe) = &probe {
-                        crate::commands::l3(self).port().auto_repair(&harness_name(probe), &binary, config.auto_repair, config.repair_script.clone());
+                        self.wiring.l3().port().auto_repair(&harness_name(probe), &binary, config.auto_repair, config.repair_script.clone());
                     }
                     still_held.entry(binary).or_default().push(HeldTask {
                         task_id: task.id.clone(),
@@ -162,7 +166,7 @@ impl Engine {
                 }
             }
         }
-        crate::commands::l3(self).port().set_held(still_held);
+        self.wiring.l3().port().set_held(still_held);
     }
 
     /// Back to `pending`, and dispatched by exactly one thing. A task whose
@@ -174,10 +178,10 @@ impl Engine {
     /// dispatched here, with the trigger it was held with. Under the
     /// schedule lock, so the scheduler's own look at the task cannot fall
     /// between the decision and the change.
-    async fn release_held(self: &Arc<Self>, task: &Task, trigger: Trigger) {
+    async fn release_held(&self, task: &Task, trigger: Trigger, spawner: &L4Spawner) {
         let scheduler_fires = {
-            let _slot = self.l4.schedule_lock.lock().await;
-            let Ok(Some(current)) = self.l4.store.get(&task.id).await else {
+            let _slot = self.state.schedule_lock.lock().await;
+            let Ok(Some(current)) = self.state.store.get(&task.id).await else {
                 return;
             };
             let scheduler_fires = current.next_run_at.is_some_and(|at| at <= Utc::now());
@@ -188,7 +192,7 @@ impl Engine {
             };
             self.entry(&task.id, TaskEntry::new("daemon", RELEASED_ENTRY, said)).await;
             if let Err(e) = self
-                .l4.store
+                .state.store
                 .update(
                     &task.id,
                     &TaskPatch { status: Some(TaskStatus::Pending), clear_error: true, ..Default::default() },
@@ -204,16 +208,14 @@ impl Engine {
         if scheduler_fires {
             return;
         }
-        let engine = self.clone();
-        let id = task.id.clone();
-        tokio::spawn(async move { engine.l4_service().start_run(&id, trigger).await });
+        spawner.spawn_start_run(task.id.clone(), trigger);
     }
 
     /// An acknowledgement timeout on a run: a reason to doubt whatever the
     /// cache says about its harness, so the next dispatch probes it again.
     pub(crate) fn doubt_harness_of(&self, task: Option<&Task>) {
-        if let Some(probe) = task.and_then(|t| self.l3_service().probe_for(&t.scope, &t.agent)) {
-            crate::commands::l3(self).port().doubt(&binary_of(&probe));
+        if let Some(probe) = task.and_then(|t| self.probe_for(&t.scope, &t.agent)) {
+            self.wiring.l3().port().doubt(&binary_of(&probe));
         }
     }
 }

@@ -241,11 +241,17 @@ impl L4Service<'_> {
         internal_review: bool,
     ) -> Result<Task> {
         let observer = crate::commands::CreationObserver(self.wiring.bus().clone());
-        let process = crate::commands::process(self.core, &observer);
+        let snapshot = self.wiring.snapshot();
+        let process = crate::commands::process_with(
+            self.state.store.as_ref(),
+            self.wiring.registry(),
+            &snapshot,
+            &observer,
+        );
         let receipt = process
             .create_extended(new, workflow_origin, bench_origin.map(Into::into), id, intake, internal_review)
             .await?;
-        crate::commands::task_snapshot(self.core, receipt.id).await
+        self.require(&receipt.id).await
     }
 
     /// Re-derive who a persisted `WorkflowActor` is right now, honouring a
@@ -257,7 +263,7 @@ impl L4Service<'_> {
             WorkflowActor::Agent { scope, name } => Caller::Agent {
                 scope: scope.clone(),
                 name: name.clone(),
-                role: self.core.effective_role_for(scope, name).await,
+                role: self.effective_role(scope, name).await,
                 run_id: None,
             },
         }
@@ -287,5 +293,58 @@ impl L4Service<'_> {
             },
         )
         .await
+    }
+}
+
+/// What L4 reads of L3: facts, and the configuration both share.
+impl L4Service<'_> {
+    /// The role an agent runs under right now (L3's `EffectiveRoleFact`).
+    pub(crate) async fn effective_role(&self, scope: &str, name: &str) -> factory_core::role::Role {
+        self.wiring
+            .facts()
+            .get::<factory_kernel::EffectiveRoleFact>(&(scope.to_string(), name.to_string()))
+            .await
+            .map(|fact| factory_core::role::Role::new(fact.0))
+            .unwrap_or_default()
+    }
+
+    /// The version L3 last observed for an adapter's harness binary (L3's `HarnessVersionFact`).
+    pub(crate) async fn harness_version_of(
+        &self,
+        adapter: &str,
+        probe: &factory_agents::harness::HealthProbe,
+    ) -> Option<String> {
+        self.wiring
+            .facts()
+            .get::<factory_kernel::HarnessVersionFact>(&(adapter.to_string(), probe.clone()))
+            .await
+            .ok()
+            .and_then(|fact| fact.0)
+    }
+
+    /// The health probe of the harness an agent resolves to, if its adapter declares one: a pure function of the
+    /// configuration and the adapter registry.
+    pub(crate) fn probe_for(&self, scope: &str, agent: &str) -> Option<factory_agents::harness::HealthProbe> {
+        let (_, adapter, _) = self.wiring.resolve_agent(scope, agent).ok()?;
+        self.wiring.registry().agent(&adapter).ok()?.health_probe()
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    /// L4 reads the effective role and the harness version from L3 as facts, and they are what L3 itself answers.
+    #[tokio::test]
+    async fn l4_reads_the_effective_role_and_harness_version_as_l3_facts() {
+        let (engine, _root) = crate::environments::tests::engine_with("  - name: prod\n");
+        let l4 = engine.l4_service();
+        for (scope, agent) in [("company", "nobody"), ("no-such-scope", "x")] {
+            assert_eq!(
+                l4.effective_role(scope, agent).await,
+                engine.l3_service().effective_role(scope, agent).await,
+                "{scope}/{agent}"
+            );
+        }
+        let probe = factory_agents::harness::HealthProbe::version("nonexistent-binary-for-the-test");
+        assert_eq!(l4.harness_version_of("claude-code", &probe).await, None, "nothing observed yet");
     }
 }

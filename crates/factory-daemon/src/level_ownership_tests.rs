@@ -165,7 +165,6 @@ const SERVICES: &[ServiceEntry] = &[
 /// (file -> accessor, count): modules that reach into a level service from
 /// another level. Each is a pull the owning slice has to replace. May only shrink.
 const PULLS_BASELINE: &[(&str, usize)] = &[
-    ("harness_hold.rs -> .l3_service()", 2),
 ];
 
 /// `Arc<Engine>` in L4- and L5-owned production code. `l4_spawner.rs` and `l5_spawner.rs` are the handles themselves; the rest is workflows, which take an
@@ -193,8 +192,8 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("configuration.rs", "reach", 1),
     ("configuration.rs", "services", 1),
     ("doctor.rs", "reach", 2),
-    ("engine.rs", "reach", 23),
-    ("engine.rs", "services", 13),
+    ("engine.rs", "reach", 22),
+    ("engine.rs", "services", 12),
     ("environments/promotion.rs", "reach", 6),
     ("environments/promotion.rs", "services", 3),
     ("environments/recovery.rs", "reach", 3),
@@ -206,13 +205,13 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("facts/l1.rs", "reach", 3),
     ("facts/l1.rs", "services", 1),
     ("facts/l2.rs", "reach", 1),
-    ("facts/l3.rs", "reach", 2),
-    ("facts/l4.rs", "people", 1),
+    ("facts/l3.rs", "reach", 3),
+    ("facts/l3.rs", "services", 1),
     ("facts/l4.rs", "reach", 10),
     ("facts/l5.rs", "providers", 1),
     ("facts/l5.rs", "reach", 2),
     ("facts/mod.rs", "providers", 2),
-    ("facts/mod.rs", "services", 5),
+    ("facts/mod.rs", "services", 6),
     ("host_power/page.rs", "reach", 4),
     ("main.rs", "services", 5),
     ("metrics.rs", "services", 2),
@@ -241,9 +240,8 @@ const DIRECT_PROVIDER_BASELINE: &[(&str, usize)] = &[];
 /// `self.core.` call sites per file (the transitional `L4Service::core`). May only shrink; goes away with the handle.
 const CORE_BASELINE: &[(&str, usize)] = &[
     ("run_settle.rs", 5),
-    ("run_start.rs", 3),
-    ("intake.rs", 2),
-    ("l4_service.rs", 3),
+    ("intake.rs", 1),
+    ("l4_service.rs", 2),
 ];
 
 /// Files that name `Facts::<People>` today (count). May only shrink.

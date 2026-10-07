@@ -228,14 +228,14 @@ impl L4Service<'_> {
         // Resolve again rather than trusting what was written down: the config
         // may have changed since the task was created.
         let (agent_name, adapter_name, declaration) =
-            crate::commands::agents(self.core).resolve_agent(&task.scope, &task.agent)?;
+            self.wiring.resolve_agent(&task.scope, &task.agent)?;
         let agent = self.wiring.registry().agent(&adapter_name)?;
         let runtime = self.wiring.registry().runtime(&task.runtime)?;
         // Before anything else exists (`#131`): a harness that does not
         // start blocks the task here, with no run row and no session, rather
         // than dispatching into a pane nobody answers and failing it as an
         // `ack_timeout` three minutes later.
-        self.core.harness_gate(&task, agent.as_ref(), trigger).await?;
+        self.harness_gate(&task, agent.as_ref(), trigger).await?;
         let factory = self.wiring.snapshot();
         let provider_account = declaration
             .as_ref()
@@ -259,13 +259,16 @@ impl L4Service<'_> {
             )));
         }
 
-        let role_name = self.core.effective_role_for(&task.scope, &agent_name).await;
+        let role_name = self.effective_role(&task.scope, &agent_name).await;
         let role = self.wiring.roles_for(&task.scope).get(&role_name).cloned();
         let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.wiring.policy_chain(&task.scope));
         let goal = self.wiring.intent().goal_context(task.labels.get("goal").cloned()).await;
         let quality = self.above.quality_block(&task.scope).await;
         let probe = agent.health_probe();
-        let version = probe.as_ref().and_then(|probe| self.core.harness_version_of(&adapter_name, probe));
+        let version = match probe.as_ref() {
+            Some(probe) => self.harness_version_of(&adapter_name, probe).await,
+            None => None,
+        };
         // Hash guide inputs, code and the observed binary version, never tokens.
         let binary_stamp = probe.as_ref().and_then(|probe| crate::harness_health::resolve(probe.program()))
             .and_then(|path| std::fs::metadata(path).ok())
@@ -577,7 +580,7 @@ impl L4Service<'_> {
 
         // Approval has passed (or none was required); only now does this run
         // acquire its liveness assertion and create an outward agent session.
-        let l3 = crate::commands::l3(self.core);
+        let l3 = self.wiring.l3();
         l3.port().keep_awake(&run.id).await;
 
         // A worktree of its own, made now rather than left to the harness --
@@ -731,7 +734,7 @@ impl L4Service<'_> {
         // the harness's own, and the prompt goes in with it: typed into a
         // TUI through a pty, a multi-line prompt would submit at its first
         // newline.
-        let notes = crate::commands::EntryNotes::of(self.core);
+        let notes = crate::commands::EntryNotes::new(self.state.store.clone(), self.wiring.bus().clone());
         let sandboxed = match &openshell {
             // Its own boxed future: everything the sandbox needs lives in
             // that frame, not in this one, which is already deep.
