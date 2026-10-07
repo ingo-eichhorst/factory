@@ -27,7 +27,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         }
 
         // -- due tasks ---------------------------------------------------
-        match engine.due_now().await {
+        match engine.l4_service().due_now().await {
             Ok(due) => {
                 for task in due {
                     // Held from the re-read to the move of `next_run_at`, so
@@ -36,7 +36,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                     // somebody else's decision now, and waits for the next
                     // tick to be looked at again.
                     let _slot = engine.l4.schedule_lock.lock().await;
-                    let Some(task) = engine.still_due(&task).await else {
+                    let Some(task) = engine.l4_service().still_due(&task).await else {
                         continue;
                     };
                     // A task with a queued retry (`pending_retry`, set only by
@@ -56,11 +56,11 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                     // firing -- the slot that fired it.
                     let slot = task.next_run_at.unwrap_or_else(Utc::now);
                     let retry = task.pending_retry.is_some();
-                    let due = engine.due_for(&task, slot, !retry).await;
+                    let due = engine.l4_service().due_for(&task, slot, !retry).await;
                     let (trigger, advanced) = if retry {
-                        (Trigger::Retry, engine.resume_from_retry(&task).await)
+                        (Trigger::Retry, engine.l4_service().resume_from_retry(&task).await)
                     } else {
-                        (Trigger::Schedule, engine.advance_schedule(&task).await)
+                        (Trigger::Schedule, engine.l4_service().advance_schedule(&task).await)
                     };
                     if let Err(e) = advanced {
                         tracing::warn!(task = %task.id, "could not advance schedule: {e}");
@@ -87,7 +87,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         // part waits as an ordinary Pending task until all of its declared
         // predecessors are Done; the status transition at dispatch keeps
         // the next tick from claiming it a second time.
-        match engine.dependency_ready_tasks().await {
+        match engine.l4_service().dependency_ready_tasks().await {
             Ok(tasks) => {
                 for task in tasks {
                     let engine = engine.clone();
@@ -112,7 +112,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         // raised limit, or a wakeup the channel dropped; every ordinary
         // release reaches its waiting task immediately through that channel
         // on its own.
-        engine.enqueue_capacity_sweep();
+        engine.l4_service().enqueue_capacity_sweep();
         engine.l4_service().sweep_workspaces().await;
 
         // -- standing agents ---------------------------------------------
@@ -126,7 +126,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         engine.record_run_liveness().await;
 
         // -- runs that stopped talking -----------------------------------
-        let active = match engine.active_runs().await {
+        let active = match engine.l4_service().active_runs().await {
             Ok(runs) => runs,
             Err(e) => {
                 tracing::warn!("could not list active runs: {e}");

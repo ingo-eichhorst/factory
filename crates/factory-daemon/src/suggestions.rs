@@ -16,7 +16,6 @@ use factory_core::run::{FailKind, Run, Trigger};
 use factory_core::task::{Task, TaskEntry};
 use factory_kernel::{FactoryError, Result};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 pub(crate) use factory_assurance::suggestion_store::SuggestionStore;
 
@@ -253,7 +252,7 @@ impl Engine {
     /// falls back to fresh for one of those, the freshly started run is
     /// cancelled rather than silently asked a question in a conversation
     /// that never saw it.
-    pub(crate) async fn suggestion_ask(self: &Arc<Self>, caller: &Caller, id: &str, question: String) -> Result<Suggestion> {
+    pub(crate) async fn suggestion_ask(&self, caller: &Caller, id: &str, question: String) -> Result<Suggestion> {
         if question.trim().is_empty() {
             return Err(FactoryError::BadRequest("a question cannot be empty".into()));
         }
@@ -366,6 +365,7 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use super::*;
     use crate::access::Caller;
     use factory_core::agent::Lifetime;

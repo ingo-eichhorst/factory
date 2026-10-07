@@ -48,7 +48,6 @@
 //! commands that same L5 service. Only the outside router reads task responses.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -253,7 +252,7 @@ impl Engine {
     /// Load, compute the metrics the trees read, and judge -- the whole
     /// evaluation for a caller that has no metric values of its own.
     async fn evaluate_quality(
-        self: &Arc<Self>,
+        &self,
         inputs: &QualityInputs,
         now: DateTime<Utc>,
     ) -> Result<(Vec<ScopeReport>, Vec<quality::Finding>, Vec<MetricSeries>)> {
@@ -273,7 +272,7 @@ impl Engine {
     /// that records the profiles' fingerprint (and so may publish
     /// `Event::QualityChanged`) -- a metrics or goals read that happens to
     /// compute `quality.*` does not.
-    pub(crate) async fn quality_report(self: &Arc<Self>, scope: Option<&str>) -> Result<QualityReport> {
+    pub(crate) async fn quality_report(&self, scope: Option<&str>) -> Result<QualityReport> {
         let now = Utc::now();
         let inputs = self.quality_inputs(scope, false).await?;
         let (reports, evidence_findings, series) = self.evaluate_quality(&inputs, now).await?;
@@ -328,7 +327,7 @@ impl Engine {
     /// profile. `h_only` narrows the tree to H-importance attributes before
     /// anything is gathered -- all the guide shows, so a dispatch never
     /// pays for evidence behind an M or L attribute.
-    async fn quality_for_scope(self: &Arc<Self>, mut inputs: QualityInputs, h_only: bool) -> Result<Option<ScopeReport>> {
+    async fn quality_for_scope(&self, mut inputs: QualityInputs, h_only: bool) -> Result<Option<ScopeReport>> {
         if h_only {
             for (_, tree) in &mut inputs.trees {
                 tree.attributes.retain(|a| a.importance == Level::High);
@@ -350,7 +349,7 @@ impl Engine {
     /// reading a year of runs. Empty, never an error, when nothing applies
     /// or something cannot be read -- a quality profile must never stop a
     /// task from dispatching -- and a failure is never cached.
-    pub(crate) async fn quality_context(self: &Arc<Self>, scope: &str) -> Vec<QualityAttributeContext> {
+    pub(crate) async fn quality_context(&self, scope: &str) -> Vec<QualityAttributeContext> {
         let mut cache = self.l5.quality_guide_cache.lock().await;
         let inputs = match self.quality_inputs(Some(scope), true).await {
             Ok(inputs) => inputs,
@@ -396,7 +395,7 @@ impl Engine {
     /// The check and the create are not atomic, the same as
     /// `policy_remediate`: two calls racing can both create.
     pub(crate) async fn quality_remediate(
-        self: &Arc<Self>,
+        &self,
         scope: String,
         attribute: String,
         scenario: String,
@@ -425,6 +424,7 @@ mod tests {
     //! temporary instance -- not `factory_core::quality` itself (covered on
     //! its own), but this module glued to a real scope tree, real profiles
     //! on disk and a real task store, the way a request sees them.
+    use std::sync::Arc;
 
     use super::*;
     use factory_core::adapter::store::task_from_new;

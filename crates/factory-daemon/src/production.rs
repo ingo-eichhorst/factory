@@ -5,11 +5,10 @@ use factory_core::{
     error::Result,
     protocol::{Production, ProductionBin},
 };
-use std::sync::Arc;
 
 impl Engine {
     pub async fn production(
-        self: &Arc<Self>,
+        &self,
         minutes: Option<u32>,
         bin: Option<ProductionBin>,
         scope: Option<String>,

@@ -39,7 +39,6 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
 
 /// The fresh `awaiting_approval` record a decision on `record` (`decided`,
 /// just made) leaves behind, or `None` when this decision has nothing to
@@ -83,7 +82,7 @@ pub(crate) fn awaiting_approval_outbound(record: &Intake, decided: &DecisionReco
 
 impl Engine {
     /// `Request::IntakePublish`, against the real `gh` on `PATH`.
-    pub(crate) async fn intake_publish(self: &Arc<Self>, caller: &Caller, id: &str) -> Result<Task> {
+    pub(crate) async fn intake_publish(&self, caller: &Caller, id: &str) -> Result<Task> {
         self.intake_publish_with_gh(caller, id, Path::new("gh")).await
     }
 
@@ -98,7 +97,7 @@ impl Engine {
     /// failure -- writes the item's `outbound` record and journals
     /// `outbound_completed` or `outbound_failed`; this never returns an
     /// error for a `gh` failure; the failure is on the record instead.
-    pub(crate) async fn intake_publish_with_gh(self: &Arc<Self>, caller: &Caller, id: &str, gh: &Path) -> Result<Task> {
+    pub(crate) async fn intake_publish_with_gh(&self, caller: &Caller, id: &str, gh: &Path) -> Result<Task> {
         let item = self.require(id).await?;
         let record = item
             .intake
@@ -411,6 +410,7 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use super::*;
     use crate::stores::ScopedStores;
     use factory_core::adapter::TaskStore;

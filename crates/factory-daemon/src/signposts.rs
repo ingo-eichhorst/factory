@@ -10,7 +10,6 @@ use factory_assurance::{
 use factory_core::protocol::TriggeredSignpost;
 use factory_core::scenario;
 use factory_kernel::{FactoryError, People, Result, SignpostFact};
-use std::sync::Arc;
 fn fingerprint(dir: &std::path::Path) -> factory_assurance::signposts::Revision {
     let mut out: factory_assurance::signposts::Revision = std::fs::read_dir(dir)
         .map(|entries| {
@@ -29,7 +28,7 @@ fn fingerprint(dir: &std::path::Path) -> factory_assurance::signposts::Revision 
 
 impl Engine {
     pub(crate) async fn signposts_fact(
-        self: &Arc<Self>,
+        &self,
         now: DateTime<Utc>,
         use_cache: bool,
     ) -> Result<SignpostFact> {
@@ -81,7 +80,7 @@ impl Engine {
     /// but now through the actual L5 fact rather than an Engine metric loop.
     #[cfg(test)]
     pub(crate) async fn triggered_signposts(
-        self: &Arc<Self>,
+        &self,
         now: DateTime<Utc>,
     ) -> Result<Vec<TriggeredSignpost>> {
         self.signposts_fact(now, false)
@@ -96,7 +95,7 @@ impl Engine {
     }
     #[cfg(test)]
     pub(crate) async fn triggered_signposts_cached(
-        self: &Arc<Self>,
+        &self,
         now: DateTime<Utc>,
     ) -> Result<Vec<TriggeredSignpost>> {
         self.signposts_fact(now, true)

@@ -2312,7 +2312,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let ready = engine.dependency_ready_tasks().await.unwrap();
+        let ready = engine.l4_service().dependency_ready_tasks().await.unwrap();
         assert!(ready.is_empty(), "workflow release is graph-owned, not the generic scheduler's");
         engine.sync_workflow_for_task(&foundation.id).await;
         assert!(engine.require(&surface.id).await.unwrap().after.is_none(), "the graph consumes the upstream wait");

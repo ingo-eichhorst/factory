@@ -254,7 +254,7 @@ impl Engine {
     /// instead means `status_report`, the one call that can cost an extra
     /// subprocess (`herdr agent explain`), is asked for exactly once per run
     /// per tick, not two or three times over.
-    pub async fn record_run_liveness(self: &Arc<Self>) {
+    pub async fn record_run_liveness(&self) {
         let runs = self.l4.store.active_runs().await.unwrap_or_default();
         for run in runs {
             if run.session.is_none() {

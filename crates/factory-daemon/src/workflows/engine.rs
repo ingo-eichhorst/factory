@@ -616,7 +616,7 @@ mod tests {
         assert_eq!(b.after, Some(vec![a.id.clone()]));
         assert_eq!(c.after, Some(vec![b.id.clone()]));
         assert_eq!(b.status, TaskStatus::Pending);
-        assert!(engine.dependency_ready_tasks().await.unwrap().is_empty());
+        assert!(engine.l4_service().dependency_ready_tasks().await.unwrap().is_empty());
         engine.start_run(&b.id, Trigger::Dependency).await;
         assert!(engine.l4.store.active_run(&b.id).await.unwrap().is_none());
         let response = engine.handle_request(factory_core::protocol::Request::TaskRun {
@@ -697,20 +697,20 @@ mod tests {
         let mut new = node("child").task;
         new.after = Some(vec![parent.id.clone()]);
         let child = engine.create(new.clone()).await.unwrap();
-        assert!(engine.dependency_ready_tasks().await.unwrap().is_empty());
+        assert!(engine.l4_service().dependency_ready_tasks().await.unwrap().is_empty());
         let invalid = engine.update(&parent.id, TaskPatch { after: Some(vec![child.id.clone()]), ..Default::default() }, None).await;
         assert!(invalid.unwrap_err().to_string().contains("cycle"));
         new.schedule = Some(factory_core::task::Schedule::Every { seconds: 1 });
         assert!(engine.create(new).await.unwrap_err().to_string().contains("exclusive"));
         engine.start_run(&parent.id, Trigger::Manual).await;
         finish(&engine, &parent.id, RunStatus::Done).await;
-        let ready = engine.dependency_ready_tasks().await.unwrap();
+        let ready = engine.l4_service().dependency_ready_tasks().await.unwrap();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].id, child.id);
         engine.start_run(&child.id, Trigger::Dependency).await;
         finish(&engine, &child.id, RunStatus::Done).await;
         assert!(engine.require(&child.id).await.unwrap().after.is_none());
-        assert!(engine.dependency_ready_tasks().await.unwrap().is_empty());
+        assert!(engine.l4_service().dependency_ready_tasks().await.unwrap().is_empty());
         assert_eq!(engine.l4.store.runs(&child.id, 10).await.unwrap().len(), 1);
     }
 
@@ -3765,7 +3765,7 @@ impl Engine {
         self.workflow_run(&run.id).await
     }
 
-    pub(crate) async fn cancel_workflow(self: &Arc<Self>, id: &str) -> Result<WorkflowRun> {
+    pub(crate) async fn cancel_workflow(&self, id: &str) -> Result<WorkflowRun> {
         let task_ids = {
             let _guard = self.l4.workflow_edit.lock().await;
             let mut run = self.workflow_run(id).await?;

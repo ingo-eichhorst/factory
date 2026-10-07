@@ -39,7 +39,7 @@ impl Engine {
     /// making a run row -- nothing is failed and no session is opened. A
     /// person's own `task run` probes afresh rather than trusting a cached
     /// failure: it is what they do right after running the repair.
-    pub(crate) async fn harness_gate(self: &Arc<Self>, task: &Task, adapter: &dyn Agent, trigger: Trigger) -> Result<()> {
+    pub(crate) async fn harness_gate(&self, task: &Task, adapter: &dyn Agent, trigger: Trigger) -> Result<()> {
         let Some(probe) = adapter.health_probe() else {
             return Ok(());
         };

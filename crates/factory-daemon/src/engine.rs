@@ -148,7 +148,7 @@ fn preserved_conversation_has(preserved_dir: &Path, session_id: &str) -> bool {
 /// entry. Three causes produce the same state (a past `next_run_at` on a
 /// pending task), so the entry says which one it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SkipReason {
+pub(crate) enum SkipReason {
     /// The task's previous run was still going when the first skipped slot
     /// came round -- `due()` only fires a `pending` task.
     StillActive,
@@ -168,7 +168,7 @@ enum SkipReason {
 /// (`started_at - scheduled_for` measures it for a slot), not queue wait.
 /// A host asleep with the daemon still running leaves no record, so that
 /// stretch still reads as queue wait.
-fn dispatchable_from(
+pub(crate) fn dispatchable_from(
     due: chrono::DateTime<Utc>,
     booted_at: chrono::DateTime<Utc>,
     previous: Option<&Run>,
@@ -186,7 +186,7 @@ fn dispatchable_from(
 /// open at `first` (started by then, not yet ended), already queued for but
 /// not yet started at `first` (`#179`: it was waiting for a capacity slot),
 /// or neither.
-fn skip_reason_of(newest: Option<&Run>, first: chrono::DateTime<Utc>) -> SkipReason {
+pub(crate) fn skip_reason_of(newest: Option<&Run>, first: chrono::DateTime<Utc>) -> SkipReason {
     match newest {
         Some(run) if run.started_at <= first && run.ended_at.is_none_or(|end| end >= first) => {
             SkipReason::StillActive
@@ -199,7 +199,7 @@ fn skip_reason_of(newest: Option<&Run>, first: chrono::DateTime<Utc>) -> SkipRea
 }
 
 impl SkipReason {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::StillActive => "still_active",
             Self::Queued => "queued",
@@ -207,7 +207,7 @@ impl SkipReason {
         }
     }
 
-    fn describe(self) -> &'static str {
+    pub(crate) fn describe(self) -> &'static str {
         match self {
             Self::StillActive => "the previous run was still going",
             Self::Queued => "it was already queued, waiting for a capacity slot",
@@ -555,7 +555,7 @@ impl Engine {
             for agent in scope.declared_agents() {
                 let Some(max) = agent.max_sessions else { continue };
                 let name = agent.name();
-                let cap = self.capacity_for(&scope.name, &name, Some(max)).await?;
+                let cap = self.l4_service().capacity_for(&scope.name, &name, Some(max)).await?;
                 let waiting = tasks
                     .iter()
                     .filter(|t| t.slot_wait.as_ref().is_some_and(|w| w.scope == scope.name && w.agent == name))
@@ -1203,52 +1203,7 @@ impl Engine {
         crate::commands::task_snapshot(self, receipt.id).await
     }
 
-    /// Human-readable dependencies that are not successfully complete.
-    /// Missing ids block too: silently treating a deleted prerequisite as
-    /// success would run work with an input it never received.
-    async fn dependency_blockers(&self, task: &Task) -> Result<Vec<String>> {
-        let mut blockers = Vec::new();
-        if task.workflow_origin.is_some() && task.after.is_some() {
-            return Ok(vec![self.waiting_description(task).await?]);
-        }
-        // The graph also owns decomposition merge/gate ordering. Its
-        // explicit release (or a journaled override) consumes that wait.
-        if task.workflow_origin.is_some() { return Ok(blockers); }
-        for id in task.depends_on.iter().chain(task.after.iter().flatten()) {
-            match self.l4.store.get(id).await? {
-                Some(parent) if parent.status == TaskStatus::Done => {}
-                Some(parent) => blockers.push(format!(
-                    "{} ({}, {})",
-                    parent.title,
-                    parent.id,
-                    parent.status.as_str()
-                )),
-                None => blockers.push(format!("{id} (missing)")),
-            }
-        }
-        Ok(blockers)
-    }
 
-    /// Pending decomposition tasks which became runnable since the last
-    /// scheduler tick, including never-started roots recovered after a
-    /// restart. `runs == 0` is deliberate: plan release starts a task once;
-    /// retrying an attempt that failed remains an explicit act.
-    pub(crate) async fn dependency_ready_tasks(&self) -> Result<Vec<Task>> {
-        let tasks = self.l4.store.list(&TaskFilter::default()).await?;
-        let mut ready = Vec::new();
-        for task in tasks.into_iter().filter(|task| {
-            task.status == TaskStatus::Pending
-                && task.runs == 0
-                && task.slot_wait.is_none()
-                && (task.after.is_some() || (task.parent_task_id.is_some() && task.decomposition_part.is_some()))
-        }) {
-            if task.workflow_origin.is_some() { continue; }
-            if self.dependency_blockers(&task).await?.is_empty() {
-                ready.push(task);
-            }
-        }
-        Ok(ready)
-    }
 
     // -- running -----------------------------------------------------------
 
@@ -1256,7 +1211,7 @@ impl Engine {
     /// a workflow node, an agent's request and a bench attempt all mean by
     /// starting one: the moment the daemon asks is the moment it became
     /// eligible. See `start_run_due` for one that became due earlier.
-    pub async fn start_run(self: &Arc<Self>, task_id: &str, trigger: Trigger) {
+    pub async fn start_run(&self, task_id: &str, trigger: Trigger) {
         self.start_run_due(task_id, trigger, Due::now()).await
     }
 
@@ -1264,7 +1219,7 @@ impl Engine {
     /// slot, a retry's backoff running out, a request that arrived before
     /// the dispatch got going. Failures here end the run rather than
     /// escaping, because nobody is waiting on the answer.
-    pub async fn start_run_due(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due) {
+    pub async fn start_run_due(&self, task_id: &str, trigger: Trigger, due: Due) {
         self.start_run_due_inner(task_id, trigger, due, None).await
     }
 
@@ -1274,11 +1229,11 @@ impl Engine {
     /// than a new parameter on `start_run_due` itself, so its dozen other
     /// callers -- the scheduler, retries, waiting-slot releases -- need no
     /// change at all.
-    pub async fn start_run_due_continue(self: &Arc<Self>, task_id: &str, due: Due, continue_from: Run) {
+    pub async fn start_run_due_continue(&self, task_id: &str, due: Due, continue_from: Run) {
         self.start_run_due_inner(task_id, Trigger::Manual, due, Some(continue_from)).await
     }
 
-    async fn start_run_due_inner(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) {
+    async fn start_run_due_inner(&self, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) {
         // However it was asked for, an item still in intake is not started --
         // and not failed either, which is what a dispatch error below would
         // do to it (`#119`).
@@ -1291,7 +1246,7 @@ impl Engine {
                 .await;
                 return;
             }
-            match self.dependency_blockers(&task).await {
+            match self.l4_service().dependency_blockers(&task).await {
                 Ok(blockers) if !blockers.is_empty() => {
                     self.entry(
                         task_id,
@@ -1429,7 +1384,7 @@ impl Engine {
         self.record_bench_task_state(task_id).await;
     }
 
-    pub(crate) async fn dispatch(self: &Arc<Self>, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) -> Result<Run> {
+    pub(crate) async fn dispatch(&self, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) -> Result<Run> {
         Box::pin(self.dispatch_with(task_id, trigger, due, continue_from, Vec::new())).await
     }
 
@@ -1440,7 +1395,7 @@ impl Engine {
     /// caller goes through `dispatch` above, which passes none.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn dispatch_with(
-        self: &Arc<Self>,
+        &self,
         task_id: &str,
         trigger: Trigger,
         due: Due,
@@ -1597,7 +1552,7 @@ impl Engine {
             }
             if admitted_task.after.is_some() {
                 if trigger != Trigger::Dependency || admitted_task.workflow_origin.is_some()
-                    || !self.dependency_blockers(&admitted_task).await?.is_empty() {
+                    || !self.l4_service().dependency_blockers(&admitted_task).await?.is_empty() {
                     return Err(FactoryError::DispatchSuperseded("the upstream trigger has not been released".into()));
                 }
                 self.l4.store.update(task_id, &TaskPatch { clear_after: true, ..Default::default() }).await?;
@@ -1626,7 +1581,7 @@ impl Engine {
                 return Err(FactoryError::DispatchSuperseded("this feedback round already has an attempt".into()));
             }
             let agent_max = declaration.as_ref().and_then(|d| d.max_sessions);
-            let cap = self.capacity_for(&task.scope, &agent_name, agent_max).await?;
+            let cap = self.l4_service().capacity_for(&task.scope, &agent_name, agent_max).await?;
             if cap.held() {
                 let (in_use, max) = cap.holding_pair();
                 return Err(FactoryError::CapacityHeld { agent: agent_name.clone(), in_use, max });
@@ -2913,7 +2868,7 @@ impl Engine {
             // caller, only closes the pane; the run is still non-terminal
             // (and so still counted as using a slot) until this write lands,
             // which is why the wakeup goes here and not there (`#179`).
-            self.enqueue_capacity_release(&task.scope, &run.agent);
+            self.l4_service().enqueue_capacity_release(&task.scope, &run.agent);
         }
         self.mirror_to_task(&run).await;
         self.settle_retry(&run).await;
@@ -2941,25 +2896,7 @@ impl Engine {
         lock
     }
 
-    /// A run just stopped using a slot: send `(scope, agent)` to the capacity
-    /// worker so whatever is waiting on it wakes right away. `&self`
-    /// deliberately -- `finish_run`, `report` and `cancel_task_run` are not
-    /// `Arc<Self>`, and a channel send needs no more than that, the same
-    /// reason `enqueue_verification` gets away with it.
-    pub(crate) fn enqueue_capacity_release(&self, scope: &str, agent: &str) {
-        let _ = self.l4.capacity_release_tx.send(CapacityEvent::Release(scope.to_string(), agent.to_string()));
-    }
 
-    /// The scheduler tick's own sweep, queued rather than run inline: a tick
-    /// that blocked on one slow dispatch would delay every due task it fires
-    /// afterward, the ack/run-timeout checks, and `supervise_agents` behind
-    /// it -- exactly why the due-task loop already spawns each dispatch
-    /// instead of awaiting it in place, and `recheck_harnesses` backgrounds
-    /// itself. Going through the same channel `Release` does also means a
-    /// sweep and a release can never run at once.
-    pub(crate) fn enqueue_capacity_sweep(&self) {
-        let _ = self.l4.capacity_release_tx.send(CapacityEvent::Sweep);
-    }
 
     /// Start the capacity-release worker: every [`CapacityEvent`]
     /// `enqueue_capacity_release`/`enqueue_capacity_sweep` sends is handled
@@ -2986,20 +2923,6 @@ impl Engine {
         });
     }
 
-    /// Every `Pending` task with a `slot_wait`, oldest wait first -- FIFO,
-    /// exactly the order `queued_at` gives it.
-    async fn waiting_tasks(&self) -> Vec<Task> {
-        let mut tasks: Vec<Task> = self
-            .l4.store
-            .list(&TaskFilter { status: Some(TaskStatus::Pending), ..Default::default() })
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|t| t.slot_wait.is_some())
-            .collect();
-        tasks.sort_by_key(|t| t.slot_wait.as_ref().unwrap().queued_at);
-        tasks
-    }
 
     /// Try to admit every waiting task whose own wait names `scope` or
     /// `agent` -- oldest first. Each attempt is an ordinary `start_run_due`,
@@ -3008,8 +2931,8 @@ impl Engine {
     /// still does not fit is simply held again, at no cost beyond the check
     /// itself. `dispatch` will see every earlier admission this loop already
     /// made, so the order tried is the order admitted.
-    pub(crate) async fn release_waiting(self: &Arc<Self>, scope: &str, agent: &str) {
-        for task in self.waiting_tasks().await {
+    pub(crate) async fn release_waiting(&self, scope: &str, agent: &str) {
+        for task in self.l4_service().waiting_tasks().await {
             let Some(wait) = task.slot_wait.clone() else { continue };
             if wait.scope != scope && wait.agent != agent {
                 continue;
@@ -3024,8 +2947,8 @@ impl Engine {
     /// a single `(scope, agent)` wakeup cannot -- a restart (nothing sent
     /// anything, but the wait is still on disk), a limit raised while tasks
     /// were already waiting, and a wakeup this channel dropped.
-    pub(crate) async fn recheck_capacity(self: &Arc<Self>) {
-        for task in self.waiting_tasks().await {
+    pub(crate) async fn recheck_capacity(&self) {
+        for task in self.l4_service().waiting_tasks().await {
             let Some(wait) = task.slot_wait.clone() else { continue };
             let due = Due { queued_at: wait.queued_at, scheduled_for: wait.scheduled_for };
             self.start_run_due(&task.id, wait.trigger, due).await;
@@ -3290,7 +3213,7 @@ impl Engine {
     /// A run that will never report back. `kind` is the reason as a fact --
     /// every caller has to name one, which is what keeps "why do runs fail"
     /// answerable without reading `why`'s prose back apart.
-    pub async fn fail_run(self: &Arc<Self>, run_id: &str, kind: FailKind, why: &str) {
+    pub async fn fail_run(&self, run_id: &str, kind: FailKind, why: &str) {
         let Ok(run) = self.require_run(run_id).await else {
             return;
         };
@@ -3470,216 +3393,12 @@ impl Engine {
 
     // -- what the scheduler needs ------------------------------------------
 
-    pub async fn due_now(&self) -> Result<Vec<Task>> {
-        // The sqlite store already passes over a paused schedule; an
-        // out-of-process store may predate the field and not know to, so
-        // the rule is held here as well rather than trusted to every
-        // adapter.
-        let mut due = self.l4.store.due(Utc::now()).await?;
-        due.retain(|t| !t.schedule_paused && t.fires());
-        Ok(due)
-    }
 
-    pub async fn active_runs(&self) -> Result<Vec<Run>> {
-        self.l4.store.active_runs().await
-    }
 
-    /// Every task still stored as `failed` -- written before `#122`, when a
-    /// failed run closed its task -- moved to `Blocked` on that failure, so
-    /// the board shows it where a person has to act instead of in a column
-    /// it no longer has. The failure is read off the newest run; a task
-    /// that never got a run (dispatch refused) has none to read, and is
-    /// blocked on a dispatch failure, which is the only way that happened.
-    ///
-    /// Blocked, not closed as not planned: the rule this exists for is that
-    /// a failure is an open item until a person disposes of it, and a bulk
-    /// close would be the daemon disposing of every one at once. A
-    /// scheduled one picks its schedule up from now -- its slots stopped
-    /// firing the moment it failed, and must not come back as a burst.
-    ///
-    /// Idempotent and cheap: once a row is moved, nothing writes `failed`
-    /// again, so later starts find none. Returns how many were moved.
-    pub async fn migrate_failed_tasks(&self) -> usize {
-        let filter = TaskFilter { status: Some(TaskStatus::Failed), ..Default::default() };
-        let Ok(tasks) = self.l4.store.list(&filter).await else {
-            return 0;
-        };
-        let mut moved = 0;
-        for task in tasks {
-            let newest = self.l4.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
-            let failure = match &newest {
-                Some(run) => TaskFailure {
-                    kind: run.fail_kind,
-                    run_id: Some(run.id.clone()),
-                    attempt: Some(run.attempt),
-                    at: run.ended_at.unwrap_or(task.updated_at),
-                },
-                None => TaskFailure {
-                    kind: Some(FailKind::DispatchFailed),
-                    run_id: None,
-                    attempt: None,
-                    at: task.updated_at,
-                },
-            };
-            let next_run_at = match &task.schedule {
-                Some(s) if !task.schedule_paused => schedule::next_after(s, Utc::now()).ok(),
-                _ => None,
-            };
-            let patch = TaskPatch {
-                status: Some(TaskStatus::Blocked),
-                failure: Some(failure),
-                next_run_at,
-                ..Default::default()
-            };
-            match self.l4.store.update(&task.id, &patch).await {
-                Ok(updated) => {
-                    moved += 1;
-                    self.entry(
-                        &task.id,
-                        TaskEntry::new(
-                            "daemon",
-                            "migrated",
-                            "stored as failed before failures stopped closing tasks (#122): now blocked on that \
-                             failure until someone runs it again or closes it with a reason",
-                        ),
-                    )
-                    .await;
-                    self.shared.bus.publish(Event::TaskUpdated { task: updated });
-                }
-                Err(e) => tracing::warn!(task = %task.id, error = %e, "could not move a failed task to blocked"),
-            }
-        }
-        if moved > 0 {
-            tracing::info!(moved, "moved tasks stored as failed to blocked (#122)");
-        }
-        moved
-    }
 
-    /// Move a scheduled task's next firing forward so it is not picked up twice
-    /// while it runs.
-    ///
-    /// The next firing is computed from now, not from the slot that is
-    /// firing, so a task that was still running through later slots -- or a
-    /// daemon that was down through them -- fires once, not once per slot.
-    /// Those passed-over slots are written down here, as one
-    /// `schedule_skipped` entry, because this is the only place that knows
-    /// they existed: nothing else would ever say the 03:00 run did not
-    /// happen.
-    pub async fn advance_schedule(&self, task: &Task) -> Result<()> {
-        let Some(s) = &task.schedule else {
-            return Ok(());
-        };
-        let now = Utc::now();
-        if let Some(slot) = task.next_run_at {
-            let tick = chrono::Duration::seconds(self.factory_snapshot().config.daemon.tick_seconds.max(1) as i64);
-            if let Some(skipped) = schedule::skipped_beyond_tick(s, slot, now, tick) {
-                let reason = self.skip_reason(task, skipped.first).await;
-                self.entry(
-                    &task.id,
-                    TaskEntry::new(
-                        "scheduler",
-                        "schedule_skipped",
-                        format!(
-                            "{} slot{} between {} and {} passed without firing ({}); \
-                             firing once for {} instead of catching up",
-                            skipped.count,
-                            if skipped.count == 1 { "" } else { "s" },
-                            skipped.first.to_rfc3339(),
-                            skipped.last.to_rfc3339(),
-                            reason.describe(),
-                            slot.to_rfc3339(),
-                        ),
-                    )
-                    .with_data(serde_json::json!({
-                        "count": skipped.count,
-                        "first": skipped.first,
-                        "last": skipped.last,
-                        "capped": skipped.capped,
-                        "fired_slot": slot,
-                        "reason": reason.as_str(),
-                    })),
-                )
-                .await;
-            }
-        }
-        let next = schedule::next_after(s, now)?;
-        let updated = self
-            .l4.store
-            .update(
-                &task.id,
-                &TaskPatch {
-                    next_run_at: Some(next),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        self.shared.bus.publish(Event::TaskUpdated { task: updated });
-        Ok(())
-    }
 
-    /// The `Due` for a scheduled firing (`scheduled: true`, `at` is the slot)
-    /// or a queued retry (`at` is when its backoff ran out): due at `at`,
-    /// queued from the moment it could first have been dispatched -- see
-    /// `dispatchable_from`. Read before `advance_schedule` or
-    /// `resume_from_retry` moves `next_run_at` on, and before the new run
-    /// exists, so the newest run is the previous one.
-    pub async fn due_for(&self, task: &Task, at: chrono::DateTime<Utc>, scheduled: bool) -> Due {
-        let previous = self.l4.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
-        let mut due = if scheduled { Due::slot(at) } else { Due::retry(at) };
-        due.queued_at = dispatchable_from(at, self.shared.booted_at, previous.as_ref());
-        due
-    }
 
-    /// Why the slots from `first` on passed without firing: the task's own
-    /// previous run was still going at `first`, or it was not -- in which
-    /// case the daemon was not there to fire it (asleep, stopped, or its
-    /// tick running late). Read off the newest run's own times, the only
-    /// record either way.
-    async fn skip_reason(&self, task: &Task, first: chrono::DateTime<Utc>) -> SkipReason {
-        let newest = self.l4.store.runs(&task.id, 1).await.ok().and_then(|r| r.into_iter().next());
-        skip_reason_of(newest.as_ref(), first)
-    }
 
-    /// Move a queued retry's task back onto the regular slot its streak is
-    /// standing in front of, before dispatching the retry attempt itself --
-    /// the retry's own version of what `advance_schedule` does for a regular
-    /// firing above, and for the same reason: a dispatch slower than the
-    /// backoff must not pick the task up a second time.
-    ///
-    /// Deliberately does not recompute the schedule the way `advance_schedule`
-    /// does: `resume_at` was captured once, in `queue_or_end_retry`, when this
-    /// streak began, and must survive however many retries happen before it
-    /// ends. Recomputing from `now` here instead would be redundant at best
-    /// for a `Cron` schedule (grid-aligned, so it would usually land on the
-    /// same slot anyway) and actively wrong for an `Every` schedule, which
-    /// has no grid at all -- each recompute would push the regular firing
-    /// further out, which is exactly the displacement the scheduler's own
-    /// comment on `advance_schedule` running before dispatch warns against.
-    ///
-    /// Dispatches this retry unconditionally, even if the task's policy was
-    /// edited to `retry: none` after this streak began: a retry already
-    /// queued and due is one the daemon committed to when it queued it, and
-    /// pulling a run back out from under a dispatch already under way would
-    /// be its own kind of surprise. `queue_or_end_retry` is where the new
-    /// policy actually takes effect -- honoured on this attempt's outcome,
-    /// not retroactively on the attempt itself.
-    pub async fn resume_from_retry(&self, task: &Task) -> Result<()> {
-        let Some(retry) = &task.pending_retry else {
-            return Ok(());
-        };
-        let updated = self
-            .l4.store
-            .update(
-                &task.id,
-                &TaskPatch {
-                    next_run_at: Some(retry.resume_at),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        self.shared.bus.publish(Event::TaskUpdated { task: updated });
-        Ok(())
-    }
 
     /// One frame of a run's session. `None` once the run has ended and its
     /// session is released -- what is left then is the transcript.
@@ -3906,7 +3625,7 @@ fn knowledge_write_payload(result: factory_core::knowledge::WriteResult) -> Payl
 /// dispatch makes it, ended the way the watchdog or a report ends one.
 #[cfg(test)]
 impl Engine {
-    pub(crate) async fn fail_task_for_test(self: &Arc<Self>, task_id: &str, kind: FailKind) -> Task {
+    pub(crate) async fn fail_task_for_test(&self, task_id: &str, kind: FailKind) -> Task {
         let run = self
             .l4.store
             .create_run(&NewRun {
@@ -4387,8 +4106,8 @@ mod tests {
             // both pass admission for `waiter` before either cleared its
             // wait.
             for _ in 0..20 {
-                engine.enqueue_capacity_release("demo", "shell");
-                engine.enqueue_capacity_sweep();
+                engine.l4_service().enqueue_capacity_release("demo", "shell");
+                engine.l4_service().enqueue_capacity_sweep();
             }
 
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -6164,7 +5883,7 @@ mod tests {
             .await
             .unwrap();
 
-        engine.resume_from_retry(&task).await.unwrap();
+        engine.l4_service().resume_from_retry(&task).await.unwrap();
 
         let task = engine.l4.store.get(&task.id).await.unwrap().unwrap();
         assert_eq!(
@@ -6517,7 +6236,7 @@ mod tests {
             .await
             .unwrap();
 
-        engine.advance_schedule(&task).await.unwrap();
+        engine.l4_service().advance_schedule(&task).await.unwrap();
 
         let entries = engine.l4.store.entries(&task.id, 20).await.unwrap();
         let skipped: Vec<_> = entries.iter().filter(|e| e.kind == "schedule_skipped").collect();
@@ -6537,7 +6256,7 @@ mod tests {
             .update(&task.id, &TaskPatch { next_run_at: Some(Utc::now()), ..Default::default() })
             .await
             .unwrap();
-        engine.advance_schedule(&on_time).await.unwrap();
+        engine.l4_service().advance_schedule(&on_time).await.unwrap();
         let entries = engine.l4.store.entries(&task.id, 20).await.unwrap();
         assert_eq!(entries.iter().filter(|e| e.kind == "schedule_skipped").count(), 1);
 
@@ -6669,7 +6388,7 @@ mod tests {
             .update(&task.id, &TaskPatch { next_run_at: Some(long_ago), ..Default::default() })
             .await
             .unwrap();
-        assert!(engine.due_now().await.unwrap().iter().any(|t| t.id == task.id), "sanity: due before the pause");
+        assert!(engine.l4_service().due_now().await.unwrap().iter().any(|t| t.id == task.id), "sanity: due before the pause");
 
         let paused = engine
             .update(&task.id, TaskPatch { schedule_paused: Some(true), ..Default::default() }, None)
@@ -6677,7 +6396,7 @@ mod tests {
             .unwrap();
         assert!(paused.schedule_paused);
         assert_eq!(paused.schedule, schedule, "a paused task keeps its schedule");
-        assert!(!engine.due_now().await.unwrap().iter().any(|t| t.id == task.id), "nothing fires while paused");
+        assert!(!engine.l4_service().due_now().await.unwrap().iter().any(|t| t.id == task.id), "nothing fires while paused");
 
         let resumed = engine
             .update(&task.id, TaskPatch { schedule_paused: Some(false), ..Default::default() }, None)
@@ -6686,7 +6405,7 @@ mod tests {
         assert!(!resumed.schedule_paused);
         assert!(resumed.next_run_at.unwrap() > Utc::now(), "recomputed from now: no catch-up firing");
         assert!(resumed.pending_retry.is_none(), "the interrupted retry streak is over");
-        assert!(!engine.due_now().await.unwrap().iter().any(|t| t.id == task.id));
+        assert!(!engine.l4_service().due_now().await.unwrap().iter().any(|t| t.id == task.id));
 
         let kinds: Vec<String> = engine.l4.store.entries(&task.id, 50).await.unwrap().into_iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&"schedule_paused".to_string()), "{kinds:?}");
@@ -6743,7 +6462,7 @@ mod tests {
             .update(&task.id, &TaskPatch { next_run_at: Some(Utc::now() - chrono::Duration::seconds(1)), ..Default::default() })
             .await
             .unwrap();
-        assert!(engine.due_now().await.unwrap().iter().any(|t| t.id == task.id), "the new schedule fires");
+        assert!(engine.l4_service().due_now().await.unwrap().iter().any(|t| t.id == task.id), "the new schedule fires");
 
         std::fs::remove_dir_all(&scope_dir).ok();
     }
@@ -7016,7 +6735,7 @@ mod tests {
         let task = engine.require(&task.id).await.unwrap();
         assert!(task.blocked_by_failure());
         assert_eq!(task.failure.as_ref().and_then(|f| f.kind), Some(FailKind::BlockedTimeout));
-        let active = engine.active_runs().await.unwrap();
+        let active = engine.l4_service().active_runs().await.unwrap();
         assert!(
             active.iter().all(|r| r.task_id != task.id),
             "no blocked run stands in for the failure, so nothing is left for the timeout to find: {active:?}"
@@ -7215,14 +6934,14 @@ mod tests {
             engine.l4.store.update(id, &TaskPatch { next_run_at: Some(past), ..Default::default() }).await.unwrap();
         }
 
-        let due: Vec<String> = engine.due_now().await.unwrap().into_iter().map(|t| t.id).collect();
+        let due: Vec<String> = engine.l4_service().due_now().await.unwrap().into_iter().map(|t| t.id).collect();
         assert_eq!(due, vec![blocked.id.clone()], "the failure keeps firing; the close and the question do not");
 
         // Closed between `due_now` and the scheduler's locked re-read: not fired.
         let seen = engine.require(&blocked.id).await.unwrap();
-        assert!(engine.still_due(&seen).await.is_some());
+        assert!(engine.l4_service().still_due(&seen).await.is_some());
         task_of(engine.handle_request(close(&blocked.id, factory_core::task::CloseReason::NotPlanned)).await);
-        assert!(engine.still_due(&seen).await.is_none(), "closed in between, so nothing fires it");
+        assert!(engine.l4_service().still_due(&seen).await.is_none(), "closed in between, so nothing fires it");
         std::fs::remove_dir_all(&scope_dir).ok();
     }
 
@@ -7274,7 +6993,7 @@ mod tests {
             .unwrap();
         let fine = one_off_task(&engine, "untouched").await;
 
-        assert_eq!(engine.migrate_failed_tasks().await, 2);
+        assert_eq!(engine.l4_service().migrate_failed_tasks().await, 2);
 
         let old = engine.require(&old.id).await.unwrap();
         assert!(old.blocked_by_failure());
@@ -7289,7 +7008,7 @@ mod tests {
         assert!(never.next_run_at.unwrap() > Utc::now(), "a migrated schedule does not fire a burst");
 
         assert_eq!(engine.require(&fine.id).await.unwrap().status, TaskStatus::Pending);
-        assert_eq!(engine.migrate_failed_tasks().await, 0, "nothing writes failed any more, so a second start finds none");
+        assert_eq!(engine.l4_service().migrate_failed_tasks().await, 0, "nothing writes failed any more, so a second start finds none");
         std::fs::remove_dir_all(&scope_dir).ok();
     }
 

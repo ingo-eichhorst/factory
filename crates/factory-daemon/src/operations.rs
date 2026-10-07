@@ -58,7 +58,6 @@
 //! changes anything on its own -- a picture, not a controller (design §8).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use factory_core::error::{FactoryError, Result};
@@ -392,22 +391,6 @@ impl Engine {
         Ok(updated)
     }
 
-    /// For the scheduler, under `schedule_lock`: `seen` as the store has it
-    /// now, if it is still due exactly as `due_now` found it -- the same
-    /// next firing, the same retry, not paused. `None` when anything moved
-    /// in between (a skip, a pause, an edit): that is somebody's decision,
-    /// and the next tick reads it afresh.
-    pub(crate) async fn still_due(&self, seen: &Task) -> Option<Task> {
-        let now = self.l4.store.get(&seen.id).await.ok().flatten()?;
-        let same = now.next_run_at == seen.next_run_at
-            && now.pending_retry == seen.pending_retry
-            && !now.schedule_paused
-            && now.schedule.is_some()
-            // Closed in between (`close_task` holds the same lock) --
-            // nothing fires a closed task, or dispatch would undo the close.
-            && now.fires();
-        same.then_some(now)
-    }
 
     /// `Request::RunAnswer`: type `text` into a blocked run's own session and
     /// press enter. Refused for a run that is not `Blocked` -- an answer to a
@@ -501,6 +484,7 @@ mod tests {
     //! with a real sqlite store -- not `factory_core::operations` itself
     //! (covered on its own), but this module's gathering and journaling,
     //! each exception kind end to end the way a real request reaches it.
+    use std::sync::Arc;
 
     use super::*;
     use factory_core::adapter::{AgentRuntime, StartRequest, TaskStore};
@@ -773,7 +757,7 @@ mod tests {
             .update(&missed.id, &TaskPatch { next_run_at: Some(Utc::now() - Duration::hours(1)), ..Default::default() })
             .await
             .unwrap();
-        engine.advance_schedule(&missed).await.unwrap();
+        engine.l4_service().advance_schedule(&missed).await.unwrap();
 
         let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         let of = |id: &str| report.attention.iter().filter(|e| e.task_id.as_deref() == Some(id)).map(|e| e.kind).collect::<Vec<_>>();
@@ -1209,9 +1193,9 @@ mod tests {
         // The scheduler read the task as due; a skip lands before it fires.
         let as_the_scheduler_saw_it = engine.require(&task.id).await.unwrap();
         engine.skip_next(&task.id, Some(seen), &owner("x")).await.unwrap();
-        assert!(engine.still_due(&as_the_scheduler_saw_it).await.is_none(), "the skipped slot is not fired");
+        assert!(engine.l4_service().still_due(&as_the_scheduler_saw_it).await.is_none(), "the skipped slot is not fired");
         let fresh = engine.require(&task.id).await.unwrap();
-        assert!(engine.still_due(&fresh).await.is_some());
+        assert!(engine.l4_service().still_due(&fresh).await.is_some());
         std::fs::remove_dir_all(root).ok();
     }
 
