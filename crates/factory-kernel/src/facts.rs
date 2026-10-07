@@ -137,6 +137,18 @@ pub struct HarnessHealthFact {
 }
 impl Fact for HarnessHealthFact { type Producer = L3; }
 
+/// The name of the role an agent runs under right now: its declared role, overridden by a standing agent's live one (the
+/// single answer to "what may this agent do" for a run and a standing agent alike). Query: (scope, agent name).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveRoleFact(pub String);
+impl Fact for EffectiveRoleFact { type Producer = L3; }
+
+/// The version L3's health state last observed for an agent's harness binary, if any. Query: the adapter's probe,
+/// defined by the provider. An observation, never a probe: it triggers no run of the binary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessVersionFact(pub Option<String>);
+impl Fact for HarnessVersionFact { type Producer = L3; }
+
 impl Fact for SandboxServiceEvidenceFact {
     type Producer = L2;
 }
@@ -807,6 +819,16 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
     FactCatalogueEntry {
         fact: "FunctionaryRosterFact", producer: "L3", readers: &["L5 independent preview binding"],
         lives_in_kernel: true, note: "declaration-order checker names and raw scope default; no arguments, role verdict or selection",
+    },
+    FactCatalogueEntry {
+        fact: "EffectiveRoleFact", producer: "L3", readers: &["L4 (dispatch guide, intake triage role check, workflow caller)"],
+        lives_in_kernel: true,
+        note: "declared role overridden by a live standing agent's; one answer for runs and standing agents",
+    },
+    FactCatalogueEntry {
+        fact: "HarnessVersionFact", producer: "L3", readers: &["L4 dispatch (the binary version stamped into the guide fingerprint)"],
+        lives_in_kernel: true,
+        note: "the last observed version; never triggers a probe",
     },
     FactCatalogueEntry {
         fact: "HarnessHealthFact", producer: "L3", readers: &["L4 harness gate and held-task release"],

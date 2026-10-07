@@ -17,7 +17,7 @@ pub(crate) use l2::{
     dependencies_provider as environment_dependencies,
     provider_declarations as environment_provider_declarations,
 };
-pub(crate) use l4::{import_recovery_journal, process_security_reports};
+pub(crate) use l4::import_recovery_journal;
 
 use crate::engine::Engine;
 use chrono::{DateTime, Utc};
@@ -160,6 +160,12 @@ impl<'a> Wiring<'a, L3> {
     /// A session that is no longer there closes its open span.
     pub(crate) async fn record_gone(&self, subject: &str, scope: &str, agent: &str) {
         self.engine.l4_service().record_gone(subject, scope, agent).await
+    }
+}
+impl<'a> Wiring<'a, factory_kernel::L4> {
+    /// The command edge L4 holds to the level below it: `Commands<L4, L3Port>`.
+    pub(crate) fn l3(&self) -> factory_kernel::Commands<factory_kernel::L4, crate::dispatch_port::L3Port<'a>> {
+        factory_kernel::Commands::new(crate::dispatch_port::L3Port(self.engine.l3_service()))
     }
 }
 impl<'a> Wiring<'a, factory_kernel::L5> {
@@ -354,6 +360,14 @@ port!(
     String,
     Vec<ExploitedFinding>,
     l2::dependencies_provider
+);
+port!(EffectiveRoleFact, crate::l3_service::RoleProvider<'a>, (String, String), EffectiveRoleFact, l3::role_provider);
+port!(
+    HarnessVersionFact,
+    crate::harness_health::VersionProvider,
+    (String, factory_core::harness::HealthProbe),
+    HarnessVersionFact,
+    l3::version_provider
 );
 port!(AgentFact, factory_agents::roster::Provider, String, Vec<AgentFact>, l3::provider);
 port!(
@@ -813,6 +827,8 @@ mod tests {
         registered::<TaskSnapshotFact>();
         registered::<RunSnapshotFact>();
         registered::<AgentReportedFact>();
+        registered::<EffectiveRoleFact>();
+        registered::<HarnessVersionFact>();
         registered::<WorkflowFact>();
         registered::<EnvironmentRecoveryFact>();
         registered::<RecoveryJournalFact>();
@@ -1423,6 +1439,8 @@ mod tests {
             "TaskSnapshotFact",
             "RunSnapshotFact",
             "AgentReportedFact",
+            "EffectiveRoleFact",
+            "HarnessVersionFact",
         ] {
             assert!(
                 !owner.contains(forbidden),

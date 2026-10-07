@@ -426,8 +426,8 @@ impl L4Service<'_> {
             .clone()
             .or_else(|| declared.agent_adapter().map(str::to_string))
             .unwrap_or_else(|| factory.config.daemon.default_agent.clone());
-        let (resolved, _, _) = crate::commands::agents(self.core).resolve_agent(&item.scope, &requested)?;
-        let role = self.core.effective_role_for(&item.scope, &resolved).await;
+        let (resolved, _, _) = self.wiring.resolve_agent(&item.scope, &requested)?;
+        let role = self.effective_role(&item.scope, &resolved).await;
         let may_report = self
             .wiring
             .roles_for(&item.scope)
@@ -541,7 +541,7 @@ impl L4Service<'_> {
         let scope = routed_scope.name.clone();
         assessment.routing.scope = scope.clone();
         if let Some(agent) = &assessment.routing.agent {
-            let (name, _, _) = crate::commands::agents(self.core).resolve_agent(&scope, agent)?;
+            let (name, _, _) = self.wiring.resolve_agent(&scope, agent)?;
             assessment.routing.agent = Some(name);
         }
         if let Some(workflow) = &assessment.routing.workflow {
@@ -596,7 +596,7 @@ impl L4Service<'_> {
                         ))
                     })?;
                 let node_scope = node.task.scope.clone().unwrap_or_else(|| found.scope.clone());
-                let (name, _, _) = crate::commands::agents(self.core).resolve_agent(&node_scope, agent)?;
+                let (name, _, _) = self.wiring.resolve_agent(&node_scope, agent)?;
                 agents.insert(step.clone(), name);
             }
             assessment.routing.agents = agents;
@@ -758,7 +758,7 @@ impl L4Service<'_> {
                         .unwrap_or_else(|| factory.config.daemon.default_agent.clone()),
                     None => item.agent.clone(),
                 };
-                let (agent, _, _) = crate::commands::agents(self.core).resolve_agent(&declared.name, &agent)?;
+                let (agent, _, _) = self.wiring.resolve_agent(&declared.name, &agent)?;
                 let mut labels = item.labels.clone();
                 labels.extend(intake::release_labels(&triage));
                 // The full range, not just its midpoint (`estimate_seconds`
@@ -1187,7 +1187,16 @@ impl L4Service<'_> {
         &self,
         scope: Option<&str>,
     ) -> Result<Vec<intake::ConfirmedSecurityReport>> {
-        crate::facts::process_security_reports(self.core, scope).await
+        {
+            let snapshot = self.wiring.snapshot();
+            let provider = factory_process::facts::Provider::new(
+                self.state.store.as_ref(),
+                &self.state.workflows,
+                snapshot.scope_tree(),
+                snapshot.root,
+            );
+            factory_kernel::Provide::<factory_kernel::ConfirmedSecurityReport>::get(&provider, &scope.map(str::to_owned)).await
+        }
     }
 
     /// Whether `caller` is the run of this item's own triage task -- the one

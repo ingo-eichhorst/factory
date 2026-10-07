@@ -170,7 +170,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 // starting since it was last probed: the next dispatch to
                 // it probes again rather than trusting the cache (#131).
                 if kind == FailKind::AckTimeout {
-                    engine.doubt_harness_of(task.as_ref());
+                    engine.l4_service().doubt_harness_of(task.as_ref());
                 }
                 engine.l4_service().fail_run(&run.id, kind, &why).await;
                 continue;

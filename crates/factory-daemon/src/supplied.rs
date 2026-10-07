@@ -54,8 +54,6 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// L4's handle on what is supplied from above is the page's own implementation: the block dispatch asks for is
     /// the block `quality_context` judges, and an unknown scope is the empty block, never an error.
     #[tokio::test]

@@ -408,21 +408,6 @@ impl Engine {
     // -- reaches the run-start path makes into other levels (S9a part 2) -------
     // Kept here, on the page, so the L4 code that moved out carries no level reach of its own.
 
-    /// What L3 says the agent's role is for this scope.
-    pub(crate) async fn effective_role_for(&self, scope: &str, agent: &str) -> Role {
-        self.l3_service().effective_role(scope, agent).await
-    }
-
-    /// The version L3's harness health last observed for this adapter's probe.
-    pub(crate) fn harness_version_of(&self, adapter_name: &str, probe: &factory_agents::harness::HealthProbe) -> Option<String> {
-        self.l3
-            .harness
-            .rows(&[(adapter_name.to_string(), probe.clone())], None)
-            .into_iter()
-            .next()
-            .and_then(|row| row.version)
-    }
-
     pub(crate) fn factory_snapshot(&self) -> Factory {
         self.shared.factory
             .read()
