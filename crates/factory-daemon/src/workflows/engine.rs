@@ -617,7 +617,7 @@ mod tests {
         assert_eq!(c.after, Some(vec![b.id.clone()]));
         assert_eq!(b.status, TaskStatus::Pending);
         assert!(engine.l4_service().dependency_ready_tasks().await.unwrap().is_empty());
-        engine.start_run(&b.id, Trigger::Dependency).await;
+        engine.l4_service().start_run(&b.id, Trigger::Dependency).await;
         assert!(engine.l4.store.active_run(&b.id).await.unwrap().is_none());
         let response = engine.handle_request(factory_core::protocol::Request::TaskRun {
             id: b.id.clone(), reason: None, continue_run: false, override_wait: false,
@@ -702,12 +702,12 @@ mod tests {
         assert!(invalid.unwrap_err().to_string().contains("cycle"));
         new.schedule = Some(factory_core::task::Schedule::Every { seconds: 1 });
         assert!(engine.create(new).await.unwrap_err().to_string().contains("exclusive"));
-        engine.start_run(&parent.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&parent.id, Trigger::Manual).await;
         finish(&engine, &parent.id, RunStatus::Done).await;
         let ready = engine.l4_service().dependency_ready_tasks().await.unwrap();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].id, child.id);
-        engine.start_run(&child.id, Trigger::Dependency).await;
+        engine.l4_service().start_run(&child.id, Trigger::Dependency).await;
         finish(&engine, &child.id, RunStatus::Done).await;
         assert!(engine.require(&child.id).await.unwrap().after.is_none());
         assert!(engine.l4_service().dependency_ready_tasks().await.unwrap().is_empty());
@@ -726,7 +726,7 @@ mod tests {
         assert!(engine.require(&b.id).await.unwrap().after.is_none());
         assert!(engine.l4.store.active_run(&b.id).await.unwrap().is_none(), "the graph does not automatically run an early override");
         engine.cancel_workflow(&run.id).await.unwrap();
-        engine.start_run(&b.id, Trigger::Workflow).await;
+        engine.l4_service().start_run(&b.id, Trigger::Workflow).await;
         assert!(engine.l4.store.runs(&b.id, 10).await.unwrap().is_empty(), "a queued release cannot launch after cancellation");
         assert_eq!(engine.require(&b.id).await.unwrap().closure.unwrap().reason, factory_core::task::CloseReason::NotPlanned);
     }
@@ -3036,7 +3036,7 @@ mod tests {
         assert_eq!(b.depends_on, vec![a.id.clone()], "a is b's dependency");
         assert!(run.definition.edges.iter().any(|edge| edge.from == "a" && edge.to == "b"), "and its workflow parent");
         report_done(&engine, &a.id, "A RESULT", None).await;
-        let outputs = engine.upstream_outputs(&engine.require(&b.id).await.unwrap()).await;
+        let outputs = engine.l4_service().upstream_outputs(&engine.require(&b.id).await.unwrap()).await;
         assert_eq!(outputs.iter().filter(|output| output.task_id == a.id).count(), 1, "{outputs:?}");
         assert_eq!(outputs[0].result.as_deref(), Some("A RESULT"));
         let _ = engine.cancel_workflow(&run.id).await;
@@ -4406,6 +4406,7 @@ impl Engine {
                 let engine = self.clone();
                 tokio::spawn(async move {
                     engine
+                        .l4_service()
                         .start_run_due_continue(&task_id, crate::engine::Due::now(), previous)
                         .await;
                 });
@@ -4757,7 +4758,7 @@ impl Engine {
         for task_id in to_start {
             let engine = self.clone();
             tokio::spawn(async move {
-                engine.start_run(&task_id, Trigger::Workflow).await;
+                engine.l4_service().start_run(&task_id, Trigger::Workflow).await;
             });
         }
         Ok(())
@@ -5172,7 +5173,7 @@ impl Engine {
                         {
                             let engine = self.clone();
                             tokio::spawn(async move {
-                                engine.start_run(&task_id, Trigger::Workflow).await;
+                                engine.l4_service().start_run(&task_id, Trigger::Workflow).await;
                             });
                         }
                     }

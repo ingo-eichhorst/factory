@@ -275,6 +275,7 @@ impl Engine {
             && run.status == RunStatus::Blocked
         {
             let resumed = match self
+                .l4_service()
                 .dispatch(
                     &task.id,
                     run.trigger,
@@ -526,6 +527,7 @@ impl Engine {
             let task_id = task.id.clone();
             tokio::spawn(async move {
                 engine
+                    .l4_service()
                     .start_run(&task_id, factory_core::run::Trigger::Manual)
                     .await;
             });
@@ -916,6 +918,7 @@ impl Engine {
             let review_task = review.id.clone();
             tokio::spawn(async move {
                 engine
+                    .l4_service()
                     .start_run(&review_task, factory_core::run::Trigger::Workflow)
                     .await;
             });
@@ -1623,7 +1626,7 @@ mod tests {
     async fn approval_blocks_before_agent_launch_and_an_owner_decision_resumes_the_same_run() {
         let (engine, _) = engine("      - { applies_to: [feature], step: approval, by: person }");
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         assert_eq!(held.status, RunStatus::Blocked);
         assert!(held.session.is_none(), "approval is before launch");
@@ -1653,10 +1656,10 @@ mod tests {
         engine.replace_scope(&scope.id.clone(), scope);
 
         let subject = task(&engine, Some("feature")).await;
-        engine.start_run(&subject.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&subject.id, Trigger::Manual).await;
         let held = engine.l4.store.active_run(&subject.id).await.unwrap().unwrap();
         let holder = task(&engine, Some("chore")).await;
-        engine.start_run(&holder.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&holder.id, Trigger::Manual).await;
         assert!(engine.l4.store.active_run(&holder.id).await.unwrap().unwrap().session.is_some());
 
         let queued = engine.decide_approval(
@@ -1669,7 +1672,7 @@ mod tests {
         assert_eq!(engine.run_attestations(&held.id).await.unwrap().len(), 1);
 
         report_done(&engine, &holder.id).await;
-        engine.recheck_capacity().await;
+        engine.l4_service().recheck_capacity().await;
         let resumed = engine.require_run(&held.id).await.unwrap();
         assert!(resumed.session.is_some());
         assert!(engine.require(&subject.id).await.unwrap().slot_wait.is_none());
@@ -1713,7 +1716,7 @@ mod tests {
             })
             .await
             .unwrap();
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         std::fs::remove_file(work.join("fake-harness")).unwrap();
 
@@ -1736,7 +1739,7 @@ mod tests {
             })
             .await
             .unwrap();
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
 
         assert_approval_resume_failed(&engine, &task, &held).await;
@@ -1758,7 +1761,7 @@ mod tests {
             })
             .await
             .unwrap();
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
 
         assert_approval_resume_failed(&engine, &task, &held).await;
@@ -1768,7 +1771,7 @@ mod tests {
     async fn the_executor_cannot_approve_its_own_held_run() {
         let (engine, _) = engine("      - { applies_to: [feature], step: approval, by: person }");
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         let caller = Caller::Agent {
             scope: "demo".into(),
@@ -1789,7 +1792,7 @@ mod tests {
         let requires = "      - { applies_to: [feature], step: approval, by: person }\n      - { applies_to: [feature], step: tests, gate: \"true\" }\n      - { applies_to: [feature], step: review, by: independent }";
         let (engine, _) = engine(requires);
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         engine
             .decide_approval(&Caller::Owner, &held.id, AttestationVerdict::Fail, "release evidence is missing")
@@ -1840,7 +1843,7 @@ mod tests {
         let requires = "      - { applies_to: [feature], step: tests, gate: \"true\" }\n      - { applies_to: [feature], step: review, by: independent }";
         let (engine, _) = engine(requires);
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let subject = report_done(&engine, &task.id).await;
         let review = review_task(&engine, &subject.id).await;
         assert_eq!(review.agent, "checker");
@@ -1881,7 +1884,7 @@ mod tests {
         let (engine, _) =
             engine("      - { applies_to: [feature], step: review, by: independent }");
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let subject = report_done(&engine, &task.id).await;
         let review = review_task(&engine, &subject.id).await;
         let review_run = engine.l4.store.active_run(&review.id).await.unwrap().unwrap();
@@ -1926,7 +1929,7 @@ mod tests {
     async fn a_terminal_review_without_a_verdict_blocks_and_the_same_task_can_be_retried() {
         let (engine, _) = engine("      - { applies_to: [feature], step: review, by: independent }");
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let subject = report_done(&engine, &task.id).await;
         let review = review_task(&engine, &subject.id).await;
         let first = engine.l4.store.active_run(&review.id).await.unwrap().unwrap();
@@ -1938,7 +1941,7 @@ mod tests {
         assert!(entries.iter().any(|entry| entry.kind == "review_unusable"
             && entry.message.contains(&review.id)), "{entries:#?}");
 
-        engine.start_run(&review.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&review.id, Trigger::Manual).await;
         let retry = engine.l4.store.active_run(&review.id).await.unwrap().unwrap();
         engine.report(
             &review.id,
@@ -1960,7 +1963,7 @@ mod tests {
         let requires = "      - { applies_to: [feature], step: tests, gate: \"true\" }\n      - { applies_to: [feature], step: review, by: independent }";
         let (engine, work) = engine(requires);
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let subject = report_done(&engine, &task.id).await;
         let first_review = review_task(&engine, &subject.id).await;
         let first_run = engine.l4.store.active_run(&first_review.id).await.unwrap().unwrap();
@@ -2012,7 +2015,7 @@ mod tests {
     async fn done_waits_for_the_gate_blocks_on_its_failure_and_verifies_again_on_the_next_done() {
         let (engine, work) = engine(TESTS_FOR_FEATURES);
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let run = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         assert_eq!(run.required_steps.len(), 1, "fixed at dispatch");
         assert_eq!(run.required_steps[0].required_by, vec!["house/tested"]);
@@ -2055,7 +2058,7 @@ mod tests {
     async fn the_executor_cannot_accept_its_own_rework_but_an_authorized_other_actor_can() {
         let (engine, _) = engine(TESTS_FOR_FEATURES);
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let failed = report_done(&engine, &task.id).await;
         assert_eq!(settled(&engine, &failed.id).await.status, RunStatus::Blocked);
         let executor = Caller::Agent {
@@ -2083,7 +2086,7 @@ mod tests {
     async fn a_verification_block_is_in_the_inbox_with_its_reason() {
         let (engine, _) = engine(TESTS_FOR_FEATURES);
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let run = report_done(&engine, &task.id).await;
         settled(&engine, &run.id).await;
         let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
@@ -2099,7 +2102,7 @@ mod tests {
     async fn work_of_a_category_nothing_requires_anything_for_is_done_on_its_report() {
         let (engine, _) = engine(TESTS_FOR_FEATURES);
         let task = task(&engine, Some("docs")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let run = report_done(&engine, &task.id).await;
         assert!(run.required_steps.is_empty());
         assert_eq!(run.status, RunStatus::Done);
@@ -2110,7 +2113,7 @@ mod tests {
         let (engine, work) = engine("      - { applies_to: [default], step: tests, gate: \"test -f built.txt\" }");
         std::fs::write(work.join("built.txt"), "ok").unwrap();
         let task = task(&engine, None).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let run = report_done(&engine, &task.id).await;
         assert_eq!(run.status, RunStatus::Verifying);
         assert_eq!(settled(&engine, &run.id).await.status, RunStatus::Done);
@@ -2120,7 +2123,7 @@ mod tests {
     async fn a_required_gate_with_no_command_blocks_as_missing_evidence() {
         let (engine, _) = engine("      - { applies_to: [feature], step: sbom }");
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let run = report_done(&engine, &task.id).await;
         let blocked = settled(&engine, &run.id).await;
         assert_eq!(blocked.status, RunStatus::Blocked);
@@ -2134,7 +2137,7 @@ mod tests {
     async fn while_it_verifies_the_agent_may_not_report_its_way_out() {
         let (engine, _) = engine("      - { applies_to: [feature], step: slow, gate: \"sleep 1\" }");
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let run = report_done(&engine, &task.id).await;
         let error = engine
             .report(
@@ -2579,7 +2582,7 @@ mod tests {
         provenance_git(&work);
         std::fs::write(work.join("release.bin"), b"release bytes\0\xff").unwrap();
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let held = provenance_done(&engine, &task, &["release.bin"])
             .await
             .unwrap();
@@ -2659,7 +2662,7 @@ mod tests {
         provenance_git(&work);
         std::fs::write(work.join("release.bin"), "v1").unwrap();
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let held = provenance_done(&engine, &task, &["release.bin"])
             .await
             .unwrap();
@@ -2711,7 +2714,7 @@ mod tests {
             provenance_git(&work);
             std::fs::write(work.join("ignored-artifact.bin"), "v1").unwrap();
             let task = task(&engine, Some("feature")).await;
-            engine.start_run(&task.id, Trigger::Manual).await;
+            engine.l4_service().start_run(&task.id, Trigger::Manual).await;
             let held = provenance_done(&engine, &task, &["ignored-artifact.bin"])
                 .await
                 .unwrap();
@@ -2748,7 +2751,7 @@ mod tests {
         let (engine, work) = provenance_engine(TESTS_FOR_FEATURES, false);
         std::fs::write(work.join("release.bin"), "v1").unwrap();
         let task = task(&engine, Some("docs")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         assert!(provenance_done(&engine, &task, &["release.bin"])
             .await
             .unwrap_err()
@@ -2821,7 +2824,7 @@ mod tests {
         let (engine, work) = provenance_engine(requires, true);
         provenance_git(&work);
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let held = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         assert_eq!(held.status, RunStatus::Blocked);
         engine
@@ -2883,7 +2886,7 @@ mod tests {
         provenance_git(&work);
         std::fs::write(work.join("release.bin"), "output").unwrap();
         let task = task(&engine, Some("feature")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let held = provenance_done(&engine, &task, &["release.bin"])
             .await
             .unwrap();
@@ -2946,7 +2949,7 @@ mod tests {
         provenance_git(&work);
         std::fs::write(work.join("release.bin"), "output").unwrap();
         let task = task(&engine, Some("docs")).await;
-        engine.start_run(&task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let mut run = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         run.artifacts = engine
             .l4_service().capture_artifacts(&run, &task, &["release.bin".into()])
@@ -2999,7 +3002,7 @@ mod tests {
 
         // A feature-category run that is held to `tests` and passes it.
         let feature_task = task(&engine, Some("feature")).await;
-        engine.start_run(&feature_task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&feature_task.id, Trigger::Manual).await;
         let run = report_done(&engine, &feature_task.id).await;
         let feature_run = settled(&engine, &run.id).await;
         assert_eq!(feature_run.status, RunStatus::Done);
@@ -3007,7 +3010,7 @@ mod tests {
         // A docs-category run: this catalogue requires nothing of `docs`, so
         // it is never held to anything and finishes without verification.
         let docs_task = task(&engine, Some("docs")).await;
-        engine.start_run(&docs_task.id, Trigger::Manual).await;
+        engine.l4_service().start_run(&docs_task.id, Trigger::Manual).await;
         let docs_run = report_done(&engine, &docs_task.id).await;
         assert_eq!(docs_run.status, RunStatus::Done);
 

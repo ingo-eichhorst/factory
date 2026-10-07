@@ -206,7 +206,7 @@ impl Engine {
         }
         let engine = self.clone();
         let id = task.id.clone();
-        tokio::spawn(async move { engine.start_run(&id, trigger).await });
+        tokio::spawn(async move { engine.l4_service().start_run(&id, trigger).await });
     }
 
     /// An acknowledgement timeout on a run: a reason to doubt whatever the

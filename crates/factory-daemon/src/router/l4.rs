@@ -218,8 +218,8 @@ impl Engine {
                 // agent to be ready. The caller gets its answer now.
                 tokio::spawn(async move {
                     match continue_from {
-                        Some(prev) => engine.start_run_due_continue(&id, due, prev).await,
-                        None => engine.start_run_due(&id, Trigger::Manual, due).await,
+                        Some(prev) => engine.l4_service().start_run_due_continue(&id, due, prev).await,
+                        None => engine.l4_service().start_run_due(&id, Trigger::Manual, due).await,
                     }
                 });
                 Ok(Payload::Ok)
