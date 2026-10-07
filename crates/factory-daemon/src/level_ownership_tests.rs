@@ -551,6 +551,19 @@ fn the_core_scanner_counts_split_calls_and_catches_state_reaches() {
     assert_eq!(core_state_reaches("score.l3.x; self.core.state()"), 0);
 }
 
+/// `Intent` is the one way a level reads what L6 authored (S9b design step). It may only call pure functions over the
+/// authored files and the snapshot: it must never name an L6 service, an L6 state group or a store type, or it would
+/// become a back door around the ladder. Consumers that need L6 computation over runtime state are inputs of the
+/// downward command instead.
+#[test]
+fn intent_stays_pure_and_never_reaches_an_l6_service_state_or_store() {
+    let code = production_code(&std::fs::read_to_string(src_root().join("intent.rs")).unwrap());
+    let squeezed: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    for forbidden in ["l6_service", "L6Service", ".l6.", ".l6;", "Store", "self.engine", "Engine", "state."] {
+        assert!(!squeezed.contains(forbidden), "intent.rs must stay pure; it names `{forbidden}`");
+    }
+}
+
 #[test]
 fn people_reads_stay_with_the_router_and_only_shrink() {
     let scan = scan();
