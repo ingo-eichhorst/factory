@@ -54,6 +54,7 @@ mod intake;
 mod interfaces;
 mod metrics;
 mod occupancy;
+mod occupancy_page;
 mod openshell;
 mod provision;
 mod renewals;

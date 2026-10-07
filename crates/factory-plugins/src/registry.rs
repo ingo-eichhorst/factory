@@ -229,3 +229,9 @@ impl factory_agents::selection::Catalog for Registry {
         self.agents.keys().cloned().collect()
     }
 }
+
+impl factory_agents::runtime::RuntimeDirectory for Registry {
+    fn runtime(&self, name: &str) -> Option<Arc<dyn AgentRuntime>> {
+        Registry::runtime(self, name).ok()
+    }
+}

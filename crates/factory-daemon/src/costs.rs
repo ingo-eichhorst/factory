@@ -16,7 +16,6 @@
 //! depends on it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use factory_core::error::Result;
@@ -32,7 +31,6 @@ use factory_core::usage::{
 use factory_core::usage::{CostGroupBy, CostReport, SpendQuery};
 
 use crate::l4_service::L4Service;
-use crate::engine::Engine;
 
 #[cfg(test)]
 use factory_process::measurements::{NO_ISSUE, NO_WORKFLOW};
@@ -465,16 +463,11 @@ fn estimate_cost(observed: Option<f64>, ratios: &[f64]) -> Option<factory_core::
     })
 }
 
-/// `Engine::snapshot_usage` needs `&self` only; the turn-ended path wants it
-/// off the hook's own request, so it is spawned from an `Arc`.
-pub(crate) fn spawn_snapshot(engine: &Arc<Engine>, run: Run, point: SnapshotPoint) {
-    let engine = engine.clone();
-    tokio::spawn(async move { engine.l4_service().snapshot_usage(&run, point).await });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::Engine;
+    use std::sync::Arc;
     use factory_core::adapter::{AgentRuntime, RuntimeStatus, StartRequest};
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
     use factory_core::error::FactoryError;

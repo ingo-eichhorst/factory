@@ -17,231 +17,32 @@ use factory_core::error::Result;
 #[cfg(test)]
 use factory_core::{error::FactoryError, occupancy::OccupancySegment};
 use factory_core::event::Event;
-use factory_core::occupancy::{
-    spans_from, Occupancy, OccupancyBlock, OccupancyPlan, OccupancyRow, OccupancyScope,
-    StatusChange,
-};
+use factory_core::occupancy::StatusChange;
+#[cfg(test)]
+use factory_core::occupancy::OccupancyBlock;
 use factory_core::run::{BlockSource, FailKind, Run, RunPatch, RunStatus};
 use factory_core::task::{TaskEntry, TurnEndEvent, TurnEnded};
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::engine::Engine;
+use crate::l4_service::L4Service;
+use crate::l4_spawner::L4Spawner;
 use crate::schedule;
 
-use factory_process::occupancy_history::{block_of, blocked_segments, lay_out, window_bounds, TRANSITION_KINDS};
+#[cfg(test)]
+use factory_process::occupancy_history::{block_of, blocked_segments, lay_out, window_bounds};
 #[cfg(test)]
 use factory_process::occupancy_history::{busy_seconds, blocked_seconds, pack_lanes, MAX_MINUTES};
 /// Bound the number of planned firings drawn for one schedule.
 const MAX_FIRINGS: usize = 500;
 
-impl Engine {
-    /// The chart over a window. With neither `from` nor `to` it is the one
-    /// it has always been: `minutes` back from now and a quarter of that
-    /// ahead. With both it is that window -- past, future, or across now --
-    /// which is what lets a person pan and zoom. See [`window_bounds`].
-    pub async fn occupancy(
-        &self,
-        minutes: Option<u32>,
-        from: Option<DateTime<Utc>>,
-        to: Option<DateTime<Utc>>,
-    ) -> Result<Occupancy> {
-        let now = Utc::now();
-        let (from, to) = window_bounds(minutes, from, to, now)?;
-        // What has happened stops at now, whichever side of it the window
-        // is on. A window wholly in the future has no runs in it; asking the
-        // store anyway would hand back every open run, drawn to a now that
-        // is off the left-hand edge.
-        let past_end = now.min(to);
-
-        let runs = if from <= now {
-            self.l4.store.runs_between(from, past_end).await?
-        } else {
-            Vec::new()
-        };
-        let tasks = self.l4.store.list(&Default::default()).await?;
-        let factory = self.factory_snapshot();
-        let titles: BTreeMap<&str, &str> = tasks
-            .iter()
-            .map(|t| (t.id.as_str(), t.title.as_str()))
-            .collect();
-        let estimates: BTreeMap<&str, u64> = tasks
-            .iter()
-            .filter_map(|t| t.estimate_seconds.map(|e| (t.id.as_str(), e)))
-            .collect();
-
-        // Runs by (scope, agent name). A run records the agent it was given to,
-        // and the task records the scope -- key both the way the agents page
-        // keys them, by name and never by harness. Canonicalized: a task
-        // written before a scope's identity became its path still carries the
-        // bare name it was given, and without this a run of one would land in
-        // an orphan row of its own instead of on the scope's actual line.
-        let scope_of: BTreeMap<&str, String> = tasks
-            .iter()
-            .map(|t| (t.id.as_str(), factory.canonical_scope_name(&t.scope)))
-            .collect();
-        // What each run waited on. The run record cannot say: `blocked_since`
-        // is cleared the moment a run ends, so the journal is the only place a
-        // finished run's blocked stretch survives (#121). One query for every
-        // run on the chart, reaching back to the oldest one's start -- a run
-        // open since before the window may have blocked before it, too.
-        let on_chart: BTreeSet<&str> = runs.iter().map(|r| r.id.as_str()).collect();
-        let mut transitions: BTreeMap<String, Vec<TaskEntry>> = BTreeMap::new();
-        if let Some(earliest) = runs.iter().map(|r| r.started_at).min() {
-            let since = earliest - Duration::seconds(1);
-            for (_, entry) in self.l4.store.entries_of_kinds(TRANSITION_KINDS, since).await? {
-                let Some(run_id) = entry.run_id.as_deref() else { continue };
-                if on_chart.contains(run_id) {
-                    transitions.entry(run_id.to_string()).or_default().push(entry);
-                }
-            }
-        }
-
-        let mut blocks: BTreeMap<(String, String), Vec<OccupancyBlock>> = BTreeMap::new();
-        for run in &runs {
-            let scope = scope_of.get(run.task_id.as_str()).cloned().unwrap_or_default();
-            blocks
-                .entry((scope, run.agent.clone()))
-                .or_default()
-                .push(block_of(
-                    run,
-                    titles.get(run.task_id.as_str()).copied(),
-                    estimates.get(run.task_id.as_str()).copied(),
-                    blocked_segments(
-                        transitions.get(&run.id).map(Vec::as_slice).unwrap_or_default(),
-                        run.ended_at,
-                    ),
-                ));
-        }
-
-        // What a schedule says is coming, drawn as wide as the task's own
-        // history says it usually takes.
-        let mut planned: BTreeMap<(String, String), Vec<OccupancyPlan>> = BTreeMap::new();
-        for task in &tasks {
-            let firings = planned_firings(task, now, from, to);
-            if firings.is_empty() {
-                continue;
-            }
-            let historical = if task.estimate_seconds.is_some() {
-                (None, 0)
-            } else {
-                self.historical_estimate_for(&task.id).await
-            };
-            let (estimate, samples, user_estimate) =
-                plan_estimate(task.estimate_seconds, historical);
-            let scope = scope_of.get(task.id.as_str()).cloned().unwrap_or_default();
-            planned
-                .entry((scope, task.agent.clone()))
-                .or_default()
-                .extend(firings.into_iter().map(|at| OccupancyPlan {
-                    task_id: task.id.clone(),
-                    title: task.title.clone(),
-                    at,
-                    estimate_seconds: estimate,
-                    samples,
-                    user_estimate,
-                }));
-        }
-
-        // Liveness, grouped by the session it was observed on -- by subject,
-        // never by agent. Two runs of the same agent at the same time are two
-        // sessions with two independent states; interleaving them into one
-        // series produces a strip that describes neither.
-        //
-        // Changes from before the window still matter: they say what state the
-        // window opened in, so keep the last one before `from` as the opening
-        // span.
-        let changes = self.l4.store.status_changes(from - Duration::hours(24)).await?;
-        let mut spans: BTreeMap<String, Vec<StatusChange>> = BTreeMap::new();
-        for change in changes {
-            spans.entry(change.subject.clone()).or_default().push(change);
-        }
-        for series in spans.values_mut() {
-            trim_to_window(series, from);
-        }
-
-        let liveness_since = self.l4.store.status_origin().await?;
-
-        let mut out = Vec::new();
-        let (views, _available) = self.scope_views().await?;
-        for view in views {
-            let path = view.path.clone();
-            let mut rows = Vec::new();
-            for agent in &view.agents {
-                let key = (view.name.clone(), agent.name.clone());
-                let mut blocks = blocks.remove(&key).unwrap_or_default();
-                let planned = planned.remove(&key).unwrap_or_default();
-                // A row draws the standing agent's own session and nothing
-                // else. A run's liveness is recorded too, but the run already
-                // has a block on this row saying more than a screen can.
-                let spans = spans
-                    .remove(&format!("{}/{}", view.name, agent.name))
-                    .map(|series| spans_from(&series, now))
-                    .unwrap_or_default();
-                let (busy_seconds, blocked_seconds, lanes, live) = lay_out(&mut blocks, from, past_end);
-                rows.push(OccupancyRow {
-                    agent: agent.name.clone(),
-                    adapter: agent.adapter.clone(),
-                    lifetime: agent.lifetime.clone(),
-                    role: agent.role.clone(),
-                    state: agent.state.clone(),
-                    blocks,
-                    planned,
-                    spans,
-                    busy_seconds,
-                    blocked_seconds,
-                    lanes,
-                    live,
-                });
-            }
-            out.push(OccupancyScope {
-                name: view.name,
-                path,
-                rows,
-            });
-        }
-
-        // A run whose agent the config no longer declares still happened. Give
-        // it a row rather than dropping it: a chart that hides work because
-        // somebody edited a config is worse than one with an extra line.
-        for ((scope, agent), mut blocks) in blocks {
-            let (busy_seconds, blocked_seconds, lanes, live) = lay_out(&mut blocks, from, past_end);
-            let row = OccupancyRow {
-                agent,
-                adapter: String::new(),
-                lifetime: "task".into(),
-                role: "worker".into(),
-                state: "undeclared".into(),
-                blocks,
-                planned: Vec::new(),
-                spans: Vec::new(),
-                busy_seconds,
-                blocked_seconds,
-                lanes,
-                live,
-            };
-            match out.iter_mut().find(|s| s.name == scope) {
-                Some(existing) => existing.rows.push(row),
-                None => out.push(OccupancyScope {
-                    name: scope,
-                    path: String::new(),
-                    rows: vec![row],
-                }),
-            }
-        }
-
-        Ok(Occupancy {
-            from,
-            to,
-            now,
-            liveness_since,
-            scopes: out,
-        })
+/// The `Arc`-holding entry points: the router's turn-end hook and the scheduler's liveness tick.
+impl crate::engine::Engine {
+    pub(crate) async fn turn_ended(self: &Arc<Self>, task_id: &str, turn: TurnEnded) -> Result<()> {
+        self.l4_service().turn_ended(task_id, turn, &self.l4_spawner()).await
     }
+}
 
-
-
-
+impl L4Service<'_> {
     /// Poll every running run's session and write down what it says. The run
     /// itself is already a block on the chart; this is what the agent looked
     /// like while it held the bay.
@@ -255,17 +56,17 @@ impl Engine {
     /// subprocess (`herdr agent explain`), is asked for exactly once per run
     /// per tick, not two or three times over.
     pub async fn record_run_liveness(&self) {
-        let runs = self.l4.store.active_runs().await.unwrap_or_default();
+        let runs = self.state.store.active_runs().await.unwrap_or_default();
         for run in runs {
             if run.session.is_none() {
                 continue;
             }
-            let Ok(Some(task)) = self.l4.store.get(&run.task_id).await else {
+            let Ok(Some(task)) = self.state.store.get(&run.task_id).await else {
                 continue;
             };
             let report = self.session_status_report(&run).await;
             let subject = format!("run:{}", run.id);
-            self.l4_service().record_status(&subject, &task.scope, &run.agent, report.status)
+            self.record_status(&subject, &task.scope, &run.agent, report.status)
                 .await;
             let action = block_action(
                 &report,
@@ -309,10 +110,10 @@ impl Engine {
             // the run there and then; a `Stop` is only held on the run, and
             // stands here, below, once `settle_turn_end` says it has.
             if turn_ended_action(&report, run.status) == TurnEndedAction::Fail {
-                self.l4_service().fail_run(&run.id, FailKind::TurnEnded, TURN_ENDED_REASON).await;
+                self.fail_run(&run.id, FailKind::TurnEnded, TURN_ENDED_REASON).await;
             } else if settle_turn_end(run.status, run.turn_ended_at, report.status, Utc::now()) {
                 let why = run.turn_end_reason.as_deref().unwrap_or(TURN_ENDED_REASON);
-                self.l4_service().fail_run(&run.id, FailKind::TurnEnded, why).await;
+                self.fail_run(&run.id, FailKind::TurnEnded, why).await;
             }
         }
     }
@@ -329,11 +130,11 @@ impl Engine {
     /// common case, not a mistake, and is answered quietly, with nothing
     /// journalled. The token is checked exactly as for a report: without it,
     /// anyone on the socket could end anyone's run.
-    pub(crate) async fn turn_ended(self: &Arc<Self>, task_id: &str, turn: TurnEnded) -> Result<()> {
-        let Some(run) = self.l4.store.active_run(task_id).await? else {
+    pub(crate) async fn turn_ended(&self, task_id: &str, turn: TurnEnded, spawner: &L4Spawner) -> Result<()> {
+        let Some(run) = self.state.store.active_run(task_id).await? else {
             return Ok(());
         };
-        self.l4_service().check_run_token(&run, turn.token.as_deref(), task_id)?;
+        self.check_run_token(&run, turn.token.as_deref(), task_id)?;
         // `#178`: Claude Code's own session id, when the hook payload names
         // one -- `--continue`'s fallback source for which session to resume,
         // kept even though this particular turn end may settle into nothing.
@@ -347,11 +148,11 @@ impl Engine {
         // on an answer. A run failing right here gets its run-end reading
         // from `close_session` instead.
         if !matches!(action, HookTurnAction::FailNow) {
-            crate::costs::spawn_snapshot(self, run.clone(), factory_core::usage::SnapshotPoint::TurnEnded);
+            spawner.spawn_snapshot(run.clone(), factory_core::usage::SnapshotPoint::TurnEnded);
         }
         match action {
             HookTurnAction::FailNow => {
-                self.l4_service().fail_run(&run.id, FailKind::StopFailure, &hook_turn_ended_reason(&turn)).await;
+                self.fail_run(&run.id, FailKind::StopFailure, &hook_turn_ended_reason(&turn)).await;
             }
             HookTurnAction::Settle => {
                 self.patch_run(
@@ -416,7 +217,7 @@ impl Engine {
                 else {
                     return;
                 };
-                self.l4_service().entry(
+                self.entry(
                     &run.task_id,
                     TaskEntry::new(
                         "daemon",
@@ -429,8 +230,8 @@ impl Engine {
                     .in_run(&run.id),
                 )
                 .await;
-                self.l4_service().mirror_to_task(&updated).await;
-                self.l4_service().record_workflow_task_state(&run.task_id).await;
+                self.mirror_to_task(&updated).await;
+                self.record_workflow_task_state(&run.task_id).await;
             }
             // The same hook that set this block says the session is active
             // again. Only fires when the daemon is the one holding the
@@ -451,7 +252,7 @@ impl Engine {
                 else {
                     return;
                 };
-                self.l4_service().entry(
+                self.entry(
                     &run.task_id,
                     TaskEntry::new(
                         "daemon",
@@ -461,16 +262,16 @@ impl Engine {
                     .in_run(&run.id),
                 )
                 .await;
-                self.l4_service().mirror_to_task(&updated).await;
-                self.l4_service().record_workflow_task_state(&run.task_id).await;
+                self.mirror_to_task(&updated).await;
+                self.record_workflow_task_state(&run.task_id).await;
             }
         }
     }
 
     async fn patch_run(&self, run: &Run, patch: RunPatch) -> Option<Run> {
-        match self.l4.store.update_run(&run.id, &patch).await {
+        match self.state.store.update_run(&run.id, &patch).await {
             Ok(updated) => {
-                self.shared.bus.publish(Event::RunUpdated { run: updated.clone() });
+                self.wiring.bus().publish(Event::RunUpdated { run: updated.clone() });
                 Some(updated)
             }
             Err(e) => {
@@ -483,8 +284,8 @@ impl Engine {
     /// How long this task usually takes, from its own finished runs. The median
     /// rather than the mean: one run that sat waiting for a human all night
     /// should not move the estimate for the rest.
-    async fn historical_estimate_for(&self, task_id: &str) -> (Option<u64>, u32) {
-        let runs = self.l4.store.runs(task_id, 50).await.unwrap_or_default();
+    pub(crate) async fn historical_estimate_for(&self, task_id: &str) -> (Option<u64>, u32) {
+        let runs = self.state.store.runs(task_id, 50).await.unwrap_or_default();
         let mut lengths: Vec<i64> = runs
             .iter()
             .filter(|r| r.status == RunStatus::Done)
@@ -498,11 +299,31 @@ impl Engine {
         let samples = lengths.len() as u32;
         (Some(lengths[lengths.len() / 2] as u64), samples)
     }
+
+    /// What the run's session is doing and where the runtime learned it (L2's `SessionStatusFact`, a live read of the
+    /// runtime: unknown, never an error).
+    async fn session_status_report(&self, run: &Run) -> StatusReport {
+        let unknown = StatusReport { status: RuntimeStatus::Unknown, source: StatusSource::Unknown };
+        let Some(session) = &run.session else {
+            return unknown;
+        };
+        match self.wiring.facts().get::<factory_kernel::SessionStatusFact>(session).await {
+            Ok(fact) => StatusReport {
+                status: RuntimeStatus::parse(&fact.status),
+                source: match fact.source.as_str() {
+                    "Reported" => StatusSource::Reported,
+                    "Inferred" => StatusSource::Inferred,
+                    _ => StatusSource::Unknown,
+                },
+            },
+            Err(_) => unknown,
+        }
+    }
 }
 
 /// The task's own estimate is the planning fact somebody deliberately wrote.
 /// History only fills the gap when they did not write one.
-fn plan_estimate(
+pub(crate) fn plan_estimate(
     user: Option<u64>,
     historical: (Option<u64>, u32),
 ) -> (Option<u64>, u32, bool) {
@@ -769,7 +590,7 @@ const LAST_MESSAGE_BYTE_CAP: usize = 2048;
 /// Drop everything before the window except the last state it was in, moved to
 /// the window's edge. Without this an agent that has been idle since yesterday
 /// draws nothing at all, which reads as "not observed".
-fn trim_to_window(series: &mut Vec<StatusChange>, from: DateTime<Utc>) {
+pub(crate) fn trim_to_window(series: &mut Vec<StatusChange>, from: DateTime<Utc>) {
     let Some(last_before) = series.iter().rposition(|c| c.at < from) else {
         return;
     };
@@ -793,7 +614,7 @@ fn trim_to_window(series: &mut Vec<StatusChange>, from: DateTime<Utc>) {
 /// already overdue -- that one is about to be a block, not a plan. A
 /// `next_run_at` with no schedule behind it (a queued retry) is the one
 /// firing it says and nothing after.
-fn planned_firings(
+pub(crate) fn planned_firings(
     task: &factory_core::task::Task,
     now: DateTime<Utc>,
     from: DateTime<Utc>,

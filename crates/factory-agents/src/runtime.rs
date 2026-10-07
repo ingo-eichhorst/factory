@@ -433,3 +433,35 @@ mod tests {
         assert!(diagnostic.server.is_none());
     }
 }
+
+/// How the L3 provider finds the runtime a session runs on, by the name the session carries. The registry that holds
+/// the runtimes lives above this crate and implements it.
+pub trait RuntimeDirectory: Send + Sync {
+    fn runtime(&self, name: &str) -> Option<std::sync::Arc<dyn AgentRuntime>>;
+}
+
+/// L3's provider for `SessionStatusFact`: ask the session's runtime what it is doing and where it learned that. An
+/// unknown runtime or a failed read is `unknown` / `unknown`, never an error.
+pub struct StatusProvider<'a> {
+    pub runtimes: &'a dyn RuntimeDirectory,
+}
+impl factory_kernel::FactProvider for StatusProvider<'_> {
+    type Level = factory_kernel::L3;
+}
+#[async_trait::async_trait]
+impl factory_kernel::Provide<factory_kernel::SessionStatusFact> for StatusProvider<'_> {
+    type Query = SessionRef;
+    type Value = factory_kernel::SessionStatusFact;
+    type Error = factory_kernel::FactoryError;
+    async fn get(&self, session: &SessionRef) -> Result<Self::Value> {
+        let unknown = StatusReport { status: RuntimeStatus::Unknown, source: StatusSource::Unknown };
+        let report = match self.runtimes.runtime(&session.runtime) {
+            Some(runtime) => runtime.status_report(session).await.unwrap_or(unknown),
+            None => unknown,
+        };
+        Ok(factory_kernel::SessionStatusFact {
+            status: report.status.as_str().to_string(),
+            source: format!("{:?}", report.source),
+        })
+    }
+}

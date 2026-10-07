@@ -51,7 +51,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("host_power/page.rs", Wiring), // the host power page: L1 assertion state beside L4 liveness
     ("host_power/", L1),
     ("power.rs", L1),
-    ("github_deployments.rs", L4),
+    ("github_deployments.rs", Wiring), // mirrors an L1 deployment to GitHub: L1 facts, L4's mirror record and the authorization, composed
     ("doctor.rs", Wiring), // `factory doctor`: diagnostics across every level
     ("renewals/mod.rs", Wiring), // the Important Dates page: L1 and L2 caches plus L6 attestations and clock
     ("renewals/", L1),
@@ -83,6 +83,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("scheduler.rs", L4),
     ("schedule.rs", L4),
     ("occupancy.rs", L4),
+    ("occupancy_page.rs", Wiring), // the occupancy chart: L4 runs and liveness composed with L3's roster
     ("operations_report.rs", Wiring), // the Operations tab: L4 tasks and runs composed with L2/L3 attention
     ("operations.rs", L4),
     ("costs.rs", L4),
@@ -169,7 +170,6 @@ const PULLS_BASELINE: &[(&str, usize)] = &[
 /// `Arc<Engine>` in L4- and L5-owned production code. `l4_spawner.rs` and `l5_spawner.rs` are the handles themselves; the rest is workflows, which take an
 /// `L4Spawner` once they move (S9b part 3).
 const ARC_ENGINE_BASELINE: &[(&str, usize)] = &[
-    ("costs.rs", 1),
     ("github_intake.rs", 1),
     ("l4_spawner.rs", 1),
     ("bench/mod.rs", 1),
@@ -217,6 +217,9 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("l2_pages.rs", "services", 2),
     ("main.rs", "services", 5),
     ("metrics.rs", "services", 2),
+    ("occupancy_page.rs", "reach", 5),
+    ("occupancy_page.rs", "services", 1),
+    ("github_deployments.rs", "reach", 5),
     ("operations_report.rs", "reach", 8),
     ("production.rs", "people", 1),
     ("quality/mod.rs", "reach", 3),

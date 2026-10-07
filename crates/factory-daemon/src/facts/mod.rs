@@ -352,6 +352,13 @@ port!(
     StandingAgentObservationsFact,
     l3::liveness_provider
 );
+port!(
+    SessionStatusFact,
+    factory_agents::runtime::StatusProvider<'a>,
+    factory_kernel::SessionRef,
+    SessionStatusFact,
+    l3::session_status_provider
+);
 port!(EffectiveRoleFact, crate::l3_service::RoleProvider<'a>, (String, String), EffectiveRoleFact, l3::role_provider);
 port!(
     HarnessVersionFact,
@@ -820,6 +827,7 @@ mod tests {
         registered::<AgentReportedFact>();
         registered::<EffectiveRoleFact>();
         registered::<StandingAgentObservationsFact>();
+        registered::<SessionStatusFact>();
         registered::<HarnessVersionFact>();
         registered::<WorkflowFact>();
         registered::<EnvironmentRecoveryFact>();
@@ -1433,6 +1441,7 @@ mod tests {
             "AgentReportedFact",
             "EffectiveRoleFact",
             "StandingAgentObservationsFact",
+            "SessionStatusFact",
             "HarnessVersionFact",
         ] {
             assert!(

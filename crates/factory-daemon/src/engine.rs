@@ -3,9 +3,7 @@
 
 use chrono::Utc;
 use factory_core::adapter::agent::LaunchSpec;
-use factory_core::adapter::runtime::{
-    RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StatusReport, StatusSource,
-};
+use factory_core::adapter::runtime::{RuntimeConnectionDiagnostic, RuntimeStatus, Screen};
 use factory_core::adapter::TaskStore;
 #[cfg(test)]
 use factory_core::adapter::{Agent, AgentRuntime};
@@ -1279,25 +1277,6 @@ impl Engine {
         match self.shared.registry.runtime(&session.runtime) {
             Ok(rt) => rt.status(session).await.unwrap_or(RuntimeStatus::Unknown),
             Err(_) => RuntimeStatus::Unknown,
-        }
-    }
-
-    /// `session_status`, plus where the answer came from. The one caller that
-    /// needs provenance is `record_run_liveness` -- the scheduler's `Gone`
-    /// check and `supervise_agents` only ever need the status, so they keep
-    /// calling `status` through `session_status` rather than paying for a
-    /// question they do not ask.
-    pub async fn session_status_report(&self, run: &Run) -> StatusReport {
-        let unknown = StatusReport {
-            status: RuntimeStatus::Unknown,
-            source: StatusSource::Unknown,
-        };
-        let Some(session) = &run.session else {
-            return unknown;
-        };
-        match self.shared.registry.runtime(&session.runtime) {
-            Ok(rt) => rt.status_report(session).await.unwrap_or(unknown),
-            Err(_) => unknown,
         }
     }
 
