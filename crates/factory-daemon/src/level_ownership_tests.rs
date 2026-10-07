@@ -105,6 +105,7 @@ const OWNERS: &[(&str, Owner)] = &[
     // L5 Improvement
     ("bench/", L5),
     ("l5_service.rs", L5),
+    ("l5_spawner.rs", L5),
     ("datasets.rs", L5),
     ("suggestions.rs", L5),
     ("quality/", L5),
@@ -142,7 +143,6 @@ const OWNERS: &[(&str, Owner)] = &[
 
 /// (file, group, count): today's cross-level reach. May only shrink.
 const BASELINE: &[(&str, &str, usize)] = &[
-    ("bench/engine.rs", "l4", 8),
     ("dependencies.rs", "l4", 2),
     ("secrets.rs", "l4", 2),
 ];
@@ -168,12 +168,14 @@ const PULLS_BASELINE: &[(&str, usize)] = &[
     ("quality/mod.rs -> .l6_service()", 1),
 ];
 
-/// `Arc<Engine>` in L4-owned production code. `l4_spawner.rs` is the handle itself; the rest is workflows, which take an
+/// `Arc<Engine>` in L4- and L5-owned production code. `l4_spawner.rs` and `l5_spawner.rs` are the handles themselves; the rest is workflows, which take an
 /// `L4Spawner` once they move (S9b part 3).
 const ARC_ENGINE_BASELINE: &[(&str, usize)] = &[
     ("costs.rs", 1),
     ("github_intake.rs", 1),
     ("l4_spawner.rs", 1),
+    ("bench/mod.rs", 1),
+    ("l5_spawner.rs", 1),
     ("recovery_journal.rs", 1),
     ("scheduler.rs", 1),
 ];
@@ -484,7 +486,7 @@ fn scan() -> Scan {
         if impersonated > 0 {
             result.impersonation.insert(relative.clone(), impersonated);
         }
-        if own_group == "l4" {
+        if own_group == "l4" || own_group == "l5" {
             let arcs = arc_engine_mentions(&code);
             if arcs > 0 {
                 result.arc_engine.insert(relative.clone(), arcs);
@@ -670,8 +672,10 @@ fn l4_code_holds_an_arc_engine_only_through_the_spawner_and_the_rest_only_shrink
     let scan = scan();
     only_shrinks("`Arc<Engine>` mentions", &scan.arc_engine, ARC_ENGINE_BASELINE, &scan);
     assert!(
-        !scan.arc_engine.contains_key("verification.rs") && !scan.arc_engine.contains_key("intake.rs"),
-        "verification and intake take an `L4Spawner`, never an `Arc<Engine>`"
+        !scan.arc_engine.contains_key("verification.rs")
+            && !scan.arc_engine.contains_key("intake.rs")
+            && !scan.arc_engine.contains_key("bench/engine.rs"),
+        "verification and intake take an `L4Spawner`, bench an `L5Spawner`, never an `Arc<Engine>`"
     );
 }
 

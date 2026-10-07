@@ -162,12 +162,12 @@ impl Engine {
                 Ok(Payload::BenchRun { run, results })
             }
             Request::BenchRunCancel { id } => {
-                let run = self.cancel_bench_run(&id).await?;
+                let run = self.l5_service().cancel_bench_run(&id).await?;
                 let results = factory_core::bench::aggregate(&run.attempts);
                 Ok(Payload::BenchRun { run, results })
             }
             Request::BenchRunClean { id } => {
-                let run = self.clean_bench_run(&id).await?;
+                let run = self.l5_service().clean_bench_run(&id).await?;
                 let results = factory_core::bench::aggregate(&run.attempts);
                 Ok(Payload::BenchRun { run, results })
             }

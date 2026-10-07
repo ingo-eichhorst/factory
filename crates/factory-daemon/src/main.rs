@@ -12,6 +12,7 @@ mod l3_service;
 mod l4_port;
 mod l4_service;
 mod l5_service;
+mod l5_spawner;
 mod l4_spawner;
 mod admission;
 mod agent_rows;

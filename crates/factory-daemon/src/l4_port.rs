@@ -78,4 +78,24 @@ impl L4Port<'_> {
         let receipt = crate::commands::assurance(self.0.core, &observer).remediate(intent).await?;
         Ok(receipt.id)
     }
+
+    /// Create a bench attempt's task, born with its bench origin and the id L5 already recorded for it.
+    pub(crate) async fn create_bench_task(
+        &self,
+        new: factory_core::task::NewTask,
+        origin: factory_core::bench::BenchOrigin,
+        id: String,
+    ) -> Result<Task> {
+        self.0.create_bench_task(new, origin, id).await
+    }
+
+    /// Start a run of the task, awaited until the dispatch has been handled.
+    pub(crate) async fn start_run(&self, task_id: &str, trigger: Trigger) {
+        self.0.start_run(task_id, trigger).await
+    }
+
+    /// Release the workspaces recorded for these paths (their worktrees are gone).
+    pub(crate) async fn release_workspaces(&self, paths: &[std::path::PathBuf]) {
+        let _ = crate::assignments::release(&self.0.state.workspaces, paths).await;
+    }
 }

@@ -402,6 +402,16 @@ impl Fact for TaskSnapshotFact {
     type Producer = L4;
 }
 
+/// Whether the agent itself reported this run's outcome (`done` or `failed` from the agent, as opposed to the daemon
+/// settling a run on the agent's behalf). Query: the run id. A selective answer, so a reader need not decode the
+/// run's journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReportedFact(pub bool);
+
+impl Fact for AgentReportedFact {
+    type Producer = L4;
+}
+
 /// Which run of a task a [`RunSnapshotFact`] read names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunSnapshotQuery {
@@ -953,6 +963,13 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         ],
         lives_in_kernel: true,
         note: "live opaque own-store record; never a task record carried by a command port",
+    },
+    FactCatalogueEntry {
+        fact: "AgentReportedFact",
+        producer: "L4",
+        readers: &["L5 bench (a failed run's own report or its gate decides the verdict)"],
+        lives_in_kernel: true,
+        note: "selective: whether the agent reported the run's outcome; no journal entries leave L4",
     },
     FactCatalogueEntry {
         fact: "RunSnapshotFact",
