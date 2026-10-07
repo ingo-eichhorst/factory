@@ -51,4 +51,11 @@ impl L4Spawner {
             engine.l4_service().start_run_due_continue(&task_id, due, previous).await;
         });
     }
+
+    /// Take a usage reading of `run` at `point` on a task of its own, off whatever request is waiting (a harness's
+    /// turn-end hook, for instance).
+    pub(crate) fn spawn_snapshot(&self, run: Run, point: factory_core::usage::SnapshotPoint) {
+        let engine = self.engine.clone();
+        tokio::spawn(async move { engine.l4_service().snapshot_usage(&run, point).await });
+    }
 }

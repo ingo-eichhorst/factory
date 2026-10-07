@@ -125,7 +125,7 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         engine.l4_service().sample_standing_agents().await;
         // What the runtime says the working agents are doing. Nothing else
         // keeps this: herdr answers "now" and forgets.
-        engine.record_run_liveness().await;
+        engine.l4_service().record_run_liveness().await;
 
         // -- runs that stopped talking -----------------------------------
         let active = match engine.l4_service().active_runs().await {

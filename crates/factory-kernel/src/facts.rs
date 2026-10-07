@@ -159,6 +159,16 @@ pub struct StandingAgentObservationsFact {
     pub next: u64,
 }
 impl Fact for StandingAgentObservationsFact { type Producer = L3; }
+/// What a runtime says a session is doing right now, and where that answer came from (`hook`, `inferred`, ...), as
+/// the runtime's own vocabulary spells them. Query: the session. A live read of the runtime, the one the liveness
+/// sampling and the turn-end handling of L4 ask once per run per tick. An unknown runtime or a failed read is
+/// `unknown` / `unknown`, never an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionStatusFact {
+    pub status: String,
+    pub source: String,
+}
+impl Fact for SessionStatusFact { type Producer = L3; }
 
 /// The name of the role an agent runs under right now: its declared role, overridden by a standing agent's live one (the
 /// single answer to "what may this agent do" for a run and a standing agent alike). Query: (scope, agent name).
@@ -847,6 +857,11 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         fact: "StandingAgentObservationsFact", producer: "L3", readers: &["L4 occupancy (the liveness record of standing agents)"],
         lives_in_kernel: true,
         note: "what L3 observed about each standing agent's session, in order, from a cursor; bounded; L4 reads, L3 tells nobody",
+    },
+    FactCatalogueEntry {
+        fact: "SessionStatusFact", producer: "L3", readers: &["L4 occupancy (run liveness sampling and hook-authoritative block and turn-end handling)"],
+        lives_in_kernel: true,
+        note: "a live runtime read: status plus provenance; unknown, never an error",
     },
     FactCatalogueEntry {
         fact: "EffectiveRoleFact", producer: "L3", readers: &["L4 (dispatch guide, intake triage role check, workflow caller)"],

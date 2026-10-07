@@ -46,3 +46,7 @@ pub(crate) fn version_provider(engine: &Engine) -> crate::harness_health::Versio
 pub(crate) fn liveness_provider(engine: &Engine) -> crate::l3_service::LivenessProvider {
     crate::l3_service::LivenessProvider(engine.l3.liveness.clone())
 }
+
+pub(crate) fn session_status_provider(engine: &Engine) -> factory_agents::runtime::StatusProvider<'_> {
+    factory_agents::runtime::StatusProvider { runtimes: &engine.shared.registry }
+}
