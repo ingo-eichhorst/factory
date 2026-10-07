@@ -168,6 +168,25 @@ impl Provide<factory_kernel::TaskSnapshotFact> for Provider<'_> {
 }
 
 #[async_trait]
+impl Provide<factory_kernel::RunSnapshotFact> for Provider<'_> {
+    type Query = factory_kernel::RunSnapshotQuery;
+    type Value = factory_kernel::RunSnapshotFact;
+    type Error = FactoryError;
+    async fn get(&self, query: &factory_kernel::RunSnapshotQuery) -> Result<Self::Value> {
+        use factory_kernel::RunSnapshotQuery::*;
+        let run = match query {
+            Latest(task) => self.store.runs(task, 1).await?.into_iter().next(),
+            Active(task) => self.store.active_run(task).await?,
+            ById(id) => self.store.get_run(id).await?,
+        };
+        let value = run
+            .map(|run| serde_json::to_value(run).map_err(|e| FactoryError::Other(e.into())))
+            .transpose()?;
+        Ok(factory_kernel::RunSnapshotFact(value))
+    }
+}
+
+#[async_trait]
 impl Provide<factory_kernel::ScheduledRunDatesFact> for Provider<'_> {
     type Query = ();
     type Value = factory_kernel::ScheduledRunDatesFact;

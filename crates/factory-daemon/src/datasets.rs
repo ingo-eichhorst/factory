@@ -7,7 +7,6 @@
 //! the file and the one lock per dataset that keeps two writers from tearing
 //! it in half.
 
-use crate::engine::Engine;
 use factory_core::dataset::{Case, Dataset, DatasetFinding, DatasetSummary};
 use factory_core::error::{FactoryError, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -61,9 +60,13 @@ fn refuse_bad_case_id(id: &str) -> Result<()> {
     }
 }
 
-impl Engine {
+use crate::l5_service::L5Service;
+#[cfg(test)]
+use crate::engine::Engine;
+
+impl L5Service<'_> {
     pub(crate) fn known_scope_names(&self) -> BTreeSet<String> {
-        self.factory_snapshot()
+        self.wiring.snapshot()
             .config
             .scopes
             .iter()
@@ -73,7 +76,7 @@ impl Engine {
 
     /// Every dataset file in `<root>/.factory/datasets/`, by name, sorted.
     fn dataset_names(&self) -> Vec<String> {
-        let dir = self.factory_snapshot().datasets_dir();
+        let dir = self.wiring.snapshot().datasets_dir();
         let Ok(read) = std::fs::read_dir(&dir) else {
             return Vec::new();
         };
@@ -93,7 +96,7 @@ impl Engine {
 
     pub(crate) fn dataset_summaries(&self) -> Result<Vec<DatasetSummary>> {
         let known = self.known_scope_names();
-        let dir = self.factory_snapshot().datasets_dir();
+        let dir = self.wiring.snapshot().datasets_dir();
         let mut out = Vec::new();
         for name in self.dataset_names() {
             if let Some(ds) = Dataset::load(&dir, &name)? {
@@ -105,7 +108,7 @@ impl Engine {
 
     pub(crate) fn dataset_view(&self, name: &str) -> Result<(Dataset, Vec<DatasetFinding>)> {
         refuse_bad_name(name)?;
-        let dir = self.factory_snapshot().datasets_dir();
+        let dir = self.wiring.snapshot().datasets_dir();
         let dataset = Dataset::load(&dir, name)?
             .ok_or_else(|| FactoryError::BadRequest(format!("no such dataset: {name:?}")))?;
         let findings = factory_core::dataset::findings(&dataset, &self.known_scope_names());
@@ -114,9 +117,9 @@ impl Engine {
 
     pub(crate) async fn dataset_create(&self, name: &str, description: Option<String>) -> Result<Dataset> {
         refuse_bad_name(name)?;
-        let lock = self.l5.dataset_locks.lock_for(name);
+        let lock = self.state.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
-        let dir = self.factory_snapshot().datasets_dir();
+        let dir = self.wiring.snapshot().datasets_dir();
         if Dataset::load(&dir, name)?.is_some() {
             return Err(FactoryError::BadRequest(format!("dataset {name:?} already exists")));
         }
@@ -132,9 +135,9 @@ impl Engine {
 
     pub(crate) async fn dataset_add_cases(&self, name: &str, cases: Vec<Case>) -> Result<Dataset> {
         refuse_bad_name(name)?;
-        let lock = self.l5.dataset_locks.lock_for(name);
+        let lock = self.state.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
-        let dir = self.factory_snapshot().datasets_dir();
+        let dir = self.wiring.snapshot().datasets_dir();
         let mut dataset = Dataset::load(&dir, name)?
             .ok_or_else(|| FactoryError::BadRequest(format!("no such dataset: {name:?}")))?;
         dataset.cases.extend(cases);
@@ -158,9 +161,9 @@ impl Engine {
             )
         })?;
 
-        let lock = self.l5.dataset_locks.lock_for(name);
+        let lock = self.state.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
-        let dir = self.factory_snapshot().datasets_dir();
+        let dir = self.wiring.snapshot().datasets_dir();
         let mut dataset = match Dataset::load(&dir, name)? {
             Some(existing) => existing,
             None => Dataset::new(name, None),
@@ -180,25 +183,24 @@ impl Engine {
 
     pub(crate) async fn dataset_from_tasks(&self, name: &str, task_ids: Vec<String>) -> Result<Dataset> {
         refuse_bad_name(name)?;
-        let lock = self.l5.dataset_locks.lock_for(name);
+        let lock = self.state.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
-        let dir = self.factory_snapshot().datasets_dir();
+        let dir = self.wiring.snapshot().datasets_dir();
         let mut dataset = match Dataset::load(&dir, name)? {
             Some(existing) => existing,
             None => Dataset::new(name, None),
         };
 
         let mut taken: BTreeSet<String> = dataset.cases.iter().map(|c| c.id.clone()).collect();
-        let factory = self.factory_snapshot();
+        let factory = self.wiring.snapshot();
         let now = chrono::Utc::now();
 
         for task_id in &task_ids {
             let task = self
-                .l4.store
-                .get(task_id)
+                .task_record(task_id)
                 .await?
                 .ok_or_else(|| FactoryError::BadRequest(format!("no such task: {task_id:?}")))?;
-            let newest_run = self.l4.store.runs(task_id, 1).await?.into_iter().next();
+            let newest_run = self.latest_run(task_id).await?;
             let outcome = newest_run
                 .as_ref()
                 .map(|r| r.status.as_str().to_string())
@@ -236,9 +238,9 @@ impl Engine {
     pub(crate) async fn dataset_delete_case(&self, name: &str, id: &str) -> Result<Dataset> {
         refuse_bad_name(name)?;
         refuse_bad_case_id(id)?;
-        let lock = self.l5.dataset_locks.lock_for(name);
+        let lock = self.state.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
-        let dir = self.factory_snapshot().datasets_dir();
+        let dir = self.wiring.snapshot().datasets_dir();
         let mut dataset = Dataset::load(&dir, name)?
             .ok_or_else(|| FactoryError::BadRequest(format!("no such dataset: {name:?}")))?;
         let before = dataset.cases.len();
@@ -253,9 +255,9 @@ impl Engine {
 
     pub(crate) async fn dataset_delete(&self, name: &str) -> Result<bool> {
         refuse_bad_name(name)?;
-        let lock = self.l5.dataset_locks.lock_for(name);
+        let lock = self.state.dataset_locks.lock_for(name);
         let _guard = lock.lock().await;
-        let dir = self.factory_snapshot().datasets_dir();
+        let dir = self.wiring.snapshot().datasets_dir();
         if Dataset::load(&dir, name)?.is_none() {
             return Ok(false);
         }
@@ -352,26 +354,27 @@ mod tests {
         let engine = test_engine();
         let bad = escaping_name(&engine);
 
-        let e = engine.dataset_view(&bad).unwrap_err().to_string();
+        let e = engine.l5_service().dataset_view(&bad).unwrap_err().to_string();
         assert!(e.contains("must match"), "{e}");
 
-        let e = engine.dataset_add_cases(&bad, Vec::new()).await.unwrap_err().to_string();
+        let e = engine.l5_service().dataset_add_cases(&bad, Vec::new()).await.unwrap_err().to_string();
         assert!(e.contains("must match"), "{e}");
 
         let e = engine
+            .l5_service()
             .dataset_import(&bad, "jsonl", "", false)
             .await
             .unwrap_err()
             .to_string();
         assert!(e.contains("must match"), "{e}");
 
-        let e = engine.dataset_from_tasks(&bad, Vec::new()).await.unwrap_err().to_string();
+        let e = engine.l5_service().dataset_from_tasks(&bad, Vec::new()).await.unwrap_err().to_string();
         assert!(e.contains("must match"), "{e}");
 
-        let e = engine.dataset_delete_case(&bad, "some-id").await.unwrap_err().to_string();
+        let e = engine.l5_service().dataset_delete_case(&bad, "some-id").await.unwrap_err().to_string();
         assert!(e.contains("must match"), "{e}");
 
-        let e = engine.dataset_delete(&bad).await.unwrap_err().to_string();
+        let e = engine.l5_service().dataset_delete(&bad).await.unwrap_err().to_string();
         assert!(e.contains("must match"), "{e}");
 
         // The file this test planted must still be exactly where it was --
@@ -383,8 +386,9 @@ mod tests {
     #[tokio::test]
     async fn dataset_delete_case_also_refuses_a_bad_case_id() {
         let engine = test_engine();
-        engine.dataset_create("demo", None).await.unwrap();
+        engine.l5_service().dataset_create("demo", None).await.unwrap();
         let e = engine
+            .l5_service()
             .dataset_delete_case("demo", "../elsewhere")
             .await
             .unwrap_err()
@@ -401,10 +405,10 @@ mod tests {
     #[tokio::test]
     async fn dataset_create_leaves_a_fresh_dataset_at_revision_one() {
         let engine = test_engine();
-        let ds = engine.dataset_create("probe", None).await.unwrap();
+        let ds = engine.l5_service().dataset_create("probe", None).await.unwrap();
         assert_eq!(ds.revision, 1, "{ds:?}");
         // And the same read back off disk, not only the in-memory answer.
-        let (loaded, _findings) = engine.dataset_view("probe").unwrap();
+        let (loaded, _findings) = engine.l5_service().dataset_view("probe").unwrap();
         assert_eq!(loaded.revision, 1, "{loaded:?}");
     }
 }

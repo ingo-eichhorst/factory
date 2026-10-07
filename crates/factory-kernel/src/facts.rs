@@ -402,6 +402,28 @@ impl Fact for TaskSnapshotFact {
     type Producer = L4;
 }
 
+/// Which run of a task a [`RunSnapshotFact`] read names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunSnapshotQuery {
+    /// The task's newest run, whatever its status.
+    Latest(String),
+    /// The task's run in progress, if any.
+    Active(String),
+    /// One run by its own id.
+    ById(String),
+}
+
+/// A live run record as L4 stores it, for the readers above that judge or report on a task's attempts (L5 bench,
+/// datasets, suggestions). Like [`TaskSnapshotFact`] it is an opaque own-store record read as a fact, never carried
+/// by a command: absence is `None`, not an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RunSnapshotFact(pub Option<serde_json::Value>);
+
+impl Fact for RunSnapshotFact {
+    type Producer = L4;
+}
+
 /// Plain scope selection for the live process inventory; no task lifecycle logic.
 pub enum TaskInventoryQuery {
     All,
@@ -925,9 +947,19 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
     FactCatalogueEntry {
         fact: "TaskSnapshotFact",
         producer: "L4",
-        readers: &["People (legacy task response composition after command acknowledgements)"],
+        readers: &[
+            "People (legacy task response composition after command acknowledgements)",
+            "L5 bench, datasets and suggestions (transitional: they judge an attempt from the whole record; S10)",
+        ],
         lives_in_kernel: true,
         note: "live opaque own-store record; never a task record carried by a command port",
+    },
+    FactCatalogueEntry {
+        fact: "RunSnapshotFact",
+        producer: "L4",
+        readers: &["L5 bench, datasets and suggestions (transitional, with TaskSnapshotFact; S10)"],
+        lives_in_kernel: true,
+        note: "live opaque own-store run record by task (latest or active) or id; absence is None",
     },
     FactCatalogueEntry {
         fact: "WorkflowFact",

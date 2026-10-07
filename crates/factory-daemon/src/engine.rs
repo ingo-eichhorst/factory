@@ -7,6 +7,7 @@ use factory_core::adapter::runtime::{
     RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StatusReport, StatusSource,
 };
 use factory_core::adapter::TaskStore;
+#[cfg(test)]
 use factory_core::adapter::{Agent, AgentRuntime};
 use factory_core::config::{Factory, Sandbox, ScopeAgent, SHELL_HARNESS};
 use factory_core::error::{FactoryError, Result};
@@ -31,9 +32,8 @@ use crate::schedule;
 use factory_agents::dispatch::Environments;
 #[cfg(test)]
 use factory_core::adapter::runtime::StartRequest;
-use factory_core::adapter::agent::UpstreamOutput;
 #[cfg(test)]
-use factory_core::adapter::agent::AgentContext;
+use factory_core::adapter::agent::{AgentContext, UpstreamOutput};
 #[cfg(test)]
 use factory_core::run::{BlockSource, NewRun, RunPatch};
 #[cfg(test)]
@@ -405,35 +405,10 @@ impl Engine {
         self.l4_service().cancel_task_run(task_id, expected, kind).await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn resolve_continue(
-        &self,
-        task: &Task,
-        names: (&str, &str),
-        agent: &dyn Agent,
-        runtime: &dyn AgentRuntime,
-        prev: &Run,
-        scope_path: &Path,
-        sandboxed: Option<&factory_core::openshell::OpenshellConfig>,
-    ) -> ContinueOutcome {
-        self.l4_service().resolve_continue(task, names, agent, runtime, prev, scope_path, sandboxed).await
-    }
-
     // L5 (bench, suggestions) starts runs through these two until S10 gives it a command port down to L4;
     // an L5 file calling `.l4_service()` itself would be a new pull.
     pub async fn start_run(&self, task_id: &str, trigger: Trigger) {
         self.l4_service().start_run(task_id, trigger).await
-    }
-
-    pub(crate) async fn dispatch_with(
-        &self,
-        task_id: &str,
-        trigger: Trigger,
-        due: Due,
-        continue_from: Option<Run>,
-        extra_upstream: Vec<UpstreamOutput>,
-    ) -> Result<Run> {
-        self.l4_service().dispatch_with(task_id, trigger, due, continue_from, extra_upstream).await
     }
 
     // -- reaches the run-start path makes into other levels (S9a part 2) -------
@@ -1201,6 +1176,12 @@ impl Engine {
     }
 
     // -- creating ----------------------------------------------------------
+
+    /// L4's settling path asks L5 to record the answer to a suggestion's ask (a page forwarder: an L4 file calling
+    /// `.l5_service()` would be a pull up the ladder; the answer arrives as an event once L5 reads run completion).
+    pub(crate) async fn settle_suggestion_ask(&self, run: &Run) {
+        self.l5_service().settle_suggestion_ask(run).await
+    }
 
     pub(crate) async fn create_bench_task(
         &self,
@@ -5268,6 +5249,7 @@ mod tests {
             // still live, the way an agent filing one mid-run actually would.
             let prev = engine.l4_service().dispatch(&task.id, Trigger::Manual, Due::now(), None).await.unwrap();
             let suggestion = engine
+                .l5_service()
                 .file_suggestion(
                     &task.id,
                     factory_core::protocol::SuggestionReport {
@@ -5285,6 +5267,7 @@ mod tests {
             seed_session_id(&engine, &prev, "sess-ask").await;
 
             let answered = engine
+                .l5_service()
                 .suggestion_ask(&crate::access::Caller::Owner, &suggestion.id, "why did this fail?".into())
                 .await
                 .unwrap();
@@ -5318,7 +5301,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let settled = engine.suggestion_get(&suggestion.id).await.unwrap();
+            let settled = engine.l5_service().suggestion_get(&suggestion.id).await.unwrap();
             assert_eq!(settled.ask.as_ref().unwrap().answer.as_deref(), Some("it needed a different grant"));
 
             std::fs::remove_dir_all(&scope_dir).ok();
