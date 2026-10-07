@@ -97,6 +97,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("run_start.rs", L4),
     ("scheduling.rs", L4),
     ("supplied.rs", Wiring), // what L5/L6 supply to L4 (quality block, functionary binding) and workflow lint
+    ("l2_pages.rs", Wiring), // L2 catalogues composed with L4 runs and journals: attachments, secret metadata
     ("l4_port.rs", L4),
     ("l4_service.rs", L4),
     ("l4_spawner.rs", L4),
@@ -144,8 +145,6 @@ const OWNERS: &[(&str, Owner)] = &[
 
 /// (file, group, count): today's cross-level reach. May only shrink.
 const BASELINE: &[(&str, &str, usize)] = &[
-    ("dependencies.rs", "l4", 2),
-    ("secrets.rs", "l4", 2),
 ];
 
 /// A level service and the accessor that enters it (`engine.l6_service()`).
@@ -214,6 +213,7 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("facts/mod.rs", "providers", 2),
     ("facts/mod.rs", "services", 6),
     ("host_power/page.rs", "reach", 4),
+    ("l2_pages.rs", "reach", 5),
     ("main.rs", "services", 5),
     ("metrics.rs", "services", 2),
     ("operations_report.rs", "reach", 8),

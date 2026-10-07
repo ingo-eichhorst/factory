@@ -10,6 +10,7 @@ mod dispatch_port;
 mod harness_hold;
 mod runtime_events;
 mod l3_service;
+mod l2_pages;
 mod l4_port;
 mod l4_service;
 mod l5_service;
