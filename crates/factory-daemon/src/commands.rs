@@ -99,3 +99,7 @@ pub(crate) fn direction<'a>(engine: &'a Engine, observer: &'a CreationObserver) 
         inventory: <factory_kernel::TaskInventoryFact as crate::facts::Port>::provider(engine),
     }
 }
+/// The one way L4 reaches L3: a sealed `Commands<L4, _>` edge over the L3 service (S8a).
+pub(crate) fn l3(engine: &Engine) -> Commands<factory_kernel::L4, crate::dispatch_port::L3Port<'_>> {
+    Commands::new(crate::dispatch_port::L3Port(engine.l3_service()))
+}

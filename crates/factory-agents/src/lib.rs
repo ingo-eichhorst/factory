@@ -8,6 +8,7 @@
 pub mod adapter;
 pub mod agent;
 pub mod assignment;
+pub mod dispatch;
 pub mod harness;
 pub mod role;
 pub mod role_chain;

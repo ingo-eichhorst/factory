@@ -479,11 +479,11 @@ impl L3Service<'_> {
     /// The owner's opt-in (`auto_repair` with a `repair_script`): run the
     /// repair once per unhealthy stretch, in the background, bounded. The
     /// script's own signature check applies exactly as it does by hand.
-    pub(crate) fn maybe_auto_repair(&self, harness: &str, binary: &str, config: &HarnessHealthConfig) {
-        if !config.auto_repair {
+    pub(crate) fn maybe_auto_repair(&self, harness: &str, binary: &str, enabled: bool, script: Option<String>) {
+        if !enabled {
             return;
         }
-        let Some(script) = config.repair_script.clone() else {
+        let Some(script) = script else {
             return;
         };
         if !self.state.harness.claim_repair(binary) {

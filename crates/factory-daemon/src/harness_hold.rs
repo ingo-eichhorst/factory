@@ -9,6 +9,7 @@
 //! the same call chain as before (no polling was added).
 use crate::engine::Engine;
 use crate::facts::Facts;
+use factory_agents::dispatch::HarnessCommands;
 use crate::harness_health::{binary_of, harness_name, HarnessCheck, Verdict, HELD_LOOKBACK_DAYS};
 use chrono::Utc;
 use factory_core::adapter::Agent;
@@ -72,11 +73,11 @@ impl Engine {
             tracing::warn!(task = task.id, "could not block the task on its harness: {e}");
         }
         self.publish_task(&task.id).await;
-        self.l3_service().hold(
+        crate::commands::l3(self).port().hold(
             &binary,
             HeldTask { task_id: task.id.clone(), scope: task.scope.clone(), title: task.title.clone() },
         );
-        self.l3_service().maybe_auto_repair(&harness, &binary, &config);
+        crate::commands::l3(self).port().auto_repair(&harness, &binary, config.auto_repair, config.repair_script.clone());
         Err(FactoryError::HarnessUnhealthy(reason))
     }
 
@@ -90,13 +91,13 @@ impl Engine {
     /// recent, which is also what makes a restart lose nothing.
     pub(crate) fn recheck_harnesses(self: &Arc<Self>) {
         let config = self.factory_snapshot().config.daemon.harness_health.clone();
-        if !config.enabled || !self.l3_service().claim_recheck(Duration::from_secs(config.retry_seconds.max(1))) {
+        if !config.enabled || !crate::commands::l3(self).port().claim_recheck(Duration::from_secs(config.retry_seconds.max(1))) {
             return;
         }
         let engine = self.clone();
         tokio::spawn(async move {
             engine.release_recovered(&config).await;
-            engine.l3_service().recheck_done();
+            crate::commands::l3(&engine).port().recheck_done();
         });
     }
 
@@ -136,7 +137,7 @@ impl Engine {
         let binaries: std::collections::BTreeSet<String> =
             held.iter().filter_map(|(_, _, p)| p.as_ref().map(binary_of)).collect();
         for binary in &binaries {
-            self.l3_service().doubt(binary);
+            crate::commands::l3(self).port().doubt(binary);
         }
         let mut still_held: BTreeMap<String, Vec<HeldTask>> = BTreeMap::new();
         for (task, trigger, probe) in held {
@@ -151,7 +152,7 @@ impl Engine {
                 Verdict::Healthy => self.release_held(&task, trigger).await,
                 Verdict::Unhealthy { binary, .. } => {
                     if let Some(probe) = &probe {
-                        self.l3_service().maybe_auto_repair(&harness_name(probe), &binary, config);
+                        crate::commands::l3(self).port().auto_repair(&harness_name(probe), &binary, config.auto_repair, config.repair_script.clone());
                     }
                     still_held.entry(binary).or_default().push(HeldTask {
                         task_id: task.id.clone(),
@@ -161,7 +162,7 @@ impl Engine {
                 }
             }
         }
-        self.l3_service().set_held(still_held);
+        crate::commands::l3(self).port().set_held(still_held);
     }
 
     /// Back to `pending`, and dispatched by exactly one thing. A task whose
@@ -212,7 +213,7 @@ impl Engine {
     /// cache says about its harness, so the next dispatch probes it again.
     pub(crate) fn doubt_harness_of(&self, task: Option<&Task>) {
         if let Some(probe) = task.and_then(|t| self.l3_service().probe_for(&t.scope, &t.agent)) {
-            self.l3_service().doubt(&binary_of(&probe));
+            crate::commands::l3(self).port().doubt(&binary_of(&probe));
         }
     }
 }

@@ -96,3 +96,17 @@ fn exactly_five_adjacent_command_edges_compile_through_the_real_wrapper() {
     fixture.check("use factory_kernel::*; struct Extra; impl Level for Extra {} impl DirectlyBelow<L6> for Extra {}",false,"sealed");
     fixture.check(&command_source("People", "L6"), false, "Level");
 }
+
+/// Named, because dispatch is where it would be tempting: Process may command Agent
+/// (`Commands<L4, L3Port>`), but cannot name `Commands<L4, L2Port>` or `Commands<L4, L1Port>`:
+/// provisioning an environment goes through Agent, which asks Environment.
+#[test]
+fn process_commands_agent_but_cannot_name_a_command_port_two_levels_down() {
+    let fixture = Fixture::new();
+    fixture.check(&command_source("L3", "L4"), true, "");
+    fixture.check(&command_source("L2", "L4"), false, "DirectlyBelow<");
+    fixture.check(&command_source("L1", "L4"), false, "DirectlyBelow<");
+    // And Agent may command Environment, not Infrastructure.
+    fixture.check(&command_source("L2", "L3"), true, "");
+    fixture.check(&command_source("L1", "L3"), false, "DirectlyBelow<");
+}

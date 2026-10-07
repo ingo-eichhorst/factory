@@ -8,7 +8,7 @@ use factory_core::adapter::agent::{
     UPSTREAM_RESULT_BYTE_CAP,
 };
 use factory_core::adapter::runtime::{
-    RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StartRequest, StatusReport, StatusSource,
+    RuntimeConnectionDiagnostic, RuntimeStatus, Screen, StatusReport, StatusSource,
 };
 use factory_core::adapter::{Agent, AgentRuntime, TaskStore};
 use factory_core::config::{Factory, Sandbox, ScopeAgent, SHELL_HARNESS};
@@ -32,6 +32,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::schedule;
+use factory_agents::dispatch::Assignments;
+#[cfg(test)]
+use factory_core::adapter::runtime::StartRequest;
 use crate::worktree;
 
 /// Request routing, one file per level. A child of this module so the arms keep
@@ -1936,20 +1939,15 @@ impl Engine {
             quality,
         };
 
-        let mut launch = agent.launch_spec(&ctx).await?;
-        // `#178`: the resume args go first -- `codex resume <id>` is a
-        // subcommand, which has to lead, and a flag like claude's
-        // `--resume <id>` does not mind leading either.
-        let resume_args_len = match &continue_outcome {
-            Some(ContinueOutcome::Resume(plan)) => plan.resume_args.len(),
-            _ => 0,
+        // Process asks Agent through its command port (#193, S8a): the adapter's launch with
+        // the `#178` resume args leading and the declaration's args after.
+        let l3 = crate::commands::l3(self);
+        let resume_args: Vec<String> = match &continue_outcome {
+            Some(ContinueOutcome::Resume(plan)) => plan.resume_args.clone(),
+            _ => Vec::new(),
         };
-        if let Some(ContinueOutcome::Resume(plan)) = &continue_outcome {
-            let mut args = plan.resume_args.clone();
-            args.append(&mut launch.args);
-            launch.args = args;
-        }
-        append_declared_args(&mut launch, declaration.as_ref());
+        let resume_args_len = resume_args.len();
+        let mut launch = l3.port().launch(&adapter_name, &ctx, &resume_args, declaration.as_ref()).await?;
         // `#274`: `Some` only for a sandboxed claude-code run whose
         // preserved conversation matched this continuation -- the local
         // directory `prepare_sandbox` tries to restore before trusting
@@ -1963,12 +1961,6 @@ impl Engine {
         // task's run lands in the same workspace as that scope's standing
         // agents rather than a second one keyed on the old name.
         let canonical_scope = factory.canonical_scope_name(&task.scope);
-        // A run's own id fragment is its discriminator: `start()` adopts any
-        // agent already carrying the name it asks for, and reconcile can
-        // dispatch this scope/agent pair again while an earlier run is still
-        // live, so two concurrent runs must never resolve to the same herdr
-        // agent.
-        let run_id_fragment = &run.id[..8.min(run.id.len())];
 
         // The sandbox, made now -- after the run row exists, so a failure
         // here fails this run with the reason, and before the session, so
@@ -1987,7 +1979,7 @@ impl Engine {
                 let resolved = self.l2_service().sandbox_gate(&key, config).await.map_err(|reason| {
                     FactoryError::BadRequest(format!("{reason}. The run was not started on the host instead"))
                 })?;
-                let prompt = agent.prompt(&ctx).await?;
+                let prompt = l3.port().prompt(&adapter_name, &ctx).await?;
                 let (plan, teardown, restore_outcome) = match &sandbox_restore {
                     // `#274`: a tentative resume plans the *fresh* pair as
                     // the primary -- what the sandbox launches with unless
@@ -2002,7 +1994,7 @@ impl Engine {
                         }
                         let mut launch_fresh = launch.clone();
                         launch_fresh.args.drain(0..resume_args_len);
-                        let prompt_fresh = agent.prompt(&ctx_fresh).await?;
+                        let prompt_fresh = l3.port().prompt(&adapter_name, &ctx_fresh).await?;
                         Box::pin(self.prepare_sandbox(
                             &factory, &task, &run.id, &cwd, &launch_fresh, &prompt_fresh,
                             Some((&launch, prompt.as_str(), local_dir.as_path())),
@@ -2063,15 +2055,14 @@ impl Engine {
             if let Some((_, plan, _)) = &sandboxed { Box::pin(crate::openshell::discard(plan)).await; }
             return Err(FactoryError::DispatchSuperseded("the run ended before its session was launched".into()));
         }
-        let started = runtime
-            .start(&StartRequest {
-                id: run.id.clone(),
+        let started = l3
+            .port()
+            .start(factory_agents::dispatch::SessionStart {
+                runtime: task.runtime.clone(),
+                run_id: run.id.clone(),
                 scope: canonical_scope.clone(),
-                name: crate::agents::herdr_name(
-                    &format!("factory-{}-{}", canonical_scope, agent_name),
-                    Some(run_id_fragment),
-                ),
-                label: truncate(&task.title, 40),
+                agent: agent_name.clone(),
+                title: task.title.clone(),
                 cwd,
                 launch,
             })
@@ -2119,8 +2110,8 @@ impl Engine {
 
         // A sandboxed run was handed its prompt at launch.
         if sandboxed.is_none() {
-            let prompt = agent.prompt(&ctx).await?;
-            runtime.submit(&session, &prompt).await?;
+            let prompt = l3.port().prompt(&adapter_name, &ctx).await?;
+            l3.port().submit(&task.runtime, &session, &prompt).await?;
         }
 
         self.entry(
@@ -4007,7 +3998,7 @@ pub(crate) fn feedback_round_title(round: u32, integration_rounds: u32) -> Strin
     )
 }
 
-fn truncate(s: &str, n: usize) -> String {
+pub(crate) fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
     } else {
