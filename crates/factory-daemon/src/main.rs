@@ -2,6 +2,7 @@
 //! runs until it is told to stop.
 
 mod access;
+mod run_settle;
 mod run_start;
 mod scheduling;
 mod dispatch_port;

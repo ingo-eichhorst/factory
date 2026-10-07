@@ -92,6 +92,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("production.rs", Wiring), // the People-side production endpoint: reads L4's fact as a page
     ("recovery_journal.rs", L4),
     ("admission.rs", L4),
+    ("run_settle.rs", L4),
     ("run_start.rs", L4),
     ("scheduling.rs", L4),
     ("l4_service.rs", L4),
@@ -166,6 +167,12 @@ const PULLS_BASELINE: &[(&str, usize)] = &[
     ("quality/mod.rs -> .l6_service()", 1),
     ("signposts.rs -> .l6_service()", 2),
     ("verification.rs -> .l6_service()", 2),
+];
+
+/// `self.core.` call sites per file (the transitional `L4Service::core`). May only shrink; goes away with the handle.
+const CORE_BASELINE: &[(&str, usize)] = &[
+    ("run_settle.rs", 11),
+    ("run_start.rs", 16),
 ];
 
 /// Files that name `Facts::<People>` today (count). May only shrink.
@@ -311,6 +318,62 @@ fn group_reach(code: &str) -> BTreeMap<&'static str, usize> {
     counts
 }
 
+/// Reads the token that follows `at` after skipping whitespace; `None` at the end of the text.
+fn next_token(code: &str, at: usize) -> Option<(&str, usize)> {
+    let rest = &code[at..];
+    let trimmed = rest.trim_start();
+    let start = at + (rest.len() - trimmed.len());
+    let first = trimmed.chars().next()?;
+    let len = if first.is_alphanumeric() || first == '_' {
+        trimmed.chars().take_while(|c| c.is_alphanumeric() || *c == '_').map(char::len_utf8).sum()
+    } else {
+        first.len_utf8()
+    };
+    Some((&code[start..start + len], start + len))
+}
+
+/// Every place `core` is used as a field of `self` (or of another `core`): `(position after "core", token after the
+/// following dot)`. Whitespace between the tokens is tolerated, so a call split over lines still counts.
+fn core_fields(code: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (at, _) in code.match_indices("self") {
+        let before_ok = !code[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if !before_ok {
+            continue;
+        }
+        let Some((dot, p)) = next_token(code, at + 4) else { continue };
+        if dot != "." {
+            continue;
+        }
+        let Some((name, p)) = next_token(code, p) else { continue };
+        if name != "core" {
+            continue;
+        }
+        let Some((dot, p)) = next_token(code, p) else { continue };
+        if dot != "." {
+            continue;
+        }
+        if let Some((field, _)) = next_token(code, p) {
+            found.push(field.to_string());
+        }
+    }
+    found
+}
+
+/// `self.core.` call sites: the transitional `L4Service::core` handle on `Engine` (S9a).
+fn core_calls(code: &str) -> usize {
+    core_fields(code).len()
+}
+
+/// `core.l1`..`core.l6` and `core.shared`: the handle must never be a way to reach a level's state or the shared
+/// group, which is exactly what the reach ratchet exists to count.
+fn core_state_reaches(code: &str) -> usize {
+    core_fields(code)
+        .iter()
+        .filter(|f| matches!(f.as_str(), "l1" | "l2" | "l3" | "l4" | "l5" | "l6" | "shared"))
+        .count()
+}
+
 fn people_reach(code: &str) -> usize {
     ["Facts::<People>", "Facts::<factory_kernel::People>", ".facts::<People>", ".facts::<factory_kernel::People>"]
         .iter()
@@ -335,6 +398,8 @@ struct Scan {
     reach: BTreeMap<(String, &'static str), usize>,
     people: BTreeMap<String, usize>,
     pulls: BTreeMap<String, usize>,
+    core: BTreeMap<String, usize>,
+    core_state: BTreeMap<String, usize>,
 }
 
 fn scan() -> Scan {
@@ -342,7 +407,7 @@ fn scan() -> Scan {
     let mut files = Vec::new();
     rust_files(&root, &mut files);
     files.sort();
-    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new() };
+    let mut result = Scan { unplaced: Vec::new(), reach: BTreeMap::new(), people: BTreeMap::new(), pulls: BTreeMap::new(), core: BTreeMap::new(), core_state: BTreeMap::new() };
     for file in files {
         let relative = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
         if is_test_file(&relative) {
@@ -352,10 +417,18 @@ fn scan() -> Scan {
             result.unplaced.push(relative);
             continue;
         };
+        let code = production_code(&std::fs::read_to_string(&file).unwrap());
+        let state_reaches = core_state_reaches(&code);
+        if state_reaches > 0 {
+            result.core_state.insert(relative.clone(), state_reaches);
+        }
+        let core = core_calls(&code);
+        if core > 0 {
+            result.core.insert(relative.clone(), core);
+        }
         let Some(own_group) = level_group(owner) else {
             continue; // wiring and the entry point may reach any group
         };
-        let code = production_code(&std::fs::read_to_string(&file).unwrap());
         // A level service is entered by its router and by wiring. A lower level's
         // module calling into it is a pull against the ladder.
         for service in SERVICES {
@@ -387,6 +460,10 @@ fn describe(scan: &Scan) -> String {
     }
     out.push_str("];\nconst PULLS_BASELINE: &[(&str, usize)] = &[\n");
     for (file, count) in &scan.pulls {
+        out.push_str(&format!("    ({file:?}, {count}),\n"));
+    }
+    out.push_str("];\nconst CORE_BASELINE: &[(&str, usize)] = &[\n");
+    for (file, count) in &scan.core {
         out.push_str(&format!("    ({file:?}, {count}),\n"));
     }
     out.push_str("];\nconst PEOPLE_BASELINE: &[(&str, usize)] = &[\n");
@@ -436,6 +513,41 @@ fn cross_level_reach_only_shrinks() {
         "cross-level reach must only shrink.\nnew or grown: {grew:#?}\nfixed (lower the baseline): {stale:#?}\ncurrent state:\n{}",
         describe(&scan)
     );
+}
+
+#[test]
+fn the_core_handle_is_counted_only_shrinks_and_never_reaches_state() {
+    let scan = scan();
+    assert!(
+        scan.core_state.is_empty(),
+        "`core.l1`..`core.l6` and `core.shared` are forbidden: {:?}",
+        scan.core_state
+    );
+    let baseline: BTreeMap<&str, usize> = CORE_BASELINE.iter().copied().collect();
+    let mut bad = Vec::new();
+    for (file, count) in &scan.core {
+        match baseline.get(file.as_str()) {
+            None => bad.push(format!("{file}: {count} `self.core.` call sites, new")),
+            Some(allowed) if count > allowed => bad.push(format!("{file}: {count} `self.core.` call sites > {allowed}")),
+            Some(allowed) if count < allowed => {
+                bad.push(format!("{file}: {count} `self.core.` call sites < baseline {allowed}: lower CORE_BASELINE"))
+            }
+            _ => {}
+        }
+    }
+    for file in baseline.keys() {
+        if !scan.core.contains_key(*file) {
+            bad.push(format!("{file}: no longer calls `self.core.`, remove it from CORE_BASELINE"));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}\ncurrent state:\n{}", describe(&scan));
+}
+
+#[test]
+fn the_core_scanner_counts_split_calls_and_catches_state_reaches() {
+    assert_eq!(core_calls("self.core.a(); self\n    .core\n    .b(); other_core.c(); itself.core.d();"), 2);
+    assert_eq!(core_state_reaches("self.core.l3.x; self.core\n.shared.y; self.core.l3_service(); self.core.shared_thing()"), 2);
+    assert_eq!(core_state_reaches("score.l3.x; self.core.state()"), 0);
 }
 
 #[test]

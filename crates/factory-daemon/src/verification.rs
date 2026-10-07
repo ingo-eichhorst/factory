@@ -322,7 +322,7 @@ impl Engine {
                     // it cannot remain dispatching (or blocked with a pass
                     // that makes the approval action unusable). A retry then
                     // starts a fresh, approvable attempt.
-                    self.fail_run(
+                    self.l4_service().fail_run(
                         &run.id,
                         factory_core::run::FailKind::DispatchFailed,
                         &format!("dispatch failed after approval: {error}"),
@@ -353,7 +353,7 @@ impl Engine {
             self.shared.bus.publish(Event::RunUpdated {
                 run: updated.clone(),
             });
-            self.mirror_to_task(&updated).await;
+            self.l4_service().mirror_to_task(&updated).await;
             self.enqueue_verification(&run.id);
             return Ok(updated);
         }
@@ -485,8 +485,9 @@ impl Engine {
             .in_run(&run.id),
         )
         .await;
-        self.close_session(&run).await;
+        self.l4_service().close_session(&run).await;
         let ended = self
+            .l4_service()
             .finish_run(
                 &run.id,
                 RunStatus::Failed,
@@ -661,7 +662,7 @@ impl Engine {
             )
             .await?;
         self.shared.bus.publish(Event::RunUpdated { run: run.clone() });
-        self.mirror_to_task(&run).await;
+        self.l4_service().mirror_to_task(&run).await;
         let steps: Vec<&str> = run.required_steps.iter().filter(|s| s.kind.enforced()).map(|s| s.step.as_str()).collect();
         self.entry(
             &run.task_id,
@@ -1054,7 +1055,7 @@ impl Engine {
                 )
                 .await?;
             self.shared.bus.publish(Event::RunUpdated { run: subject.clone() });
-            self.mirror_to_task(&subject).await;
+            self.l4_service().mirror_to_task(&subject).await;
         }
         let step_name = review_task
             .labels
@@ -1240,7 +1241,7 @@ impl Engine {
         if verdict.passed {
             // Keep the session available if artifact validation/publication
             // blocks completion. `finish_run` journals and mirrors the hold.
-            if let Err(error) = self.finish_run(
+            if let Err(error) = self.l4_service().finish_run(
                 &run.id,
                 RunStatus::Done,
                 RunPatch { status: Some(RunStatus::Done), ..Default::default() },
@@ -1281,7 +1282,7 @@ impl Engine {
             )
             .await;
             self.shared.bus.publish(Event::RunUpdated { run: blocked.clone() });
-            self.mirror_to_task(&blocked).await;
+            self.l4_service().mirror_to_task(&blocked).await;
         }
         self.sync_workflow_for_task(&task.id).await;
         Ok(())
@@ -1549,6 +1550,7 @@ mod tests {
     async fn report_done(engine: &Arc<Engine>, task_id: &str) -> Run {
         let run = engine.l4.store.active_run(task_id).await.unwrap().expect("an active run");
         let run = engine
+            .l4_service()
             .report(
                 task_id,
                 TaskReport {
@@ -1849,6 +1851,7 @@ mod tests {
         assert_eq!(review.agent, "checker");
         let review_run = engine.l4.store.active_run(&review.id).await.unwrap().unwrap();
         engine
+            .l4_service()
             .report(
                 &review.id,
                 TaskReport {
@@ -1889,6 +1892,7 @@ mod tests {
         let review = review_task(&engine, &subject.id).await;
         let review_run = engine.l4.store.active_run(&review.id).await.unwrap().unwrap();
         engine
+            .l4_service()
             .report(
                 &review.id,
                 TaskReport {
@@ -1933,7 +1937,7 @@ mod tests {
         let subject = report_done(&engine, &task.id).await;
         let review = review_task(&engine, &subject.id).await;
         let first = engine.l4.store.active_run(&review.id).await.unwrap().unwrap();
-        engine.fail_run(&first.id, factory_core::run::FailKind::AgentFailed, "review crashed").await;
+        engine.l4_service().fail_run(&first.id, factory_core::run::FailKind::AgentFailed, "review crashed").await;
 
         let blocked = settled(&engine, &subject.id).await;
         assert_eq!(blocked.status, RunStatus::Blocked);
@@ -1943,7 +1947,7 @@ mod tests {
 
         engine.l4_service().start_run(&review.id, Trigger::Manual).await;
         let retry = engine.l4.store.active_run(&review.id).await.unwrap().unwrap();
-        engine.report(
+        engine.l4_service().report(
             &review.id,
             TaskReport {
                 artifacts: Vec::new(),
@@ -1969,7 +1973,7 @@ mod tests {
         let first_run = engine.l4.store.active_run(&first_review.id).await.unwrap().unwrap();
 
         std::fs::write(work.join("changed-during-review.txt"), "new state").unwrap();
-        let error = engine.report(
+        let error = engine.l4_service().report(
             &first_review.id,
             TaskReport {
                 artifacts: Vec::new(),
@@ -1986,7 +1990,7 @@ mod tests {
         let second_review = review_task(&engine, &subject.id).await;
         assert_ne!(second_review.id, first_review.id);
         let second_run = engine.l4.store.active_run(&second_review.id).await.unwrap().unwrap();
-        engine.report(
+        engine.l4_service().report(
             &second_review.id,
             TaskReport {
                 artifacts: Vec::new(),
@@ -2140,6 +2144,7 @@ mod tests {
         engine.l4_service().start_run(&task.id, Trigger::Manual).await;
         let run = report_done(&engine, &task.id).await;
         let error = engine
+            .l4_service()
             .report(
                 &task.id,
                 TaskReport {
@@ -2557,6 +2562,7 @@ mod tests {
     async fn provenance_done(engine: &Arc<Engine>, task: &Task, paths: &[&str]) -> Result<Run> {
         let run = engine.l4.store.active_run(&task.id).await?.unwrap();
         engine
+            .l4_service()
             .report(
                 &task.id,
                 TaskReport {
@@ -2780,6 +2786,7 @@ mod tests {
             RunStatus::Dispatching | RunStatus::Running
         ));
         assert!(engine
+            .l4_service()
             .report(
                 &task.id,
                 TaskReport {
@@ -2797,6 +2804,7 @@ mod tests {
             .to_string()
             .contains("done report"));
         assert!(engine
+            .l4_service()
             .report(
                 &task.id,
                 TaskReport {
@@ -2972,6 +2980,7 @@ mod tests {
         assert_eq!(engine.l4.run_evidence.provenance(&run.id).await.unwrap().len(), 1);
         assert!(engine.l4_service().run_provenance(&run.id).await.unwrap().is_empty());
         engine
+            .l4_service()
             .cancel_task_run(
                 &task.id,
                 Some(&run.id),
@@ -2980,6 +2989,7 @@ mod tests {
             .await
             .unwrap();
         assert!(engine
+            .l4_service()
             .finish_run(
                 &run.id,
                 RunStatus::Done,

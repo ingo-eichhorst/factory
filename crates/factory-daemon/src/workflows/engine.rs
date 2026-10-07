@@ -543,6 +543,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         };
         engine
+            .l4_service()
             .report(
                 task_id,
                 TaskReport {
@@ -570,6 +571,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         };
         engine
+            .l4_service()
             .report(
                 task_id,
                 TaskReport {
@@ -753,7 +755,7 @@ mod tests {
         let a = of_node(&all, "a")[0].clone();
         let b = of_node(&all, "b")[0].clone();
         let first = wait_for_attempt(&engine, &a.id, 1).await;
-        engine.fail_run(&first.id, FailKind::AckTimeout, "provider vanished").await;
+        engine.l4_service().fail_run(&first.id, FailKind::AckTimeout, "provider vanished").await;
         engine.sync_workflow_for_task(&a.id).await;
         assert_eq!(engine.workflow_run(&run.id).await.unwrap().status, WorkflowRunStatus::Failed);
         let response = engine.handle_request(factory_core::protocol::Request::TaskRun {
@@ -1292,6 +1294,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         };
         engine
+            .l4_service()
             .report(
                 &root.id,
                 TaskReport {
@@ -1561,6 +1564,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         };
         engine
+            .l4_service()
             .report(
                 task_id,
                 TaskReport {
@@ -1593,7 +1597,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         };
-        let refused = engine.report(&review.id, TaskReport {
+        let refused = engine.l4_service().report(&review.id, TaskReport {
             artifacts: Vec::new(),
             status: Some(RunStatus::Done), message: None, result: Some("findings".into()),
             send_to: Some("nowhere".into()), error: None, token: active.token,
@@ -1693,6 +1697,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         };
         let error = engine
+            .l4_service()
             .report(
                 &last.id,
                 TaskReport {
@@ -1748,7 +1753,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         };
-        engine.fail_run(&active.id, FailKind::RunTimeout, "ran out of time").await;
+        engine.l4_service().fail_run(&active.id, FailKind::RunTimeout, "ran out of time").await;
         engine.sync_workflow_for_task(&review.id).await;
 
         let run = engine.workflow_run(&run.id).await.unwrap();
@@ -1917,6 +1922,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         };
         let wrong_status = engine
+            .l4_service()
             .report(
                 &task.id,
                 TaskReport {
@@ -1937,6 +1943,7 @@ mod tests {
             "{wrong_status}"
         );
         let wrong_target = engine
+            .l4_service()
             .report(
                 &task.id,
                 TaskReport {
@@ -2088,6 +2095,7 @@ mod tests {
         git_ok(&foundation_path, &["add", "foundation.txt"]).await;
         git_ok(&foundation_path, &["commit", "-q", "-m", "foundation"]).await;
         engine
+            .l4_service()
             .report(
                 &foundation.id,
                 TaskReport {
@@ -2114,6 +2122,7 @@ mod tests {
         git_ok(&surface_path, &["add", "surface.txt"]).await;
         git_ok(&surface_path, &["commit", "-q", "-m", "surface"]).await;
         engine
+            .l4_service()
             .report(
                 &surface.id,
                 TaskReport {
@@ -2144,6 +2153,7 @@ mod tests {
         git_ok(&rework_path, &["add", "fixed.txt"]).await;
         git_ok(&rework_path, &["commit", "-q", "-m", "fix combined check"]).await;
         engine
+            .l4_service()
             .report(
                 &surface.id,
                 TaskReport {
@@ -2393,6 +2403,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         };
         engine
+            .l4_service()
             .report(
                 task_id,
                 TaskReport {
@@ -2884,6 +2895,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         };
         engine
+            .l4_service()
             .report(
                 task_id,
                 TaskReport {
@@ -3799,6 +3811,7 @@ impl Engine {
         for task_id in task_ids {
             if self.l4.store.active_run(&task_id).await?.is_some() {
                 let _ = self
+                    .l4_service()
                     .cancel_task_run(&task_id, None, factory_core::run::FailKind::CancelledWithParent)
                     .await;
             }

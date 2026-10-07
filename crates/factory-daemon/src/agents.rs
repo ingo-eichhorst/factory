@@ -1328,6 +1328,7 @@ mod tests {
 
         let run = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
         engine
+            .l4_service()
             .report(
                 &task.id,
                 TaskReport {
@@ -1373,7 +1374,7 @@ mod tests {
         assert!(guide.exists());
 
         let run = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
-        engine.fail_run(&run.id, factory_core::run::FailKind::AckTimeout, "gave up waiting").await;
+        engine.l4_service().fail_run(&run.id, factory_core::run::FailKind::AckTimeout, "gave up waiting").await;
 
         assert!(!guide.exists(), "gone once the watchdog closes the run too");
         std::fs::remove_dir_all(root).ok();
