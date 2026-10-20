@@ -52,10 +52,19 @@ test("L5 Improvement is live, with a Benchmarks tab and a Knowledge tab after Se
   assert.ok(benchmarks < knowledge, "Knowledge tab must follow Benchmarks");
   assert.ok(knowledge < quality, "Quality tab must follow Knowledge");
   assert.ok(quality < suggestions, "Suggestions tab (#275) must follow Quality");
+  const metrics = page.indexOf('id="tab-metrics"');
+  assert.match(page, /id="tab-metrics"[^>]*>Metrics<\/button>/);
+  assert.match(page, /id="view-metrics"/);
+  assert.ok(suggestions < metrics, "Metrics tab (#333) must follow Suggestions");
 });
 
-test("LEVEL_VIEWS.imp names exactly benchmarks, knowledge, quality and suggestions, invented spelling and all", () => {
-  assert.match(app, /imp: \["benchmarks", "knowledge", "quality", "suggestions"\]/);
+test("LEVEL_VIEWS.imp names exactly benchmarks, knowledge, quality, suggestions and metrics, invented spelling and all", () => {
+  assert.match(app, /imp: \["benchmarks", "knowledge", "quality", "suggestions", "metrics"\]/);
+});
+
+test("the Metrics view has its own error element and empty state, hidden by default", () => {
+  assert.match(page, /id="metrics-error"[^>]*hidden/);
+  assert.match(page, /id="metrics-empty"[^>]*hidden/);
 });
 
 test("both new views have their own error element, hidden by default", () => {

@@ -39,6 +39,7 @@ export const state = {
   dependencies: null,       // selected scope's /api/dependencies report
   dependenciesError: null,
   dependenciesSegment: "sbom",
+  dependenciesFocus: null,  // a service row to highlight, when a link (the Metrics tab's, #333) asked for one
   infrastructure: null,   // last /api/infrastructure answer: { host, daemon, providers, unassigned }
   infrastructureError: null,
   infrastructureUnavailable: false, // the daemon predates the endpoint (a bare 404), not a fault

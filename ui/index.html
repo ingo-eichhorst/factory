@@ -93,6 +93,7 @@
   <button id="tab-knowledge" hidden>Knowledge</button>
   <button id="tab-quality" hidden>Quality</button>
   <button id="tab-suggestions" hidden>Suggestions</button>
+  <button id="tab-metrics" hidden>Metrics</button>
   <button id="tab-infrastructure" hidden>Infrastructure</button>
   <button id="tab-doctor" hidden>Doctor</button>
   <button id="tab-environments" hidden>Operations</button>
@@ -1019,6 +1020,26 @@
     <p class="env-note bad" id="suggestions-error" hidden></p>
     <div class="empty" id="suggestions-empty" hidden>No suggestions. An agent files one with <code>factory task suggest</code> while a run is active.</div>
     <div id="suggestions-groups"></div>
+  </div>
+
+  <div id="view-metrics" hidden>
+    <div class="bar">
+      <h2>Metrics</h2>
+      <span class="sub" id="metrics-count"></span>
+      <span class="sp"></span>
+      <input type="search" id="metrics-query" placeholder="Search metric, source, consumer…" aria-label="Filter metrics by text">
+      <button class="btn" id="metrics-refresh">Refresh</button>
+    </div>
+    <p class="env-note" id="metrics-note"></p>
+    <p class="env-note bad" id="metrics-error" hidden></p>
+    <section>
+      <table>
+        <thead><tr><th>Metric</th><th>Value</th><th>Freshness</th><th>Source</th><th>Used by</th></tr></thead>
+        <tbody id="metrics-rows"></tbody>
+      </table>
+      <div class="empty" id="metrics-empty" hidden>Nothing in this scope reads a metric: no applicable control's <code>check: metric</code>, no bound quality measure, no key result, and no <code>scope.metrics</code> declaration.</div>
+      <div id="metrics-findings"></div>
+    </section>
   </div>
 
   <div id="view-infrastructure" hidden>

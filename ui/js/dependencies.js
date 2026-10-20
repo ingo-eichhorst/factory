@@ -48,7 +48,8 @@ function serviceRow(row, evidence) {
   const credential = credentialState(row);
   const scope = (row.agents || []).length ? row.agents.join(", ") : "every declared agent";
   const access = [row.effects, row.direction].filter(Boolean).join(" / ") || "—";
-  return `<tr>
+  const focused = state.dependenciesFocus === row.name;
+  return `<tr id="dependency-service-${esc(row.name)}"${focused ? ' class="focus"' : ""}>
     <td><strong>${esc(row.name)}</strong><div class="sub">${esc(scope)}</div></td>
     <td>${esc(row.transport)}</td>
     <td><code>${esc(serviceTarget(row))}</code></td>
@@ -95,6 +96,11 @@ export function renderDependencies() {
   $("dependencies-services").innerHTML = services.map((service) => serviceRow(service, report?.service_evidence)).join("");
   $("dependencies-observations").innerHTML = evidenceCards(report?.service_evidence);
   $("no-dependency-services").hidden = services.length !== 0 || !!state.dependenciesError;
+  // A link that named one service (`#333`'s Metrics tab) lands on its row.
+  if (state.dependenciesFocus) {
+    const row = document.getElementById(`dependency-service-${state.dependenciesFocus}`);
+    if (row) row.scrollIntoView({ block: "center" });
+  }
 }
 
 export async function loadDependencies() {
