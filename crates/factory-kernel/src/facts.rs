@@ -167,7 +167,7 @@ pub struct StandingAgentAction {
     pub subject: String,
     pub scope: String,
     pub agent: String,
-    /// `started`, `stopped`, `attached` or `scaled`, as L3 spells it.
+    /// `started`, `start_refused`, `stopped`, `attached` or `scaled`, as L3 spells it.
     pub action: String,
     /// `the owner`, or the agent that asked, as the access check described it.
     pub by: String,

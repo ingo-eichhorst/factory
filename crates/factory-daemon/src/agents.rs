@@ -468,11 +468,11 @@ impl L3Service<'_> {
             Some(instance) => (AgentSession::instance_id(&canonical, name, instance), String::new()),
             None => (AgentSession::id_for(&canonical, name), " (every instance it keeps)".to_string()),
         };
-        let message = match &started {
-            Ok(_) => format!("{subject} started by {}{what}", asker.by),
-            Err(e) => format!("{subject} asked to start by {}{what}, and it did not: {e}", asker.by),
+        let (action, message) = match &started {
+            Ok(_) => ("started", format!("{subject} started by {}{what}", asker.by)),
+            Err(e) => ("start_refused", format!("{subject} asked to start by {}{what}, and it did not: {e}", asker.by)),
         };
-        self.asked(asker, "started", &subject, &canonical, name, message);
+        self.asked(asker, action, &subject, &canonical, name, message);
         started
     }
 
@@ -1918,7 +1918,7 @@ mod tests {
         assert!(said("agent_scaled", "demo/watcher scaled 2 -> 3 by the owner"), "{journal:#?}");
         assert!(said("agent_started", "demo/watcher#2 started by the owner"), "{journal:#?}");
         assert!(said("agent_stopped", "demo/watcher stopped by the owner"), "{journal:#?}");
-        assert!(said("agent_started", "demo/watcher#5 asked to start by the owner, and it did not"), "{journal:#?}");
+        assert!(said("agent_start_refused", "demo/watcher#5 asked to start by the owner, and it did not"), "{journal:#?}");
         assert_eq!(journal.len(), 5, "{journal:#?}");
         std::fs::remove_dir_all(root).ok();
     }

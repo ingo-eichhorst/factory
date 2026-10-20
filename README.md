@@ -222,7 +222,8 @@ and scripts rely on it.
 
 Starting, stopping, attaching and scaling are journaled with who asked, under
 the fixed journal id `factory:agents` (`agent_started`, `agent_stopped`,
-`agent_attached`, `agent_scaled`; `source` is `owner` or `agent`, `data.by`
+`agent_attached`, `agent_scaled`, and `agent_start_refused` for a start that
+did not happen, with the reason; `source` is `owner` or `agent`, `data.by`
 names which). L3 keeps what it was asked in a bounded log and L4 reads it from
 a cursor on its tick (`StandingAgentActionsFact`), the way it reads L3's
 liveness observations, so an entry can trail the action by a tick.
