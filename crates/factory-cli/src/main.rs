@@ -3985,7 +3985,11 @@ fn policy_status_text(report: &PolicyReport, framework: Option<&str>) -> String 
     // anything to say beyond the rollup: then every framework says where it
     // applies, and one excluded at the asked scope -- absent from the
     // rollup above -- is named here rather than silently missing.
-    if report.applicability.iter().any(|a| a.restricted_by.is_some()) {
+    if report
+        .applicability
+        .iter()
+        .any(|a| a.restricted_by.is_some())
+    {
         out.push_str("\nAPPLICABILITY\n");
         for a in report
             .applicability
@@ -8077,7 +8081,10 @@ mod tests {
             ]
         })).unwrap();
         let text = policy_status_text(&report, None);
-        assert!(text.contains("no applicable frameworks"), "cra has no rollup at finance: {text}");
+        assert!(
+            text.contains("no applicable frameworks"),
+            "cra has no rollup at finance: {text}"
+        );
         assert!(text.contains("\nAPPLICABILITY\n"), "{text}");
         assert!(text.contains(
             "  cra          the instance root (company) binds it to the whole tree minus the finance subtree(s) \
@@ -8091,8 +8098,12 @@ mod tests {
         let unrestricted: PolicyReport = serde_json::from_value(serde_json::json!({
             "rows": [], "rollup": [], "not_applicable": [], "findings": [], "catalogues": [],
             "applicability": [{"framework": "cra", "bound_by": ["company"], "covers": ["company"]}]
-        })).unwrap();
-        assert!(!policy_status_text(&unrestricted, None).contains("APPLICABILITY"), "nothing restricted, nothing to add");
+        }))
+        .unwrap();
+        assert!(
+            !policy_status_text(&unrestricted, None).contains("APPLICABILITY"),
+            "nothing restricted, nothing to add"
+        );
     }
 
     #[test]

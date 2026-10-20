@@ -163,11 +163,7 @@ pub fn export_markdown(export: &PolicyExport) -> String {
                 .get(a.framework.as_str())
                 .copied()
                 .unwrap_or(a.framework.as_str());
-            out.push_str(&format!(
-                "- {title} ({}): {}\n",
-                a.framework,
-                a.describe()
-            ));
+            out.push_str(&format!("- {title} ({}): {}\n", a.framework, a.describe()));
         }
     }
 
@@ -415,7 +411,10 @@ mod tests {
             json["report"]["applicability"][0]["excluded"],
             serde_json::json!(["finance", "finance/ledger"])
         );
-        assert_eq!(json["report"]["applicability"][0]["restricted_by"], "company");
+        assert_eq!(
+            json["report"]["applicability"][0]["restricted_by"],
+            "company"
+        );
     }
 
     #[test]

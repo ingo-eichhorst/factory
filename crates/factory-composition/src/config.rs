@@ -2704,7 +2704,10 @@ mod tests {
 
         let mut f = factory_with(c.scopes.clone());
         f.config = c;
-        assert_eq!(f.policy_chain("finance"), f.config.policy_chain_for_scope(f.scope("finance").unwrap()));
+        assert_eq!(
+            f.policy_chain("finance"),
+            f.config.policy_chain_for_scope(f.scope("finance").unwrap())
+        );
         assert_eq!(
             f.policy_chain("gone")[0].frameworks,
             ["cra", "dsgvo"],
@@ -2722,9 +2725,19 @@ mod tests {
         );
         let e = c.validate().unwrap_err().to_string();
         assert!(e.contains("scope \"finance\""), "{e}");
-        assert!(e.contains("Only the instance root's top-level `policies.frameworks`"), "{e}");
-        c.scopes[1] = scope_with_policies("finance", "finance", "  frameworks:\n    - name: cra\n      scopes: [finance]\n");
-        assert!(c.validate().is_err(), "`scopes` narrows as surely as `except`");
+        assert!(
+            e.contains("Only the instance root's top-level `policies.frameworks`"),
+            "{e}"
+        );
+        c.scopes[1] = scope_with_policies(
+            "finance",
+            "finance",
+            "  frameworks:\n    - name: cra\n      scopes: [finance]\n",
+        );
+        assert!(
+            c.validate().is_err(),
+            "`scopes` narrows as surely as `except`"
+        );
         c.scopes[1] = scope_with_policies("finance", "finance", "  frameworks:\n    - name: cra\n");
         c.validate().unwrap();
     }

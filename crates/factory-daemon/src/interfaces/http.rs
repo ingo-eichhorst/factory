@@ -2985,19 +2985,27 @@ mod tests {
              \x20 - { id: b, title: Control B, evidence: [{ check: attestation }] }\n",
         )
         .unwrap();
-        let mut company: Scope = serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        let mut company: Scope =
+            serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
         company.path = PathBuf::from(".");
-        let mut finance: Scope = serde_yaml_ng::from_str("id: finance-id\nname: finance\n").unwrap();
+        let mut finance: Scope =
+            serde_yaml_ng::from_str("id: finance-id\nname: finance\n").unwrap();
         finance.path = PathBuf::from("finance");
         let config = Config {
             version: 1,
-            instance: Instance { id: "test".into(), name: "test".into() },
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
             daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![company, finance],
             roles: Default::default(),
             dashboard: None,
-            policies: serde_yaml_ng::from_str::<PolicyDeclaration>("frameworks: [{name: cra, except: [finance]}]").unwrap(),
+            policies: serde_yaml_ng::from_str::<PolicyDeclaration>(
+                "frameworks: [{name: cra, except: [finance]}]",
+            )
+            .unwrap(),
             quality: Vec::new(),
             infrastructure: Default::default(),
             secrets: Vec::new(),
@@ -3005,33 +3013,57 @@ mod tests {
             renewals: Vec::new(),
             renewals_notify: None,
         };
-        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
-        Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
+        let store: Arc<dyn factory_core::adapter::TaskStore> =
+            Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(
+            Factory { root, config },
+            Registry::with_builtins(),
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
     }
 
     #[tokio::test]
-    async fn policy_routes_leave_a_root_excluded_framework_out_of_that_scope_and_name_the_exclusion() {
+    async fn policy_routes_leave_a_root_excluded_framework_out_of_that_scope_and_name_the_exclusion(
+    ) {
         let engine = engine_with_excluded_scope();
-        let (status, json) = request(engine.clone(), "GET", "/api/policy?scope=finance", None).await;
+        let (status, json) =
+            request(engine.clone(), "GET", "/api/policy?scope=finance", None).await;
         assert_eq!(status, 200, "{json}");
         let report = &json["data"]["report"];
         assert_eq!(report["rows"], serde_json::json!([]), "{json}");
         assert_eq!(report["rollup"], serde_json::json!([]), "{json}");
         assert_eq!(report["applicability"][0]["framework"], "cra");
         assert_eq!(report["applicability"][0]["restricted_by"], "company");
-        assert_eq!(report["applicability"][0]["excluded"], serde_json::json!(["finance"]));
+        assert_eq!(
+            report["applicability"][0]["excluded"],
+            serde_json::json!(["finance"])
+        );
 
         let (_, json) = request(engine.clone(), "GET", "/api/policy", None).await;
-        assert_eq!(json["data"]["report"]["applicability"][0]["covers"], serde_json::json!(["company"]));
+        assert_eq!(
+            json["data"]["report"]["applicability"][0]["covers"],
+            serde_json::json!(["company"])
+        );
         assert_eq!(json["data"]["report"]["rows"][0]["scope"], "company");
 
-        let (status, json) =
-            request(engine.clone(), "GET", "/api/policy/export?scope=finance&format=json", None).await;
+        let (status, json) = request(
+            engine.clone(),
+            "GET",
+            "/api/policy/export?scope=finance&format=json",
+            None,
+        )
+        .await;
         assert_eq!(status, 200, "{json}");
-        assert_eq!(json["report"]["applicability"][0]["except"], serde_json::json!(["finance"]));
+        assert_eq!(
+            json["report"]["applicability"][0]["except"],
+            serde_json::json!(["finance"])
+        );
 
         let body = r#"{"control":"cra/b","scope":"finance"}"#;
-        let (status, json) = request(engine.clone(), "POST", "/api/policy/remediate", Some(body)).await;
+        let (status, json) =
+            request(engine.clone(), "POST", "/api/policy/remediate", Some(body)).await;
         assert_eq!(status, 400, "{json}");
         let message = json["message"].as_str().unwrap_or_default();
         assert!(message.contains("does not apply at \"finance\""), "{json}");

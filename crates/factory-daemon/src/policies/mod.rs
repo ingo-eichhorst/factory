@@ -2233,36 +2233,68 @@ mod tests {
         let mut factory = base.factory_snapshot();
         factory.config.policies =
             serde_yaml_ng::from_str("frameworks: [{name: cra, except: [engineering]}]").unwrap();
-        Arc::new(Engine::new(factory, Registry::with_builtins(), base.l4.store.clone(), PathBuf::from("factory"), Vec::new()))
+        Arc::new(Engine::new(
+            factory,
+            Registry::with_builtins(),
+            base.l4.store.clone(),
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
     }
 
     #[tokio::test]
-    async fn a_root_exclusion_leaves_the_framework_off_that_subtrees_board_guide_export_attest_and_remediate() {
+    async fn a_root_exclusion_leaves_the_framework_off_that_subtrees_board_guide_export_attest_and_remediate(
+    ) {
         let engine = excluded_test_engine();
         let owner = Caller::Owner;
 
         let subtree = engine.policy_report(Some("engineering")).await.unwrap();
-        assert!(subtree.rows.is_empty(), "cra applies nowhere below engineering: {:?}", subtree.rows);
+        assert!(
+            subtree.rows.is_empty(),
+            "cra applies nowhere below engineering: {:?}",
+            subtree.rows
+        );
         assert!(subtree.rollup.is_empty());
         let cra = &subtree.applicability[0];
-        assert_eq!((cra.framework.as_str(), cra.restricted_by.as_deref()), ("cra", Some("test")));
+        assert_eq!(
+            (cra.framework.as_str(), cra.restricted_by.as_deref()),
+            ("cra", Some("test"))
+        );
         assert!(cra.covers.is_empty());
         assert_eq!(cra.excluded, ["engineering", "demo-app"]);
 
         let whole = engine.policy_report(None).await.unwrap();
-        assert_eq!(whole.rows.iter().map(|r| r.scope.as_str()).collect::<Vec<_>>(), ["company", "sibling"]);
+        assert_eq!(
+            whole
+                .rows
+                .iter()
+                .map(|r| r.scope.as_str())
+                .collect::<Vec<_>>(),
+            ["company", "sibling"]
+        );
         assert_eq!(whole.applicability[0].covers, ["company", "sibling"]);
 
-        assert!(factory_core::policy::frameworks_in_chain(&engine.policy_chain("demo-app")).is_empty());
-        assert_eq!(factory_core::policy::frameworks_in_chain(&engine.policy_chain("sibling")), ["cra"]);
+        assert!(
+            factory_core::policy::frameworks_in_chain(&engine.policy_chain("demo-app")).is_empty()
+        );
+        assert_eq!(
+            factory_core::policy::frameworks_in_chain(&engine.policy_chain("sibling")),
+            ["cra"]
+        );
 
         let refused = engine
             .policy_remediate("cra/b".parse().unwrap(), "demo-app".to_string(), None)
             .await
             .unwrap_err()
             .to_string();
-        assert!(refused.contains("cra/b does not apply at \"demo-app\""), "{refused}");
-        assert!(refused.contains("excludes cra from the \"engineering\" subtree"), "{refused}");
+        assert!(
+            refused.contains("cra/b does not apply at \"demo-app\""),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("excludes cra from the \"engineering\" subtree"),
+            "{refused}"
+        );
         let refused = engine
             .policy_attest(
                 &owner,
@@ -2282,7 +2314,10 @@ mod tests {
             .policy_remediate("cra/b".parse().unwrap(), "sibling".to_string(), None)
             .await
             .unwrap();
-        assert_eq!(task.scope, "sibling", "cra still applies, and remediates, outside the exclusion");
+        assert_eq!(
+            task.scope, "sibling",
+            "cra still applies, and remediates, outside the exclusion"
+        );
 
         let (_, body) = engine.policy_export_render(None, "md").await.unwrap();
         assert!(body.contains("## Applicability"), "{body}");
@@ -2293,9 +2328,15 @@ mod tests {
             ),
             "{body}"
         );
-        let (_, json) = engine.policy_export_render(Some("engineering"), "json").await.unwrap();
+        let (_, json) = engine
+            .policy_export_render(Some("engineering"), "json")
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(json["report"]["applicability"][0]["except"], serde_json::json!(["engineering"]));
+        assert_eq!(
+            json["report"]["applicability"][0]["except"],
+            serde_json::json!(["engineering"])
+        );
         assert_eq!(json["report"]["rows"], serde_json::json!([]));
     }
 
