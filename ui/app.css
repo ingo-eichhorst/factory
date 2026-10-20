@@ -395,6 +395,12 @@ select.rolepick:disabled { opacity: .38; cursor: default; }
   background: var(--sunk); border: 1px solid var(--line-soft); padding: 3px 7px; border-radius: 3px;
   font: 400 11px/1.4 var(--mono); color: var(--ink-2);
 }
+/* A standing agent's instance count and its − / + (#329), and one line per
+   instance once there is more than one. */
+.scaler { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; }
+.scaler .btn { min-width: 24px; padding-left: 6px; padding-right: 6px; }
+.instances { margin-top: 7px; display: grid; gap: 6px; padding-left: 10px; border-left: 2px solid var(--line-soft); }
+.instance .attach { margin-top: 3px; }
 .work { margin-top: 8px; display: grid; gap: 6px; }
 .work .job { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; cursor: pointer; }
 .work .job:hover .jt { color: var(--signal); }

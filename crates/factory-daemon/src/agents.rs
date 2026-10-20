@@ -773,7 +773,15 @@ impl L3Service<'_> {
         };
         let mut to_start = Vec::new();
         for instance in 1..=wanted {
-            if rows.iter().any(|a| a.instance == instance) {
+            if let Some(row) = rows.iter().find(|a| a.instance == instance) {
+                // Left up by an earlier scale-down and wanted again: it is
+                // one of the count once more, restarted should it die.
+                if !row.declared {
+                    let mut row = row.clone();
+                    row.declared = true;
+                    self.state.agents.put_agent(&row).await?;
+                    self.wiring.bus().publish(Event::AgentUpdated { agent: row });
+                }
                 continue;
             }
             let a = AgentSession::new(scope, name, &decl.harness, &self.runtime_for(scope), decl.lifetime, decl.role.clone())
@@ -1543,14 +1551,23 @@ mod tests {
         engine.l3_service().supervise_agents().await;
         assert_eq!(stub.stopped_handles(), [StubRuntime::handle("demo/watcher#3")]);
         assert_eq!(rows(&engine).await, ["demo/watcher", "demo/watcher#2"]);
+        assert!(!engine.l3.agents.get_agent("demo/watcher#2").await.unwrap().unwrap().declared, "left up, not wanted");
         // A surplus instance that dies is not brought back.
         assert_eq!(stub.starts.lock().unwrap().len(), 3);
+
+        // Wanted again before it went: #2 is one of the count once more, and
+        // brought back should it die; #3 is started afresh.
+        let report = scale(&engine, Some(3), None).await.unwrap();
+        assert_eq!(report.started, ["demo/watcher#3"]);
+        assert_eq!(started(&stub, 4).await.last().map(String::as_str), Some("demo/watcher#3"));
+        assert!(engine.l3.agents.get_agent("demo/watcher#2").await.unwrap().unwrap().declared);
+        scale(&engine, Some(1), None).await.unwrap();
 
         // The terminal is closed: #2 goes too, and #1 is left alone.
         engine.l3.attention.forget("demo/watcher#2");
         engine.l3_service().supervise_agents().await;
         assert_eq!(rows(&engine).await, ["demo/watcher"]);
-        assert_eq!(stub.stopped_handles().len(), 2);
+        assert_eq!(stub.stopped_handles().len(), 3);
         std::fs::remove_dir_all(root).ok();
     }
 

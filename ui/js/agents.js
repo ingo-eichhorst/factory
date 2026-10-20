@@ -10,6 +10,7 @@ import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
 import { agentConfigurePayload, agentDeletePayload } from "./agent-config.js";
+import { canStart, instanceSummary, instancesOf, liveIds, scalePayload } from "./agents-model.js";
 // The roster and the wiring open each other: the wiring builds the rail at
 // boot, and this is the other place /api/agents is refetched, which is the
 // only thing the rail's tree is made of. A cycle ES modules handle, because
@@ -80,12 +81,27 @@ export function renderAgents() {
     const rows = s.agents.map(a => {
       const standing = a.lifetime !== "task";
       const live = a.state === "ready" || a.state === "starting";
+      // A standing agent may keep several standing sessions (#329): Start
+      // brings up whichever are down, Stop takes every live one down.
+      const summary = instanceSummary(a);
+      const several = Boolean(summary && summary.several);
+      const stopping = liveIds(a);
       const buttons = [];
       if (standing) {
-        buttons.push(`<button class="btn" data-act="start" data-scope="${esc(s.name)}" data-name="${esc(a.name)}" ${live ? "disabled" : ""}>Start</button>`);
-        buttons.push(`<button class="btn" data-act="stop" data-id="${esc(a.id || "")}" ${live ? "" : "disabled"}>Stop</button>`);
+        buttons.push(`<button class="btn" data-act="start" data-scope="${esc(s.name)}" data-name="${esc(a.name)}" ${canStart(a) ? "" : "disabled"}>Start</button>`);
+        buttons.push(`<button class="btn" data-act="stop" data-ids="${esc(stopping.join(" "))}" ${stopping.length ? "" : "disabled"}>Stop</button>`);
         buttons.push(`<button class="btn" data-act="term" data-id="${esc(a.id || "")}" ${live ? "" : "disabled"}>Terminal</button>`);
       }
+      // The count, and − / + where the declaration is this scope's own to
+      // rewrite: the scale goes into its config, like Delete does.
+      const scaler = summary && (several || a.deletable)
+        ? `<span class="scaler" title="Standing sessions kept up: instances in the scope's config">
+             <span class="sub">${esc(summary.label)}</span>
+             ${a.deletable ? `
+               <button class="btn" data-act="scale" data-by="-1" data-scope="${esc(s.name)}" data-name="${esc(a.name)}" data-wanted="${summary.wanted}" ${summary.wanted > 1 ? "" : "disabled"} title="One fewer">−</button>
+               <button class="btn" data-act="scale" data-by="1" data-scope="${esc(s.name)}" data-name="${esc(a.name)}" data-wanted="${summary.wanted}" title="One more">+</button>` : ""}
+           </span>`
+        : "";
       buttons.push(`<button class="btn" data-act="task" data-scope="${esc(s.name)}" data-agent="${esc(a.adapter)}">Start task…</button>`);
       if (a.deletable && state.scope === s.name)
         buttons.push(`<button class="btn danger" data-act="delete" data-scope="${esc(s.name)}" data-name="${esc(a.name)}">Delete</button>`);
@@ -99,10 +115,25 @@ export function renderAgents() {
            </select>`
         : "";
 
-      const attach = a.attach
-        ? `<div class="attach"><span class="sub">attach</span><code>${esc(a.attach)}</code>
-             <button class="btn" data-act="copy" data-copy="${esc(a.attach)}">Copy</button></div>`
-        : (a.session ? `<div class="attach"><span class="sub">session</span><code>${esc(a.session)}</code></div>` : "");
+      const attachLine = (cmd, session) => cmd
+        ? `<div class="attach"><span class="sub">attach</span><code>${esc(cmd)}</code>
+             <button class="btn" data-act="copy" data-copy="${esc(cmd)}">Copy</button></div>`
+        : (session ? `<div class="attach"><span class="sub">session</span><code>${esc(session)}</code></div>` : "");
+      // One standing session keeps the row's own attach line; several list
+      // each instance with its own id, state and attach line.
+      const attach = several
+        ? `<div class="instances">${instancesOf(a).map(i => `
+            <div class="instance">
+              <div class="line">
+                <span class="sub">#${esc(String(i.instance))}</span>
+                <code class="id">${esc(i.id)}</code>
+                ${statusBadge(i.state)}
+                ${i.surplus ? `<span class="tag warn" title="Above the count: stopped once nobody is using it">draining</span>` : ""}
+              </div>
+              ${i.error ? `<div class="err">${esc(i.error)}</div>` : ""}
+              ${attachLine(i.attach, i.session)}
+            </div>`).join("")}</div>`
+        : attachLine(a.attach, a.session);
 
       const work = a.active.length
         ? `<div class="work">${a.active.map(w => `
@@ -122,11 +153,12 @@ export function renderAgents() {
           ${agentTags(a)}
           ${dateBadges({ scope: s.name, agent: a.name })}
           <span style="margin-left:auto"></span>
+          ${scaler}
           ${rolePicker}
           <span class="row-btns">${buttons.join("")}</span>
         </div>
         <div class="sub">${esc(a.description)}</div>
-        ${a.error ? `<div class="err">${esc(a.error)}</div>` : ""}
+        ${a.error && !several ? `<div class="err">${esc(a.error)}</div>` : ""}
         ${attach}
         ${work}
       </div>`;
@@ -162,7 +194,18 @@ export async function agentAction(el) {
       await api("/api/agents/start", { method: "POST", body: JSON.stringify({ scope: el.dataset.scope, name: el.dataset.name }) });
     } else if (act === "stop") {
       el.disabled = true;
-      await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id: el.dataset.id }) });
+      for (const id of (el.dataset.ids || "").split(" ").filter(Boolean)) {
+        await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id }) });
+      }
+    } else if (act === "scale") {
+      const payload = scalePayload(el.dataset.scope, el.dataset.name, Number(el.dataset.by), Number(el.dataset.wanted));
+      el.disabled = true;
+      const answer = await api("/api/agents/scale", { method: "POST", body: JSON.stringify(payload) });
+      // Never forced: what a scale-down could not stop is said, not hidden.
+      const scale = answer && answer.scale;
+      if (scale && scale.kept && scale.kept.length) {
+        alert(scale.kept.map(k => `${k.id} is still up: ${keptWords(k.why)}. It stops once it is idle.`).join("\n"));
+      }
     } else if (act === "role") {
       el.disabled = true;
       await api("/api/agents/role", { method: "POST", body: JSON.stringify({ id: el.dataset.id, role: el.value }) });
@@ -189,6 +232,10 @@ export async function agentAction(el) {
     alert(e.message);
   }
   loadAgents();
+}
+
+function keptWords(why) {
+  return { working: "it is working", blocked: "it is waiting on an answer", attached: "a person is attached to it" }[why] || why;
 }
 
 export function openAgentCreate(scope) {
