@@ -710,9 +710,9 @@ impl AgentContext {
                     "task.attach -> {bin} task attach --kind sbom|vulnerabilities <file>"
                 ),
                 Grant::AgentStart => format!("agent.start -> {bin} agent start {scope} <name>"),
-                Grant::AgentConfigure => {
-                    "agent.configure -> add, edit or delete a standing agent's declaration in its scope; today that is the web UI's Roster, not this CLI".to_string()
-                }
+                Grant::AgentConfigure => format!(
+                    "agent.configure -> {bin} agent scale {scope} <name> <n|+n|-n> keeps that many standing instances of an agent up; adding or deleting a declaration is the web UI's Roster, not this CLI"
+                ),
                 Grant::AgentStop => format!("agent.stop -> {bin} agent stop <id>"),
                 Grant::AgentInput => {
                     format!("agent.input -> {bin} agent input <id> --text \"...\" --key enter")

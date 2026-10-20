@@ -85,6 +85,11 @@ scope:
       harness: pi
       lifetime: permanent     # started with the daemon, restarted if it dies
       args: ["--model", "opus"] # arguments for this declaration only
+    - name: claude
+      harness: claude-code
+      lifetime: permanent
+      instances: 3            # three standing sessions side by side; absent means 1
+      max_sessions: 5         # standing instances and runs together (#179)
     - name: scratch
       harness: shell
       lifetime: temporary     # startable, but nothing starts it on its own
@@ -111,6 +116,55 @@ longer declares is **closed** rather than left for somebody to find next week.
 `lifetime` may also sit inside the singular `agent:` block, which is how
 instances written before standing agents existed already spell it.
 
+**A standing agent can keep several standing sessions (`#329`).** `instances:
+3` on a permanent or temporary declaration keeps three of it up side by side;
+absent means one, which is what every declaration written before this key
+meant. Each instance has its own id, herdr name, state and attach line:
+instance 1 keeps exactly the id and herdr name a single standing agent always
+had (`demo/claude`, `factory-demo-claude`), so a config that never says
+`instances` behaves, and is named, as it did; the others are `demo/claude#2`,
+`demo/claude#3`, … with herdr names that carry their number
+(`factory-demo-claude-2-<hash>`). Reconciliation works per instance: on
+startup every instance that outlived the daemon is adopted, none is started
+twice, and a permanent instance whose session dies is brought back as itself.
+`instances: 0`, any count on a task agent, and more instances than the
+agent's or its scope's `max_sessions` are refused at load, naming the scope
+and both numbers: each live instance holds one of those sessions, so a run
+could otherwise never be admitted.
+
+The count can be changed live, without touching the YAML by hand:
+
+```sh
+factory agent scale demo claude 3     # keep three up
+factory agent scale demo claude +1    # one more; -1 for one fewer
+```
+
+The same request is `POST /api/agents/scale` (`{scope, name, instances}` or
+`{scope, name, by}`) and the roster's − / + next to Start and Stop; all three
+reach one handler, and none of them writes the file itself. The new count is
+written into the scope's own `.factory/config.yaml` through the same edit path
+the roster's **New agent…** uses -- only that one `instances:` line changes or
+is added, every comment and sibling stays where it was, and the file is
+parsed back and refused unless it then says exactly what was asked -- and the
+live snapshot is updated, so the count survives a restart and the YAML stays
+the source of truth. It takes the `agent.configure` grant with scope reach,
+like any other declaration edit. Scaling up starts the new instances in the
+background when the agent is already up, or when it starts itself and nobody
+has stopped it. Scaling down takes the highest-numbered instances above the
+count away, but **never forces one down**: an instance whose runtime says it
+is working or waiting on an answer, or that a person has in front of them --
+its terminal open in Factory, its transcript read or a key typed into it in
+the last minute -- is left up, and the answer names it and says why
+(`claude in demo: 1 wanted, 2 up; stopped demo/claude#2; demo/claude#3 left up
+because it is working -- it stops once it is idle`). The supervisor stops it
+on the first tick it is idle, and does not restart it should it die first.
+herdr reports no attached client per pane, so a person in `herdr agent
+attach` who has not typed anything is not seen. Every scale is announced on
+the event stream (an `agent_scaled` event with who asked, which `factory
+watch` prints as `agent demo/claude scaled 1 -> 3 by the owner`) and in the
+daemon log; like starting and stopping one, it is not a task, so it has no
+task journal of its own.
+
 `sandbox` says where an agent's runs execute: `none` (the default),
 `openshell`, `docker`, or `srt`. **`openshell` is enforced** (`#218`): every
 task run of such an agent starts inside its own [NVIDIA OpenShell][openshell]
@@ -125,8 +179,8 @@ starts exactly the way one declaring `none` does.
 
 **`max_sessions` is enforced (`#179`).** An agent declaring it may have at
 most that many sessions open at once -- a run of it `Dispatching` or already
-holding a session, plus one if it is also a live permanent agent under the
-same name. A scope may declare its own `max_sessions` too (in its `scope:`
+holding a session, plus one for each live standing instance under the same
+name (`instances:`, below). A scope may declare its own `max_sessions` too (in its `scope:`
 block, root included), a cap shared across every agent in it; the two apply
 together, whichever is tighter. `0` is refused at load, naming the scope,
 since it would never run anything. Absent, on either, is unlimited -- today's
@@ -377,8 +431,10 @@ hand itself a role would not be bounded by the one it has.
 
 ```sh
 factory agents                       # scopes, their agents, and what each is doing
-factory agent start demo watcher
+factory agent start demo watcher     # every instance it keeps
 factory agent stop demo/watcher      # stays stopped until someone asks again
+factory agent stop 'demo/claude#2'   # one instance of several (quote the #)
+factory agent scale demo claude 3    # keep three standing sessions up
 factory agent output demo/watcher
 factory agent input demo/watcher --text "how is it going?" --key enter
 factory agent role demo/watcher reviewer
@@ -4465,8 +4521,20 @@ scope:
     - name: reviewer
       harness: claude-code
       lifetime: task
+    - name: assistant
+      harness: claude-code
+      lifetime: permanent    # a standing agent: started with the daemon
+      instances: 2           # standing sessions kept up (#329); absent = 1
+      max_sessions: 4        # cap on instances + runs of it; absent = no cap
   task_store: file-store     # this scope's tasks live somewhere else
 ```
+
+An agent declaration, in `agents:` or the singular `agent:` block, takes
+`name` (default: the harness), `harness`, `lifetime` (`task`, `permanent` or
+`temporary`), `role`, `autostart`, `args`, `sandbox`/`openshell`,
+`provider`, `max_sessions` and, for a standing agent, `instances` -- see
+"Task agents and standing agents" above. A name may not contain `/` or `#`:
+`#` is what a standing instance's id carries its number behind.
 
 Only directories with a valid local scope block appear in the CLI or UI. A
 configured scope is nested below its nearest configured ancestor in the rail;
@@ -5108,6 +5176,7 @@ HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 for only the task's own lines, none of its runs'), `GET /api/runs/{id}/output`,
 `GET /api/runs/{id}/usage`, `GET /api/tasks/{id}/usage`,
 `GET /api/costs?group_by=&from=&to=&scope=`, `GET /api/agents`,
+`POST /api/agents/scale` (see "Task agents and standing agents" above),
 `GET /api/agent-runtime`, `GET /api/environment`, `GET /api/infrastructure`,
 `GET /api/backup`, `POST /api/backup/run`, `POST /api/backup/verify?snapshot=`,
 `GET /api/knowledge`,
@@ -5210,7 +5279,12 @@ the task. The chart looks a quarter of a window ahead of now, so the next
 scheduled run has room to be read.
 
 **Roster** is the list: each scope, then the agents it declares, then
-what each one is doing. A standing agent can be started, stopped, and opened —
+what each one is doing. A standing agent shows `instances 2/3 up` with − / +
+to change how many standing sessions it keeps (`#329`; offered where the
+declaration is the scope's own), and, once it has more than one, a line per
+instance with its id, state and attach line; one draining after a scale-down
+is marked so. Start brings up whichever instances are down; Stop takes every
+live one down. A standing agent can be started, stopped, and opened —
 its terminal is live, and there is a line to type into it with keys for Enter,
 Esc, ↑, ↓ and Ctrl-C. That is enough to answer the prompt an agent is sitting
 on, which is usually a first-run trust dialog or a login. Every agent also
@@ -5395,6 +5469,11 @@ liveness bridge are all at zero. What remains counted is deliberate: the pages
   the first recording exists, and the chart says so rather than drawing a flat
   line back to the beginning of time. The runtime is polled, so a flip and a
   flip back between two ticks leaves no trace.
+- **The roster's Terminal is instance 1's.** A standing agent with several
+  instances lists each one with its own attach line, and `factory agent
+  stop/output/input` take any instance's id, but the roster opens a terminal
+  on, and stops, the declaration as a whole (#330). The Occupancy chart draws
+  no lane per standing session yet (#331).
 - **A task always opens its own session**, even when it names a standing agent.
   Sending work into an agent's existing session — so it keeps its context — is
   a different feature, with its own questions about whose transcript is whose.
