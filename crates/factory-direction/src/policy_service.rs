@@ -484,6 +484,9 @@ mod tests {
             std::fs::write(policy::policies_dir(&self.root).join("cra.yaml"), format!("framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {{id: a, title: {title}, evidence: [{{check: {check}}}]}}\n")).unwrap();
         }
         fn service(&self) -> Service<'_> {
+            self.service_with("frameworks: [cra, practices]")
+        }
+        fn service_with(&self, root_policies: &str) -> Service<'_> {
             let configuration = policy_intent::Configuration {
                 scopes: [
                     ("parent-id", "company", "."),
@@ -497,7 +500,7 @@ mod tests {
                     policies: Default::default(),
                 })
                 .collect(),
-                root_policies: serde_yaml_ng::from_str("frameworks: [cra, practices]").unwrap(),
+                root_policies: serde_yaml_ng::from_str(root_policies).unwrap(),
                 root_name: Some("company".into()),
                 instance_name: "instance".into(),
             };
@@ -746,6 +749,79 @@ mod tests {
             .unwrap();
         assert_eq!(next.attestations[1].withdrawn, Some(withdrawal));
         assert_eq!(*inventory.calls.lock().unwrap(), ["app", "app"]);
+    }
+
+    #[tokio::test]
+    async fn an_excluded_framework_is_absent_at_its_scope_named_on_the_board_and_refused_in_detail() {
+        let fixture = Fixture::new();
+        let service = fixture.service_with(
+            "frameworks: [{name: cra, except: [app]}, practices, {name: house, scopes: [nowhere]}]",
+        );
+        let lower = Lower::default();
+        let inventory = Inventory::default();
+
+        let app = service.report(Some("app"), &lower, &lower, &inventory).await.unwrap();
+        assert_eq!(
+            app.rows[0].statuses.iter().map(|s| s.control.to_string()).collect::<Vec<_>>(),
+            ["practices/p"],
+            "cra is absent at the scope the root excluded it from"
+        );
+        assert!(app.rollup.iter().all(|rollup| rollup.framework != "cra"));
+        let cra = app.applicability.iter().find(|a| a.framework == "cra").unwrap();
+        assert!(cra.covers.is_empty());
+        assert_eq!(cra.excluded, ["app"]);
+        assert_eq!(cra.restricted_by.as_deref(), Some("company"));
+        assert_eq!(cra.except, ["app"]);
+        let unknown: Vec<_> = app
+            .findings
+            .iter()
+            .filter(|f| f.kind == policy::FindingKind::UnknownScope)
+            .collect();
+        assert_eq!(unknown.len(), 1, "{:?}", app.findings);
+        assert_eq!(unknown[0].subject, "company");
+        assert!(unknown[0].detail.contains("\"nowhere\""), "{unknown:?}");
+
+        let whole = service.report(None, &lower, &lower, &inventory).await.unwrap();
+        let summary: Vec<_> = whole
+            .applicability
+            .iter()
+            .map(|a| (a.framework.as_str(), a.describe()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (
+                    "cra",
+                    "the instance root (company) binds it to the whole tree minus the app subtree(s) -- \
+                     applies at company; excluded at app"
+                        .to_owned()
+                ),
+                (
+                    "house",
+                    "the instance root (company) binds it to no configured scope -- applies at no scope here; \
+                     excluded at company, app"
+                        .to_owned()
+                ),
+                ("practices", "bound by company -- applies at company, app".to_owned()),
+            ]
+        );
+        assert_eq!(
+            whole.rows.iter().map(|row| row.scope.as_str()).collect::<Vec<_>>(),
+            ["company", "app"]
+        );
+        assert!(whole.rollup.iter().any(|rollup| rollup.framework == "cra"), "cra still holds at the root");
+
+        let refused = service
+            .detail("cra/a".parse().unwrap(), "app", &lower, &lower, &inventory)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("cra/a does not apply at \"app\""), "{refused}");
+        assert!(refused.contains("except: [app]"), "{refused}");
+        assert!(service
+            .detail("cra/a".parse().unwrap(), "company", &lower, &lower, &inventory)
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

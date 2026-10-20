@@ -852,6 +852,228 @@ mod tests {
         );
     }
 
+    // -- applicability per framework (#332) ------------------------------
+
+    /// The tree every applicability test reads: the root is a scope at `.`,
+    /// `finance` sits beside `work`, and `ledger` and `demo` sit one level
+    /// below each -- plus a lookalike whose path shares `finance`'s prefix
+    /// string but is not below it.
+    fn applicability(root: &str) -> Configuration {
+        Configuration {
+            scopes: [
+                ("root-id", "company", ".", "{}"),
+                ("finance-id", "finance", "finance", "{}"),
+                ("ledger-id", "ledger", "finance/ledger", "{}"),
+                ("work-id", "work", "projects/work", "{}"),
+                ("demo-id", "demo", "projects/work/demo", "{}"),
+                ("lookalike-id", "lookalike", "finance-archive", "{}"),
+            ]
+            .into_iter()
+            .map(|(id, name, path, raw)| Scope {
+                id: id.into(),
+                name: name.into(),
+                path: path.into(),
+                policies: declaration(raw),
+            })
+            .collect(),
+            root_policies: declaration(root),
+            root_name: Some("company".into()),
+            instance_name: "instance".into(),
+        }
+    }
+    /// Which scopes `framework` reaches, by every scope's own chain.
+    fn reaches(config: &Configuration, framework: &str) -> Vec<String> {
+        config
+            .scopes
+            .iter()
+            .filter(|scope| {
+                policy::frameworks_in_chain(&config.chain_for_scope(scope))
+                    .iter()
+                    .any(|f| f == framework)
+            })
+            .map(|scope| scope.name.clone())
+            .collect()
+    }
+    const EVERYWHERE: [&str; 6] = ["company", "finance", "ledger", "work", "demo", "lookalike"];
+
+    #[test]
+    fn a_plain_string_binds_the_whole_tree_and_parses_into_the_same_layer_as_before() {
+        let config = applicability("frameworks: [cra, dsgvo]
+tighten: {cra/a: {max_age: 7d}}
+");
+        assert_eq!(reaches(&config, "cra"), EVERYWHERE);
+        assert!(config.root_policies.applicability.is_empty());
+        for scope in &config.scopes {
+            assert_eq!(
+                config.chain_for_scope(scope)[0],
+                config.root_policies.clone().into_layer("company"),
+                "an unrestricted root layer is exactly today's at {}",
+                scope.name
+            );
+        }
+        assert!(config.applicability_findings().is_empty());
+        assert!(config.exclusions(&config.scopes[1]).is_empty());
+        let object = declaration("frameworks: [{name: cra}, dsgvo]");
+        assert_eq!(object, declaration("frameworks: [cra, dsgvo]"), "an object with neither key is a string");
+        assert_eq!(serde_yaml_ng::to_string(&object).unwrap(), "frameworks:\n- cra\n- dsgvo\n");
+    }
+
+    #[test]
+    fn scopes_limits_a_framework_to_the_named_subtrees() {
+        let config = applicability("frameworks: [dsgvo, {name: finance, scopes: [finance]}]");
+        assert_eq!(reaches(&config, "finance"), ["finance", "ledger"], "the subtree, never the lookalike path");
+        assert_eq!(reaches(&config, "dsgvo"), EVERYWHERE);
+        let work = &config.scopes[3];
+        assert_eq!(config.chain_for_scope(work)[0].frameworks, ["dsgvo"]);
+        assert_eq!(
+            config.exclusions(work),
+            [Exclusion {
+                framework: "finance".into(),
+                layer: "company".into(),
+                rule: ExclusionRule::Scopes(vec!["finance".into()]),
+            }]
+        );
+        assert_eq!(
+            config.exclusions(work)[0].to_string(),
+            "the instance root (\"company\") applies finance only to the finance subtree(s) (scopes: [finance])"
+        );
+    }
+
+    #[test]
+    fn except_removes_subtrees_from_the_whole_tree() {
+        let config = applicability("frameworks: [{name: cra, except: [finance]}, {name: dsgvo, except: [finance]}]");
+        assert_eq!(reaches(&config, "cra"), ["company", "work", "demo", "lookalike"]);
+        assert_eq!(reaches(&config, "dsgvo"), ["company", "work", "demo", "lookalike"]);
+        let ledger = &config.scopes[2];
+        assert!(config.chain_for_scope(ledger).is_empty(), "nothing is left of the root layer below finance");
+        assert_eq!(
+            config.exclusions(ledger)[0].rule,
+            ExclusionRule::Except("finance".into()),
+            "a scope below an except subtree names the subtree that excluded it"
+        );
+        assert_eq!(
+            config.exclusions(ledger)[0].to_string(),
+            "the instance root (\"company\") excludes cra from the \"finance\" subtree (except: [finance])"
+        );
+    }
+
+    #[test]
+    fn scopes_and_except_together_apply_except_after_scopes() {
+        let config = applicability("frameworks: [{name: cra, scopes: [work, finance], except: [demo, ledger]}]");
+        assert_eq!(reaches(&config, "cra"), ["finance", "work"]);
+        // Outside `scopes` is the reason reported first, `scopes` being applied first.
+        assert!(matches!(config.exclusions(&config.scopes[0])[0].rule, ExclusionRule::Scopes(_)));
+        assert!(matches!(config.exclusions(&config.scopes[4])[0].rule, ExclusionRule::Except(_)));
+    }
+
+    #[test]
+    fn the_root_scope_itself_is_a_subtree_covering_everything() {
+        let whole = applicability("frameworks: [{name: cra, scopes: [company]}]");
+        assert_eq!(reaches(&whole, "cra"), EVERYWHERE);
+        let nowhere = applicability("frameworks: [{name: cra, except: [company]}]");
+        assert!(reaches(&nowhere, "cra").is_empty());
+    }
+
+    #[test]
+    fn a_nested_scope_may_bind_a_framework_back_after_a_root_exclusion_and_never_drop_one() {
+        let mut config = applicability(
+            "frameworks: [{name: cra, except: [finance]}]\ntighten: {cra/a: {max_age: 7d}}\n",
+        );
+        config.scopes[2].policies = declaration("frameworks: [cra]");
+        // A child that tries to exclude anything is refused at load by the
+        // configuration owner; here it simply never enters a layer.
+        config.scopes[3].policies = declaration("frameworks: [{name: practices, except: [demo]}]");
+        assert_eq!(reaches(&config, "cra"), ["company", "ledger", "work", "demo", "lookalike"]);
+        assert_eq!(reaches(&config, "practices"), ["work", "demo"], "a nested restriction excludes nothing");
+
+        let catalogues = vec![serde_yaml_ng::from_str::<policy::Catalogue>(CATALOGUE).unwrap()];
+        let ledger = config.chain_for_scope(&config.scopes[2]);
+        assert_eq!(ledger.iter().map(|l| l.scope.as_str()).collect::<Vec<_>>(), ["company", "ledger"]);
+        assert!(ledger[0].frameworks.is_empty(), "the root still excludes cra at ledger itself");
+        let (applied, findings) = policy::applicable(&catalogues, &ledger);
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(
+            applied[0].max_age,
+            Some("7d".parse().unwrap()),
+            "the root's tightening holds wherever the framework is bound back"
+        );
+        let finance = config.chain_for_scope(&config.scopes[1]);
+        assert!(finance.is_empty(), "the root's tightening of an excluded framework is not carried in");
+        assert_eq!(policy::applicable(&catalogues, &finance), (vec![], vec![]), "and so is no finding");
+
+        let cra_a: policy::ControlRef = "cra/a".parse().unwrap();
+        let rebound = config.not_applying(&"cra/zz".parse().unwrap(), &config.scopes[2]).to_string();
+        assert!(rebound.contains("is not a control any loaded catalogue defines"), "{rebound}");
+        let excluded = config.not_applying(&cra_a, &config.scopes[1]).to_string();
+        assert!(excluded.contains("cra/a does not apply at \"finance\""), "{excluded}");
+        assert!(excluded.contains("except: [finance]"), "{excluded}");
+    }
+
+    #[test]
+    fn an_unknown_scope_name_is_a_finding_and_counts_as_absent() {
+        let config = applicability(
+            "frameworks: [{name: cra, except: [fiannce]}, {name: gobd, scopes: [finance, nope]}, {name: x, scopes: [gone]}]",
+        );
+        assert_eq!(reaches(&config, "cra"), EVERYWHERE, "an unknown except removes nothing");
+        assert_eq!(reaches(&config, "gobd"), ["finance", "ledger"], "the known name still holds");
+        assert!(reaches(&config, "x").is_empty(), "scopes of nothing but unknown names is nowhere");
+        let findings = config.applicability_findings();
+        assert_eq!(
+            findings.iter().map(|f| (f.kind, f.subject.as_str())).collect::<Vec<_>>(),
+            [(policy::FindingKind::UnknownScope, "company"); 3]
+        );
+        assert!(findings[0].detail.contains("cra's `except` names \"fiannce\""), "{findings:?}");
+        assert!(findings[1].detail.contains("gobd's `scopes` names \"nope\""), "{findings:?}");
+        assert_eq!(config.restriction("gobd").unwrap().scopes, Some(vec!["finance".to_string()]));
+        assert_eq!(config.restriction("cra").unwrap().except, Vec::<String>::new());
+        assert!(config.restriction("dsgvo").is_none());
+        // A leaf alias or a path is not a scope name.
+        let aliased = applicability("frameworks: [{name: cra, except: [finance/ledger]}]");
+        assert_eq!(reaches(&aliased, "cra"), EVERYWHERE);
+        assert_eq!(aliased.applicability_findings().len(), 1);
+    }
+
+    #[test]
+    fn a_vanished_scope_gets_the_root_layer_as_it_applies_at_the_root() {
+        let config = applicability(
+            "frameworks: [{name: cra, except: [finance]}, {name: finance, scopes: [finance]}, dsgvo]",
+        );
+        assert_eq!(config.chain("vanished")[0].frameworks, ["cra", "dsgvo"]);
+        let mut unscoped = config.clone();
+        unscoped.scopes.remove(0);
+        unscoped.root_name = None;
+        let chain = unscoped.chain("vanished");
+        assert_eq!(chain[0].scope, "instance");
+        assert_eq!(chain[0].frameworks, ["cra", "dsgvo"], "no root scope still means the root position");
+    }
+
+    #[test]
+    fn the_object_form_round_trips_refuses_a_typo_and_a_second_entry_for_a_restricted_framework() {
+        let raw = "frameworks:\n- name: cra\n  except:\n  - finance\n- dsgvo\n- name: finance\n  scopes:\n  - finance\n";
+        let parsed = declaration(raw);
+        assert_eq!(parsed.frameworks, ["cra", "dsgvo", "finance"]);
+        assert_eq!(parsed.applicability["cra"].except, ["finance"]);
+        assert_eq!(parsed.applicability["finance"].scopes, Some(vec!["finance".to_string()]));
+        assert_eq!(serde_yaml_ng::to_string(&parsed).unwrap(), raw);
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(json["frameworks"][0], serde_json::json!({"name": "cra", "except": ["finance"]}));
+        assert_eq!(serde_json::from_value::<PolicyDeclaration>(json).unwrap(), parsed);
+
+        let typo = serde_yaml_ng::from_str::<PolicyDeclaration>("frameworks: [{name: cra, exept: [finance]}]")
+            .unwrap_err()
+            .to_string();
+        assert!(typo.contains("exept"), "{typo}");
+        for twice in [
+            "frameworks: [cra, {name: cra, except: [finance]}]",
+            "frameworks: [{name: cra, except: [finance]}, cra]",
+        ] {
+            let error = serde_yaml_ng::from_str::<PolicyDeclaration>(twice).unwrap_err().to_string();
+            assert!(error.contains("listed more than once"), "{twice}: {error}");
+        }
+        assert_eq!(declaration("frameworks: [cra, cra]").frameworks, ["cra", "cra"]);
+        assert!(serde_yaml_ng::from_str::<PolicyDeclaration>("frameworks: [7]").is_err());
+    }
+
     #[tokio::test]
     async fn metric_inputs_reread_catalogues_receipts_and_withdrawals_without_a_verdict() {
         let root = Root::new();

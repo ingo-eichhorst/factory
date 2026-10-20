@@ -389,6 +389,36 @@ mod tests {
     }
 
     #[test]
+    fn export_markdown_lists_each_frameworks_scope_set_and_every_root_exclusion() {
+        assert!(!export_markdown(&sample()).contains("## Applicability"));
+        let mut export = sample();
+        export.report.applicability = vec![crate::policy_report::FrameworkApplicability {
+            framework: "cra".to_string(),
+            bound_by: vec!["company".to_string()],
+            covers: vec!["company".to_string(), "demo".to_string()],
+            restricted_by: Some("company".to_string()),
+            scopes: None,
+            except: vec!["finance".to_string()],
+            excluded: vec!["finance".to_string(), "finance/ledger".to_string()],
+        }];
+        let text = export_markdown(&export);
+        assert!(text.contains("## Applicability"), "{text}");
+        assert!(
+            text.contains(
+                "- Cyber Resilience Act (cra): the instance root (company) binds it to the whole tree \
+                 minus the finance subtree(s) -- applies at company, demo; excluded at finance, finance/ledger"
+            ),
+            "{text}"
+        );
+        let json = serde_json::to_value(&export).unwrap();
+        assert_eq!(
+            json["report"]["applicability"][0]["excluded"],
+            serde_json::json!(["finance", "finance/ledger"])
+        );
+        assert_eq!(json["report"]["applicability"][0]["restricted_by"], "company");
+    }
+
+    #[test]
     fn export_markdown_shows_a_withdrawn_attestation_rather_than_dropping_it() {
         let mut export = sample();
         let atts = export.attestations.get_mut("demo").unwrap();

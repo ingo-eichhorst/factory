@@ -2661,6 +2661,82 @@ mod tests {
         assert_eq!(root_only[0].frameworks, vec!["cra".to_string()]);
     }
 
+    /// `#332`: the root decides per framework where it applies; the rest of
+    /// the tree is `policy_tree()`'s shape, with a `finance` beside it.
+    fn applicability_tree() -> Config {
+        let mut c = config_with(
+            "scope:\n  name: company\npolicies:\n  frameworks:\n    - name: cra\n      except: [finance]\n    \
+             - dsgvo\n    - name: finance\n      scopes: [finance]\n",
+        );
+        c.scopes = vec![
+            scope_with_policies("company", ".", ""),
+            scope_with_policies("finance", "finance", ""),
+            scope_with_policies("ledger", "finance/ledger", "  frameworks: [cra]\n"),
+            scope_with_policies("demo-app", "projects/demo", ""),
+        ];
+        c
+    }
+
+    #[test]
+    fn root_frameworks_take_strings_and_objects_and_the_chain_narrows_per_scope() {
+        let c = applicability_tree();
+        c.validate().unwrap();
+        let root_frameworks = |name: &str| {
+            c.policy_chain_for_scope(scope_named(&c, name))
+                .first()
+                .filter(|layer| layer.scope == "company")
+                .map(|layer| layer.frameworks.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(root_frameworks("company"), ["cra", "dsgvo"]);
+        assert_eq!(root_frameworks("demo-app"), ["cra", "dsgvo"]);
+        assert_eq!(root_frameworks("finance"), ["dsgvo", "finance"]);
+        assert_eq!(root_frameworks("ledger"), ["dsgvo", "finance"]);
+        let ledger = c.policy_chain_for_scope(scope_named(&c, "ledger"));
+        assert_eq!(
+            ledger[1].frameworks,
+            ["cra"],
+            "a nested scope still binds back what the root left out for it"
+        );
+
+        let mut f = factory_with(c.scopes.clone());
+        f.config = c;
+        assert_eq!(f.policy_chain("finance"), f.config.policy_chain_for_scope(f.scope("finance").unwrap()));
+        assert_eq!(
+            f.policy_chain("gone")[0].frameworks,
+            ["cra", "dsgvo"],
+            "a vanished scope gets the root layer as it applies at the root itself"
+        );
+    }
+
+    #[test]
+    fn a_nested_scope_cannot_restrict_where_a_framework_applies() {
+        let mut c = applicability_tree();
+        c.scopes[1] = scope_with_policies(
+            "finance",
+            "finance",
+            "  frameworks:\n    - name: cra\n      except: [ledger]\n",
+        );
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("scope \"finance\""), "{e}");
+        assert!(e.contains("Only the instance root's top-level `policies.frameworks`"), "{e}");
+        c.scopes[1] = scope_with_policies("finance", "finance", "  frameworks:\n    - name: cra\n      scopes: [finance]\n");
+        assert!(c.validate().is_err(), "`scopes` narrows as surely as `except`");
+        c.scopes[1] = scope_with_policies("finance", "finance", "  frameworks:\n    - name: cra\n");
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn a_restricted_root_declaration_round_trips_through_yaml_and_a_string_stays_a_string() {
+        let c = applicability_tree();
+        let rendered = serde_yaml_ng::to_string(&c).unwrap();
+        assert!(rendered.contains("- dsgvo\n"), "{rendered}");
+        assert!(rendered.contains("- name: cra\n"), "{rendered}");
+        let reparsed: Config = serde_yaml_ng::from_str(&rendered).unwrap();
+        assert_eq!(reparsed.policies, c.policies);
+        assert_eq!(c.policies.frameworks, ["cra", "dsgvo", "finance"]);
+    }
+
     #[test]
     fn a_populated_policy_declaration_round_trips_through_yaml() {
         // `tighten` is keyed by `ControlRef`, which #75 only ever exercised
