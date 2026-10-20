@@ -1713,6 +1713,7 @@ mod tests {
                 openshell: None,
                 provider: None,
                 max_sessions,
+                instances: None,
             }
         }
 
@@ -2485,6 +2486,7 @@ mod tests {
                 openshell: None,
                 provider: None,
                 max_sessions: None,
+                instances: None,
             });
         }
 
@@ -2903,6 +2905,7 @@ mod tests {
                 openshell: None,
                 provider: None,
                 max_sessions: None,
+                instances: None,
             });
             factory.config.daemon.foreman.enabled = true;
         }
@@ -6006,6 +6009,7 @@ edges: [{id: next, from: implement, to: review}]
                 ),
                 provider: None,
                 max_sessions: None,
+                instances: None,
             });
             let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
             let engine = Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()));

@@ -1562,6 +1562,7 @@ mod tests {
             openshell: None,
             provider: None,
             max_sessions: None,
+            instances: None,
         }
     }
 

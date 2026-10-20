@@ -76,14 +76,21 @@ impl AgentState {
     }
 }
 
-/// A standing agent as the daemon currently knows it.
+/// A standing agent as the daemon currently knows it -- one of its instances,
+/// to be exact (`#329`): a declaration with `instances: 3` has three of these.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSession {
-    /// `<scope>/<name>`. Deterministic, so reconciling against the config after
+    /// `<scope>/<name>` for instance 1, `<scope>/<name>#<n>` for the others
+    /// (`instance_id`). Deterministic, so reconciling against the config after
     /// a restart is a lookup rather than a search.
     pub id: String,
     pub name: String,
     pub scope: String,
+    /// Which of its declaration's standing instances this is, counted from 1.
+    /// Defaulted on read and left out when it is 1: every row written before
+    /// instances existed is instance 1, under the id it always had.
+    #[serde(default = "first", skip_serializing_if = "is_first")]
+    pub instance: u32,
     /// The agent adapter.
     pub agent: String,
     pub runtime: String,
@@ -126,9 +133,28 @@ fn yes() -> bool {
     true
 }
 
+fn first() -> u32 {
+    1
+}
+
+fn is_first(instance: &u32) -> bool {
+    *instance == 1
+}
+
 impl AgentSession {
+    /// The declaration's own id, which is also its first instance's.
     pub fn id_for(scope: &str, name: &str) -> String {
         format!("{scope}/{name}")
+    }
+
+    /// One instance's id. Instance 1 keeps the id a standing agent had before
+    /// it could have more than one, so its row, its guide and its attach line
+    /// are exactly what they were; the rest are `<scope>/<name>#<n>`.
+    pub fn instance_id(scope: &str, name: &str, instance: u32) -> String {
+        match instance {
+            0 | 1 => Self::id_for(scope, name),
+            n => format!("{scope}/{name}#{n}"),
+        }
     }
 
     /// The id this agent would have been given before a scope's identity
@@ -174,6 +200,7 @@ impl AgentSession {
             id: Self::id_for(scope, name),
             name: name.to_string(),
             scope: scope.to_string(),
+            instance: 1,
             agent: agent.to_string(),
             runtime: runtime.to_string(),
             lifetime,
@@ -188,6 +215,101 @@ impl AgentSession {
             started_at: now,
             last_seen_at: now,
         }
+    }
+
+    /// The same row, as instance `instance` of its declaration.
+    pub fn as_instance(mut self, instance: u32) -> Self {
+        self.instance = instance.max(1);
+        self.id = Self::instance_id(&self.scope, &self.name, self.instance);
+        self
+    }
+}
+
+/// Why a standing instance a scale-down would have stopped is still up. L3's
+/// own observation only: a run belongs to L4 and is never looked at here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeptUp {
+    /// Its runtime says it is in the middle of a turn.
+    Working,
+    /// Its runtime says it is waiting on an answer -- a question a person
+    /// would lose if the session went away under it.
+    Blocked,
+    /// A person has its terminal open in Factory or typed at it a moment ago.
+    Attached,
+}
+
+impl KeptUp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Blocked => "blocked",
+            Self::Attached => "attached",
+        }
+    }
+
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::Working => "it is working",
+            Self::Blocked => "it is waiting on an answer",
+            Self::Attached => "a person is attached to it",
+        }
+    }
+}
+
+/// One instance a scale-down left up, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptInstance {
+    pub id: String,
+    pub instance: u32,
+    pub why: KeptUp,
+}
+
+/// What a scale did (`#329`): the count asked for, what came up, what went
+/// away, and what was left up because stopping it would have cost somebody
+/// something. Instances left up are stopped once they are idle -- a scale
+/// never forces one down.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScaleReport {
+    pub scope: String,
+    pub name: String,
+    /// The count the declaration said before this scale.
+    pub previous: u32,
+    /// The count it says now.
+    pub wanted: u32,
+    /// Instances live once this answered, the ones still draining included.
+    pub up: u32,
+    /// Instances being brought up, by id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub started: Vec<String>,
+    /// Instances stopped and removed, by id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stopped: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<KeptInstance>,
+}
+
+impl ScaleReport {
+    /// `"business-factory-claude in root: 3 wanted, 3 up"`, then what moved.
+    pub fn summary(&self) -> String {
+        let mut out = format!(
+            "{} in {}: {} wanted, {} up",
+            self.name, self.scope, self.wanted, self.up
+        );
+        if !self.started.is_empty() {
+            out.push_str(&format!("; starting {}", self.started.join(", ")));
+        }
+        if !self.stopped.is_empty() {
+            out.push_str(&format!("; stopped {}", self.stopped.join(", ")));
+        }
+        for kept in &self.kept {
+            out.push_str(&format!(
+                "; {} left up because {} -- it stops once it is idle",
+                kept.id,
+                kept.why.words()
+            ));
+        }
+        out
     }
 }
 
@@ -222,6 +344,39 @@ mod tests {
     }
 
     #[test]
+    fn instance_one_keeps_the_declarations_id_and_the_rest_carry_their_number() {
+        assert_eq!(AgentSession::instance_id("projects/demo", "watcher", 1), "projects/demo/watcher");
+        assert_eq!(AgentSession::instance_id("projects/demo", "watcher", 3), "projects/demo/watcher#3");
+        let second = AgentSession::new("demo", "watcher", "shell", "runtime", Lifetime::Permanent, Role::worker())
+            .as_instance(2);
+        assert_eq!((second.id.as_str(), second.instance), ("demo/watcher#2", 2));
+        // Instance 1 is written exactly as a row was before instances existed.
+        let first = AgentSession::new("demo", "watcher", "shell", "runtime", Lifetime::Permanent, Role::worker());
+        let json = serde_json::to_value(&first).unwrap();
+        assert!(json.get("instance").is_none(), "{json}");
+        assert_eq!(serde_json::to_value(&second).unwrap()["instance"], 2);
+    }
+
+    #[test]
+    fn a_scale_report_says_what_it_left_up_and_why() {
+        let report = ScaleReport {
+            scope: "root".into(),
+            name: "claude".into(),
+            previous: 3,
+            wanted: 1,
+            up: 2,
+            started: Vec::new(),
+            stopped: vec!["root/claude#2".into()],
+            kept: vec![KeptInstance { id: "root/claude#3".into(), instance: 3, why: KeptUp::Working }],
+        };
+        assert_eq!(
+            report.summary(),
+            "claude in root: 1 wanted, 2 up; stopped root/claude#2; \
+             root/claude#3 left up because it is working -- it stops once it is idle"
+        );
+    }
+
+    #[test]
     fn standing_and_live_states_keep_their_original_vocabulary() {
         assert!(Lifetime::Permanent.is_standing() && Lifetime::Temporary.is_standing());
         assert!(!Lifetime::Task.is_standing());
@@ -241,6 +396,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(agent.role, Role::worker());
+        assert_eq!(agent.instance, 1, "a row from before instances is instance 1");
         assert!(agent.declared);
         assert!(agent.token.is_none() && agent.assigned_role.is_none());
     }

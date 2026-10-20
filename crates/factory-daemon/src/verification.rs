@@ -1459,6 +1459,7 @@ mod tests {
                     openshell: None,
                     provider: None,
                     max_sessions: None,
+                    instances: None,
                 }],
                 runtime: Some("quiet".into()),
                 git: None,
