@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   rowLanes, rowStyle, laneStyle, concurrency, blockedStretches, blockedNote, waitingShare,
+  blockLanes, sessionsOf, blockOffset, isStanding, groupRows, visibleGroups, stateClass, lifetimeBadge,
+  uptimeBands, uptimeNote, uptimeMarks, standingUtil, slotsLabel, sessionLabel,
   MIN_SPAN, MAX_SPAN, tickStep, tickTimes, liveView, resolveWindow, settle, isPreset, zoomAround, pan,
   panByPixels, wheelFactor, fractionAt, buttonAnchor, windowQuery, overlaps,
 } from "../js/occupancy-model.js";
@@ -231,4 +233,156 @@ test("ticks fall on round times of the local clock, not of UTC", () => {
   assert.deepEqual(tickTimes(NOW, NOW + 2 * HOUR, HOUR, 2 * HOUR), [NOW, NOW + HOUR, NOW + 2 * HOUR]);
   // Five-and-a-half hours ahead (India): hourly ticks land on the half hour in UTC.
   assert.equal(tickTimes(NOW, NOW + 2 * HOUR, HOUR, 5.5 * HOUR)[0], NOW + 30 * MIN);
+});
+
+// -- standing agents (#331) ---------------------------------------------------
+
+const UP_HOUR = 3600;
+const standingRow = (extra = {}) => ({
+  agent: "business-factory-claude", adapter: "claude-code", lifetime: "permanent", role: "worker", state: "ready",
+  blocks: [], planned: [], busy_seconds: 0, blocked_seconds: 0, lanes: 1, live: 0,
+  sessions: [{ subject: "company/business-factory-claude", uptime: [{ from: iso(-7200) }], spans: [] }],
+  up_seconds: UP_HOUR, slots: { in_use: 1, max: 5 },
+  ...extra,
+});
+const taskRow = (agent, extra = {}) => ({
+  agent, adapter: "codex", lifetime: "task", role: "worker", state: "task",
+  blocks: [], planned: [], busy_seconds: 0, blocked_seconds: 0, lanes: 1, live: 0, ...extra,
+});
+
+test("a standing agent up the whole window reads up 100% and its state, never idle", () => {
+  const util = standingUtil(standingRow(), UP_HOUR);
+  assert.equal(util.text, "up 100% · ready");
+  assert.deepEqual([util.up, util.state], ["up 100%", "ready"]);
+  assert.equal(util.runs, null, "no run, no runs share");
+  assert.doesNotMatch(util.text, /idle/);
+  // Idle on the screen is still up: the runtime's word is not the util column's.
+  const quiet = standingRow({ sessions: [{ subject: "s", uptime: [{ from: iso(0) }], spans: [{ status: "idle", from: iso(0) }] }] });
+  assert.equal(standingUtil(quiet, UP_HOUR).text, "up 100% · ready");
+});
+
+test("a standing row's runs are a share of their own beside its uptime", () => {
+  const util = standingUtil(standingRow({ busy_seconds: 720, up_seconds: 1800 }), UP_HOUR);
+  assert.equal(util.text, "up 50% · ready");
+  assert.equal(util.runs, 20);
+});
+
+test("a standing agent with no uptime in the window says only what it is now", () => {
+  const stopped = standingUtil(standingRow({ up_seconds: 0, state: "stopped", sessions: [] }), UP_HOUR);
+  assert.deepEqual([stopped.text, stopped.up], ["stopped", null]);
+  assert.equal(standingUtil(standingRow({ up_seconds: 0 }), 0).text, "ready", "a window wholly ahead");
+  assert.equal(standingUtil(taskRow("codex"), UP_HOUR), null, "a task row keeps its busy share");
+});
+
+test("permanent and temporary rows are marked; a task row is not", () => {
+  assert.equal(isStanding(standingRow()), true);
+  assert.equal(isStanding(standingRow({ lifetime: "temporary" })), true);
+  assert.equal(isStanding(taskRow("codex")), false);
+  assert.equal(lifetimeBadge(standingRow()).text, "permanent");
+  assert.equal(lifetimeBadge(standingRow()).short, "perm");
+  assert.equal(lifetimeBadge(standingRow({ lifetime: "temporary" })).text, "temporary");
+  assert.equal(lifetimeBadge(standingRow({ lifetime: "temporary" })).short, "temp");
+  assert.equal(lifetimeBadge(taskRow("codex")), null);
+});
+
+test("the state dot is one of a standing agent's four states, and nothing else", () => {
+  assert.deepEqual(["ready", "starting", "gone", "stopped"].map((state) => stateClass(standingRow({ state }))),
+    ["ready", "starting", "gone", "stopped"]);
+  assert.equal(stateClass(taskRow("codex")), "");
+  assert.equal(stateClass(standingRow({ state: "ready\" onclick=\"x" })), "");
+});
+
+test("the slots a row holds read like factory status", () => {
+  assert.deepEqual(slotsLabel(standingRow()), {
+    text: "1/5", title: "holds 1 of its 5 sessions (max_sessions), as admission counts them", full: false,
+  });
+  // Two runs of the same name beside the standing session.
+  assert.equal(slotsLabel(standingRow({ slots: { in_use: 3, max: 5 } })).text, "3/5");
+  assert.equal(slotsLabel(standingRow({ slots: { in_use: 5, max: 5 } })).full, true);
+  assert.equal(slotsLabel(standingRow({ slots: { in_use: 1 } })).text, "1 slot", "no cap");
+  assert.equal(slotsLabel(standingRow({ slots: { in_use: 0 }, state: "stopped" })).text, "0 slots");
+  assert.equal(slotsLabel(standingRow({ slots: { in_use: 0, max: 5 }, state: "stopped" })).text, "0/5");
+  assert.equal(slotsLabel(taskRow("codex", { slots: { in_use: 0, max: 2 } })), null, "a task agent holding nothing");
+  assert.equal(slotsLabel(taskRow("codex", { slots: { in_use: 2, max: 2 } })).text, "2/2");
+  assert.equal(slotsLabel(standingRow({ slots: undefined })), null, "an older daemon");
+});
+
+test("standing rows come first, and the filter keeps only them with the scope selection", () => {
+  const scopes = [
+    { name: "company", path: ".", rows: [taskRow("codex"), standingRow(), taskRow("pi")] },
+    { name: "projects/x", path: "projects/x", rows: [taskRow("shell")] },
+    { name: "projects/y", path: "projects/y", rows: [standingRow({ agent: "finance-assistant" })] },
+  ];
+  const names = (groups) => groups.map((g) => [g.scope.name, g.standing.map((r) => r.agent), g.task.map((r) => r.agent)]);
+  assert.deepEqual(names(visibleGroups(scopes, null, false)), [
+    ["company", ["business-factory-claude"], ["codex", "pi"]],
+    ["projects/x", [], ["shell"]],
+    ["projects/y", ["finance-assistant"], []],
+  ]);
+  assert.deepEqual(names(visibleGroups(scopes, null, true)), [
+    ["company", ["business-factory-claude"], []],
+    ["projects/y", ["finance-assistant"], []],
+  ], "a scope with no standing agent is left out");
+  const onlyX = (name) => name === "projects/x";
+  assert.deepEqual(names(visibleGroups(scopes, onlyX, false)), [["projects/x", [], ["shell"]]]);
+  assert.deepEqual(visibleGroups(scopes, onlyX, true), [], "the selection has none");
+  assert.deepEqual(groupRows(undefined), { standing: [], task: [] });
+});
+
+test("two standing sessions of one agent are two lanes, its runs below them", () => {
+  const two = standingRow({
+    sessions: [
+      { subject: "company/business-factory-claude", uptime: [{ from: iso(0) }], spans: [] },
+      { subject: "company/business-factory-claude#2", uptime: [{ from: iso(60) }], spans: [] },
+    ],
+  });
+  assert.equal(sessionsOf(two).length, 2);
+  assert.equal(rowLanes(two), 2, "no run: the sessions are the whole row");
+  assert.equal(rowStyle(two), ` style="--lanes:2"`);
+  assert.equal(sessionLabel(two, two.sessions[1], 1), "company/business-factory-claude#2");
+  assert.equal(sessionLabel(standingRow(), standingRow().sessions[0], 0), "", "one session needs no name");
+
+  const busy = { ...two, blocks: [{ lane: 0 }, { lane: 1 }], lanes: 2 };
+  assert.equal(blockOffset(busy), 2);
+  assert.equal(rowLanes(busy), 4);
+  assert.deepEqual(busy.blocks.map((b) => laneStyle(b, blockOffset(busy))), ["--lane:2;", "--lane:3;"]);
+  // A plan on a standing row sits in the first lane under its sessions.
+  assert.equal(rowLanes({ ...standingRow(), planned: [{}] }), 2);
+  assert.equal(laneStyle({ lane: 0 }, 1), "--lane:1;");
+});
+
+test("a row without sessions keeps the geometry it always had", () => {
+  assert.equal(blockLanes({ lanes: 3 }), 3);
+  assert.equal(rowLanes(taskRow("codex", { lanes: 3 })), 3);
+  assert.equal(rowLanes(standingRow({ sessions: [] })), 1);
+  assert.equal(blockOffset(taskRow("codex")), 0);
+  assert.equal(laneStyle({ lane: 1 }, 0), "--lane:1;");
+  assert.equal(laneStyle({ lane: 0 }, "2;color:red"), "", "garbage in an offset never becomes a style");
+});
+
+test("uptime is drawn as bands that end where the record says, open ones at now", () => {
+  const now = T0 + 3600e3;
+  const session = {
+    uptime: [
+      { from: iso(0), to: iso(600), ended: "restarted" },
+      { from: iso(660), to: iso(1200), ended: "stopped" },
+      { from: iso(1500) },
+      { from: iso(1600), to: iso(1600), ended: "gone" },
+    ],
+  };
+  const bands = uptimeBands(session, now);
+  assert.deepEqual(bands, [
+    { from: T0, to: T0 + 600e3, ended: "restarted" },
+    { from: T0 + 660e3, to: T0 + 1200e3, ended: "stopped" },
+    { from: T0 + 1500e3, to: now, ended: null },
+  ], "a stretch that held nothing is not drawn");
+  assert.deepEqual(uptimeMarks(bands).map((m) => [m.at, m.kind]), [[T0 + 600e3, "restarted"], [T0 + 1200e3, "stopped"]]);
+  assert.equal(uptimeMarks(bands)[1].title, "stopped by a person");
+  const when = (ms) => `@${(ms - T0) / 1000}`;
+  assert.equal(uptimeNote(bands[0], when, span), "up @0 – @600 (600s), then went away and came back up");
+  assert.equal(uptimeNote(bands[2], when, span), "up since @1500 (2100s), and up now");
+  // Opened at the window's edge: it was up before it.
+  assert.equal(uptimeNote(bands[0], when, span, T0), "up from before this window – @600 (600s of it in view), then went away and came back up");
+  assert.equal(uptimeNote(bands[2], when, span, T0 + 1500e3), "up since before this window (2100s of it in view), and up now");
+  assert.deepEqual(uptimeBands({}, now), [], "an older daemon sends none");
 });

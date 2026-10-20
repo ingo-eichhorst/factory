@@ -34,6 +34,7 @@ export const state = {
   runtimeConnectionError: null,
   sitePoll: null,        // the site view's slow tick, for the half of it no event announces
   occ: null,              // the occupancy answer, as the daemon assembled it
+  occStanding: false,     // the occupancy chart's "standing agents only" filter (#331)
   environment: null,      // last /api/environment answer: { sandboxes, credentials }
   environmentError: null,
   dependencies: null,       // selected scope's /api/dependencies report

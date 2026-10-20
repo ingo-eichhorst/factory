@@ -633,9 +633,10 @@ a.role-origin:hover { color: var(--signal); border-color: var(--signal); }
 
 /* --------------------------------------------------------- occupancy
    One row per agent, one block per run, drawn against a shared clock.
-   Three layers, and they must stay visually apart: a solid block is a run
+   Four layers, and they must stay visually apart: a solid block is a run
    Factory started and the agent reported on, a dashed one is a schedule's
-   promise, and the thin strip under both is only what the runtime saw. */
+   promise, a pale band is a standing session being up at all (#331), and
+   the thin strip on it is only what the runtime saw. */
 
 /* The toolbar is not a form: its controls size to their content, while the
    ones inside a modal still stretch to the field width. */
@@ -651,8 +652,8 @@ fieldset.seg { margin: 0; padding: 0; min-width: 0; }
 .seg button + button { border-left: 1px solid var(--line); }
 .seg button.on { background: var(--signal); color: var(--on-signal); font-weight: 600; }
 
-.occ { padding: 14px 16px 16px; }
-.occ-axis { position: relative; height: 16px; margin: 0 58px 0 var(--lab); border-bottom: 1px solid var(--line); }
+.occ { padding: 14px 16px 16px; --lab: 248px; --util: 118px; }
+.occ-axis { position: relative; height: 16px; margin: 0 var(--util) 0 var(--lab); border-bottom: 1px solid var(--line); }
 .occ-axis span {
   position: absolute; top: 0; font: 400 9.5px/1 var(--mono); color: var(--faint);
   transform: translateX(-50%); font-variant-numeric: tabular-nums; white-space: nowrap;
@@ -685,14 +686,40 @@ fieldset.seg { margin: 0; padding: 0; min-width: 0; }
 .occ-lab .h { color: var(--faint); }
 .occ-lab.free { color: var(--faint); }
 .occ-lab.free b { color: var(--faint); font-weight: 400; }
+/* A standing agent's label (#331): its state as a dot, its name, its
+   lifetime as a badge. The name gives way first; the badge always shows. */
+.occ-lab.std { display: flex; align-items: center; gap: 5px; }
+.occ-lab.std b { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.occ-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+.occ-dot.ready { background: var(--run); }
+.occ-dot.starting { background: var(--wait); }
+.occ-dot.gone { background: var(--fault); }
+.occ-dot.stopped { background: var(--idle); }
+.occ-badge {
+  flex: 0 0 auto; padding: 2px 4px 1px; border-radius: 2px; font: 600 8.5px/1 var(--cond);
+  letter-spacing: .08em; text-transform: uppercase; color: var(--signal-ink); background: var(--signal-wash);
+}
+.occ-badge.temporary { color: var(--muted); background: var(--line-soft); }
+.occ-badge .short { display: none; }
+.occ-sub {
+  margin: 5px 0 1px; font: 500 8.5px/1 var(--cond); letter-spacing: .12em;
+  text-transform: uppercase; color: var(--faint);
+}
 .occ-track {
   flex: 1; position: relative; height: calc(var(--lanes, 1) * var(--lane-h) + 2px); min-width: 0; border-radius: 2px; background: var(--sunk);
   cursor: grab;
 }
 .occ-util {
-  flex: 0 0 58px; text-align: right; padding-left: 10px; font: 500 10px/1 var(--mono);
-  color: var(--muted); font-variant-numeric: tabular-nums;
+  flex: 0 0 var(--util); display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
+  min-width: 0; padding-left: 10px; font: 500 10px/1 var(--mono); color: var(--muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden;
 }
+.occ-util > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.occ-util2 { font-size: 9px; color: var(--faint); }
+.occ-up.ready { color: var(--run); }
+.occ-up.starting { color: var(--wait); }
+.occ-up.gone { color: var(--fault); }
+.occ-slots.full { color: var(--wait); font-weight: 600; }
 .occ-conc { color: var(--wait); font-weight: 600; }
 .blk {
   position: absolute; top: 0; height: 15px; border-radius: 2px; min-width: 2px; cursor: pointer;
@@ -706,7 +733,7 @@ fieldset.seg { margin: 0; padding: 0; min-width: 0; }
 .blk.cancelled { background: var(--idle); background-image: repeating-linear-gradient(135deg, rgba(255,255,255,.26) 0 4px, transparent 4px 8px); }
 .blk.blocked { background: var(--signal); }
 .blk.run { z-index: 2; }
-.blk.run, .blk.estimate { top: calc(var(--lane, 0) * var(--lane-h)); }
+.blk.run, .blk.estimate, .blk.plan { top: calc(var(--lane, 0) * var(--lane-h)); }
 /* Time a run spent blocked (#121): a band along the foot of its bar, drawn
    after it, so the bar still shows how the run ended and its title reads. */
 .blk.seg { z-index: 2; top: calc(var(--lane, 0) * var(--lane-h) + 10px); height: 5px; min-width: 1px; padding: 0; border-radius: 0 0 2px 2px; }
@@ -720,8 +747,16 @@ fieldset.seg { margin: 0; padding: 0; min-width: 0; }
 /* No finished run to measure means no width to claim: a marker, not a bar. */
 .blk.plan.noeta { border-style: dotted; border-width: 1px 2px; }
 .blk.tiny { padding: 0; font-size: 0; }
-/* The observation layer. Deliberately thin and under everything else. */
-.liv { position: absolute; bottom: 0; height: 4px; border-radius: 2px; }
+/* A standing session being up (#331): a solid, low-contrast band filling its
+   lane, under everything else. Where a stretch ended is a mark on it. */
+.up { position: absolute; top: calc(var(--lane, 0) * var(--lane-h)); height: 15px; border-radius: 2px; background: var(--run-wash); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--run) 35%, transparent); }
+.up-end { position: absolute; top: calc(var(--lane, 0) * var(--lane-h) - 1px); height: 17px; width: 3px; margin-left: -1.5px; border-radius: 1px; z-index: 2; cursor: help; }
+.up-end.restarted { background: var(--wait); }
+.up-end.gone { background: var(--fault); }
+.up-end.stopped { background: var(--ink-2); }
+/* The observation layer. Deliberately thin, along the foot of the session's
+   lane, over its band and under the runs. */
+.liv { position: absolute; top: calc(var(--lane, 0) * var(--lane-h) + 11px); height: 4px; border-radius: 2px; z-index: 1; }
 .liv.working { background: var(--run); opacity: .6; }
 .liv.idle { background: var(--line); }
 .liv.blocked { background: var(--signal); opacity: .6; }
@@ -742,7 +777,11 @@ fieldset.seg { margin: 0; padding: 0; min-width: 0; }
   border-radius: 0 3px 3px 0; font: 400 11.5px/1.6 var(--sans); color: var(--ink-2);
 }
 .occ-note b { color: var(--ink); font-weight: 600; }
-@media (max-width: 720px) { .occ { --lab: 110px; } }
+@media (max-width: 720px) {
+  .occ { --lab: 132px; --util: 76px; }
+  .occ-badge .long, .occ-state { display: none; }
+  .occ-badge .short { display: inline; }
+}
 
 /* --------------------------------------------------------------- the rail
    The scope tree. Depth is a custom property rather than nesting, because the

@@ -1,6 +1,7 @@
 //! The occupancy chart. Draws what the daemon assembled and decides nothing:
-//! the three layers -- runs, schedule, liveness -- arrive already separated,
-//! and the only job here is to keep them visually apart.
+//! the four layers -- runs, schedule, a standing session's uptime, liveness --
+//! arrive already separated, and the only job here is to keep them visually
+//! apart. Standing agents come first in each scope, marked as such (#331).
 //!
 //! The window it draws is the viewer's, not the answer's: `state.occView`
 //! (see `occupancy-model.js` for its two shapes) is resolved against the
@@ -12,7 +13,9 @@ import { $, esc, api, state, shortSpan } from "./core.js";
 import { inScope, scopeLabel } from "./scopes.js";
 import { openTask } from "./tasks.js";
 import {
-  rowStyle, laneStyle, concurrency, blockedStretches, blockedNote, waitingShare,
+  rowStyle, laneStyle, blockOffset, sessionsOf, concurrency, blockedStretches, blockedNote, waitingShare,
+  visibleGroups, stateClass, lifetimeBadge, uptimeBands, uptimeNote, uptimeMarks, standingUtil, slotsLabel,
+  sessionLabel,
   tickStep, tickTimes, liveView, resolveWindow, settle, isPreset, zoomAround, panByPixels,
   wheelFactor, fractionAt, buttonAnchor, windowQuery, overlaps,
 } from "./occupancy-model.js";
@@ -27,6 +30,20 @@ export function clockLabel(d, coarse) {
 }
 
 const presetMinutes = () => Number($("occ-window").value);
+
+const STANDING_KEY = "factory-occ-standing";
+
+/// The "standing agents only" filter is a viewer's habit, so it is kept in
+/// this browser -- and a browser that keeps nothing simply starts with it off.
+function readStanding() {
+  try { return localStorage.getItem(STANDING_KEY) === "1"; } catch { return false; }
+}
+
+function syncStanding() {
+  const button = $("occ-standing");
+  button.classList.toggle("on", !!state.occStanding);
+  button.setAttribute("aria-pressed", state.occStanding ? "true" : "false");
+}
 
 /// The view, created on first use from the select, so the page opens on the
 /// window it always has.
@@ -122,6 +139,14 @@ function overTracks(e, ext) {
 
 export function wireOccupancy() {
   $("occ-window").onchange = () => resetOccupancyView();
+  state.occStanding = readStanding();
+  syncStanding();
+  $("occ-standing").onclick = () => {
+    state.occStanding = !state.occStanding;
+    try { localStorage.setItem(STANDING_KEY, state.occStanding ? "1" : "0"); } catch { /* private window */ }
+    syncStanding();
+    renderOccupancy();
+  };
   $("occ-now").onclick = () => resetOccupancyView();
   const zoomButton = (factor) => () => {
     moveView((win, now) => zoomAround(win, factor, buttonAnchor(win, now)));
@@ -220,13 +245,13 @@ export function wireOccupancy() {
   syncControls();
 }
 
-/// A row's util column: a percentage of the time it was asked about, `—`
-/// for a window wholly ahead of now or an agent working with no run, else
-/// `idle`.
+/// A task row's util column: a percentage of the time it was asked about,
+/// `—` for a window wholly ahead of now, else `idle`. A standing row has its
+/// own (`standingUtil`): it never says `idle` for an agent that is up.
 function utilisation(r, ahead, elapsed) {
   if (ahead) return "—";
   if (r.busy_seconds > 0) return `${Math.min(100, Math.round((r.busy_seconds / elapsed) * 100))}%`;
-  return r.spans.some(s => s.status === "working") ? "—" : "idle";
+  return "idle";
 }
 
 export function renderOccupancy() {
@@ -253,100 +278,165 @@ export function renderOccupancy() {
     ticks += `<span style="left:${((t - from) / span * 100).toFixed(3)}%">${clockLabel(new Date(t), coarse)}</span>`;
   }
 
-  // Only the rows are narrowed. The window, its ticks and the now line are the
-  // same clock whichever scope is being looked at, so they are left above.
-  const body = occ.scopes.filter(sc => inScope(sc.name)).map(sc => {
-    const rows = sc.rows.map(r => {
-      const parts = [];
+  // Utilisation is the answer's, over the window it was asked for --
+  // not whatever the view has been dragged to since.
+  const asked = new Date(occ.from).getTime();
+  const ahead = asked > now;
+  const elapsed = Math.max(1, (Math.min(now, new Date(occ.to).getTime()) - asked) / 1000);
+  // Uptime was summed up to the answer's own now; its share is taken over
+  // the same stretch, so an agent up all window reads 100%, not 99.
+  const answered = Math.max(1, (Math.min(new Date(occ.now).getTime(), new Date(occ.to).getTime()) - asked) / 1000);
+  const when = (ms) => new Date(ms).toLocaleString();
 
-      for (const sp of r.spans) {
+  const renderRow = (r) => {
+    const parts = [];
+
+    // A standing agent's sessions, one lane each, at the top of the row: the
+    // uptime band, the liveness strip on it, and a mark where each stretch
+    // ended. Its runs -- other sessions of the same name -- go below.
+    sessionsOf(r).forEach((session, i) => {
+      const lane = i > 0 ? `--lane:${i};` : "";
+      const name = sessionLabel(r, session, i);
+      const prefix = name ? `${name} — ` : "";
+      const bands = uptimeBands(session, end);
+      for (const b of bands) {
+        if (!overlaps(b.from, b.to, win)) continue;
+        const l = clamp(pct(b.from));
+        const w = clamp(pct(b.to)) - l;
+        if (w <= 0) continue;
+        parts.push(`<div class="up" style="${lane}left:${l.toFixed(3)}%;width:${w.toFixed(3)}%"
+          title="${esc(prefix + uptimeNote(b, when, shortSpan, asked))}"></div>`);
+      }
+      for (const sp of session.spans || []) {
         const l = clamp(pct(sp.from));
         const w = clamp(pct(sp.to || occ.now)) - l;
         if (w <= 0) continue;
-        parts.push(`<div class="liv ${esc(sp.status)}" style="left:${l.toFixed(3)}%;width:${w.toFixed(3)}%"
-          title="runtime saw: ${esc(sp.status)}"></div>`);
+        parts.push(`<div class="liv ${esc(sp.status)}" style="${lane}left:${l.toFixed(3)}%;width:${w.toFixed(3)}%"
+          title="${esc(prefix)}runtime saw: ${esc(sp.status)}"></div>`);
       }
+      for (const m of uptimeMarks(bands)) {
+        if (m.at < from || m.at > to) continue;
+        parts.push(`<div class="up-end ${esc(m.kind)}" style="${lane}left:${clamp(pct(m.at)).toFixed(3)}%"
+          title="${esc(`${prefix}${m.kind} at ${when(m.at)}: ${m.title}`)}"></div>`);
+      }
+    });
 
-      // Runs of one agent that overlap are stacked, one lane each, as the
-      // daemon packed them. The liveness strip stays along the bottom.
-      for (const b of r.blocks) {
-        const bEnd = b.to ? new Date(b.to).getTime() : end;
-        const l = clamp(pct(b.from));
-        const lane = laneStyle(b);
-        if (b.estimate_seconds) {
-          const expected = new Date(new Date(b.from).getTime() + b.estimate_seconds * 1000);
-          const ew = clamp(pct(expected)) - l;
-          if (ew > 0) {
-            parts.push(`<div class="blk estimate${ew < 6 ? " tiny" : ""}"
-              data-task="${esc(b.task_id)}"
-              style="${lane}left:${l.toFixed(3)}%;width:${Math.min(Math.max(0.4, ew), 100 - l).toFixed(3)}%"
-              title="estimated: ${esc(b.title)} — user estimate ${shortSpan(b.estimate_seconds)}, expected until ${esc(expected.toLocaleString())}">${esc(b.title)}</div>`);
-          }
-        }
-        if (!overlaps(new Date(b.from).getTime(), bEnd, win)) continue;
-        const w = Math.max(0.25, clamp(pct(b.to || end)) - l);
-        const secs = ((b.to ? new Date(b.to) : new Date(end)) - new Date(b.from)) / 1000;
-        const waits = blockedStretches(b, end);
-        const note = blockedNote(waits, shortSpan);
-        parts.push(`<div class="blk run ${esc(b.status)}${w < 6 ? " tiny" : ""}"
-          data-task="${esc(b.task_id)}" data-run="${esc(b.run_id)}"
-          style="${lane}left:${l.toFixed(3)}%;width:${w.toFixed(3)}%"
-          title="${esc(b.title)} — attempt ${b.attempt}, ${esc(b.trigger)}, ${esc(b.status)}, ${shortSpan(secs)}${note ? ` · ${note}` : ""}">${esc(b.title)}</div>`);
-        // The time it spent waiting on a human, laid over the bar in the run's
-        // own lane. The bar keeps the colour of how the run ended; this is
-        // what it waited on along the way, which the run record forgets.
-        for (const s of waits) {
-          const sl = clamp(pct(s.from));
-          const sw = clamp(pct(s.to)) - sl;
-          if (sw <= 0) continue;
-          parts.push(`<div class="blk seg blocked" data-task="${esc(b.task_id)}" data-run="${esc(b.run_id)}"
-            style="${lane}left:${sl.toFixed(3)}%;width:${Math.max(0.25, sw).toFixed(3)}%"
-            title="${esc(b.title)} — blocked ${shortSpan(s.seconds)} waiting for a human"></div>`);
+    // Runs of one agent that overlap are stacked, one lane each, as the
+    // daemon packed them, below any standing session's lanes.
+    const offset = blockOffset(r);
+    for (const b of r.blocks) {
+      const bEnd = b.to ? new Date(b.to).getTime() : end;
+      const l = clamp(pct(b.from));
+      const lane = laneStyle(b, offset);
+      if (b.estimate_seconds) {
+        const expected = new Date(new Date(b.from).getTime() + b.estimate_seconds * 1000);
+        const ew = clamp(pct(expected)) - l;
+        if (ew > 0) {
+          parts.push(`<div class="blk estimate${ew < 6 ? " tiny" : ""}"
+            data-task="${esc(b.task_id)}"
+            style="${lane}left:${l.toFixed(3)}%;width:${Math.min(Math.max(0.4, ew), 100 - l).toFixed(3)}%"
+            title="estimated: ${esc(b.title)} — user estimate ${shortSpan(b.estimate_seconds)}, expected until ${esc(expected.toLocaleString())}">${esc(b.title)}</div>`);
         }
       }
-
-      for (const p of r.planned) {
-        const at = new Date(p.at).getTime();
-        if (!overlaps(at, at + (p.estimate_seconds || 0) * 1000, win)) continue;
-        const l = clamp(pct(p.at));
-        // A task that has never finished gives nothing to measure. Draw a
-        // marker and say so, rather than inventing a width.
-        const w = p.estimate_seconds ? Math.max(0.4, (p.estimate_seconds * 1000) / span * 100) : 0.5;
-        const why = p.user_estimate
-          ? "user estimate"
-          : (p.samples
-            ? `median of ${p.samples} finished run${p.samples === 1 ? "" : "s"}`
-            : "no estimate and no finished run to measure");
-        parts.push(`<div class="blk plan${p.estimate_seconds ? "" : " noeta"}${w < 6 ? " tiny" : ""}"
-          data-task="${esc(p.task_id)}"
-          style="left:${l.toFixed(3)}%;width:${Math.min(w, 100 - l).toFixed(3)}%"
-          title="scheduled: ${esc(p.title)} — ${why}">${esc(p.title)}</div>`);
+      if (!overlaps(new Date(b.from).getTime(), bEnd, win)) continue;
+      const w = Math.max(0.25, clamp(pct(b.to || end)) - l);
+      const secs = ((b.to ? new Date(b.to) : new Date(end)) - new Date(b.from)) / 1000;
+      const waits = blockedStretches(b, end);
+      const note = blockedNote(waits, shortSpan);
+      parts.push(`<div class="blk run ${esc(b.status)}${w < 6 ? " tiny" : ""}"
+        data-task="${esc(b.task_id)}" data-run="${esc(b.run_id)}"
+        style="${lane}left:${l.toFixed(3)}%;width:${w.toFixed(3)}%"
+        title="${esc(b.title)} — attempt ${b.attempt}, ${esc(b.trigger)}, ${esc(b.status)}, ${shortSpan(secs)}${note ? ` · ${note}` : ""}">${esc(b.title)}</div>`);
+      // The time it spent waiting on a human, laid over the bar in the run's
+      // own lane. The bar keeps the colour of how the run ended; this is
+      // what it waited on along the way, which the run record forgets.
+      for (const s of waits) {
+        const sl = clamp(pct(s.from));
+        const sw = clamp(pct(s.to)) - sl;
+        if (sw <= 0) continue;
+        parts.push(`<div class="blk seg blocked" data-task="${esc(b.task_id)}" data-run="${esc(b.run_id)}"
+          style="${lane}left:${sl.toFixed(3)}%;width:${Math.max(0.25, sw).toFixed(3)}%"
+          title="${esc(b.title)} — blocked ${shortSpan(s.seconds)} waiting for a human"></div>`);
       }
+    }
 
-      // Utilisation is the answer's, over the window it was asked for --
-      // not whatever the view has been dragged to since.
-      const asked = new Date(occ.from).getTime();
-      const elapsed = Math.max(1, (Math.min(now, new Date(occ.to).getTime()) - asked) / 1000);
-      const busy = utilisation(r, asked > now, elapsed);
+    const planLane = laneStyle({ lane: 0 }, offset);
+    for (const p of r.planned) {
+      const at = new Date(p.at).getTime();
+      if (!overlaps(at, at + (p.estimate_seconds || 0) * 1000, win)) continue;
+      const l = clamp(pct(p.at));
+      // A task that has never finished gives nothing to measure. Draw a
+      // marker and say so, rather than inventing a width.
+      const w = p.estimate_seconds ? Math.max(0.4, (p.estimate_seconds * 1000) / span * 100) : 0.5;
+      const why = p.user_estimate
+        ? "user estimate"
+        : (p.samples
+          ? `median of ${p.samples} finished run${p.samples === 1 ? "" : "s"}`
+          : "no estimate and no finished run to measure");
+      parts.push(`<div class="blk plan${p.estimate_seconds ? "" : " noeta"}${w < 6 ? " tiny" : ""}"
+        data-task="${esc(p.task_id)}"
+        style="${planLane}left:${l.toFixed(3)}%;width:${Math.min(w, 100 - l).toFixed(3)}%"
+        title="scheduled: ${esc(p.title)} — ${why}">${esc(p.title)}</div>`);
+    }
+
+    const slots = slotsLabel(r);
+    const slotsHtml = slots
+      ? `<span class="occ-slots${slots.full ? " full" : ""}" title="${esc(slots.title)}">${esc(slots.text)}</span>`
+      : "";
+    const standing = standingUtil(r, ahead ? 0 : answered);
+    let util;
+    if (standing) {
+      // Up share and state first; the slots it holds and any runs' share under it.
+      const runs = standing.runs !== null
+        ? `<span title="runs of ${esc(r.agent)} held it ${standing.runs}% of the window">runs ${standing.runs}%</span>`
+        : "";
+      const under = [slotsHtml, runs].filter(Boolean).join(" · ");
+      // The state is on the label's dot too; a narrow screen keeps only that.
+      const head = standing.up
+        ? `${esc(standing.up)}<span class="occ-state"> · ${esc(standing.state)}</span>`
+        : esc(standing.state);
+      util = `<span class="occ-up ${stateClass(r)}" title="${esc(standing.title)}">${head}</span>${under ? `<span class="occ-util2">${under}</span>` : ""}`;
+    } else {
+      const busy = utilisation(r, ahead, elapsed);
       // Blocked time stays inside busy time (#121 leaves that call open); the
       // share of it spent waiting is marked on the figure, not taken off it.
       const wait = waitingShare(r);
       const shown = wait ? `<span class="occ-wait" title="${esc(wait.title)}">${busy}</span>` : busy;
       const conc = concurrency(r);
-      const util = conc
+      const line = conc
         ? `<span class="occ-conc" title="${esc(conc.title)}">${esc(conc.tag)}</span> ${shown}`
         : shown;
+      util = `<span>${line}</span>${slotsHtml ? `<span class="occ-util2">${slotsHtml}</span>` : ""}`;
+    }
 
-      return `<div class="occ-row"${rowStyle(r)}>
-        <span class="occ-lab${r.blocks.length ? "" : " free"}"
+    const badge = lifetimeBadge(r);
+    const label = badge
+      ? `<span class="occ-lab std${r.blocks.length || sessionsOf(r).length ? "" : " free"}"
+          title="${esc(r.agent)} — ${esc(r.adapter || "no adapter")}, ${esc(r.lifetime)}, ${esc(r.role)}, ${esc(r.state)} now">
+          <i class="occ-dot ${stateClass(r)}" aria-label="${esc(r.state)}"></i><b>${esc(r.agent)}</b><span class="occ-badge ${esc(r.lifetime)}" title="${esc(badge.title)}"><span class="long">${esc(badge.text)}</span><span class="short">${esc(badge.short)}</span></span>
+        </span>`
+      : `<span class="occ-lab${r.blocks.length ? "" : " free"}"
           title="${esc(r.agent)} — ${esc(r.adapter || "no adapter")}, ${esc(r.lifetime)}, ${esc(r.role)}">
           <b>${esc(r.agent)}</b> <span class="h">${esc(r.adapter && r.adapter !== r.agent ? r.adapter : r.lifetime)}</span>
-        </span>
-        <span class="occ-track">${parts.join("")}</span>
-        <span class="occ-util">${util}</span>
-      </div>`;
-    }).join("");
+        </span>`;
 
+    return `<div class="occ-row${badge ? " std" : ""}"${rowStyle(r)}>
+      ${label}
+      <span class="occ-track">${parts.join("")}</span>
+      <span class="occ-util">${util}</span>
+    </div>`;
+  };
+
+  // Only the rows are narrowed. The window, its ticks and the now line are the
+  // same clock whichever scope is being looked at, so they are left above.
+  const standingOnly = !!state.occStanding;
+  const body = visibleGroups(occ.scopes, inScope, standingOnly).map(({ scope: sc, standing, task }) => {
+    // A scope with standing agents says which rows are which; one without
+    // looks the way it always did.
+    const rows = standing.length
+      ? `<div class="occ-sub">standing</div>${standing.map(renderRow).join("")}`
+        + (task.length ? `<div class="occ-sub">task agents</div>${task.map(renderRow).join("")}` : "")
+      : task.map(renderRow).join("");
     return `<div class="occ-grp">${esc(sc.name)} <span class="p">${esc(sc.path)}</span></div>
       ${rows || `<div class="occ-row"><span class="occ-lab free">no agents</span><span class="occ-track"></span><span class="occ-util"></span></div>`}`;
   }).join("");
@@ -355,13 +445,13 @@ export function renderOccupancy() {
   // moment that is not there.
   const nowLeft = ((now - from) / span) * 100;
   const nowLine = nowLeft >= 0 && nowLeft <= 100
-    ? `<div class="occ-now" style="left:calc(var(--lab) + (100% - var(--lab) - 58px) * ${(nowLeft / 100).toFixed(4)})"><b>now</b></div>`
+    ? `<div class="occ-now" style="left:calc(var(--lab) + (100% - var(--lab) - var(--util)) * ${(nowLeft / 100).toFixed(4)})"><b>now</b></div>`
     : "";
   // An empty chart under a selection is a fact about the scope. Falling through
   // to the instance line would claim something about the daemon that is false.
-  const nothing = state.scope
-    ? `No agents in ${esc(scopeLabel())}.`
-    : "This instance has no configured scopes.";
+  const nothing = standingOnly
+    ? (state.scope ? `No standing agents in ${esc(scopeLabel())}.` : "This instance has no standing agents.")
+    : (state.scope ? `No agents in ${esc(scopeLabel())}.` : "This instance has no configured scopes.");
   const since = occ.liveness_since
     ? `Liveness has been recorded since ${new Date(occ.liveness_since).toLocaleString()}.`
     : `No liveness recorded yet — the strip stays empty until the daemon has seen an agent change state.`;
@@ -379,12 +469,18 @@ export function renderOccupancy() {
       <span><i style="background:var(--run);box-shadow:inset 0 -3px 0 var(--signal)"></i>waited on a human</span>
       <span><i style="border:1px dashed var(--signal);height:6px"></i>scheduled</span>
       <span><i style="border:1px dotted var(--wait);height:6px"></i>estimated duration</span>
+      <span><i style="background:var(--run-wash);box-shadow:inset 0 0 0 1px var(--run)"></i>standing session up</span>
+      <span><i style="width:3px;background:var(--wait)"></i>went away, came back</span>
+      <span><i style="width:3px;background:var(--fault)"></i>gone</span>
+      <span><i style="width:3px;background:var(--ink-2)"></i>stopped by a person</span>
       <span><i style="background:var(--run);opacity:.6;height:4px"></i>runtime saw it busy</span>
     </div>
     <div class="occ-note"><b>Two kinds of fact.</b> A block is a run: Factory started it and the agent
-      reported back. The thin strip is only what the runtime saw on the screen, which is a guess about
-      a terminal, not a claim about work. ${esc(since)} herdr keeps no history of its own, so nothing
-      before that exists.</div>`;
+      reported back. A standing agent's band says its session was there at all, and the thin strip on it
+      is only what the runtime saw on the screen, which is a guess about a terminal, not a claim about
+      work. Both come from the liveness record. ${esc(since)} herdr keeps no history of its own, so
+      nothing before that exists, and while the daemon is down nothing watches a session: a daemon
+      restart reads as a session that went away and came back.</div>`;
 
   for (const el of $("occ").querySelectorAll(".blk[data-run]")) {
     el.onclick = () => openTask(el.dataset.task, el.dataset.run);

@@ -5193,7 +5193,7 @@ every cursor move and scroll applied, so what arrives is text and colour, and
 eighty lines turn that into HTML.
 
 **Occupancy** is a chart: one row per agent, grouped by scope, drawn against a
-shared clock. Three layers, kept
+shared clock. Four layers, kept
 deliberately apart because they are different kinds of evidence:
 
 - a **solid block** is a run — Factory started it and the agent reported back;
@@ -5202,10 +5202,22 @@ deliberately apart because they are different kinds of evidence:
   median of its own finished runs, or as a marker when it has none to measure;
 - a **dotted yellow outline** around an active run is the task's user-authored
   estimated duration; the solid run grows past it when the estimate is exceeded;
-- the **thin strip** underneath is liveness: what the runtime saw on the
+- a **pale band** is a standing agent's session being up at all (#331), one
+  lane per session, with a mark where a stretch ended: it went away and came
+  back, it is gone, or a person stopped it;
+- the **thin strip** on that band is liveness: what the runtime saw on the
   screen. A guess about a terminal, never a claim about work.
 
-The right-hand column is utilisation over the window. Clicking any block opens
+Standing agents come first in each scope, under their own heading, with a
+`permanent` or `temporary` badge and their current state as a coloured dot;
+**standing only** hides everything else. The right-hand column is utilisation
+over the window: a task agent's busy share, or for a standing agent its uptime
+share and state (`up 100% · ready` — never `idle` for an agent that is up),
+with the slots it holds against its `max_sessions` under it, the same count
+`factory status` and admission use. Both the uptime and the liveness come from
+L4's record of L3's observations, which starts when Factory started keeping
+it; a daemon restart reads as a session that went away and came back, because
+nothing watches a session while the daemon is down. Clicking any block opens
 the task. The chart looks a quarter of a window ahead of now, so the next
 scheduled run has room to be read.
 
