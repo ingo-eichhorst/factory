@@ -36,7 +36,10 @@ pub use factory_environment::declarations::{
 /// frameworks and tighten or mark a control `n/a`, never drop or loosen what
 /// an ancestor already committed the company to. That rule lives in
 /// `policy::applicable`, which folds a chain of these; nothing here enforces
-/// it on its own.
+/// it on its own. The one narrowing is the root's (`#332`): its
+/// `frameworks` entries may carry `scopes`/`except`, resolved per scope by
+/// `policy_intent::chain_for_scope`; a nested scope's never may
+/// (`refuse_scope_applicability`).
 ///
 /// `deny_unknown_fields`: a typo here -- `framework:` for `frameworks:` --
 /// would otherwise commit the company to nothing while parsing clean. For a
