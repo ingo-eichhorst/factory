@@ -1407,9 +1407,10 @@ pub struct Scope {
 }
 
 /// `scope.metrics`, exactly as written -- plain strings, no validation.
-/// `source` is the one file this scope reports through; `declare` names
-/// every metric id that file may report, with the title and unit L5's
-/// registry listing shows for it.
+/// `source` is the one file (or, `#333`, the one declared network dependency
+/// service) this scope reports through; `declare` names every metric id that
+/// document may report, with the title and unit L5's registry listing shows
+/// for it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScopeMetricsDeclaration {
@@ -1433,6 +1434,17 @@ pub struct ScopeMetricsSource {
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// `#333`: instead of `file`, the name of one of this scope's own
+    /// `dependencies.services` -- a `network` one with a loopback endpoint --
+    /// that answers the same JSON document at `path`. Giving both, an
+    /// unknown or non-network service, or one with no loopback endpoint is
+    /// a finding L5 raises on read, never a parse failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// `#333`: the request path `service` answers the document at, e.g.
+    /// `/buchhaltung/extension/FactoryMetrics/metrics`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// See [`ScopeMetricsSource`]'s doc comment: every field is optional for

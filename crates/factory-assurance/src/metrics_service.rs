@@ -217,8 +217,12 @@ pub struct Gathered {
     /// `#278`: every needed source's file, read at most once per call and
     /// shared across every `reported.*` id that names it -- keyed by
     /// source id, empty when no asked id needs one.
-    reported: BTreeMap<String, std::result::Result<reported::Document, String>>,
+    reported: ReportedDocs,
 }
+
+/// Every source document one call read, keyed by source id.
+type ReportedDocs = BTreeMap<String, std::result::Result<reported::Document, String>>;
+
 struct PolicyMeasurements {
     rollup: Vec<PolicyFramework>,
 }
@@ -233,10 +237,23 @@ pub struct Service<'a, P> {
     // for `shared`/`for_scope`, rather than this crate's two L5 services
     // each carrying their own separate `evidence::Service`.
     pub(crate) evidence: evidence::Service<'a, P>,
+    /// `#333`: how long one service source read may take --
+    /// [`reported::SERVICE_TIMEOUT`] unless a test shortens it.
+    service_timeout: std::time::Duration,
 }
 impl<'a, P: Ports> Service<'a, P> {
     pub fn new(evidence: evidence::Service<'a, P>) -> Self {
-        Self { evidence }
+        Self {
+            evidence,
+            service_timeout: reported::SERVICE_TIMEOUT,
+        }
+    }
+
+    /// A shorter service read deadline, so a test of an unanswering service
+    /// does not wait the full [`reported::SERVICE_TIMEOUT`].
+    pub fn with_service_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.service_timeout = timeout;
+        self
     }
     pub async fn gather(
         &self,
@@ -266,6 +283,22 @@ impl<'a, P: Ports> Service<'a, P> {
         plan: &Plan,
         now: DateTime<Utc>,
         window: Option<MetricsWindow>,
+    ) -> Result<Gathered> {
+        self.gather_measurements_reusing(plan, now, window, &BTreeMap::new())
+            .await
+    }
+
+    /// [`Service::gather_measurements`], taking any source document `prior`
+    /// already holds instead of reading it again -- how a nested read
+    /// inside one call (`policy_measurements`' own `metric_values`) keeps
+    /// `#333`'s "at most one request per read" for a service source. Never
+    /// a cache: `prior` lives only as long as the one call that read it.
+    async fn gather_measurements_reusing(
+        &self,
+        plan: &Plan,
+        now: DateTime<Utc>,
+        window: Option<MetricsWindow>,
+        prior: &ReportedDocs,
     ) -> Result<Gathered> {
         let computing = &plan.computing;
         let canonical_scope = plan.scope();
@@ -362,25 +395,39 @@ impl<'a, P: Ports> Service<'a, P> {
                     .is_some_and(|source| plan.includes_scope(&source.scope.name))
             })
             .collect();
-        let reported = if needed_sources.is_empty() {
-            BTreeMap::new()
-        } else {
-            let paths: Vec<(String, std::path::PathBuf)> = needed_sources
-                .into_iter()
-                .map(|source_id| {
-                    let path = plan.catalogue.sources[&source_id].path.clone();
-                    (source_id, path)
-                })
-                .collect();
-            tokio::task::spawn_blocking(move || {
+        // `#333`: a file is opened off the executor, a service is one
+        // bounded HTTP GET, and a refused service declaration is its own
+        // reason with no IO at all.
+        let mut reported = BTreeMap::new();
+        let mut paths: Vec<(String, std::path::PathBuf)> = Vec::new();
+        let mut services: Vec<(String, reported::ServiceTarget)> = Vec::new();
+        for source_id in needed_sources {
+            if let Some(read) = prior.get(&source_id) {
+                reported.insert(source_id, read.clone());
+                continue;
+            }
+            match &plan.catalogue.sources[&source_id].location {
+                reported::Location::File(path) => paths.push((source_id, path.clone())),
+                reported::Location::Service(target) => services.push((source_id, target.clone())),
+                reported::Location::Refused { reason, .. } => {
+                    reported.insert(source_id, Err(reason.clone()));
+                }
+            }
+        }
+        if !paths.is_empty() {
+            let read = tokio::task::spawn_blocking(move || {
                 paths
                     .into_iter()
                     .map(|(source_id, path)| (source_id, reported::read_source(&path)))
                     .collect::<BTreeMap<_, _>>()
             })
             .await
-            .map_err(|e| FactoryError::Other(anyhow::anyhow!("reported metrics read: {e}")))?
-        };
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("reported metrics read: {e}")))?;
+            reported.extend(read);
+        }
+        if !services.is_empty() {
+            reported.extend(reported::read_services(services, self.service_timeout).await);
+        }
 
         Ok(Gathered {
             spend,
@@ -396,7 +443,10 @@ impl<'a, P: Ports> Service<'a, P> {
         inputs: &PolicyInputs,
         plan: &Plan,
     ) -> Result<()> {
-        gathered.policy = Some(self.policy_measurements(inputs, plan).await?);
+        let measured = self
+            .policy_measurements(inputs, plan, &gathered.reported)
+            .await?;
+        gathered.policy = Some(measured);
         Ok(())
     }
 
@@ -430,6 +480,20 @@ impl<'a, P: Ports> Service<'a, P> {
         reported: &reported::Configuration,
         now: DateTime<Utc>,
     ) -> Result<(BTreeMap<MetricId, MetricValue>, reported::Catalogue)> {
+        self.metric_values_reusing(per_scope, root, reported, now, &BTreeMap::new())
+            .await
+    }
+
+    /// [`Service::metric_values`], reusing whatever source documents the
+    /// enclosing call already read (`gather_measurements_reusing`).
+    async fn metric_values_reusing<S: checks::CheckSource>(
+        &self,
+        per_scope: &[(&str, &[S])],
+        root: PathBuf,
+        reported: &reported::Configuration,
+        now: DateTime<Utc>,
+        prior: &ReportedDocs,
+    ) -> Result<(BTreeMap<MetricId, MetricValue>, reported::Catalogue)> {
         let mut ids = Vec::new();
         for (_, subjects) in per_scope {
             for id in evidence::metric_check_ids(subjects) {
@@ -450,7 +514,9 @@ impl<'a, P: Ports> Service<'a, P> {
             None,
         )
         .await?;
-        let gathered = self.gather_measurements(&plan, now, None).await?;
+        let gathered = self
+            .gather_measurements_reusing(&plan, now, None, prior)
+            .await?;
         let computed = self
             .finish(&plan, gathered, &Ok(BTreeMap::new()), now, None)
             .await?;
@@ -466,6 +532,7 @@ impl<'a, P: Ports> Service<'a, P> {
         &self,
         inputs: &PolicyInputs,
         plan: &Plan,
+        prior: &ReportedDocs,
     ) -> Result<PolicyMeasurements> {
         let tags = Provide::<KnowledgeTags>::get(&self.evidence.own, &())
             .await?
@@ -485,7 +552,7 @@ impl<'a, P: Ports> Service<'a, P> {
         // evaluated scope below, exactly the way the Policy tab already
         // does it.
         let (metric_values, reported_catalogue) = self
-            .metric_values(&targets, plan.root.clone(), &plan.reported, now)
+            .metric_values_reusing(&targets, plan.root.clone(), &plan.reported, now, prior)
             .await?;
         let mut per_scope = Vec::new();
         for scope in &inputs.scopes {
@@ -1387,7 +1454,7 @@ struct ComputeSources<'a> {
 #[derive(Clone, Copy)]
 struct ReportedSources<'a> {
     catalogue: &'a reported::Catalogue,
-    docs: &'a BTreeMap<String, std::result::Result<reported::Document, String>>,
+    docs: &'a ReportedDocs,
     members: Option<&'a BTreeSet<String>>,
 }
 

@@ -528,6 +528,7 @@ mod tests {
             source: Some(factory_core::config::ScopeMetricsSource {
                 id: Some("finance".into()),
                 file: Some("metrics.json".into()),
+                ..Default::default()
             }),
             declare: vec![factory_core::config::ScopeMetricsDeclared {
                 id: Some("beleg_coverage".into()),
@@ -661,6 +662,7 @@ mod tests {
             source: Some(factory_core::config::ScopeMetricsSource {
                 id: Some("finance".into()),
                 file: Some("../metrics.json".into()),
+                ..Default::default()
             }),
             declare: vec![factory_core::config::ScopeMetricsDeclared {
                 id: Some("beleg_coverage".into()),

@@ -623,6 +623,7 @@ mod tests {
             source: Some(factory_core::config::ScopeMetricsSource {
                 id: Some("demo".into()),
                 file: Some("metrics.json".into()),
+                ..Default::default()
             }),
             declare: vec![factory_core::config::ScopeMetricsDeclared {
                 id: Some("x".into()),
