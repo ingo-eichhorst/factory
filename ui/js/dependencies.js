@@ -96,10 +96,14 @@ export function renderDependencies() {
   $("dependencies-services").innerHTML = services.map((service) => serviceRow(service, report?.service_evidence)).join("");
   $("dependencies-observations").innerHTML = evidenceCards(report?.service_evidence);
   $("no-dependency-services").hidden = services.length !== 0 || !!state.dependenciesError;
-  // A link that named one service (`#333`'s Metrics tab) lands on its row.
+  // A link that named one service (`#333`'s Metrics tab) lands on its row,
+  // once: the highlight lasts until the next redraw, not every later visit.
   if (state.dependenciesFocus) {
     const row = document.getElementById(`dependency-service-${state.dependenciesFocus}`);
-    if (row) row.scrollIntoView({ block: "center" });
+    if (row) {
+      row.scrollIntoView({ block: "center" });
+      state.dependenciesFocus = null;
+    }
   }
 }
 
