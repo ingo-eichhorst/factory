@@ -27,6 +27,11 @@ test("L6 Direction is live: the level button carries no disabled/title, and the 
   assert.match(wiring, /policy:\s*\{\s*onShow:\s*loadPolicy\s*\}/);
 });
 
+test("the applicability table (#332) is in the markup, hidden until the root restricts a framework", () => {
+  assert.match(page, /<section id="policy-applicability-section" hidden>/);
+  assert.match(page, /<tbody id="policy-applicability"><\/tbody>/);
+});
+
 test("a policy_changed event and the refresh button both go through the same loader", () => {
   assert.match(wiring, /ev\.type === "policy_changed"/);
   assert.match(wiring, /reloadPolicy\(\)/);

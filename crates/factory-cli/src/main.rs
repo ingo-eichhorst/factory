@@ -8066,6 +8066,36 @@ mod tests {
     }
 
     #[test]
+    fn policy_status_names_a_framework_the_root_excluded_at_the_asked_scope() {
+        let report: PolicyReport = serde_json::from_value(serde_json::json!({
+            "scope": "finance", "rows": [], "rollup": [], "not_applicable": [], "findings": [], "catalogues": [],
+            "applicability": [
+                {"framework": "cra", "bound_by": [], "covers": [], "restricted_by": "company",
+                 "except": ["finance"], "excluded": ["finance"]},
+                {"framework": "finance", "bound_by": ["company"], "covers": ["finance"], "restricted_by": "company",
+                 "scopes": ["finance"]}
+            ]
+        })).unwrap();
+        let text = policy_status_text(&report, None);
+        assert!(text.contains("no applicable frameworks"), "cra has no rollup at finance: {text}");
+        assert!(text.contains("\nAPPLICABILITY\n"), "{text}");
+        assert!(text.contains(
+            "  cra          the instance root (company) binds it to the whole tree minus the finance subtree(s) \
+             -- applies at no scope here; excluded at finance"
+        ), "{text}");
+        assert!(text.contains(
+            "  finance      the instance root (company) binds it to only the finance subtree(s) -- applies at finance"
+        ), "{text}");
+        assert!(!policy_status_text(&report, Some("finance")).contains("  cra "));
+
+        let unrestricted: PolicyReport = serde_json::from_value(serde_json::json!({
+            "rows": [], "rollup": [], "not_applicable": [], "findings": [], "catalogues": [],
+            "applicability": [{"framework": "cra", "bound_by": ["company"], "covers": ["company"]}]
+        })).unwrap();
+        assert!(!policy_status_text(&unrestricted, None).contains("APPLICABILITY"), "nothing restricted, nothing to add");
+    }
+
+    #[test]
     fn a_stale_policy_denial_is_labeled_transient_but_an_ordinary_denial_is_not() {
         let report: DependenciesReport = serde_json::from_value(serde_json::json!({
             "scope": "demo", "documents": [], "findings": [], "services": [],
