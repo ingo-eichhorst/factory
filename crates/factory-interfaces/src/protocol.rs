@@ -3,7 +3,7 @@
 //! third interface means translating to this, not inventing a new API.
 
 use crate::event::Event;
-use factory_agents::agent::{AgentSession, ScaleReport};
+use factory_agents::agent::{AgentSession, AttachTarget, ScaleReport, StopCheck};
 use factory_agents::role::{RoleOrigin, RoleSpec};
 use factory_agents::runtime::{RuntimeConnectionDiagnostic, Screen};
 use factory_assurance::benchmark::Configuration;
@@ -44,18 +44,35 @@ pub enum Request {
     /// The scopes, the agents each one declares, and what they are doing.
     #[serde(rename = "agents")]
     Agents,
-    /// Bring a declared standing agent up.
+    /// Bring a declared standing agent up: every instance it keeps, or only
+    /// `instance` (`#330`), counted from 1.
     #[serde(rename = "agent.start")]
-    AgentStart { scope: String, name: String },
+    AgentStart {
+        scope: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance: Option<u32>,
+    },
     /// Add an agent declaration to one scope's local Factory config.
     #[serde(rename = "agent.configure")]
     AgentConfigure { scope: String, agent: ScopeAgent },
     /// Remove an agent declaration from one scope's local Factory config.
     #[serde(rename = "agent.delete")]
     AgentDelete { scope: String, name: String },
-    /// Take one down and leave it down.
+    /// Take one down and leave it down. One instance: `scope/name` is
+    /// instance 1, `scope/name#n` the others.
     #[serde(rename = "agent.stop")]
     AgentStop { id: String },
+    /// What stopping one instance now would cost somebody (`#330`) -- a
+    /// person attached, a turn under way, a question waiting -- asked by a
+    /// page before it stops one. Changes nothing.
+    #[serde(rename = "agent.stop_check")]
+    AgentStopCheck { id: String },
+    /// Resolve the command that attaches a terminal to one instance's
+    /// session (`#330`), for `factory agent attach`. Journaled with who
+    /// asked; the attaching itself is the runtime's.
+    #[serde(rename = "agent.attach")]
+    AgentAttach { id: String },
     /// Keep `instances` standing sessions of one standing agent up, or move
     /// its count `by` that many (`#329`). Written into the scope's own config,
     /// then lined up live: missing instances start, surplus ones stop once
@@ -1208,6 +1225,8 @@ impl Request {
             Request::AgentConfigure { .. } |
             Request::AgentDelete { .. } |
             Request::AgentStop { .. } |
+            Request::AgentStopCheck { .. } |
+            Request::AgentAttach { .. } |
             Request::AgentScale { .. } |
             Request::RoleList { .. } |
             Request::RoleDefine { .. } |
@@ -1381,6 +1400,14 @@ pub enum Payload {
     /// What a scale did (`#329`).
     Scaled {
         scale: ScaleReport,
+    },
+    /// What stopping one instance would cost (`#330`).
+    StopCheck {
+        check: StopCheck,
+    },
+    /// Where `factory agent attach` takes a person (`#330`).
+    Attach {
+        attach: AttachTarget,
     },
     Scopes {
         scopes: Vec<ScopeView>,
@@ -1950,6 +1977,24 @@ pub struct AgentInstanceView {
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What a person types to get into this instance's terminal from a shell
+    /// (`#330`): `factory agent attach <id>`, quoted as a shell needs it.
+    /// `attach` above is the runtime's own line, the fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect: Option<String>,
+    /// What its runtime last said it was doing (`working`, `idle`, `blocked`,
+    /// ...), as L3 last observed it. Absent while it is not up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
+    /// How a person was last seen at it, within the last minute: `its
+    /// terminal was open in Factory 4s ago`. Absent when nobody was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attended: Option<String>,
+    /// Who stopped it, while it stays stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One role, as the roster, the pickers and the Roles view show it.

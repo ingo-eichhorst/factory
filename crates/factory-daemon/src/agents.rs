@@ -8,7 +8,9 @@
 use chrono::Utc;
 use factory_core::adapter::agent::AgentContext;
 use factory_core::adapter::runtime::{RuntimeStatus, Screen, StartRequest};
-use factory_core::agent::{AgentSession, AgentState, KeptInstance, KeptUp, Lifetime, ScaleReport};
+use factory_core::agent::{
+    AgentSession, AgentState, AttachTarget, KeptInstance, KeptUp, Lifetime, ScaleReport, StopCheck, StopReason,
+};
 use factory_core::role::Role;
 use factory_core::config::ScopeAgent;
 use factory_core::error::{FactoryError, Result};
@@ -16,7 +18,7 @@ use factory_core::event::Event;
 use factory_core::task::SessionRef;
 
 use crate::engine::append_declared_args;
-use crate::l3_service::L3Service;
+use crate::l3_service::{Asker, L3Service, Presence};
 #[cfg(test)]
 use crate::engine::Engine;
 #[cfg(test)]
@@ -267,6 +269,17 @@ impl L3Service<'_> {
                 "{name:?} in {scope:?} is a task agent; start a task with it instead"
             )));
         }
+        // One above the count would be drained the moment the supervisor saw
+        // it, so it is never started: the count is `scale`'s to change.
+        if instance > decl.instance_count() {
+            return Err(FactoryError::BadRequest(format!(
+                "{name:?} in {scope:?} keeps {} instance(s); #{instance} is not one of them. \
+                 `factory agent scale {} {} {instance}` keeps that many",
+                decl.instance_count(),
+                AgentSession::quoted_id(scope),
+                AgentSession::quoted_id(name),
+            )));
+        }
 
         let existing = if instance == 1 {
             self.existing_agent(scope, name).await?
@@ -408,8 +421,10 @@ impl L3Service<'_> {
 
     /// Stop a standing agent and leave it stopped. Nothing restarts it until
     /// somebody asks, not even a permanent one -- otherwise the button would
-    /// do nothing anybody could see. One instance: the one `id` names.
-    pub async fn stop_agent(&self, id: &str) -> Result<AgentSession> {
+    /// do nothing anybody could see. One instance: the one `id` names; the
+    /// others keep running. Who asked is kept on the row while it stays
+    /// down, and journaled (`#330`).
+    pub async fn stop_agent(&self, id: &str, asker: &Asker) -> Result<AgentSession> {
         let mut agent = self.require_agent(id).await?;
         if let Some(session) = &agent.session {
             if let Ok(runtime) = self.wiring.registry().runtime(&session.runtime) {
@@ -420,14 +435,132 @@ impl L3Service<'_> {
         agent.attach = None;
         agent.token = None;
         agent.state = AgentState::Stopped;
+        agent.stopped_by = Some(asker.by.clone());
+        agent.stopped_at = Some(Utc::now());
         agent.last_seen_at = Utc::now();
         self.state.agents.put_agent(&agent).await?;
         self.wiring.bus().publish(Event::AgentUpdated {
             agent: agent.clone(),
         });
         self.observe(&agent.id, &agent.scope, &agent.name, RuntimeStatus::Gone);
-        tracing::info!(agent = %agent.id, "standing agent stopped");
+        self.state.attention.forget(&agent.id);
+        self.asked(asker, "stopped", &agent.id, &agent.scope, &agent.name, format!("{} stopped by {}", agent.id, asker.by));
+        tracing::info!(agent = %agent.id, by = %asker.by, "standing agent stopped");
         Ok(agent)
+    }
+
+    /// Bring a standing agent up because somebody asked (`#330`): one
+    /// instance, or every instance it keeps -- a stopped one included, since
+    /// asking is what a stopped one waits for. Journaled with who asked.
+    pub async fn start_asked(
+        &self,
+        scope: &str,
+        name: &str,
+        instance: Option<u32>,
+        asker: &Asker,
+    ) -> Result<AgentSession> {
+        let started = match instance {
+            Some(instance) => self.start_instance(scope, name, instance).await,
+            None => self.start_agent(scope, name).await,
+        };
+        let canonical = self.wiring.snapshot().scope(scope).map(|s| s.name.clone()).unwrap_or_else(|_| scope.to_string());
+        let (subject, what) = match instance {
+            Some(instance) => (AgentSession::instance_id(&canonical, name, instance), String::new()),
+            None => (AgentSession::id_for(&canonical, name), " (every instance it keeps)".to_string()),
+        };
+        let message = match &started {
+            Ok(_) => format!("{subject} started by {}{what}", asker.by),
+            Err(e) => format!("{subject} asked to start by {}{what}, and it did not: {e}", asker.by),
+        };
+        self.asked(asker, "started", &subject, &canonical, name, message);
+        started
+    }
+
+    /// What stopping one instance now would cost somebody (`#330`), for the
+    /// page to ask before it stops one: the same three things a scale-down
+    /// never stops an instance for, each named. A person attached comes
+    /// first.
+    pub async fn stop_check(&self, id: &str) -> Result<StopCheck> {
+        let agent = self.require_agent(id).await?;
+        let live = agent.state.is_live();
+        let mut reasons = Vec::new();
+        if live {
+            if let Some((how, ago)) = self.state.attention.presence(&agent.id) {
+                reasons.push(StopReason { why: KeptUp::Attached, detail: how.words(ago) });
+            }
+            if let Some(why) = self.busy(&agent).await {
+                reasons.push(StopReason { why, detail: why.words().to_string() });
+            }
+        }
+        Ok(StopCheck { id: agent.id, instance: agent.instance, live, reasons })
+    }
+
+    /// Where `factory agent attach <id>` goes (`#330`): the runtime's own
+    /// attach command for that instance's session, asked of the runtime now.
+    /// A person is about to be in front of it, so that counts as attention
+    /// for the next minute, and it is journaled with who asked. Refused,
+    /// saying why, when the instance is not up or its runtime cannot name a
+    /// command -- a shell pane has no named agent to attach to.
+    pub async fn attach(&self, id: &str, asker: &Asker) -> Result<AttachTarget> {
+        let agent = self.require_agent(id).await?;
+        let quoted = AgentSession::quoted_id(&agent.id);
+        let session = agent.session.as_ref().filter(|_| agent.state.is_live()).ok_or_else(|| {
+            FactoryError::BadRequest(format!(
+                "{} is {}: there is no session to attach to. `factory agent start {quoted}` brings it up",
+                agent.id,
+                agent.state.as_str()
+            ))
+        })?;
+        let command = self
+            .wiring
+            .registry()
+            .runtime(&session.runtime)
+            .ok()
+            .and_then(|runtime| runtime.attach_command(session))
+            .or_else(|| agent.attach.clone())
+            .ok_or_else(|| {
+                FactoryError::BadRequest(format!(
+                    "{}'s runtime names no command to attach to its session with -- a shell pane has no \
+                     named agent. Open its terminal on the roster instead, or `factory agent output {quoted}`",
+                    agent.id
+                ))
+            })?;
+        self.state.attention.saw(&agent.id, Presence::Attach(asker.by.clone()));
+        self.asked(
+            asker,
+            "attached",
+            &agent.id,
+            &agent.scope,
+            &agent.name,
+            format!("{} attached to by {}: {command}", agent.id, asker.by),
+        );
+        Ok(AttachTarget {
+            argv: command.split_whitespace().map(str::to_string).collect(),
+            command,
+            id: agent.id,
+            scope: agent.scope,
+            name: agent.name,
+            instance: agent.instance,
+        })
+    }
+
+    /// The roster's per-instance view of what only L3 knows (`#330`): what
+    /// the runtime last said each instance was doing, and how a person was
+    /// last seen at it. Both read from L3's own memory -- the roster asks no
+    /// runtime anything.
+    pub fn decorate_instances(&self, scopes: &mut [factory_core::protocol::ScopeView]) {
+        for scope in scopes {
+            for agent in &mut scope.agents {
+                for instance in &mut agent.instances {
+                    let live = instance.state == AgentState::Ready.as_str() || instance.state == AgentState::Starting.as_str();
+                    if !live {
+                        continue;
+                    }
+                    instance.activity = self.state.liveness.last_status(&instance.id);
+                    instance.attended = self.state.attention.presence(&instance.id).map(|(how, ago)| how.words(ago));
+                }
+            }
+        }
     }
 
     /// Give a standing agent a role, or take the given one away and let the
@@ -484,7 +617,7 @@ impl L3Service<'_> {
         let session = agent.session.as_ref().ok_or_else(|| {
             FactoryError::BadRequest(format!("{id} has no session to type into"))
         })?;
-        self.state.attention.touch(&agent.id);
+        self.state.attention.saw(&agent.id, Presence::Typed);
         let runtime = self.wiring.registry().runtime(&session.runtime)?;
         if let Some(text) = text.filter(|t| !t.is_empty()) {
             runtime.send_text(session, text).await?;
@@ -501,7 +634,7 @@ impl L3Service<'_> {
         let Some(session) = &agent.session else {
             return Ok(String::new());
         };
-        self.state.attention.touch(&agent.id);
+        self.state.attention.saw(&agent.id, Presence::Transcript);
         let runtime = self.wiring.registry().runtime(&session.runtime)?;
         Ok(runtime.read(session, lines).await.unwrap_or_default())
     }
@@ -518,11 +651,29 @@ impl L3Service<'_> {
         runtime.screen(session).await
     }
 
+    /// The instance an id names. `scope/name` and `scope/name#1` are both
+    /// instance 1 (`#330`); a `#n` that is not on file says which are.
     pub async fn require_agent(&self, id: &str) -> Result<AgentSession> {
-        self.state.agents
-            .get_agent(id)
+        let canonical = AgentSession::canonical_id(id);
+        if let Some(agent) = self.state.agents.get_agent(&canonical).await? {
+            return Ok(agent);
+        }
+        let declaration = AgentSession::declaration_id(&canonical);
+        let mut known: Vec<String> = self
+            .state
+            .agents
+            .agents()
             .await?
-            .ok_or_else(|| FactoryError::TaskNotFound(format!("agent {id}")))
+            .into_iter()
+            .filter(|a| AgentSession::id_for(&a.scope, &a.name) == declaration)
+            .map(|a| a.id)
+            .collect();
+        known.sort();
+        Err(FactoryError::TaskNotFound(if known.is_empty() || declaration == canonical {
+            format!("agent {id}")
+        } else {
+            format!("agent {id}; {declaration} has {}", known.join(", "))
+        }))
     }
 
     /// Is the session still there -- and, on the way past, write down what it
@@ -550,6 +701,12 @@ impl L3Service<'_> {
         if self.state.attention.attended(&agent.id) {
             return Some(KeptUp::Attached);
         }
+        self.busy(agent).await
+    }
+
+    /// The runtime's word on whether an instance is in the middle of
+    /// something: a turn, or a question it is waiting on an answer to.
+    async fn busy(&self, agent: &AgentSession) -> Option<KeptUp> {
         let session = agent.session.as_ref()?;
         let status = match self.wiring.registry().runtime(&session.runtime) {
             Ok(rt) => rt.status(session).await.unwrap_or(RuntimeStatus::Unknown),
@@ -1266,11 +1423,20 @@ mod tests {
         }
         async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
             self.starts.lock().unwrap().push(req.clone());
+            // As herdr does: a named harness becomes a named agent a person can
+            // attach to; a shell pane (`shell`'s empty command) does not.
+            let mut meta = std::collections::BTreeMap::new();
+            if matches!(req.launch.kind, factory_core::adapter::agent::LaunchKind::Named(_)) {
+                meta.insert("agent_name".to_string(), req.name.clone());
+            }
             Ok(SessionRef {
                 runtime: "stub".into(),
                 handle: Self::handle(&req.id),
-                meta: Default::default(),
+                meta,
             })
+        }
+        fn attach_command(&self, session: &SessionRef) -> Option<String> {
+            Some(format!("herdr --session qa agent attach {}", session.meta.get("agent_name")?))
         }
         async fn submit(&self, _session: &SessionRef, _text: &str) -> Result<()> {
             Ok(())
@@ -1639,6 +1805,183 @@ mod tests {
         engine.l3_service().supervise_agents().await;
         assert_eq!(stub.started_ids().last().map(String::as_str), Some("demo/watcher#2"));
         assert_eq!(stub.starts.lock().unwrap().len(), 4, "only the one that went");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Two standing `shell` sessions of one declaration (`#330`).
+    const TWO_SHELLS: &str = "  - name: watcher\n    harness: shell\n    lifetime: permanent\n    instances: 2\n";
+
+    async fn ask(engine: &Arc<Engine>, request: Request) -> std::result::Result<Payload, String> {
+        match engine.handle_request(request).await {
+            Response::Ok { data } => Ok(data),
+            Response::Error { message, .. } => Err(message),
+        }
+    }
+
+    async fn instance(engine: &Engine, id: &str) -> AgentSession {
+        engine.l3.agents.get_agent(id).await.unwrap().unwrap_or_else(|| panic!("no row {id}"))
+    }
+
+    /// What the `factory:agents` journal says, once L4 has read L3's log.
+    async fn journal(engine: &Engine) -> Vec<(String, String, String)> {
+        engine.l4_service().sample_standing_agents().await;
+        engine
+            .l4
+            .store
+            .entries(crate::l4_service::AGENTS_JOURNAL, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.source, e.kind, e.message))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn two_shell_instances_stop_and_start_one_at_a_time_and_a_stopped_one_stays_down() {
+        let (engine, stub, root) = scaled_engine(TWO_SHELLS);
+        engine.l3_service().reconcile_agents().await;
+        assert_eq!(stub.started_ids(), ["demo/watcher", "demo/watcher#2"]);
+
+        // #2 alone goes down; #1 keeps running.
+        let Payload::Agent { agent } = ask(&engine, Request::AgentStop { id: "demo/watcher#2".into() }).await.unwrap() else {
+            panic!("an agent")
+        };
+        assert_eq!((agent.id.as_str(), agent.state), ("demo/watcher#2", AgentState::Stopped));
+        assert_eq!(agent.stopped_by.as_deref(), Some("the owner"));
+        assert_eq!(stub.stopped_handles(), [StubRuntime::handle("demo/watcher#2")]);
+        assert_eq!(instance(&engine, "demo/watcher").await.state, AgentState::Ready);
+
+        // Nothing brings it back on its own: not the supervisor, not a
+        // restart's reconcile, not a scale-up around it.
+        engine.l3_service().supervise_agents().await;
+        engine.l3_service().reconcile_agents().await;
+        let report = scale(&engine, Some(3), None).await.unwrap();
+        assert_eq!(report.started, ["demo/watcher#3"]);
+        assert_eq!(started(&stub, 3).await, ["demo/watcher", "demo/watcher#2", "demo/watcher#3"]);
+        assert_eq!(instance(&engine, "demo/watcher#2").await.state, AgentState::Stopped);
+
+        // The roster says so, one instance at a time.
+        let Payload::Scopes { scopes, .. } = ask(&engine, Request::Agents).await.unwrap() else { panic!("the roster") };
+        let watcher = scopes[0].agents.iter().find(|a| a.name == "watcher").unwrap();
+        let listed: Vec<(&str, &str, Option<&str>)> =
+            watcher.instances.iter().map(|i| (i.id.as_str(), i.state.as_str(), i.stopped_by.as_deref())).collect();
+        assert_eq!(
+            listed,
+            [("demo/watcher", "ready", None), ("demo/watcher#2", "stopped", Some("the owner")), ("demo/watcher#3", "ready", None)]
+        );
+        assert!(watcher.instances[0].started_at.is_some() && watcher.instances[1].started_at.is_none(), "uptime while up");
+        // A shell pane is no named agent: there is nothing to connect to,
+        // and attaching says so instead of handing out a command that fails.
+        assert!(watcher.instances.iter().all(|i| i.connect.is_none() && i.attach.is_none()));
+        let e = ask(&engine, Request::AgentAttach { id: "demo/watcher#3".into() }).await.unwrap_err();
+        assert!(e.contains("a shell pane has no named agent"), "{e}");
+
+        // Brought back by its number -- only it.
+        let Payload::Agent { agent } = ask(
+            &engine,
+            Request::AgentStart { scope: "demo".into(), name: "watcher".into(), instance: Some(2) },
+        )
+        .await
+        .unwrap() else {
+            panic!("an agent")
+        };
+        assert_eq!((agent.id.as_str(), agent.state, agent.stopped_by), ("demo/watcher#2", AgentState::Ready, None));
+        assert_eq!(stub.started_ids().len(), 4);
+        assert_eq!(stub.started_ids().last().map(String::as_str), Some("demo/watcher#2"));
+
+        // `#1` is the bare id; a number the declaration does not keep is
+        // refused; one with no row says which there are.
+        let Payload::Agent { agent } = ask(&engine, Request::AgentStop { id: "demo/watcher#1".into() }).await.unwrap() else {
+            panic!("an agent")
+        };
+        assert_eq!(agent.id, "demo/watcher");
+        let e = ask(&engine, Request::AgentStart { scope: "demo".into(), name: "watcher".into(), instance: Some(5) })
+            .await
+            .unwrap_err();
+        assert!(e.contains("keeps 3 instance(s); #5 is not one of them"), "{e}");
+        let e = ask(&engine, Request::AgentStop { id: "demo/watcher#7".into() }).await.unwrap_err();
+        assert!(e.contains("demo/watcher has demo/watcher, demo/watcher#2, demo/watcher#3"), "{e}");
+        assert_eq!(instance(&engine, "demo/watcher#3").await.state, AgentState::Ready, "#3 untouched throughout");
+
+        // Each of those is journaled under `factory:agents`, with who asked.
+        let journal = journal(&engine).await;
+        let said = |kind: &str, message: &str| {
+            journal.iter().any(|(source, k, m)| source == "owner" && k == kind && m.starts_with(message))
+        };
+        assert!(said("agent_stopped", "demo/watcher#2 stopped by the owner"), "{journal:#?}");
+        assert!(said("agent_scaled", "demo/watcher scaled 2 -> 3 by the owner"), "{journal:#?}");
+        assert!(said("agent_started", "demo/watcher#2 started by the owner"), "{journal:#?}");
+        assert!(said("agent_stopped", "demo/watcher stopped by the owner"), "{journal:#?}");
+        assert!(said("agent_started", "demo/watcher#5 asked to start by the owner, and it did not"), "{journal:#?}");
+        assert_eq!(journal.len(), 5, "{journal:#?}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn attach_resolves_one_instances_own_session_and_a_stop_check_then_names_who_is_there() {
+        let (engine, stub, root) = recording_engine(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: watcher\n    harness: configured\n    lifetime: permanent\n    instances: 2\n",
+        );
+        engine.l3_service().reconcile_agents().await;
+        let check = |id: &'static str| {
+            let engine = engine.clone();
+            async move {
+                match ask(&engine, Request::AgentStopCheck { id: id.into() }).await.unwrap() {
+                    Payload::StopCheck { check } => check,
+                    other => panic!("{other:?}"),
+                }
+            }
+        };
+        let quiet = check("demo/watcher#2").await;
+        assert!(quiet.live && quiet.reasons.is_empty(), "nothing lost yet: {quiet:?}");
+
+        // Resolved by the daemon from the runtime's own line, per instance.
+        let Payload::Attach { attach } = ask(&engine, Request::AgentAttach { id: "demo/watcher#2".into() }).await.unwrap()
+        else {
+            panic!("an attach")
+        };
+        let second = runtime_name("demo", "watcher", 2);
+        assert_eq!((attach.id.as_str(), attach.instance), ("demo/watcher#2", 2));
+        assert_eq!(attach.command, format!("herdr --session qa agent attach {second}"));
+        assert_eq!(attach.argv, ["herdr", "--session", "qa", "agent", "attach", second.as_str()]);
+        let Payload::Attach { attach } = ask(&engine, Request::AgentAttach { id: "demo/watcher".into() }).await.unwrap() else {
+            panic!("an attach")
+        };
+        assert_eq!(attach.argv.last().map(String::as_str), Some("factory-demo-watcher"), "#1 is its own session");
+
+        // Somebody is now in front of #2, and stopping it says who before it
+        // happens; a turn under way is named as well.
+        let attached = check("demo/watcher#2").await;
+        assert_eq!(attached.reasons.len(), 1, "{attached:?}");
+        assert_eq!(attached.reasons[0].why, KeptUp::Attached);
+        assert!(attached.reasons[0].detail.starts_with("the owner attached to it with factory agent attach"), "{attached:?}");
+        stub.set_status("demo/watcher#2", RuntimeStatus::Working);
+        let busy = check("demo/watcher#2").await;
+        assert_eq!(busy.reasons.iter().map(|r| r.why).collect::<Vec<_>>(), [KeptUp::Attached, KeptUp::Working]);
+        assert!(busy.warning().unwrap().starts_with("demo/watcher#2: the owner attached to it"), "{busy:?}");
+
+        // The roster carries the same, and the quoted command to connect with.
+        let Payload::Scopes { scopes, .. } = ask(&engine, Request::Agents).await.unwrap() else { panic!("the roster") };
+        let watcher = scopes[0].agents.iter().find(|a| a.name == "watcher").unwrap();
+        let two = &watcher.instances[1];
+        assert_eq!(two.connect.as_deref(), Some("factory agent attach 'demo/watcher#2'"));
+        assert_eq!(watcher.instances[0].connect.as_deref(), Some("factory agent attach demo/watcher"));
+        assert_eq!(two.activity.as_deref(), Some("working"));
+        assert!(two.attended.as_deref().is_some_and(|a| a.contains("factory agent attach")), "{two:?}");
+
+        // Stopped, there is nothing to attach to and nothing to lose.
+        ask(&engine, Request::AgentStop { id: "demo/watcher#2".into() }).await.unwrap();
+        let e = ask(&engine, Request::AgentAttach { id: "demo/watcher#2".into() }).await.unwrap_err();
+        assert!(e.contains("is stopped") && e.contains("factory agent start 'demo/watcher#2'"), "{e}");
+        let down = check("demo/watcher#2").await;
+        assert!(!down.live && down.reasons.is_empty(), "{down:?}");
+        assert_eq!(instance(&engine, "demo/watcher").await.state, AgentState::Ready);
+
+        let journal = journal(&engine).await;
+        let attaches: Vec<&str> =
+            journal.iter().filter(|(_, kind, _)| kind == "agent_attached").map(|(_, _, m)| m.as_str()).collect();
+        assert_eq!(attaches.len(), 2, "{journal:#?}");
+        assert!(attaches[0].starts_with("demo/watcher#2 attached to by the owner: herdr --session qa"), "{attaches:?}");
         std::fs::remove_dir_all(root).ok();
     }
 

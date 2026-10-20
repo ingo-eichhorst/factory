@@ -34,6 +34,10 @@ use factory_core::task::{NewTask, Task, TaskEntry, WorkflowOrigin};
 use factory_core::workflow::WorkflowActor;
 use factory_kernel::L4;
 
+/// The journal what is asked of standing agents is recorded in (`#330`). Not a task, so a fixed id of its own, like
+/// the secrets catalogue's: `factory task log factory:agents` reads it.
+pub(crate) const AGENTS_JOURNAL: &str = "factory:agents";
+
 pub(crate) struct L4Service<'a> {
     pub(crate) state: &'a L4State,
     pub(crate) wiring: Wiring<'a, L4>,
@@ -203,6 +207,36 @@ impl crate::l4_service::L4Service<'_> {
             let status = RuntimeStatus::parse(&observation.status);
             self.record_status_at(&observation.subject, &observation.scope, &observation.agent, status, observation.at)
                 .await;
+        }
+        *cursor = fact.next;
+        drop(cursor);
+        self.journal_standing_actions().await;
+    }
+
+    /// Journal what L3 was asked to do to its standing agents since the last read (`#330`): one entry per start,
+    /// stop, attach or scale under `factory:agents`, with who asked. Read the way the observations are, from a
+    /// cursor, so L3 tells nobody; on the same tick, so nothing waits on a second timer.
+    async fn journal_standing_actions(&self) {
+        let mut cursor = self.state.actions_cursor.lock().await;
+        let fact = match self.wiring.facts().get::<factory_kernel::StandingAgentActionsFact>(&*cursor).await {
+            Ok(fact) => fact,
+            Err(error) => {
+                tracing::debug!("could not read what the standing agents were asked to do: {error}");
+                return;
+            }
+        };
+        for action in fact.actions {
+            let mut entry = TaskEntry::new(action.source.clone(), format!("agent_{}", action.action), action.message.clone())
+                .with_data(serde_json::json!({
+                    "id": action.subject,
+                    "scope": action.scope,
+                    "agent": action.agent,
+                    "by": action.by,
+                }));
+            entry.at = action.at;
+            if let Err(e) = self.state.store.append_entry(AGENTS_JOURNAL, &entry).await {
+                tracing::warn!(agent = %action.subject, "a standing agent's {} was not journaled: {e}", action.action);
+            }
         }
         *cursor = fact.next;
     }

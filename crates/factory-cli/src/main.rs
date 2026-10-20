@@ -1091,10 +1091,30 @@ enum CaseCmd {
 
 #[derive(Subcommand)]
 enum AgentCmd {
-    /// Bring a declared standing agent up: every instance it keeps.
-    Start { scope: String, name: String },
-    /// Take one down and leave it down.
+    /// Bring a declared standing agent up: every instance it keeps
+    /// (`start <scope> <name>`), or one -- `--instance 2`, or its id
+    /// (`start 'demo/watcher#2'`).
+    Start {
+        /// The scope, or one instance's id (`demo/watcher#2`).
+        scope: String,
+        name: Option<String>,
+        /// One instance only, counted from 1.
+        #[arg(long)]
+        instance: Option<u32>,
+    },
+    /// Take one instance down and leave it down: `demo/watcher` is instance
+    /// 1, `'demo/watcher#2'` the second. The others keep running.
     Stop { id: String },
+    /// Replace this terminal with one instance's: the daemon resolves its
+    /// session and this runs the runtime's own attach command (herdr's), so
+    /// detaching works the way it always does. Over `--url`, or with
+    /// `--print`, it prints the command instead.
+    Attach {
+        id: String,
+        /// Print the command rather than running it.
+        #[arg(long)]
+        print: bool,
+    },
     /// Keep N standing sessions of a standing agent up (`instances:`), or move
     /// the count by +N / -N. Written into the scope's own config; instances
     /// that are busy or that somebody is attached to are never stopped.
@@ -1997,13 +2017,20 @@ async fn main() -> Result<()> {
                             if !a.declared {
                                 flags.push("undeclared".into());
                             }
-                            // One standing session is the row it always was;
-                            // more than one (`#329`) is a count on the row and
-                            // a line per instance, each with its own attach.
+                            // One standing session keeps its state on the row;
+                            // more than one (`#329`) is a count there. Either
+                            // way every instance on record gets a line of its
+                            // own (`#330`): its id, state, uptime and the
+                            // command that attaches to it.
                             let several = a.wanted.is_some_and(|n| n > 1) || a.instances.len() > 1;
                             let state = if several {
                                 let up = a.instances.iter().filter(|i| i.state == "ready" || i.state == "starting").count();
-                                format!("{up}/{} up", a.wanted.unwrap_or(1))
+                                let stopped = a.instances.iter().filter(|i| i.state == "stopped").count();
+                                let mut state = format!("{up}/{} up", a.wanted.unwrap_or(1));
+                                if stopped > 0 {
+                                    state.push_str(&format!(", stopped {stopped} of {}", a.instances.len()));
+                                }
+                                state
                             } else {
                                 a.state.clone()
                             };
@@ -2013,29 +2040,15 @@ async fn main() -> Result<()> {
                                 state,
                                 flags.join(", ")
                             ));
-                            if several {
-                                for i in &a.instances {
-                                    out.push_str(&format!(
-                                        "      #{:<3} {:<28} {}{}\n",
-                                        i.instance,
-                                        i.id,
-                                        i.state,
-                                        if i.surplus { " (draining: stops once idle)" } else { "" }
-                                    ));
-                                    if let Some(cmd) = &i.attach {
-                                        out.push_str(&format!("           attach: {cmd}\n"));
-                                    }
-                                    if let Some(err) = &i.error {
-                                        out.push_str(&format!("           error:  {err}\n"));
-                                    }
-                                }
-                            } else {
+                            if a.instances.is_empty() {
                                 if let Some(cmd) = &a.attach {
                                     out.push_str(&format!("      attach: {cmd}\n"));
                                 }
                                 if let Some(err) = &a.error {
                                     out.push_str(&format!("      error:  {err}\n"));
                                 }
+                            } else {
+                                out.push_str(&instance_lines(a, chrono::Utc::now()));
                             }
                             for w in &a.active {
                                 out.push_str(&format!(
@@ -5321,12 +5334,32 @@ fn verdict_str(v: Verdict) -> &'static str {
 
 async fn agent_cmd(json: bool, client: &Client, cmd: AgentCmd) -> Result<()> {
     match cmd {
-        AgentCmd::Start { scope, name } => {
-            let payload = client.send(Request::AgentStart { scope, name }).await?;
+        AgentCmd::Start { scope, name, instance } => {
+            let payload = client.send(start_request(scope, name, instance)?).await?;
             print(&payload, json, |p| match p {
                 Payload::Agent { agent } => Some(agent_line(agent)),
                 _ => None,
             })
+        }
+        AgentCmd::Attach { id, print: only_print } => {
+            let payload = client.send(Request::AgentAttach { id }).await?;
+            let Payload::Attach { attach } = &payload else {
+                return print(&payload, json, |_| None);
+            };
+            if !attach_runs_here(&client.endpoint, json, only_print) {
+                if !json && matches!(client.endpoint, client::Endpoint::Http(_)) {
+                    eprintln!("(over --url: run this where the daemon's herdr is)");
+                }
+                return print(&payload, json, |_| Some(attach.command.clone()));
+            }
+            let (program, args) = attach
+                .argv
+                .split_first()
+                .ok_or_else(|| anyhow!("{} has an empty attach command", attach.id))?;
+            use std::os::unix::process::CommandExt;
+            // Only returns if it could not be run at all.
+            let error = std::process::Command::new(program).args(args).exec();
+            Err(anyhow!("could not run `{}`: {error}", attach.command))
         }
         AgentCmd::Stop { id } => {
             let payload = client.send(Request::AgentStop { id }).await?;
@@ -5384,6 +5417,82 @@ async fn agent_cmd(json: bool, client: &Client, cmd: AgentCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `start <scope> <name> [--instance n]`, or `start <id>` for the one
+/// instance an id names (`demo/watcher` is instance 1). The id is taken apart
+/// the way the daemon writes it -- a name holds neither `/` nor `#`.
+fn start_request(scope: String, name: Option<String>, instance: Option<u32>) -> Result<Request> {
+    if instance == Some(0) {
+        return Err(anyhow!("instances are counted from 1"));
+    }
+    if let Some(name) = name {
+        return Ok(Request::AgentStart { scope, name, instance });
+    }
+    if instance.is_some() {
+        return Err(anyhow!("give the instance in the id ('{scope}#2') or as --instance with <scope> <name>, not both"));
+    }
+    let (scope, name, instance) = factory_core::agent::AgentSession::split_id(&scope).ok_or_else(|| {
+        anyhow!("start takes <scope> <name> for every instance, or one instance's id: <scope>/<name>[#n], not {scope:?}")
+    })?;
+    Ok(Request::AgentStart { scope, name, instance: Some(instance) })
+}
+
+/// Whether `factory agent attach` runs the attach command itself: only
+/// against a local socket, where the daemon's herdr is this machine's, and
+/// never when the answer was asked for as data.
+fn attach_runs_here(endpoint: &client::Endpoint, json: bool, only_print: bool) -> bool {
+    matches!(endpoint, client::Endpoint::Socket(_)) && !json && !only_print
+}
+
+/// `3h 2m`, `45s`, `2d 4h`: how long something has been up.
+fn uptime(since: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+    let secs = (now - since).num_seconds().max(0);
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h {}m", s / 3600, s % 3600 / 60),
+        s => format!("{}d {}h", s / 86_400, s % 86_400 / 3600),
+    }
+}
+
+/// One standing agent's instances for `factory agents` (`#330`): a line per
+/// instance with its id, state and uptime, then the command that attaches to
+/// it and the runtime's own line underneath as the fallback.
+fn instance_lines(a: &factory_core::protocol::AgentView, now: chrono::DateTime<chrono::Utc>) -> String {
+    let mut out = String::new();
+    for i in &a.instances {
+        let mut state = i.state.clone();
+        if let Some(by) = &i.stopped_by {
+            state.push_str(&format!(" by {by}"));
+            if let Some(at) = i.stopped_at {
+                state.push_str(&format!(" {} ago", uptime(at, now)));
+            }
+        }
+        if let Some(started) = i.started_at {
+            state.push_str(&format!(" · up {}", uptime(started, now)));
+        }
+        if let Some(activity) = &i.activity {
+            state.push_str(&format!(" · {activity}"));
+        }
+        if i.surplus {
+            state.push_str(" (draining: stops once idle)");
+        }
+        out.push_str(&format!("      #{:<3} {:<28} {state}\n", i.instance, i.id));
+        if let Some(seen) = &i.attended {
+            out.push_str(&format!("           seen:    {seen}\n"));
+        }
+        if let Some(cmd) = &i.connect {
+            out.push_str(&format!("           connect: {cmd}\n"));
+        }
+        if let Some(cmd) = &i.attach {
+            out.push_str(&format!("           herdr:   {cmd}\n"));
+        }
+        if let Some(err) = &i.error {
+            out.push_str(&format!("           error:   {err}\n"));
+        }
+    }
+    out
 }
 
 /// `3` is a count, `+1` and `-1` move it: `(instances, by)`, one of them set.
@@ -7359,6 +7468,70 @@ mod tests {
         let cli = Cli::try_parse_from(["factory", "--root", "/tmp/instance", "recovery-journal", "finish", "uuid", "--exit-code", "1"]).unwrap();
         assert!(matches!(cli.command, Command::RecoveryJournal(RecoveryJournalCmd::Finish { local_http: None, network_routes: None, .. })));
         assert!(Cli::try_parse_from(["factory", "recovery-journal", "finish", "uuid", "--exit-code", "999"]).is_err());
+    }
+
+    #[test]
+    fn start_takes_a_scope_and_name_or_one_instances_id() {
+        let start = |scope: &str, name: Option<&str>, instance| start_request(scope.into(), name.map(Into::into), instance);
+        let parts = |r: Request| match r {
+            Request::AgentStart { scope, name, instance } => (scope, name, instance),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(parts(start("demo", Some("watcher"), None).unwrap()), ("demo".into(), "watcher".into(), None));
+        assert_eq!(parts(start("demo", Some("watcher"), Some(2)).unwrap()), ("demo".into(), "watcher".into(), Some(2)));
+        assert_eq!(parts(start("projects/demo/watcher#2", None, None).unwrap()), ("projects/demo".into(), "watcher".into(), Some(2)));
+        assert_eq!(parts(start("demo/watcher", None, None).unwrap()), ("demo".into(), "watcher".into(), Some(1)), "a bare id is #1");
+        assert!(start("demo/watcher#2", None, Some(3)).unwrap_err().to_string().contains("not both"));
+        assert!(start("demo", Some("watcher"), Some(0)).is_err());
+        assert!(start("watcher", None, None).unwrap_err().to_string().contains("<scope>/<name>[#n]"));
+        // The CLI spells it out the same way.
+        let cli = Cli::try_parse_from(["factory", "agent", "start", "demo", "watcher", "--instance", "2"]).unwrap();
+        assert!(matches!(cli.command, Command::Agent(AgentCmd::Start { instance: Some(2), .. })));
+        let cli = Cli::try_parse_from(["factory", "agent", "attach", "demo/watcher#2", "--print"]).unwrap();
+        assert!(matches!(cli.command, Command::Agent(AgentCmd::Attach { print: true, ref id }) if id == "demo/watcher#2"));
+    }
+
+    #[test]
+    fn attach_runs_the_command_only_against_a_local_socket() {
+        let socket = client::Endpoint::Socket(PathBuf::from("/tmp/f/.factory/factory.sock"));
+        let http = client::Endpoint::Http(client::HttpUrl::parse("http://127.0.0.1:8787").unwrap());
+        assert!(attach_runs_here(&socket, false, false));
+        assert!(!attach_runs_here(&socket, false, true), "--print");
+        assert!(!attach_runs_here(&socket, true, false), "--json is data");
+        assert!(!attach_runs_here(&http, false, false), "--url prints instead");
+    }
+
+    #[test]
+    fn factory_agents_lists_each_instance_of_a_two_shell_standing_agent() {
+        let now = chrono::Utc::now();
+        let agent: factory_core::protocol::AgentView = serde_json::from_value(serde_json::json!({
+            "id": "demo/watcher", "name": "watcher", "adapter": "shell", "description": "", "source": "builtin",
+            "lifetime": "permanent", "role": "worker", "sandbox": "none", "autostart": true, "state": "ready",
+            "is_default": false, "declared": true, "deletable": true, "active": [], "wanted": 2,
+            "instances": [
+                { "id": "demo/watcher", "instance": 1, "state": "ready", "session": "p1",
+                  "started_at": now - chrono::Duration::minutes(125), "activity": "idle" },
+                { "id": "demo/watcher#2", "instance": 2, "state": "stopped",
+                  "stopped_by": "the owner", "stopped_at": now - chrono::Duration::seconds(40) },
+            ],
+        }))
+        .unwrap();
+        assert_eq!(
+            instance_lines(&agent, now),
+            "      #1   demo/watcher                 ready · up 2h 5m · idle\n\
+             \x20     #2   demo/watcher#2               stopped by the owner 40s ago\n"
+        );
+        // A named harness's instance carries both commands: Factory's, and the
+        // runtime's own underneath as the fallback.
+        let mut named = agent.clone();
+        named.instances[0].connect = Some("factory agent attach demo/watcher".into());
+        named.instances[0].attach = Some("herdr --session factory agent attach factory-demo-watcher".into());
+        named.instances[0].attended = Some("its terminal was open in Factory 3s ago".into());
+        let lines = instance_lines(&named, now);
+        assert!(lines.contains("           seen:    its terminal was open in Factory 3s ago\n"), "{lines}");
+        assert!(lines.contains("           connect: factory agent attach demo/watcher\n"), "{lines}");
+        assert!(lines.contains("           herdr:   herdr --session factory agent attach factory-demo-watcher\n"), "{lines}");
+        assert_eq!(uptime(now - chrono::Duration::hours(50), now), "2d 2h");
     }
 
     #[test]

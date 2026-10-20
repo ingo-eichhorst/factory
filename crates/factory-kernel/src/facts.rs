@@ -159,6 +159,34 @@ pub struct StandingAgentObservationsFact {
     pub next: u64,
 }
 impl Fact for StandingAgentObservationsFact { type Producer = L3; }
+
+/// One thing somebody asked of a standing agent (`#330`): started, stopped, attached to, scaled -- and who asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandingAgentAction {
+    /// The instance's own id, or the declaration's (`scope/name`) when it was asked of every instance.
+    pub subject: String,
+    pub scope: String,
+    pub agent: String,
+    /// `started`, `stopped`, `attached` or `scaled`, as L3 spells it.
+    pub action: String,
+    /// `the owner`, or the agent that asked, as the access check described it.
+    pub by: String,
+    /// `owner` or `agent`.
+    pub source: String,
+    /// The whole of it, in a line: `demo/watcher#2 stopped by the owner`.
+    pub message: String,
+    pub at: DateTime<Utc>,
+}
+
+/// What standing agents were asked to do, in the order L3 was asked, from a cursor on. Query: the sequence number to
+/// read from (0 reads everything still kept); the answer carries the cursor to read from next. Bounded like
+/// `StandingAgentObservationsFact`, and like it a read, never a notification: L3 does not know who reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandingAgentActionsFact {
+    pub actions: Vec<StandingAgentAction>,
+    pub next: u64,
+}
+impl Fact for StandingAgentActionsFact { type Producer = L3; }
 /// What a runtime says a session is doing right now, and where that answer came from (`hook`, `inferred`, ...), as
 /// the runtime's own vocabulary spells them. Query: the session. A live read of the runtime, the one the liveness
 /// sampling and the turn-end handling of L4 ask once per run per tick. An unknown runtime or a failed read is
@@ -857,6 +885,11 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         fact: "StandingAgentObservationsFact", producer: "L3", readers: &["L4 occupancy (the liveness record of standing agents)"],
         lives_in_kernel: true,
         note: "what L3 observed about each standing agent's session, in order, from a cursor; bounded; L4 reads, L3 tells nobody",
+    },
+    FactCatalogueEntry {
+        fact: "StandingAgentActionsFact", producer: "L3", readers: &["L4 journal (the factory:agents line of who started, stopped, attached to or scaled a standing agent)"],
+        lives_in_kernel: true,
+        note: "what standing agents were asked to do and by whom, in order, from a cursor; bounded; L4 journals it, L3 tells nobody",
     },
     FactCatalogueEntry {
         fact: "SessionStatusFact", producer: "L3", readers: &["L4 occupancy (run liveness sampling and hook-authoritative block and turn-end handling)"],

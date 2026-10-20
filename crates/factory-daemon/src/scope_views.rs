@@ -165,6 +165,14 @@ impl Engine {
                         session: a.session.as_ref().map(|s| s.handle.clone()),
                         started_at: a.state.is_live().then_some(a.started_at),
                         error: a.error.clone(),
+                        // Only where attaching can work: a session whose
+                        // runtime named a command for it (a shell pane has none).
+                        connect: a.attach.as_ref().map(|_| AgentSession::connect_command(&a.id)),
+                        // L3's own memory, filled in by its router (`decorate_instances`).
+                        activity: None,
+                        attended: None,
+                        stopped_by: (a.state == AgentState::Stopped).then(|| a.stopped_by.clone()).flatten(),
+                        stopped_at: (a.state == AgentState::Stopped).then_some(a.stopped_at).flatten(),
                     })
                     .collect();
                 let (description, source) = described
