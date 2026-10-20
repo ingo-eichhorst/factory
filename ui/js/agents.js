@@ -173,6 +173,11 @@ export function renderAgents() {
               ? `<div class="work idle">up and waiting${a.started_at ? " · " + since(a.started_at) : ""}</div>`
               : `<div class="work idle">nothing running</div>`);
 
+      // The row's Stop over more than one instance waits here; a stop of a
+      // single instance waits on that instance's own line.
+      const rowConfirm = confirming && several && confirming.ids.length > 1 && confirming.key === stopping.join(" ")
+        ? confirmBlock(confirming) : "";
+
       return `<div class="agent">
         <div class="line">
           <span class="nm">${esc(a.name)}</span>
@@ -187,7 +192,7 @@ export function renderAgents() {
         </div>
         <div class="sub">${esc(a.description)}</div>
         ${a.error && !several ? `<div class="err">${esc(a.error)}</div>` : ""}
-        ${confirming && several && confirming.key === stopping.join(" ") ? confirmBlock(confirming) : ""}
+        ${rowConfirm}
         ${attach}
         ${work}
       </div>`;
