@@ -556,7 +556,13 @@ impl L3Service<'_> {
                     if !live {
                         continue;
                     }
-                    instance.activity = self.state.liveness.last_status(&instance.id);
+                    // `unknown` says nothing a person could act on -- a
+                    // shell pane is always that -- so it is left out.
+                    instance.activity = self
+                        .state
+                        .liveness
+                        .last_status(&instance.id)
+                        .filter(|status| status != RuntimeStatus::Unknown.as_str());
                     instance.attended = self.state.attention.presence(&instance.id).map(|(how, ago)| how.words(ago));
                 }
             }
