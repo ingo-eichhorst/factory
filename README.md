@@ -161,9 +161,71 @@ on the first tick it is idle, and does not restart it should it die first.
 herdr reports no attached client per pane, so a person in `herdr agent
 attach` who has not typed anything is not seen. Every scale is announced on
 the event stream (an `agent_scaled` event with who asked, which `factory
-watch` prints as `agent demo/claude scaled 1 -> 3 by the owner`) and in the
-daemon log; like starting and stopping one, it is not a task, so it has no
-task journal of its own.
+watch` prints as `agent demo/claude scaled 1 -> 3 by the owner`), in the
+daemon log, and in the `factory:agents` journal below.
+
+**Each instance on its own (`#330`).** Every standing instance can be opened,
+connected to, stopped and started without touching the others, from the CLI
+and from the roster:
+
+```sh
+factory agents                                  # a line per instance: id, state, uptime, attach
+factory agent attach 'demo/claude#2'            # this terminal becomes #2's; detach returns
+factory agent attach 'demo/claude#2' --print    # just print the command
+factory agent stop   'demo/claude#2'            # #2 only; #1 and #3 keep running
+factory agent start  demo claude --instance 2   # #2 only
+factory agent start  'demo/claude#2'            # the same, by its id
+factory task log factory:agents                 # who started, stopped, attached to or scaled what
+```
+
+An instance's id is `scope/name` for instance 1 and `scope/name#n` for the
+others; `stop`, `output`, `input`, `role` and `attach` all take one, and
+`scope/name#1` means `scope/name`, so every script and guide written before
+instances keeps working. Quote an id with a `#` in it: a shell reads the rest
+of the word as a comment, and zsh's extended glob treats `#` as an operator.
+`start <scope> <name>` still starts every instance the declaration keeps; with
+`--instance n`, or given an id, it starts that one, and refuses a number the
+declaration does not keep (`factory agent scale` changes the count).
+
+`factory agent attach <id>` asks the daemon which session that instance is
+in -- it never derives a herdr name itself -- and runs the runtime's own
+attach command (`herdr --session factory agent attach <runtime-name>`) in
+place of itself, so the terminal is herdr's and detaching works the way
+herdr's does. Over `--url` (`FACTORY_URL`), where the daemon's herdr may be
+on another machine, and with `--print` or `--json`, it prints the command
+instead. An instance that is not up has nothing to attach to, and a `shell`
+instance is a plain pane with no named agent, so both are refused with the
+reason rather than handed a command that would fail -- the roster's Terminal
+still opens a shell instance. Resolving the command needs no grant: `factory
+agents` prints the same line to anyone. It counts as a person in front of the
+instance for the next minute, the same as a read of its screen, so a
+scale-down or a stop in the page in that minute says so.
+
+A stopped instance stays stopped -- the meaning `stop` always had: nothing
+brings it back on its own, not the supervisor, not a daemon restart's
+reconcile, and not a scale-up around it (`instances 2/3 up · stopped 1 of 3`
+on the roster, `stopped by the owner 4m ago` on its line). Only a start that
+names it, or a start of the whole agent, does.
+
+Before the roster stops an instance it asks the daemon what that would cost
+(`POST /api/agents/stop-check`): a person attached -- named the way they were
+seen: its terminal open in Factory, its transcript read, a key typed, or
+`factory agent attach` run for it, and by whom -- a turn under way, or a
+question it is waiting on an answer to. If any, the page says so in place
+and waits for **Stop anyway**; if none, it just stops. These are L3's own
+observations, the same three a scale-down never stops an instance for. No
+task run is ever given a standing agent's session, so "the run it holds" is
+the turn its runtime says it is in the middle of; the runs listed under an
+agent on the roster have sessions of their own and are not touched by
+stopping an instance. The CLI's `stop` does not ask: it is typed on purpose,
+and scripts rely on it.
+
+Starting, stopping, attaching and scaling are journaled with who asked, under
+the fixed journal id `factory:agents` (`agent_started`, `agent_stopped`,
+`agent_attached`, `agent_scaled`; `source` is `owner` or `agent`, `data.by`
+names which). L3 keeps what it was asked in a bounded log and L4 reads it from
+a cursor on its tick (`StandingAgentActionsFact`), the way it reads L3's
+liveness observations, so an entry can trail the action by a tick.
 
 `sandbox` says where an agent's runs execute: `none` (the default),
 `openshell`, `docker`, or `srt`. **`openshell` is enforced** (`#218`): every
@@ -432,8 +494,10 @@ hand itself a role would not be bounded by the one it has.
 ```sh
 factory agents                       # scopes, their agents, and what each is doing
 factory agent start demo watcher     # every instance it keeps
+factory agent start demo claude --instance 2   # one instance (or: start 'demo/claude#2')
 factory agent stop demo/watcher      # stays stopped until someone asks again
 factory agent stop 'demo/claude#2'   # one instance of several (quote the #)
+factory agent attach 'demo/claude#2' # into its terminal; --print to only show the command
 factory agent scale demo claude 3    # keep three standing sessions up
 factory agent output demo/watcher
 factory agent input demo/watcher --text "how is it going?" --key enter
@@ -464,10 +528,12 @@ time a `demo` agent starts. The herdr agent name still carries `factory-` as
 an outer namespace ahead of the scope, because herdr agent names are global
 and Factory adopts any agent already carrying the name it is about to start —
 dropping the prefix could make it adopt a person's own hand-made agent by
-accident. Each standing agent also carries the command to get into its
-terminal yourself — `herdr --session factory agent attach
-factory-demo-watcher`. A shell session has no named agent to attach to, so
-Factory says so instead of printing a command that would fail.
+accident. Each standing instance also carries the command to get into its
+terminal yourself — `factory agent attach demo/watcher`, which resolves the
+session through the daemon, and underneath it herdr's own `herdr --session
+factory agent attach factory-demo-watcher`. A shell session has no named
+agent to attach to, so Factory says so instead of printing a command that
+would fail.
 
 Stopping a standing agent or ending a task run closes only its own tab, never
 the scope's workspace — the workspace is shared by everything else running in
@@ -5176,7 +5242,10 @@ HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 for only the task's own lines, none of its runs'), `GET /api/runs/{id}/output`,
 `GET /api/runs/{id}/usage`, `GET /api/tasks/{id}/usage`,
 `GET /api/costs?group_by=&from=&to=&scope=`, `GET /api/agents`,
-`POST /api/agents/scale` (see "Task agents and standing agents" above),
+`POST /api/agents/scale`, `POST /api/agents/start` (`{scope, name}` for
+every instance, plus `instance` for one), `POST /api/agents/stop-check` and
+`POST /api/agents/attach` (`{id}`; see "Task agents and standing agents"
+above),
 `GET /api/agent-runtime`, `GET /api/environment`, `GET /api/infrastructure`,
 `GET /api/backup`, `POST /api/backup/run`, `POST /api/backup/verify?snapshot=`,
 `GET /api/knowledge`,
@@ -5282,9 +5351,19 @@ scheduled run has room to be read.
 what each one is doing. A standing agent shows `instances 2/3 up` with − / +
 to change how many standing sessions it keeps (`#329`; offered where the
 declaration is the scope's own), and, once it has more than one, a line per
-instance with its id, state and attach line; one draining after a scale-down
-is marked so. Start brings up whichever instances are down; Stop takes every
-live one down. A standing agent can be started, stopped, and opened —
+instance with its id, state, uptime and what its runtime last said it was
+doing (`#330`); one draining after a scale-down is marked so, one a person
+stopped says who, and one somebody is in front of is tagged `attended`. Each
+instance's line has its own **Terminal** (the live terminal below, for that
+instance's session), **Connect** (shows and copies `factory agent attach
+<id>`, with herdr's own line underneath as the fallback; off for a shell
+pane, which has none) and **Stop** or **Start** for that instance only. With
+a single instance those are the row's own buttons. The row's Start brings up
+whichever instances are down and its Stop takes every live one down. Any Stop
+asks the daemon first and, when a person is attached or the instance is in
+the middle of something, says which in the page and waits for **Stop anyway**
+-- see "Task agents and standing agents". A standing agent can be started,
+stopped, and opened —
 its terminal is live, and there is a line to type into it with keys for Enter,
 Esc, ↑, ↓ and Ctrl-C. That is enough to answer the prompt an agent is sitting
 on, which is usually a first-run trust dialog or a login. Every agent also

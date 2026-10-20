@@ -401,6 +401,16 @@ select.rolepick:disabled { opacity: .38; cursor: default; }
 .scaler .btn { min-width: 24px; padding-left: 6px; padding-right: 6px; }
 .instances { margin-top: 7px; display: grid; gap: 6px; padding-left: 10px; border-left: 2px solid var(--line-soft); }
 .instance .attach { margin-top: 3px; }
+/* One instance's Connect panel and the page's own word before stopping one
+   that somebody would lose something by (#330). */
+.instance.one { margin-top: 5px; }
+.instance .line .row-btns .btn { padding-top: 3px; padding-bottom: 3px; }
+.connect { margin-top: 3px; }
+.confirm-stop {
+  margin-top: 7px; padding: 8px 10px; display: grid; gap: 5px; border-radius: 3px;
+  border: 1px solid var(--wait); background: var(--wait-wash); font-size: 12px; color: var(--ink-2);
+}
+.confirm-stop b { color: var(--ink); }
 .work { margin-top: 8px; display: grid; gap: 6px; }
 .work .job { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; cursor: pointer; }
 .work .job:hover .jt { color: var(--signal); }
