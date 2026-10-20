@@ -11,7 +11,7 @@ use factory_core::config::{Factory, Sandbox, ScopeAgent, SHELL_HARNESS};
 use factory_core::error::{FactoryError, Result};
 use factory_core::event::{Event, EventBus};
 use factory_core::protocol::{
-    AgentActivity, AgentView, CapacityRow, CredentialRow, DaemonFacts, Envelope, Payload, ProviderAgent,
+    AgentActivity, AgentInstanceView, AgentView, CapacityRow, CredentialRow, DaemonFacts, Envelope, Payload, ProviderAgent,
     ProviderRow, ProviderRun, ProviderWindow, Request, Response, RuntimeConnectionView, SandboxRow,
     ScopeView, StatusInfo, StoreFacts, UnassignedAgent,
 };
@@ -278,6 +278,7 @@ impl Engine {
                 harness: crate::harness_health::HarnessHealth::new(),
                 agents: Arc::new(crate::agent_rows::AgentRows(store.clone())),
                 liveness: Default::default(),
+                attention: Default::default(),
             },
             l4: crate::state::L4State {
                 store,

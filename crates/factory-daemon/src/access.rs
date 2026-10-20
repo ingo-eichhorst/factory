@@ -218,7 +218,11 @@ impl Engine {
             // Starting a continuation run, like `task run --continue`.
             Request::SuggestionAsk { .. } => Grant::TaskRun,
             Request::AgentStart { .. } => Grant::AgentStart,
-            Request::AgentConfigure { .. } | Request::AgentDelete { .. } => Grant::AgentConfigure,
+            // A scale rewrites the declaration's `instances:` in its scope's
+            // config (`#329`), so it is the same write as adding one.
+            Request::AgentConfigure { .. } | Request::AgentDelete { .. } | Request::AgentScale { .. } => {
+                Grant::AgentConfigure
+            }
             // Saving or resetting a scope's own dashboard layout (`#160`).
             // An ordinary grant, unlike the role-layer writes it otherwise
             // resembles: a layout cannot widen what an agent may do.
@@ -657,7 +661,8 @@ impl Engine {
             },
 
             Request::AgentConfigure { scope: s, .. }
-            | Request::AgentDelete { scope: s, .. } => match def.reach {
+            | Request::AgentDelete { scope: s, .. }
+            | Request::AgentScale { scope: s, .. } => match def.reach {
                 Reach::Scope => in_scope(s),
                 Reach::Own => Err(deny("configure an agent declaration")),
             },

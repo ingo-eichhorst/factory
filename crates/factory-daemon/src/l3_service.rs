@@ -63,6 +63,9 @@ impl L3Service<'_> {
     /// if there is one, and the config's otherwise. Every answer to "what may
     /// this agent do" comes through here, so a standing agent and a run of the
     /// same agent cannot be told two different things.
+    ///
+    /// A role is the declaration's, not one instance's: it is kept on instance 1's
+    /// row, and `set_agent_role` gives every instance the same one.
     pub async fn effective_role(&self, scope: &str, name: &str) -> Role {
         let declared = self.role_of(scope, name);
         match self.state.agents.get_agent(&AgentSession::id_for(scope, name)).await {
@@ -114,6 +117,39 @@ impl LivenessLog {
         let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let seen = guard.1.iter().filter(|(seq, _)| *seq > cursor).map(|(_, o)| o.clone()).collect();
         (seen, guard.0)
+    }
+}
+
+/// When a person last had each standing instance's terminal in front of them, as L3
+/// saw it (`#329`): a frame of its screen read (the Factory terminal polls one every
+/// fraction of a second while it is open), its transcript read, or a keystroke typed
+/// into it. A scale-down never stops an instance seen within `ATTENDED_FOR`. Only
+/// what reaches L3 can be seen this way: herdr reports no attached client per pane,
+/// so a person in `herdr agent attach` who has not typed is not visible here.
+#[derive(Default)]
+pub(crate) struct Attention {
+    seen: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+}
+
+/// Long enough to cover a terminal that is open and a person reading what they
+/// just asked; short enough that one closed a minute ago no longer holds a
+/// session up.
+pub(crate) const ATTENDED_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl Attention {
+    pub(crate) fn touch(&self, id: &str) {
+        let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+        seen.insert(id.to_string(), std::time::Instant::now());
+    }
+
+    pub(crate) fn attended(&self, id: &str) -> bool {
+        let seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+        seen.get(id).is_some_and(|at| at.elapsed() < ATTENDED_FOR)
+    }
+
+    pub(crate) fn forget(&self, id: &str) {
+        let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+        seen.remove(id);
     }
 }
 

@@ -6,8 +6,8 @@
 
 use factory_core::agent::Lifetime;
 use factory_core::config::{
-    refuse_misplaced_scope_policies, refuse_misplaced_scope_roles, AgentRef, Config, Scope, ScopeAgent,
-    CONFIG_FILE, FACTORY_DIR,
+    refuse_bad_instances, refuse_misplaced_scope_policies, refuse_misplaced_scope_roles, AgentRef, Config,
+    Scope, ScopeAgent, CONFIG_FILE, FACTORY_DIR,
 };
 use factory_core::dashboard::{DashboardConfig, Tile};
 use factory_core::error::{FactoryError, Result};
@@ -546,6 +546,227 @@ fn remove_text(
     Ok(format!("{}{}", &text[..start], &text[end..]))
 }
 
+/// One YAML value as the block a key at `indent` opens: `key:` alone on its
+/// line, the value's own lines two further in. For the declarations below
+/// with no line of their own to edit.
+fn rendered_block(key: &str, value: &Value, indent: usize) -> Result<String> {
+    let yaml = serde_yaml_ng::to_string(value).map_err(|error| {
+        FactoryError::Other(anyhow::anyhow!("encoding {key}: {error}"))
+    })?;
+    let mut out = format!("{}{key}:\n", " ".repeat(indent));
+    for line in yaml.lines() {
+        out.push_str(&" ".repeat(indent + 2));
+        out.push_str(line);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// One list item from a YAML value, every key it had and nothing it did not.
+/// `rendered_item` goes through `ScopeAgent`, which would also write out the
+/// defaults a person left unsaid.
+fn rendered_value_item(value: &Value, indent: usize) -> Result<String> {
+    let yaml = serde_yaml_ng::to_string(value).map_err(|error| {
+        FactoryError::Other(anyhow::anyhow!("encoding agent declaration: {error}"))
+    })?;
+    let mut lines = yaml.lines();
+    let first = lines.next().unwrap_or_default();
+    let mut out = format!("{}- {first}\n", " ".repeat(indent));
+    for line in lines {
+        out.push_str(&" ".repeat(indent + 2));
+        out.push_str(line);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// `line` with its `instances:` value replaced by `n`, keeping whatever came
+/// before the key (an indent, or a list item's `- `) and a trailing comment.
+fn with_instances(line: &str, n: u32) -> String {
+    let at = line.find("instances:").unwrap_or(0);
+    let rest = &line[at + "instances:".len()..];
+    let comment = rest
+        .find(" #")
+        .map(|hash| format!(" {}", rest[hash..].trim()))
+        .unwrap_or_default();
+    format!("{}instances: {n}{comment}\n", &line[..at])
+}
+
+/// Set `instances: n` on exactly one declaration (`#329`), leaving every other
+/// line a person wrote -- comments, the declaration's other keys, its siblings
+/// -- where it was. `expected` is the whole document once the change is made,
+/// for the shapes with no line of their own to edit (a flow-style scope, list
+/// or item), which are expanded from it the way `edit_text` and `remove_text`
+/// expand one. The caller parses the result back and refuses it unless it
+/// says exactly `expected`.
+fn set_instances_text(
+    text: &str,
+    expected: &Value,
+    location: AgentLocation,
+    n: u32,
+    path: &Path,
+) -> Result<String> {
+    let mut lines = Vec::new();
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        lines.push((offset, offset + line.len(), line));
+        offset += line.len();
+    }
+    if offset < text.len() {
+        lines.push((offset, text.len(), &text[offset..]));
+    }
+    let replace = |from: usize, to: usize, with: &str| -> String {
+        let start = lines[from].0;
+        let end = lines.get(to).map(|line| line.0).unwrap_or(text.len());
+        format!("{}{with}{}", &text[..start], &text[end..])
+    };
+    let scope_value = expected
+        .as_mapping()
+        .and_then(|root| root.get(Value::String("scope".into())))
+        .ok_or_else(|| bad(format!("scope config {} has no scope block", path.display())))?;
+
+    let scope_index = lines
+        .iter()
+        .position(|(_, _, line)| indentation(line) == Some(0) && key_rest(line, "scope").is_some())
+        .ok_or_else(|| bad(format!("scope config {} has no top-level scope block", path.display())))?;
+    let scope_rest = key_rest(lines[scope_index].2, "scope").unwrap_or_default();
+    if !scope_rest.trim().is_empty() && !scope_rest.trim_start().starts_with('#') {
+        let comment = scope_rest
+            .find('#')
+            .map(|at| format!(" {}", scope_rest[at..].trim()))
+            .unwrap_or_default();
+        return Ok(replace(scope_index, scope_index + 1, &rendered_scope(scope_value, &comment, path)?));
+    }
+
+    let scope_end = lines
+        .iter()
+        .enumerate()
+        .skip(scope_index + 1)
+        .find(|(_, (_, _, line))| !line.trim().is_empty() && indentation(line) == Some(0))
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+    let child_indent = lines[scope_index + 1..scope_end]
+        .iter()
+        .filter_map(|(_, _, line)| is_content(line).then(|| indentation(line)).flatten())
+        .min()
+        .unwrap_or(2);
+    let key = match location {
+        AgentLocation::Singular => "agent",
+        AgentLocation::List(_) => "agents",
+    };
+    let key_index = lines[scope_index + 1..scope_end]
+        .iter()
+        .position(|(_, _, line)| indentation(line) == Some(child_indent) && key_rest(line, key).is_some())
+        .map(|index| index + scope_index + 1)
+        .ok_or_else(|| bad(format!("scope.{key} is missing from {}", path.display())))?;
+    let value_end = block_end(&lines, key_index, scope_end, child_indent);
+    let key_value = scope_value
+        .as_mapping()
+        .and_then(|scope| scope.get(Value::String(key.into())))
+        .ok_or_else(|| bad(format!("scope.{key} is missing from {}", path.display())))?;
+    let inline = |rest: &str| !rest.trim().is_empty() && !rest.trim_start().starts_with('#');
+
+    // The lines of the one mapping to edit, and the indent its keys sit at.
+    // `first` is a list item's own `- ` line, whose first key shares it.
+    let (from, to, key_indent, first) = match location {
+        AgentLocation::Singular => {
+            if inline(key_rest(lines[key_index].2, "agent").unwrap_or_default()) {
+                return Ok(replace(key_index, key_index + 1, &rendered_block("agent", key_value, child_indent)?));
+            }
+            let indent = (key_index + 1..value_end)
+                .find(|index| is_content(lines[*index].2))
+                .and_then(|index| indentation(lines[index].2))
+                .ok_or_else(|| bad(format!("scope.agent in {} has no keys", path.display())))?;
+            (key_index + 1, value_end, indent, None)
+        }
+        AgentLocation::List(target) => {
+            if inline(key_rest(lines[key_index].2, "agents").unwrap_or_default()) {
+                return Ok(replace(key_index, key_index + 1, &rendered_block("agents", key_value, child_indent)?));
+            }
+            let item_indent = (key_index + 1..value_end)
+                .find(|index| lines[*index].2.trim_start().starts_with('-'))
+                .and_then(|index| indentation(lines[index].2))
+                .ok_or_else(|| bad(format!("scope.agents in {} has no list items", path.display())))?;
+            let items: Vec<usize> = (key_index + 1..value_end)
+                .filter(|index| {
+                    indentation(lines[*index].2) == Some(item_indent) && lines[*index].2.trim_start().starts_with('-')
+                })
+                .collect();
+            let item = *items.get(target).ok_or_else(|| {
+                bad(format!("scope.agents in {} changed while it was being edited", path.display()))
+            })?;
+            let next = items.iter().copied().find(|index| *index > item).unwrap_or(value_end);
+            let after_dash = lines[item].2.trim_start()[1..].trim_start();
+            if after_dash.starts_with('{') || after_dash.starts_with('[') {
+                let value = key_value
+                    .as_sequence()
+                    .and_then(|items| items.get(target))
+                    .ok_or_else(|| bad(format!("scope.agents in {} changed while it was being edited", path.display())))?;
+                let end = last_content(&lines, item, next).map(|index| index + 1).unwrap_or(item + 1);
+                return Ok(replace(item, end, &rendered_value_item(value, item_indent)?));
+            }
+            if after_dash.is_empty() || after_dash.starts_with('#') {
+                let indent = (item + 1..next)
+                    .find(|index| is_content(lines[*index].2))
+                    .and_then(|index| indentation(lines[index].2))
+                    .ok_or_else(|| bad(format!("scope.agents in {} has an empty item", path.display())))?;
+                (item + 1, next, indent, None)
+            } else {
+                let line = lines[item].2;
+                let indent = line.len() - line.trim_start().len() + (line.trim_start().len() - after_dash.len());
+                (item + 1, next, indent, Some(item))
+            }
+        }
+    };
+
+    if let Some(item) = first {
+        if after_dash_key(lines[item].2) == Some("instances") {
+            return Ok(replace(item, item + 1, &with_instances(lines[item].2, n)));
+        }
+    }
+    if let Some(index) = (from..to)
+        .find(|index| indentation(lines[*index].2) == Some(key_indent) && key_rest(lines[*index].2, "instances").is_some())
+    {
+        return Ok(replace(index, index + 1, &with_instances(lines[index].2, n)));
+    }
+    // No `instances:` yet: a new key, after the mapping's last line that says
+    // anything, so a comment or blank line between it and the next entry stays
+    // between them.
+    let last = last_content(&lines, from, to).or(first).ok_or_else(|| {
+        bad(format!("the declaration in {} has no keys", path.display()))
+    })?;
+    let at = lines.get(last + 1).map(|line| line.0).unwrap_or(text.len());
+    Ok(insert_at(text, at, &format!("{}instances: {n}\n", " ".repeat(key_indent))))
+}
+
+/// The key a list item's own `- key: value` line opens, if it opens one.
+fn after_dash_key(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix('-')?.trim_start();
+    let (key, _) = rest.split_once(':')?;
+    Some(key.trim())
+}
+
+/// The document as it should read once one declaration says `instances: n`.
+fn expected_instances(document: &Value, location: AgentLocation, n: u32, path: &Path) -> Result<Value> {
+    let mut expected = document.clone();
+    let root = mapping(&mut expected, "the document", path)?;
+    let scope = root
+        .get_mut(Value::String("scope".into()))
+        .ok_or_else(|| bad(format!("scope config {} has no scope block", path.display())))?;
+    let scope = mapping(scope, "scope", path)?;
+    let declaration = match location {
+        AgentLocation::Singular => scope.get_mut(Value::String("agent".into())),
+        AgentLocation::List(index) => scope
+            .get_mut(Value::String("agents".into()))
+            .and_then(Value::as_sequence_mut)
+            .and_then(|agents| agents.get_mut(index)),
+    }
+    .ok_or_else(|| bad(format!("the declaration in {} changed while it was being edited", path.display())))?;
+    mapping(declaration, "an agent declaration", path)?
+        .insert(Value::String("instances".into()), Value::Number(n.into()));
+    Ok(expected)
+}
+
 /// Replace `path` without ever exposing a truncated or half-written config.
 fn atomic_write(path: &Path, contents: &str) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
@@ -624,9 +845,11 @@ impl Engine {
             _ => None,
         };
         let name = agent.name();
-        if name.contains('/') || name.chars().any(char::is_control) {
+        // `#` is what a standing instance's id carries its number behind
+        // (`scope/name#2`), so a name with one could be taken for another's.
+        if name.contains('/') || name.contains('#') || name.chars().any(char::is_control) {
             return Err(bad(
-                "an agent name cannot contain `/` or control characters",
+                "an agent name cannot contain `/`, `#` or control characters",
             ));
         }
         self.shared.registry.agent(&agent.harness)?;
@@ -671,8 +894,9 @@ impl Engine {
             )));
         }
 
-        append_agent(&mut document, &agent, &path)?;
         from_file.agents.push(agent.clone());
+        refuse_bad_instances(&from_file)?;
+        append_agent(&mut document, &agent, &path)?;
         let serialized = edit_text(&text, &document, &agent, &path)?;
         atomic_write(&path, &serialized)?;
         self.replace_scope(&current.id, from_file);
@@ -724,6 +948,95 @@ impl Engine {
         atomic_write(&path, &serialized)?;
         self.replace_scope(&current.id, from_file);
         Ok((current.name, removed))
+    }
+
+    /// Rewrite one standing declaration's `instances:` in its scope's own
+    /// config and make the new count live (`#329`). `factory agent scale`,
+    /// `POST /api/agents/scale` and the roster's − / + all arrive here through
+    /// `Request::AgentScale`; none of them writes the file itself. The count is
+    /// absolute (`to`) or relative (`by`), resolved against the file under the
+    /// edit lock, and checked exactly as a load would check it, before
+    /// anything is written. An unchanged count writes nothing.
+    ///
+    /// Answers the canonical scope, the count before and the count now. The
+    /// caller lines the sessions up with it afterwards, so a refused edit can
+    /// never start or stop one.
+    pub(crate) fn set_agent_instances(
+        &self,
+        scope_name: &str,
+        name: &str,
+        to: Option<u32>,
+        by: Option<i64>,
+    ) -> Result<(String, u32, u32)> {
+        let _edit = self
+            .shared.configuration_edit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let factory = self.factory_snapshot();
+        let current = factory.scope(scope_name)?.clone();
+        let directory = factory.scope_path(&current.name)?;
+        let path = directory.join(FACTORY_DIR).join(CONFIG_FILE);
+        let (text, document, mut from_file) = read_document(&path)?;
+        if from_file.id != current.id || from_file.name != current.name {
+            return Err(bad(format!(
+                "scope config {} changed identity since startup; restart Factory before editing it",
+                path.display()
+            )));
+        }
+        from_file.path = current.path.clone();
+
+        let (declared, location) = find_agent(&from_file, name).ok_or_else(|| {
+            bad(format!(
+                "scope {:?} has no local agent declaration named {:?} to scale",
+                current.name, name
+            ))
+        })?;
+        if !declared.lifetime.is_standing() {
+            return Err(bad(format!(
+                "{name:?} in {:?} is a task agent; only a standing agent (lifetime: permanent or temporary) keeps instances",
+                current.name
+            )));
+        }
+        let previous = declared.instance_count();
+        let wanted = match (to, by) {
+            (Some(n), None) => i64::from(n),
+            (None, Some(delta)) => i64::from(previous) + delta,
+            _ => return Err(bad("say how many instances: a count, or +n / -n")),
+        };
+        if wanted < 1 {
+            return Err(bad(format!(
+                "{name:?} would be left with {wanted} instances, which would keep nothing up; \
+                 the least is 1, and `factory agent stop` takes one down"
+            )));
+        }
+        let wanted = u32::try_from(wanted).map_err(|_| bad(format!("{wanted} instances is more than anyone means")))?;
+
+        match location {
+            AgentLocation::Singular => {
+                if let Some(AgentRef::Declared { instances, .. }) = &mut from_file.agent {
+                    *instances = Some(wanted);
+                }
+            }
+            AgentLocation::List(index) => from_file.agents[index].instances = Some(wanted),
+        }
+        refuse_bad_instances(&from_file)?;
+        if wanted == previous {
+            return Ok((current.name, previous, wanted));
+        }
+
+        let expected = expected_instances(&document, location, wanted, &path)?;
+        let serialized = set_instances_text(&text, &expected, location, wanted, &path)?;
+        let reread: Value = serde_yaml_ng::from_str(&serialized)
+            .map_err(|error| bad(format!("the edit of {} would not parse: {error}", path.display())))?;
+        if reread != expected {
+            return Err(bad(format!(
+                "could not set instances in {} without changing something else; set `instances: {wanted}` there by hand",
+                path.display()
+            )));
+        }
+        atomic_write(&path, &serialized)?;
+        self.replace_scope(&current.id, from_file);
+        Ok((current.name, previous, wanted))
     }
 }
 
@@ -1246,12 +1559,15 @@ impl Engine {
     /// Every role somebody gave a standing agent, by agent id. Read before a
     /// role edit takes the configuration lock, which is a plain mutex and
     /// cannot be held across the store's await.
+    /// A given role is the declaration's, kept on instance 1's row; the other
+    /// instances only wear it (`#329`), so they are not holders of their own.
     async fn given_roles(&self) -> Result<HashMap<String, Role>> {
         Ok(self
             .l4.store
             .agents()
             .await?
             .into_iter()
+            .filter(|agent| agent.instance == 1)
             .filter_map(|agent| agent.assigned_role.map(|role| (agent.id, role)))
             .collect())
     }

@@ -220,6 +220,7 @@ fn router(engine: Arc<Engine>) -> Router {
             post(agent_configure).delete(agent_delete),
         )
         .route("/api/agents/stop", post(agent_stop))
+        .route("/api/agents/scale", post(agent_scale))
         .route("/api/agents/role", post(agent_role))
         .route("/api/agents/input", post(agent_input))
         .route("/api/agents/output", post(agent_output))
@@ -2207,6 +2208,30 @@ async fn agent_delete(
         Request::AgentDelete {
             scope: body.scope,
             name: body.name,
+        },
+    )
+    .await
+}
+
+/// `{scope, name, instances}` for a count, or `{scope, name, by}` to move it.
+#[derive(serde::Deserialize)]
+struct ScaleAgent {
+    scope: String,
+    name: String,
+    #[serde(default)]
+    instances: Option<u32>,
+    #[serde(default)]
+    by: Option<i64>,
+}
+
+async fn agent_scale(State(engine): State<Arc<Engine>>, Json(body): Json<ScaleAgent>) -> AxumResponse {
+    run(
+        &engine,
+        Request::AgentScale {
+            scope: body.scope,
+            name: body.name,
+            instances: body.instances,
+            by: body.by,
         },
     )
     .await

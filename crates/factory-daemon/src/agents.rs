@@ -8,7 +8,7 @@
 use chrono::Utc;
 use factory_core::adapter::agent::AgentContext;
 use factory_core::adapter::runtime::{RuntimeStatus, Screen, StartRequest};
-use factory_core::agent::{AgentSession, AgentState, Lifetime};
+use factory_core::agent::{AgentSession, AgentState, KeptInstance, KeptUp, Lifetime, ScaleReport};
 use factory_core::role::Role;
 use factory_core::config::ScopeAgent;
 use factory_core::error::{FactoryError, Result};
@@ -121,10 +121,23 @@ fn cut_herdr_name_at_boundary(clean: &str, budget: usize) -> String {
     }
 }
 
-/// A standing agent's herdr name: `factory-{scope}-{name}`, cleaned up and
-/// truncated as `herdr_name` describes.
-fn runtime_name(scope: &str, name: &str) -> String {
-    herdr_name(&format!("factory-{scope}-{name}"), None)
+/// A standing instance's herdr name: `factory-{scope}-{name}`, cleaned up and
+/// truncated as `herdr_name` describes. Instance 1 keeps exactly the name a
+/// standing agent had before it could have more than one, so a session
+/// already running under it is adopted, not duplicated. The others carry their
+/// number behind a `#` (`#329`): no clean name contains one, so `herdr_name`
+/// always hashes them, and instance 2 of `watcher` never comes out named like
+/// instance 1 of an agent called `watcher-2`.
+fn runtime_name(scope: &str, name: &str, instance: u32) -> String {
+    match instance {
+        0 | 1 => herdr_name(&format!("factory-{scope}-{name}"), None),
+        n => herdr_name(&format!("factory-{scope}-{name}#{n}"), None),
+    }
+}
+
+/// Why a scale-down that wanted `instance` gone could not take it.
+fn kept(agent: &AgentSession, why: KeptUp) -> KeptInstance {
+    KeptInstance { id: agent.id.clone(), instance: agent.instance, why }
 }
 
 impl L3Service<'_> {
@@ -157,6 +170,20 @@ impl L3Service<'_> {
             .unwrap_or_else(|| factory.config.daemon.default_runtime.clone())
     }
 
+    /// Every row on file for one declaration, lowest instance first.
+    async fn instances_of(&self, scope: &str, name: &str) -> Result<Vec<AgentSession>> {
+        let mut rows: Vec<AgentSession> = self
+            .state
+            .agents
+            .agents()
+            .await?
+            .into_iter()
+            .filter(|a| a.scope == scope && a.name == name)
+            .collect();
+        rows.sort_by_key(|a| a.instance);
+        Ok(rows)
+    }
+
     /// The session already on file for `(canonical_scope, name)`, migrating
     /// it onto its canonical id first if it is only on file under the id a
     /// scope's pre-migration bare name would have given it -- the same
@@ -167,6 +194,8 @@ impl L3Service<'_> {
     /// Self-healing rather than permanent: once this has run for a session,
     /// `AgentSession::id_for(canonical_scope, name)` is the only id it has,
     /// and every future lookup finds it on the first try.
+    ///
+    /// Instance 1 only: nothing was ever written under an old id with a `#n`.
     async fn existing_agent(&self, canonical_scope: &str, name: &str) -> Result<Option<AgentSession>> {
         let id = AgentSession::id_for(canonical_scope, name);
         if let Some(found) = self.state.agents.get_agent(&id).await? {
@@ -190,9 +219,38 @@ impl L3Service<'_> {
         Ok(Some(legacy))
     }
 
-    /// Bring a declared standing agent up. Idempotent: an agent already live is
-    /// returned as it is rather than started twice.
+    /// Bring a declared standing agent up: every instance its declaration
+    /// wants that is not already live (`#329`). Idempotent: an instance already
+    /// live is left as it is rather than started twice. Answers the lowest
+    /// instance -- instance 1, for every declaration that has one -- and, if an
+    /// instance would not start, the first such error once every other has
+    /// had its chance.
     pub async fn start_agent(&self, scope: &str, name: &str) -> Result<AgentSession> {
+        let factory = self.wiring.snapshot();
+        let scope = factory.scope(scope)?.name.clone();
+        let decl = self.declared(&scope, name)?;
+        let mut first = None;
+        let mut failed = None;
+        for instance in 1..=decl.instance_count() {
+            match self.start_instance(&scope, name, instance).await {
+                Ok(agent) => {
+                    first.get_or_insert(agent);
+                }
+                Err(e) => {
+                    failed.get_or_insert(e);
+                }
+            }
+        }
+        match (failed, first) {
+            (Some(e), _) => Err(e),
+            (None, Some(agent)) => Ok(agent),
+            (None, None) => Err(FactoryError::BadRequest(format!("{name:?} in {scope:?} has no instance to start"))),
+        }
+    }
+
+    /// Bring one instance of a declared standing agent up. Idempotent: an
+    /// instance already live is returned as it is rather than started twice.
+    pub async fn start_instance(&self, scope: &str, name: &str, instance: u32) -> Result<AgentSession> {
         let factory = self.wiring.snapshot();
         // Canonical from here down, whatever the caller typed -- a bare name
         // from before a scope's identity became its path still resolves
@@ -201,6 +259,7 @@ impl L3Service<'_> {
         // expect.
         let scope = factory.scope(scope)?.name.clone();
         let scope = scope.as_str();
+        let instance = instance.max(1);
 
         let decl = self.declared(scope, name)?;
         if !decl.lifetime.is_standing() {
@@ -209,12 +268,26 @@ impl L3Service<'_> {
             )));
         }
 
-        let existing = self.existing_agent(scope, name).await?;
+        let existing = if instance == 1 {
+            self.existing_agent(scope, name).await?
+        } else {
+            self.state.agents.get_agent(&AgentSession::instance_id(scope, name, instance)).await?
+        };
         if let Some(existing) = &existing {
             if existing.state.is_live() && self.agent_alive(existing).await {
                 return Ok(existing.clone());
             }
         }
+        // A role is the declaration's: instance 1 holds it, the others wear it.
+        let assigned_role = if instance == 1 {
+            existing.and_then(|a| a.assigned_role)
+        } else {
+            self.state
+                .agents
+                .get_agent(&AgentSession::id_for(scope, name))
+                .await?
+                .and_then(|a| a.assigned_role)
+        };
 
         let runtime_name_ = self.runtime_for(scope);
         let adapter = self.wiring.registry().agent(&decl.harness)?;
@@ -234,9 +307,10 @@ impl L3Service<'_> {
             &runtime_name_,
             decl.lifetime,
             decl.role.clone(),
-        );
+        )
+        .as_instance(instance);
         // A role somebody gave this agent outlives the session it was given in.
-        agent.assigned_role = existing.and_then(|a| a.assigned_role);
+        agent.assigned_role = assigned_role;
         agent.role = agent.role_with(&decl.role);
         // A fresh token each time it comes up: an old session's token must not
         // still speak for the agent that replaced it.
@@ -292,8 +366,12 @@ impl L3Service<'_> {
             .start(&StartRequest {
                 id: agent.id.clone(),
                 scope: scope.to_string(),
-                name: runtime_name(scope, name),
-                label: name.to_string(),
+                name: runtime_name(scope, name, instance),
+                // The tab says which one it is once there is more than one.
+                label: match instance {
+                    1 => name.to_string(),
+                    n => format!("{name} #{n}"),
+                },
                 cwd,
                 launch,
             })
@@ -330,7 +408,7 @@ impl L3Service<'_> {
 
     /// Stop a standing agent and leave it stopped. Nothing restarts it until
     /// somebody asks, not even a permanent one -- otherwise the button would
-    /// do nothing anybody could see.
+    /// do nothing anybody could see. One instance: the one `id` names.
     pub async fn stop_agent(&self, id: &str) -> Result<AgentSession> {
         let mut agent = self.require_agent(id).await?;
         if let Some(session) = &agent.session {
@@ -362,9 +440,11 @@ impl L3Service<'_> {
     ///
     /// A standing agent, because that is what has a row to remember it in. A
     /// task agent is whatever its scope declares for the length of one run, so
-    /// its role is a question for the config.
+    /// its role is a question for the config. Every instance of it, whichever
+    /// one `id` names: two instances of one declaration are the same agent,
+    /// and must never be told two different things about what they may do.
     pub async fn set_agent_role(&self, id: &str, role: Option<Role>) -> Result<AgentSession> {
-        let mut agent = self.require_agent(id).await?;
+        let agent = self.require_agent(id).await?;
         if let Some(role) = &role {
             // The agent's own scope's roles: one defined in `projects/a` is
             // valid there and does not exist for an agent in `projects/b`.
@@ -379,15 +459,21 @@ impl L3Service<'_> {
             }
         }
         let declared = self.role_of(&agent.scope, &agent.name);
-        agent.assigned_role = role;
-        agent.role = agent.role_with(&declared);
-        agent.last_seen_at = Utc::now();
-        self.state.agents.put_agent(&agent).await?;
-        self.wiring.bus().publish(Event::AgentUpdated {
-            agent: agent.clone(),
-        });
-        tracing::info!(agent = %agent.id, role = %agent.role, "role set");
-        Ok(agent)
+        let mut answer = agent.clone();
+        for mut row in self.instances_of(&agent.scope, &agent.name).await? {
+            row.assigned_role = role.clone();
+            row.role = row.role_with(&declared);
+            row.last_seen_at = Utc::now();
+            self.state.agents.put_agent(&row).await?;
+            self.wiring.bus().publish(Event::AgentUpdated {
+                agent: row.clone(),
+            });
+            if row.id == agent.id {
+                answer = row;
+            }
+        }
+        tracing::info!(agent = %answer.id, role = %answer.role, "role set");
+        Ok(answer)
     }
 
     /// Type at an agent. This is how a person answers the prompt an agent is
@@ -398,6 +484,7 @@ impl L3Service<'_> {
         let session = agent.session.as_ref().ok_or_else(|| {
             FactoryError::BadRequest(format!("{id} has no session to type into"))
         })?;
+        self.state.attention.touch(&agent.id);
         let runtime = self.wiring.registry().runtime(&session.runtime)?;
         if let Some(text) = text.filter(|t| !t.is_empty()) {
             runtime.send_text(session, text).await?;
@@ -414,6 +501,7 @@ impl L3Service<'_> {
         let Some(session) = &agent.session else {
             return Ok(String::new());
         };
+        self.state.attention.touch(&agent.id);
         let runtime = self.wiring.registry().runtime(&session.runtime)?;
         Ok(runtime.read(session, lines).await.unwrap_or_default())
     }
@@ -425,6 +513,7 @@ impl L3Service<'_> {
         let Some(session) = &agent.session else {
             return Ok(None);
         };
+        self.state.attention.touch(&agent.id);
         let runtime = self.wiring.registry().runtime(&session.runtime)?;
         runtime.screen(session).await
     }
@@ -451,9 +540,65 @@ impl L3Service<'_> {
         status != RuntimeStatus::Gone
     }
 
+    /// What, if anything, stopping this instance now would cost somebody: a
+    /// person who has it in front of them, a turn it is in the middle of, a
+    /// question it is waiting on an answer to. L3's own observation only --
+    /// the attention it has seen and the runtime's word on the session. A run
+    /// is L4's and never comes into it: no run is ever given a standing
+    /// agent's session.
+    async fn kept_up_by(&self, agent: &AgentSession) -> Option<KeptUp> {
+        if self.state.attention.attended(&agent.id) {
+            return Some(KeptUp::Attached);
+        }
+        let session = agent.session.as_ref()?;
+        let status = match self.wiring.registry().runtime(&session.runtime) {
+            Ok(rt) => rt.status(session).await.unwrap_or(RuntimeStatus::Unknown),
+            Err(_) => RuntimeStatus::Unknown,
+        };
+        self.observe(&agent.id, &agent.scope, &agent.name, status);
+        match status {
+            RuntimeStatus::Working => Some(KeptUp::Working),
+            RuntimeStatus::Blocked => Some(KeptUp::Blocked),
+            _ => None,
+        }
+    }
+
+    /// Take away an instance its declaration no longer wants, after a
+    /// scale-down -- if nobody would lose anything by it: its session is
+    /// closed and its row goes. One that `kept_up_by` says is still worth
+    /// something stays exactly as it is, except that it is no longer declared
+    /// (so nothing restarts it should it die), and the answer says why; the
+    /// supervisor asks again on every tick, and it goes once it is idle.
+    /// `None` once it is gone.
+    async fn drain(&self, mut agent: AgentSession) -> Option<KeptUp> {
+        if agent.state.is_live() {
+            if let Some(why) = self.kept_up_by(&agent).await {
+                if agent.declared {
+                    agent.declared = false;
+                    let _ = self.state.agents.put_agent(&agent).await;
+                    self.wiring.bus().publish(Event::AgentUpdated { agent: agent.clone() });
+                    tracing::info!(agent = %agent.id, "surplus standing instance left up because {}", why.words());
+                }
+                return Some(why);
+            }
+            if let Some(session) = &agent.session {
+                if let Ok(rt) = self.wiring.registry().runtime(&session.runtime) {
+                    let _ = rt.stop(session).await;
+                }
+            }
+            self.observe(&agent.id, &agent.scope, &agent.name, RuntimeStatus::Gone);
+        }
+        let _ = self.state.agents.delete_agent(&agent.id).await;
+        self.state.attention.forget(&agent.id);
+        self.wiring.bus().publish(Event::AgentRemoved { id: agent.id.clone() });
+        tracing::info!(agent = %agent.id, "surplus standing instance stopped");
+        None
+    }
+
     /// Line up what the config declares with what is actually still running,
     /// after a restart or a config change. Three different things can be true
-    /// and each needs its own answer.
+    /// of each instance a declaration wants, and each needs its own answer;
+    /// an instance above the count it wants is drained.
     pub async fn reconcile_agents(&self) {
         let factory = self.wiring.snapshot();
         let stored = self.state.agents.agents().await.unwrap_or_default();
@@ -461,87 +606,22 @@ impl L3Service<'_> {
 
         for scope in &factory.config.scopes {
             for decl in scope.standing_agents_with(&factory.config.daemon.foreman) {
-                let id = AgentSession::id_for(&scope.name, &decl.name());
-                let legacy_id = AgentSession::legacy_id_for(&scope.name, &decl.name());
-                seen.insert(id.clone());
-                if let Some(lid) = &legacy_id {
-                    seen.insert(lid.clone());
+                let name = decl.name();
+                let wanted = decl.instance_count();
+                for instance in 1..=wanted {
+                    self.reconcile_instance(&scope.name, &decl, instance, &stored, &mut seen).await;
                 }
-
-                // A session found under its canonical id first; failing
-                // that, under the id its scope's pre-migration bare name
-                // would have given it -- rewritten onto the canonical one
-                // before anything below decides what to do with it, so the
-                // "no longer declared" sweep after this loop never sees the
-                // id it used to have and closes a session that just moved
-                // house. `migrated_from` is only set when the row actually
-                // came from the legacy lookup, so the cleanup below never
-                // deletes a row this scope did not just claim.
-                let mut migrated_from: Option<String> = None;
-                let found = stored.iter().find(|a| a.id == id).cloned().or_else(|| {
-                    legacy_id.as_deref().and_then(|lid| {
-                        stored.iter().find(|a| a.id == lid).map(|a| {
-                            tracing::info!(
-                                from = %lid, to = %id,
-                                "migrating a standing agent onto its scope's current identity"
-                            );
-                            migrated_from = Some(lid.to_string());
-                            let mut a = a.clone();
-                            a.id = id.clone();
-                            a.scope = scope.name.clone();
-                            a
-                        })
-                    })
-                });
-
-                match found {
-                    // Still there from before: adopt it rather than opening a
-                    // second session beside the one already running.
-                    Some(existing) if existing.state.is_live() && self.agent_alive(&existing).await => {
-                        let mut a = existing;
-                        a.declared = true;
-                        a.lifetime = decl.lifetime;
-                        a.role = a.role_with(&decl.role);
-                        a.last_seen_at = Utc::now();
-                        let _ = self.state.agents.put_agent(&a).await;
-                        tracing::info!(agent = %id, "adopted a standing agent that outlived the daemon");
-                    }
-                    // Known but not running. Start it if it is meant to start
-                    // itself; a stopped one stays stopped.
-                    Some(existing) => {
-                        let mut a = existing;
-                        a.declared = true;
-                        a.lifetime = decl.lifetime;
-                        a.role = a.role_with(&decl.role);
-                        a.session = None;
-                        if a.state != AgentState::Stopped {
-                            a.state = AgentState::Gone;
-                        }
-                        let _ = self.state.agents.put_agent(&a).await;
-                        if decl.autostart() && a.state != AgentState::Stopped {
-                            self.autostart(&scope.name, &decl.name()).await;
-                        }
-                    }
-                    // Never seen. Record it so the page can show it, and start
-                    // it if it wants starting.
-                    None => {
-                        let a = AgentSession::new(
-                            &scope.name,
-                            &decl.name(),
-                            &decl.harness,
-                            &self.runtime_for(&scope.name),
-                            decl.lifetime,
-                            decl.role.clone(),
-                        );
-                        let _ = self.state.agents.put_agent(&a).await;
-                        if decl.autostart() {
-                            self.autostart(&scope.name, &decl.name()).await;
-                        }
-                    }
-                }
-
-                if let Some(lid) = migrated_from {
-                    let _ = self.state.agents.delete_agent(&lid).await;
+                // Instances above the count: a scale-down made while this
+                // daemon was not running, or a count lowered by hand. Highest
+                // first, as a scale-down takes them.
+                let mut surplus: Vec<&AgentSession> = stored
+                    .iter()
+                    .filter(|a| a.scope == scope.name && a.name == name && a.instance > wanted)
+                    .collect();
+                surplus.sort_by_key(|a| std::cmp::Reverse(a.instance));
+                for extra in surplus {
+                    seen.insert(extra.id.clone());
+                    self.drain(extra.clone()).await;
                 }
             }
         }
@@ -564,10 +644,160 @@ impl L3Service<'_> {
         }
     }
 
-    async fn autostart(&self, scope: &str, name: &str) {
-        if let Err(e) = self.start_agent(scope, name).await {
-            tracing::warn!(scope, name, "could not start standing agent: {e}");
+    /// One instance a declaration wants, lined up with what is on file.
+    async fn reconcile_instance(
+        &self,
+        scope: &str,
+        decl: &ScopeAgent,
+        instance: u32,
+        stored: &[AgentSession],
+        seen: &mut std::collections::BTreeSet<String>,
+    ) {
+        let name = decl.name();
+        let id = AgentSession::instance_id(scope, &name, instance);
+        // Only instance 1 can be on file under the id its scope's
+        // pre-migration bare name would have given it.
+        let legacy_id = (instance == 1).then(|| AgentSession::legacy_id_for(scope, &name)).flatten();
+        seen.insert(id.clone());
+        if let Some(lid) = &legacy_id {
+            seen.insert(lid.clone());
         }
+
+        // A session found under its canonical id first; failing that, under
+        // the id its scope's pre-migration bare name would have given it --
+        // rewritten onto the canonical one before anything below decides what
+        // to do with it, so the "no longer declared" sweep after this never
+        // sees the id it used to have and closes a session that just moved
+        // house. `migrated_from` is only set when the row actually came from
+        // the legacy lookup, so the cleanup below never deletes a row this
+        // scope did not just claim.
+        let mut migrated_from: Option<String> = None;
+        let found = stored.iter().find(|a| a.id == id).cloned().or_else(|| {
+            legacy_id.as_deref().and_then(|lid| {
+                stored.iter().find(|a| a.id == lid).map(|a| {
+                    tracing::info!(
+                        from = %lid, to = %id,
+                        "migrating a standing agent onto its scope's current identity"
+                    );
+                    migrated_from = Some(lid.to_string());
+                    let mut a = a.clone();
+                    a.id = id.clone();
+                    a.scope = scope.to_string();
+                    a
+                })
+            })
+        });
+
+        match found {
+            // Still there from before: adopt it rather than opening a second
+            // session beside the one already running.
+            Some(existing) if existing.state.is_live() && self.agent_alive(&existing).await => {
+                let mut a = existing;
+                a.declared = true;
+                a.lifetime = decl.lifetime;
+                a.role = a.role_with(&decl.role);
+                a.last_seen_at = Utc::now();
+                let _ = self.state.agents.put_agent(&a).await;
+                tracing::info!(agent = %id, "adopted a standing agent that outlived the daemon");
+            }
+            // Known but not running. Start it if it is meant to start itself;
+            // a stopped one stays stopped.
+            Some(existing) => {
+                let mut a = existing;
+                a.declared = true;
+                a.lifetime = decl.lifetime;
+                a.role = a.role_with(&decl.role);
+                a.session = None;
+                if a.state != AgentState::Stopped {
+                    a.state = AgentState::Gone;
+                }
+                let _ = self.state.agents.put_agent(&a).await;
+                if decl.autostart() && a.state != AgentState::Stopped {
+                    self.autostart(scope, &name, instance).await;
+                }
+            }
+            // Never seen. Record it so the page can show it, and start it if
+            // it wants starting.
+            None => {
+                let a = AgentSession::new(
+                    scope,
+                    &name,
+                    &decl.harness,
+                    &self.runtime_for(scope),
+                    decl.lifetime,
+                    decl.role.clone(),
+                )
+                .as_instance(instance);
+                let _ = self.state.agents.put_agent(&a).await;
+                if decl.autostart() {
+                    self.autostart(scope, &name, instance).await;
+                }
+            }
+        }
+
+        if let Some(lid) = migrated_from {
+            let _ = self.state.agents.delete_agent(&lid).await;
+        }
+    }
+
+    async fn autostart(&self, scope: &str, name: &str, instance: u32) {
+        if let Err(e) = self.start_instance(scope, name, instance).await {
+            tracing::warn!(scope, name, instance, "could not start standing agent: {e}");
+        }
+    }
+
+    /// Line one declaration's instances up with the count its config now
+    /// gives it, once `factory agent scale` has written that count (`#329`).
+    ///
+    /// Up: the instances it lacks are recorded, and handed back to be started
+    /// when the agent is up already -- growing something that is running means
+    /// more of it running -- or when it starts itself and nobody has stopped
+    /// it. Down: the instances above the count are drained, highest first;
+    /// one a person would lose something by is left up and named, never
+    /// forced. The router starts what this hands back, in the background, the
+    /// way a newly configured agent is started.
+    pub async fn scale_agent(&self, scope: &str, name: &str, previous: u32) -> Result<(ScaleReport, Vec<u32>)> {
+        let decl = self.declared(scope, name)?;
+        let wanted = decl.instance_count();
+        let rows = self.instances_of(scope, name).await?;
+        let up_already = rows.iter().any(|a| a.state.is_live());
+        let held_down = rows.iter().any(|a| a.state == AgentState::Stopped);
+        let start = up_already || (decl.autostart() && !held_down);
+
+        let mut report = ScaleReport {
+            scope: scope.to_string(),
+            name: name.to_string(),
+            previous,
+            wanted,
+            ..ScaleReport::default()
+        };
+        let mut to_start = Vec::new();
+        for instance in 1..=wanted {
+            if rows.iter().any(|a| a.instance == instance) {
+                continue;
+            }
+            let a = AgentSession::new(scope, name, &decl.harness, &self.runtime_for(scope), decl.lifetime, decl.role.clone())
+                .as_instance(instance);
+            self.state.agents.put_agent(&a).await?;
+            self.wiring.bus().publish(Event::AgentUpdated { agent: a.clone() });
+            if start {
+                report.started.push(a.id.clone());
+                to_start.push(instance);
+            }
+        }
+        for extra in rows.iter().rev().filter(|a| a.instance > wanted) {
+            match self.drain(extra.clone()).await {
+                None => report.stopped.push(extra.id.clone()),
+                Some(why) => report.kept.push(kept(extra, why)),
+            }
+        }
+        report.up = self
+            .instances_of(scope, name)
+            .await?
+            .iter()
+            .filter(|a| a.state.is_live())
+            .count() as u32;
+        Ok((report, to_start))
     }
 
     /// The standing-agent watchdog. Deliberately not the run watchdog: a
@@ -575,6 +805,13 @@ impl L3Service<'_> {
     pub async fn supervise_agents(&self) {
         let agents = self.state.agents.agents().await.unwrap_or_default();
         for agent in agents {
+            let declaration = self.declared(&agent.scope, &agent.name).ok().filter(|d| d.lifetime.is_standing());
+            // Above the count its declaration wants: left up by a scale-down
+            // because it was busy, and taken away once it is not.
+            if declaration.as_ref().is_some_and(|d| agent.instance > d.instance_count()) {
+                self.drain(agent).await;
+                continue;
+            }
             if !agent.declared || agent.state == AgentState::Stopped {
                 continue;
             }
@@ -595,23 +832,14 @@ impl L3Service<'_> {
                 tracing::warn!(agent = %agent.id, "standing agent's session is gone");
             }
 
-            // Gone and permanent means bring it back.
-            if agent.lifetime == Lifetime::Permanent {
-                let declared = self
-                    .declared(&agent.scope, &agent.name)
-                    .ok()
-                    .filter(|d| d.autostart());
-                if declared.is_some() {
-                    tracing::info!(agent = %agent.id, "restarting permanent agent");
-                    self.autostart(&agent.scope, &agent.name).await;
-                }
+            // Gone and permanent means bring it back -- this instance, not
+            // the first.
+            if agent.lifetime == Lifetime::Permanent && declaration.is_some_and(|d| d.autostart()) {
+                tracing::info!(agent = %agent.id, "restarting permanent agent");
+                self.autostart(&agent.scope, &agent.name, agent.instance).await;
             }
         }
     }
-
-
-
-
 }
 
 #[cfg(test)]
@@ -645,17 +873,17 @@ mod tests {
 
     #[test]
     fn runtime_names_obey_herdrs_identifier_contract() {
-        let generated = runtime_name("factory", "Codex-Builder");
+        let generated = runtime_name("factory", "Codex-Builder", 1);
         assert!(is_valid_herdr_name(&generated), "{generated}");
-        assert_eq!(generated, runtime_name("factory", "Codex-Builder"));
+        assert_eq!(generated, runtime_name("factory", "Codex-Builder", 1));
     }
 
     #[test]
     fn normalized_and_truncated_runtime_names_stay_distinct() {
-        assert_ne!(runtime_name("demo", "Builder"), runtime_name("demo", "builder"));
+        assert_ne!(runtime_name("demo", "Builder", 1), runtime_name("demo", "builder", 1));
         assert_ne!(
-            runtime_name("a-very-long-scope-name", "a-very-long-agent-name-one"),
-            runtime_name("a-very-long-scope-name", "a-very-long-agent-name-two")
+            runtime_name("a-very-long-scope-name", "a-very-long-agent-name-one", 1),
+            runtime_name("a-very-long-scope-name", "a-very-long-agent-name-two", 1)
         );
     }
 
@@ -663,7 +891,7 @@ mod tests {
     fn a_clean_name_that_already_fits_is_returned_verbatim() {
         // Unchanged behaviour for the common case -- `factory-demo-watcher`,
         // the exact form the README's attach-command example still uses.
-        assert_eq!(runtime_name("demo", "watcher"), "factory-demo-watcher");
+        assert_eq!(runtime_name("demo", "watcher", 1), "factory-demo-watcher");
     }
 
     #[test]
@@ -672,7 +900,7 @@ mod tests {
         // cut `builder` mid-word. The hash is unchanged (it still hashes the
         // un-normalized original), so this pins the boundary cut without
         // pinning the hash algorithm to a second, redundant assertion.
-        let generated = runtime_name("factory", "Codex Builder");
+        let generated = runtime_name("factory", "Codex Builder", 1);
         assert!(is_valid_herdr_name(&generated), "{generated}");
         assert_eq!(generated, "factory-factory-codex-e63be92f");
         assert!(
