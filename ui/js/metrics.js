@@ -91,9 +91,11 @@ function consumersHtml(consumers) {
 function rowHtml(row) {
   const value = formatValue(row.value, row.unit);
   const asOf = row.asOf ? new Date(row.asOf).toLocaleString() : "";
+  // A refused source already explains itself in the Source column.
+  const why = row.value === null && row.reason && row.reason !== row.source?.reason ? row.reason : "";
   return `<tr>
     <td><strong>${esc(row.title)}</strong><div class="sub"><code>${esc(row.id)}</code></div><div class="sub">${esc([row.unit, betterLabel(row.better)].filter(Boolean).join(" · "))}</div></td>
-    <td><strong>${esc(value)}</strong>${row.value === null && row.reason ? `<div class="sub">${esc(row.reason)}</div>` : ""}</td>
+    <td><strong>${esc(value)}</strong>${why ? `<div class="sub">${esc(why)}</div>` : ""}</td>
     <td>${chip(freshnessClass(row.freshness), freshnessLabel(row.freshness))}${row.maxAge ? ` <span class="sub">max_age ${esc(row.maxAge)}</span>` : ""}${asOf ? `<div class="sub">as of ${esc(asOf)}</div>` : ""}</td>
     <td>${sourceHtml(row.source)}</td>
     <td>${consumersHtml(row.consumers)}</td>
