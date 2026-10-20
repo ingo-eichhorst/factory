@@ -916,7 +916,10 @@ async fn fetch(target: &ServiceTarget) -> std::result::Result<Vec<u8>, String> {
         (false, Some(n)) => n,
         (false, None) => MAX_SOURCE_BYTES + 1,
     };
-    while (body.len() as u64) < bound {
+    // A chunked body is complete at its last chunk, whether or not the
+    // server then closes the connection as `Connection: close` asked.
+    let complete = |body: &[u8]| chunked && body.ends_with(b"\r\n\r\n") && dechunk(body).is_some();
+    while (body.len() as u64) < bound && !complete(&body) {
         let read = stream
             .read(&mut chunk)
             .await
@@ -2153,6 +2156,34 @@ mod tests {
 
         let delimited = format!("HTTP/1.0 200 OK\r\n\r\n{DOC}");
         let (target, _) = serve(Some(delimited.into_bytes())).await;
+        assert_eq!(read_service(&target, QUICK).await.unwrap().metrics.len(), 1);
+    }
+
+    /// A server that ignores `Connection: close` after its last chunk is
+    /// still read to completion, not into the timeout.
+    #[tokio::test]
+    async fn a_chunked_body_is_complete_at_its_last_chunk_even_on_a_connection_left_open() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = [0u8; 1024];
+            let _ = stream.read(&mut head).await;
+            let body = format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{DOC}\r\n0\r\n\r\n",
+                DOC.len()
+            );
+            stream.write_all(body.as_bytes()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        let target = ServiceTarget {
+            service: "fava".to_string(),
+            endpoint: format!("127.0.0.1:{port}"),
+            host: LoopbackHost::V4,
+            port,
+            path: "/metrics".to_string(),
+        };
         assert_eq!(read_service(&target, QUICK).await.unwrap().metrics.len(), 1);
     }
 

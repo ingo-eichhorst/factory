@@ -121,7 +121,9 @@ export function renderMetrics() {
     return;
   }
   if (note) {
-    note.textContent = `Scope ${listed} and everything below it: what its applicable controls, bound quality scenarios${state.scope ? "" : ", key results"} and its own declarations read.`;
+    // Key results are the instance root's own, so only its listing has them.
+    const atRoot = listed === listingScope(null, state.scopes, state.root);
+    note.textContent = `Scope ${listed} and everything below it: what its applicable controls, bound quality scenarios${atRoot ? ", current key results" : ""} and its own declarations read.`;
   }
   const rows = filterRows(shapeRows(answer), query);
   if (count) count.textContent = answer ? countLine(rows) : "";

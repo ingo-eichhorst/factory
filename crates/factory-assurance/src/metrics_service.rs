@@ -237,23 +237,10 @@ pub struct Service<'a, P> {
     // for `shared`/`for_scope`, rather than this crate's two L5 services
     // each carrying their own separate `evidence::Service`.
     pub(crate) evidence: evidence::Service<'a, P>,
-    /// `#333`: how long one service source read may take --
-    /// [`reported::SERVICE_TIMEOUT`] unless a test shortens it.
-    service_timeout: std::time::Duration,
 }
 impl<'a, P: Ports> Service<'a, P> {
     pub fn new(evidence: evidence::Service<'a, P>) -> Self {
-        Self {
-            evidence,
-            service_timeout: reported::SERVICE_TIMEOUT,
-        }
-    }
-
-    /// A shorter service read deadline, so a test of an unanswering service
-    /// does not wait the full [`reported::SERVICE_TIMEOUT`].
-    pub fn with_service_timeout(mut self, timeout: std::time::Duration) -> Self {
-        self.service_timeout = timeout;
-        self
+        Self { evidence }
     }
     pub async fn gather(
         &self,
@@ -426,7 +413,7 @@ impl<'a, P: Ports> Service<'a, P> {
             reported.extend(read);
         }
         if !services.is_empty() {
-            reported.extend(reported::read_services(services, self.service_timeout).await);
+            reported.extend(reported::read_services(services, reported::SERVICE_TIMEOUT).await);
         }
 
         Ok(Gathered {
