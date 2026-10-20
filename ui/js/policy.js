@@ -21,6 +21,7 @@
 import { $, api, esc, state } from "./core.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
 import {
+  applicabilityRows,
   attestBody,
   checkTarget,
   closingLinks,
@@ -118,6 +119,15 @@ function gapRow(row) {
         : `<span class="sub">—</span>`}</div>
       ${remediateHtml(row.control, row.scope, remediateAction(row.status, row.openTask))}
     </td>
+  </tr>`;
+}
+
+function applicabilityRow(row) {
+  return `<tr>
+    <td><div class="title">${esc(row.title)}</div><code class="id">${esc(row.framework)}</code></td>
+    <td class="sub">${esc(row.rule)}</td>
+    <td>${row.covers.length ? row.covers.map(esc).join(", ") : `<span class="sub">no scope here</span>`}</td>
+    <td>${row.excluded.length ? row.excluded.map(esc).join(", ") : `<span class="sub">—</span>`}</td>
   </tr>`;
 }
 
@@ -246,8 +256,12 @@ export function renderPolicy() {
   const naBody = $("policy-na");
   const findingsEl = $("policy-findings");
   const workflowEnforcementEl = $("policy-workflow-enforcement");
+  const applicabilityEl = $("policy-applicability");
+  const applicabilitySection = $("policy-applicability-section");
 
   if (!report) {
+    if (applicabilityEl) applicabilityEl.innerHTML = "";
+    if (applicabilitySection) applicabilitySection.hidden = true;
     if (cardsEl) cardsEl.innerHTML = "";
     if (countEl) countEl.textContent = "";
     if (gapsBody) gapsBody.innerHTML = "";
@@ -265,6 +279,12 @@ export function renderPolicy() {
   if (countEl) countEl.textContent = `${cards.length} framework${cards.length === 1 ? "" : "s"}`;
   if (cardsEl) cardsEl.innerHTML = cards.map(frameworkCard).join("");
   if (emptyEl) emptyEl.hidden = cards.length !== 0;
+
+  // Only once the root restricts a framework (#332): where each applies,
+  // and a framework excluded here -- with no card above -- named anyway.
+  const applicability = applicabilityRows(report);
+  if (applicabilityEl) applicabilityEl.innerHTML = applicability.map(applicabilityRow).join("");
+  if (applicabilitySection) applicabilitySection.hidden = applicability.length === 0;
 
   const gaps = gapRows(report);
   if (gapsBody) {

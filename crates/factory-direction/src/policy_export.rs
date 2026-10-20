@@ -122,9 +122,11 @@ fn control_section(
 
 /// The whole export as markdown: an instance/scope/produced-at header and
 /// the "compliant means evidence complete" sentence ADR 0004 asks every
-/// view of this to carry, then per framework its rollup and, scope by
-/// scope, every control that framework applies to there, then every `n/a`
-/// declaration with its rationale and declaring scope, then every finding.
+/// view of this to carry, then each framework's applicability -- the
+/// layers binding it, the scopes it covers and every subtree the root
+/// excluded -- then per framework its rollup and, scope by scope, every
+/// control that framework applies to there, then every `n/a` declaration
+/// with its rationale and declaring scope, then every finding.
 /// No page text anywhere in it -- every pointer is an id
 /// (`EvidenceRef`/`Attestation.evidence`), never a knowledge page's own
 /// content, exactly the issue's own "no page text, only pointers" rule.
@@ -153,6 +155,21 @@ pub fn export_markdown(export: &PolicyExport) -> String {
         .iter()
         .map(|c| (c.framework.as_str(), c.title.as_str()))
         .collect();
+
+    if !report.applicability.is_empty() {
+        out.push_str("\n## Applicability\n\n");
+        for a in &report.applicability {
+            let title = titles
+                .get(a.framework.as_str())
+                .copied()
+                .unwrap_or(a.framework.as_str());
+            out.push_str(&format!(
+                "- {title} ({}): {}\n",
+                a.framework,
+                a.describe()
+            ));
+        }
+    }
 
     for r in &report.rollup {
         let title = titles
@@ -287,6 +304,7 @@ mod tests {
                 scope: "demo".to_string(),
                 rationale: "we ship no hardware".to_string(),
             }],
+            applicability: vec![],
             findings: vec![Finding {
                 kind: FindingKind::EmptyRationale,
                 subject: "demo".to_string(),

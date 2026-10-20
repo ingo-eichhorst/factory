@@ -264,6 +264,10 @@ pub enum FindingKind {
     /// `#278`: a `metric` check names an id this build knows but cannot
     /// compute yet.
     UnavailableMetric,
+    /// `#332`: the root's `scopes` or `except` for a framework names no
+    /// configured scope. The config still loads and the framework applies
+    /// as if the name were absent -- `policy_intent::applicability_findings`.
+    UnknownScope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

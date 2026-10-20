@@ -153,9 +153,31 @@ impl<'a> Service<'a> {
         let now = chrono::Utc::now();
         let mut applied = Vec::new();
         let mut not_applicable = BTreeSet::new();
+        // Per framework: the layers binding it, the scopes whose chain does,
+        // and the scopes the root's own restriction leaves it out of (#332).
+        let mut coverage: BTreeMap<String, FrameworkApplicability> = BTreeMap::new();
+        findings.extend(self.intent.config.applicability_findings());
         for target in targets {
-            let (subjects, chain_findings) =
-                policy::applicable(&catalogues, &self.intent.config.chain(&target.name));
+            let chain = self.intent.config.chain(&target.name);
+            for layer in &chain {
+                for framework in &layer.frameworks {
+                    let entry = coverage.entry(framework.clone()).or_default();
+                    if !entry.bound_by.contains(&layer.scope) {
+                        entry.bound_by.push(layer.scope.clone());
+                    }
+                }
+            }
+            for framework in policy::frameworks_in_chain(&chain) {
+                coverage.entry(framework).or_default().covers.push(target.name.clone());
+            }
+            for exclusion in self.intent.config.exclusions(target) {
+                coverage
+                    .entry(exclusion.framework)
+                    .or_default()
+                    .excluded
+                    .push(target.name.clone());
+            }
+            let (subjects, chain_findings) = policy::applicable(&catalogues, &chain);
             findings.extend(chain_findings);
             for subject in &subjects {
                 if let Some(na) = &subject.not_applicable {
@@ -237,6 +259,18 @@ impl<'a> Service<'a> {
                 .then(a.detail.cmp(&b.detail))
         });
         findings.dedup();
+        let applicability = coverage
+            .into_iter()
+            .map(|(framework, mut entry)| {
+                if let Some(restriction) = self.intent.config.restriction(&framework) {
+                    entry.restricted_by = Some(self.intent.config.root_name().to_owned());
+                    entry.scopes = restriction.scopes;
+                    entry.except = restriction.except;
+                }
+                entry.framework = framework;
+                entry
+            })
+            .collect();
         Ok(PolicyReport {
             scope: asked.map(|scope| scope.name.clone()),
             rows,
@@ -249,6 +283,7 @@ impl<'a> Service<'a> {
                     rationale,
                 })
                 .collect(),
+            applicability,
             findings,
             workflow_enforcement: Vec::new(),
             workflow_findings: Vec::new(),
@@ -290,9 +325,10 @@ impl<'a> Service<'a> {
         let target = resolve_scope(&self.intent.config.scopes, scope)?;
         let (catalogues, _, tags) = self.intent.catalogues_with_tags(knowledge).await?;
         let (applied, _) = policy::applicable(&catalogues, &self.intent.config.chain(&target.name));
-        let found = applied.iter().find(|subject| subject.control == control).ok_or_else(|| {
-            FactoryError::BadRequest(format!("{control} does not apply at {:?}, or is not a control any loaded catalogue defines", target.name))
-        })?;
+        let found = applied
+            .iter()
+            .find(|subject| subject.control == control)
+            .ok_or_else(|| self.intent.config.not_applying(&control, target))?;
         let ancestors: BTreeSet<_> = scope_ancestors(&self.intent.config.scopes, target)
             .into_iter()
             .map(|scope| scope.name.as_str())

@@ -11,27 +11,37 @@ use factory_kernel::{
     resolve_scope, scope_ancestors, scope_subtree, FactoryError, Facts, KnowledgeTags, Provide,
     Result, ScopeIdentity, ScopeNode, L6,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 /// One authored config declaration, before any catalogue is resolved.
 /// The legacy configuration path re-exports this exact type.
+///
+/// A `frameworks` entry is a name or, at the instance root only (#332),
+/// `{name, scopes?, except?}`. Either way the name lands in `frameworks`, in
+/// the order written, and only a real restriction lands in `applicability`,
+/// so a plain string -- or an object with neither key -- still means the
+/// whole tree. A nested scope's restriction is refused by the configuration
+/// owner, and `into_layer` drops it besides: a child can never exclude.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawDeclaration", into = "RawDeclaration")]
 pub struct PolicyDeclaration {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frameworks: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Where a root-bound framework applies, by framework name. A framework
+    /// absent here applies to the whole tree.
+    pub applicability: BTreeMap<String, Applicability>,
     pub tighten: BTreeMap<policy::ControlRef, policy::Tighten>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_applicable: Vec<policy::NotApplicable>,
 }
 impl PolicyDeclaration {
     pub fn is_empty(&self) -> bool {
-        self.frameworks.is_empty() && self.tighten.is_empty() && self.not_applicable.is_empty()
+        self.frameworks.is_empty()
+            && self.applicability.is_empty()
+            && self.tighten.is_empty()
+            && self.not_applicable.is_empty()
     }
     pub fn into_layer(self, scope: impl Into<String>) -> policy::PolicyLayer {
         policy::PolicyLayer {
@@ -43,42 +53,349 @@ impl PolicyDeclaration {
     }
 }
 
+/// The subtrees one root-bound framework applies to (#332): each scope named
+/// in `scopes` and everything below it -- the whole tree when `scopes` is
+/// absent -- minus each `except` subtree, applied after `scopes`. Names are
+/// configured scope names, never a path or a leaf alias. A name no scope
+/// carries counts as absent and is a finding (`applicability_findings`),
+/// never a load failure: a renamed scope must not stop the daemon.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Applicability {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub except: Vec<String>,
+}
+impl Applicability {
+    fn is_whole_tree(&self) -> bool {
+        self.scopes.is_none() && self.except.is_empty()
+    }
+
+    /// The rule that leaves its framework out at `target` (`None`: the root
+    /// itself), or `None` when the framework applies there.
+    fn excludes<S: ScopeIdentity>(&self, scopes: &[S], target: Option<&S>) -> Option<ExclusionRule> {
+        let known = |names: &[String]| -> Vec<String> {
+            names.iter().filter(|name| named(scopes, name).is_some()).cloned().collect()
+        };
+        let covers = |name: &String| named(scopes, name).is_some_and(|top| within(scopes, target, top));
+        if let Some(limited) = &self.scopes {
+            if !limited.iter().any(covers) {
+                return Some(ExclusionRule::Scopes(known(limited)));
+            }
+        }
+        self.except.iter().find(|name| covers(name)).cloned().map(ExclusionRule::Except)
+    }
+}
+
+/// Why a framework the root binds does not apply at one scope (#332). Only
+/// the root's own layer may restrict where a framework applies, so `layer`
+/// is always the root's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exclusion {
+    pub framework: String,
+    pub layer: String,
+    pub rule: ExclusionRule,
+}
+/// Which half of a root restriction left a scope out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExclusionRule {
+    /// Outside every `scopes` subtree -- the known names it was limited to.
+    Scopes(Vec<String>),
+    /// Inside this `except` subtree.
+    Except(String),
+}
+impl std::fmt::Display for Exclusion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (framework, layer) = (&self.framework, &self.layer);
+        match &self.rule {
+            ExclusionRule::Except(top) => write!(
+                f,
+                "the instance root ({layer:?}) excludes {framework} from the {top:?} subtree (except: [{top}])"
+            ),
+            ExclusionRule::Scopes(limited) => write!(
+                f,
+                "the instance root ({layer:?}) applies {framework} only to {} (scopes: [{}])",
+                if limited.is_empty() {
+                    "no configured scope".to_owned()
+                } else {
+                    format!("the {} subtree(s)", limited.join(", "))
+                },
+                limited.join(", ")
+            ),
+        }
+    }
+}
+
+/// The configured scope a root applicability name means: by its configured
+/// name only. Names are unique across the tree (discovery refuses a
+/// duplicate), so this never has to choose.
+fn named<'a, S: ScopeIdentity>(scopes: &'a [S], name: &str) -> Option<&'a S> {
+    scopes.iter().find(|scope| scope.scope_name() == name)
+}
+
+/// `target` is `top` or below it -- `scope_subtree`'s own membership rule,
+/// by whole path components, never a name prefix. `None` is the root
+/// itself, which only a scope configured at the root's own path covers.
+fn within<S: ScopeIdentity>(scopes: &[S], target: Option<&S>, top: &S) -> bool {
+    match target {
+        Some(target) => {
+            target.scope_name() == top.scope_name()
+                || scope_ancestors(scopes, target)
+                    .iter()
+                    .any(|ancestor| ancestor.scope_path() == top.scope_path())
+        }
+        None => top
+            .scope_path()
+            .components()
+            .all(|component| matches!(component, Component::CurDir)),
+    }
+}
+
+/// Every framework the root binds that its own restriction leaves out at
+/// `target` (`None`: the root itself), with the rule that did -- the one
+/// resolver the chain, the board's coverage and every refusal share.
+pub fn exclusions<S: ScopeIdentity>(
+    root: &PolicyDeclaration,
+    root_name: &str,
+    scopes: &[S],
+    target: Option<&S>,
+) -> Vec<Exclusion> {
+    root.applicability
+        .iter()
+        .filter_map(|(framework, applicability)| {
+            applicability.excludes(scopes, target).map(|rule| Exclusion {
+                framework: framework.clone(),
+                layer: root_name.to_owned(),
+                rule,
+            })
+        })
+        .collect()
+}
+
+/// Each root `scopes`/`except` name no configured scope carries, as a
+/// finding on the root's own layer. The framework applies as if the name
+/// were absent -- which, for a `scopes` list of nothing but unknown names,
+/// is nowhere, and the board says so rather than guessing a whole tree.
+pub fn applicability_findings<S: ScopeIdentity>(
+    root: &PolicyDeclaration,
+    root_name: &str,
+    scopes: &[S],
+) -> Vec<policy::Finding> {
+    let mut findings = Vec::new();
+    for (framework, applicability) in &root.applicability {
+        let written = applicability
+            .scopes
+            .iter()
+            .flatten()
+            .map(|name| ("scopes", name))
+            .chain(applicability.except.iter().map(|name| ("except", name)));
+        for (key, name) in written {
+            if named(scopes, name).is_none() {
+                findings.push(policy::Finding {
+                    kind: policy::FindingKind::UnknownScope,
+                    subject: root_name.to_owned(),
+                    detail: format!(
+                        "{framework}'s `{key}` names {name:?}, which is no configured scope's name; \
+                         {framework} applies as if it were absent"
+                    ),
+                });
+            }
+        }
+    }
+    findings
+}
+
 /// Plain declarations, not a resolved chain or policy/status cache.
 pub trait ScopePolicies: ScopeIdentity {
     fn policy_declaration(&self) -> &PolicyDeclaration;
 }
 
-pub fn root_layer(
-    declaration: &PolicyDeclaration,
-    root_name: Option<&str>,
-    instance_name: &str,
+/// The name the root's own layer carries: its configured scope's, or the
+/// instance's for a root that never opted into being a scope.
+pub fn root_name<'a>(root_name: Option<&'a str>, instance_name: &'a str) -> &'a str {
+    root_name.unwrap_or(instance_name)
+}
+
+/// The root's own layer as it applies under `excluded`: every excluded
+/// framework is gone from it, and so is the root's tightening and `n/a` for
+/// one -- unless a layer `below` binds that framework again, which adding
+/// always may, and then the root's tightening holds there as it would
+/// anywhere the framework applies. Nothing left means no layer at all.
+fn narrowed_root(
+    root: &PolicyDeclaration,
+    root_name: &str,
+    excluded: &[Exclusion],
+    below: &[policy::PolicyLayer],
 ) -> Option<policy::PolicyLayer> {
-    (!declaration.is_empty()).then(|| {
-        declaration
-            .clone()
-            .into_layer(root_name.unwrap_or(instance_name))
-    })
+    let gone: BTreeSet<&str> = excluded.iter().map(|e| e.framework.as_str()).collect();
+    let rebound = |framework: &str| {
+        below
+            .iter()
+            .any(|layer| layer.frameworks.iter().any(|f| f == framework))
+    };
+    let mut layer = root.clone().into_layer(root_name);
+    layer.frameworks.retain(|f| !gone.contains(f.as_str()));
+    layer.tighten.retain(|control, _| {
+        !gone.contains(control.framework.as_str()) || rebound(&control.framework)
+    });
+    layer.not_applicable.retain(|na| {
+        !gone.contains(na.control.framework.as_str()) || rebound(&na.control.framework)
+    });
+    let empty =
+        layer.frameworks.is_empty() && layer.tighten.is_empty() && layer.not_applicable.is_empty();
+    (!empty).then_some(layer)
 }
 
 /// The single policy ancestry algorithm for both configuration compatibility
 /// and the physical service. Names never define ancestry; empty layers add
 /// nothing and discovery's empty root cannot double the root declaration.
+/// The root's layer is narrowed to what applies at `scope` (#332); every
+/// layer below is taken whole, since only the root decides applicability.
 pub fn chain_for_scope<S: ScopePolicies>(
-    root: Option<policy::PolicyLayer>,
+    root: &PolicyDeclaration,
+    root_name: &str,
     scopes: &[S],
     scope: &S,
 ) -> Vec<policy::PolicyLayer> {
-    let mut chain: Vec<_> = root.into_iter().collect();
-    for layer in scope_ancestors(scopes, scope)
+    let below: Vec<_> = scope_ancestors(scopes, scope)
         .into_iter()
         .chain(std::iter::once(scope))
-    {
-        let declaration = layer.policy_declaration();
-        if !declaration.is_empty() {
-            chain.push(declaration.clone().into_layer(layer.scope_name()));
+        .filter(|layer| !layer.policy_declaration().is_empty())
+        .map(|layer| layer.policy_declaration().clone().into_layer(layer.scope_name()))
+        .collect();
+    let excluded = exclusions(root, root_name, scopes, Some(scope));
+    narrowed_root(root, root_name, &excluded, &below)
+        .into_iter()
+        .chain(below)
+        .collect()
+}
+
+/// The chain for a scope that resolves to nothing -- a caller whose scope
+/// has since gone: the root's layer alone, narrowed as it applies at the
+/// root itself, since a vanished scope has no place in the tree to stand.
+pub fn root_chain<S: ScopeIdentity>(
+    root: &PolicyDeclaration,
+    root_name: &str,
+    scopes: &[S],
+) -> Vec<policy::PolicyLayer> {
+    narrowed_root(root, root_name, &exclusions(root, root_name, scopes, None), &[])
+        .into_iter()
+        .collect()
+}
+
+/// The serialized form: `frameworks` entries as written, a name or
+/// `{name, scopes?, except?}`. `deny_unknown_fields`: a typo here --
+/// `framework:` for `frameworks:` -- would otherwise commit the company to
+/// nothing while parsing clean.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDeclaration {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    frameworks: Vec<FrameworkEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    tighten: BTreeMap<policy::ControlRef, policy::Tighten>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    not_applicable: Vec<policy::NotApplicable>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum FrameworkEntry {
+    Name(String),
+    Restricted(RestrictedFramework),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestrictedFramework {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scopes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    except: Vec<String>,
+}
+
+/// By hand rather than `untagged`, so a typo inside the object form
+/// (`exept:`) is refused by name instead of as "matched no variant".
+impl<'de> Deserialize<'de> for FrameworkEntry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct Entry;
+        impl<'de> serde::de::Visitor<'de> for Entry {
+            type Value = FrameworkEntry;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a framework name, or {name, scopes, except}")
+            }
+            fn visit_str<E: serde::de::Error>(self, name: &str) -> std::result::Result<FrameworkEntry, E> {
+                Ok(FrameworkEntry::Name(name.to_owned()))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> std::result::Result<FrameworkEntry, A::Error> {
+                RestrictedFramework::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(FrameworkEntry::Restricted)
+            }
+        }
+        deserializer.deserialize_any(Entry)
+    }
+}
+
+impl TryFrom<RawDeclaration> for PolicyDeclaration {
+    type Error = String;
+    fn try_from(raw: RawDeclaration) -> std::result::Result<Self, String> {
+        let mut frameworks: Vec<String> = Vec::new();
+        let mut applicability = BTreeMap::new();
+        for entry in raw.frameworks {
+            let (name, restriction) = match entry {
+                FrameworkEntry::Name(name) => (name, None),
+                FrameworkEntry::Restricted(entry) => {
+                    let restriction = Applicability {
+                        scopes: entry.scopes,
+                        except: entry.except,
+                    };
+                    (entry.name, (!restriction.is_whole_tree()).then_some(restriction))
+                }
+            };
+            // Two entries for one framework, either restricted, would leave
+            // a person guessing which one decides where it applies.
+            let listed = frameworks.contains(&name);
+            if listed && (restriction.is_some() || applicability.contains_key(&name)) {
+                return Err(format!(
+                    "framework {name:?} is listed more than once, with `scopes` or `except` on one of them; \
+                     give it a single entry"
+                ));
+            }
+            if let Some(restriction) = restriction {
+                applicability.insert(name.clone(), restriction);
+            }
+            frameworks.push(name);
+        }
+        Ok(Self {
+            frameworks,
+            applicability,
+            tighten: raw.tighten,
+            not_applicable: raw.not_applicable,
+        })
+    }
+}
+
+impl From<PolicyDeclaration> for RawDeclaration {
+    fn from(declaration: PolicyDeclaration) -> Self {
+        let mut applicability = declaration.applicability;
+        Self {
+            frameworks: declaration
+                .frameworks
+                .into_iter()
+                .map(|name| match applicability.remove(&name) {
+                    Some(restriction) => FrameworkEntry::Restricted(RestrictedFramework {
+                        name,
+                        scopes: restriction.scopes,
+                        except: restriction.except,
+                    }),
+                    None => FrameworkEntry::Name(name),
+                })
+                .collect(),
+            tighten: declaration.tighten,
+            not_applicable: declaration.not_applicable,
         }
     }
-    chain
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,22 +426,64 @@ pub struct Configuration {
     pub instance_name: String,
 }
 impl Configuration {
-    fn root_layer(&self) -> Option<policy::PolicyLayer> {
-        root_layer(
-            &self.root_policies,
-            self.root_name.as_deref(),
-            &self.instance_name,
-        )
+    pub fn root_name(&self) -> &str {
+        root_name(self.root_name.as_deref(), &self.instance_name)
     }
     pub fn chain_for_scope(&self, scope: &Scope) -> Vec<policy::PolicyLayer> {
-        chain_for_scope(self.root_layer(), &self.scopes, scope)
+        chain_for_scope(&self.root_policies, self.root_name(), &self.scopes, scope)
     }
     /// Name/path/leaf resolution keeps the same first-match and vanished-
     /// scope root fallback as the public configuration compatibility path.
     pub fn chain(&self, name: &str) -> Vec<policy::PolicyLayer> {
         match resolve_scope(&self.scopes, name) {
             Ok(scope) => self.chain_for_scope(scope),
-            Err(_) => self.root_layer().into_iter().collect(),
+            Err(_) => root_chain(&self.root_policies, self.root_name(), &self.scopes),
+        }
+    }
+    /// Every framework the root's own restriction leaves out at `scope`.
+    pub fn exclusions(&self, scope: &Scope) -> Vec<Exclusion> {
+        exclusions(&self.root_policies, self.root_name(), &self.scopes, Some(scope))
+    }
+    /// The root's restriction on `framework` with every unknown name left
+    /// out -- what the Statement of Applicability prints -- or `None` when
+    /// it applies to the whole tree.
+    pub fn restriction(&self, framework: &str) -> Option<Applicability> {
+        let known = |names: &[String]| -> Vec<String> {
+            names
+                .iter()
+                .filter(|name| named(&self.scopes, name).is_some())
+                .cloned()
+                .collect()
+        };
+        self.root_policies
+            .applicability
+            .get(framework)
+            .map(|restriction| Applicability {
+                scopes: restriction.scopes.as_deref().map(known),
+                except: known(&restriction.except),
+            })
+    }
+    pub fn applicability_findings(&self) -> Vec<policy::Finding> {
+        applicability_findings(&self.root_policies, self.root_name(), &self.scopes)
+    }
+    /// The refusal for `control` not applying at `scope`: it names the
+    /// root's exclusion when that is why -- and nothing below binds the
+    /// framework back -- rather than leaving a person to guess.
+    pub fn not_applying(&self, control: &policy::ControlRef, scope: &Scope) -> FactoryError {
+        let bound = policy::frameworks_in_chain(&self.chain_for_scope(scope));
+        match self
+            .exclusions(scope)
+            .into_iter()
+            .find(|e| e.framework == control.framework && !bound.contains(&e.framework))
+        {
+            Some(exclusion) => FactoryError::BadRequest(format!(
+                "{control} does not apply at {:?}: {exclusion}",
+                scope.name
+            )),
+            None => FactoryError::BadRequest(format!(
+                "{control} does not apply at {:?}, or is not a control any loaded catalogue defines",
+                scope.name
+            )),
         }
     }
     pub fn budget_intent(&self, scope: &Scope, config: &budget::PolicyConfig) -> BudgetIntent {

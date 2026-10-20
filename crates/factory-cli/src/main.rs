@@ -3936,9 +3936,11 @@ fn policy_kind_str(kind: policy::Kind) -> &'static str {
 
 /// One line per framework's rollup over the asked scope's subtree, plainly
 /// noting that "compliant" means the evidence is complete, never certified
-/// (ADR 0004); then every open or stale control (the worst status across
-/// every scope it applies to, via the same `policy::worst_across_scopes`
-/// the daemon's own rollup is built from); then every finding.
+/// (ADR 0004); then, once the root restricts any framework (#332), where
+/// each one applies; then every open or stale control (the worst status
+/// across every scope it applies to, via the same
+/// `policy::worst_across_scopes` the daemon's own rollup is built from);
+/// then every finding.
 fn policy_status_text(report: &PolicyReport, framework: Option<&str>) -> String {
     let mut out = String::new();
     let titles: std::collections::BTreeMap<&str, &str> = report
@@ -3978,6 +3980,21 @@ fn policy_status_text(report: &PolicyReport, framework: Option<&str>) -> String 
         }
     }
     out.push_str("\n\"compliant\" means the evidence is complete -- not that anything is certified.\n");
+
+    // Only once the root restricts where a framework applies (#332) is there
+    // anything to say beyond the rollup: then every framework says where it
+    // applies, and one excluded at the asked scope -- absent from the
+    // rollup above -- is named here rather than silently missing.
+    if report.applicability.iter().any(|a| a.restricted_by.is_some()) {
+        out.push_str("\nAPPLICABILITY\n");
+        for a in report
+            .applicability
+            .iter()
+            .filter(|a| framework.is_none_or(|f| a.framework == f))
+        {
+            out.push_str(&format!("  {:<12} {}\n", a.framework, a.describe()));
+        }
+    }
 
     let per_scope: Vec<Vec<factory_core::policy::ControlStatus>> =
         report.rows.iter().map(|r| r.statuses.clone()).collect();
