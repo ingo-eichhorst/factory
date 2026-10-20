@@ -111,6 +111,18 @@ pub trait TaskStore: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// What every standing session was last seen doing before `at`: the
+    /// newest change of each subject that is not a run's (`run:<id>`), oldest
+    /// first. The state a window opened in for an agent that has not changed
+    /// since -- a standing agent is quiet by design, and the last row that
+    /// says it is up may be days old (#331).
+    async fn standing_status_before(
+        &self,
+        _at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<StatusChange>> {
+        Ok(Vec::new())
+    }
+
     /// The oldest change on record. Marks where the chart may start claiming
     /// that a quiet agent was idle rather than unobserved.
     async fn status_origin(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>> {

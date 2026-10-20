@@ -615,7 +615,7 @@ impl L3Service<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! A live herdr subscription cannot be asserted here, so these exercise
     //! `on_runtime_event` and `watch_runtimes` against a stub runtime that
     //! pushes events on demand -- the daemon-side half of this issue. The
@@ -987,7 +987,7 @@ mod tests {
 
     /// A runtime that pushes, standing in for herdr: `watch()` hands back a
     /// channel and stores the sending half so the test can push through it.
-    struct StubRuntime {
+    pub(crate) struct StubRuntime {
         tx: std::sync::Mutex<Option<mpsc::Sender<RuntimeEvent>>>,
         starts: std::sync::Mutex<Vec<StartRequest>>,
         stops: std::sync::Mutex<Vec<SessionRef>>,
@@ -1042,7 +1042,7 @@ mod tests {
         }
     }
 
-    fn recording_engine(scope_yaml: &str) -> (Arc<Engine>, Arc<StubRuntime>, PathBuf) {
+    pub(crate) fn recording_engine(scope_yaml: &str) -> (Arc<Engine>, Arc<StubRuntime>, PathBuf) {
         let root =
             std::env::temp_dir().join(format!("factory-agent-args-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
