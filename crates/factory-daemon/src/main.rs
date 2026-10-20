@@ -53,6 +53,7 @@ mod host_power;
 mod intake;
 mod interfaces;
 mod metrics;
+mod metrics_page;
 mod occupancy;
 mod occupancy_page;
 mod openshell;

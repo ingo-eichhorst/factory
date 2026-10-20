@@ -25,6 +25,7 @@ pub mod harness;
 pub mod intake;
 pub mod knowledge;
 pub mod metrics;
+pub mod metrics_catalogue;
 pub mod occupancy;
 pub mod openshell;
 pub mod operations;
