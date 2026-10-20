@@ -193,12 +193,15 @@ enum Command {
     /// Every named metric, computed fresh off data Factory already records
     /// -- the shared vocabulary the L6 Goals tab's key results (and, later,
     /// Scenarios) read from. With no ids, every non-parameterised metric
-    /// plus whatever the loaded goals and policy catalogues imply.
+    /// plus whatever the loaded goals and policy catalogues imply; with no
+    /// ids and `--scope`, the L5 Metrics tab's listing (#333): what that
+    /// subtree is measured by, each with its source and its consumers.
     Metrics {
         /// e.g. `throughput_week`, `compliance.cra`, `bench.resolve_rate.eval-set-a`.
         ids: Vec<String>,
         /// Only this scope and its descendants (instance-wide metrics say so
-        /// in their registry definition and ignore this selection).
+        /// in their registry definition and ignore this selection). With no
+        /// ids, list only the metrics this subtree is measured by.
         #[arg(long)]
         scope: Option<String>,
         /// Override run-backed metric intervals: day, 14d, or 90d.
@@ -8459,6 +8462,36 @@ mod tests {
             _ => panic!("summary"),
         }
         assert!(Cli::try_parse_from(["factory", "stats", "--window", "9d"]).is_err());
+    }
+
+    /// `#333`: the scoped listing names each metric's value, freshness,
+    /// source and every consumer's verdict.
+    #[test]
+    fn the_metrics_listing_names_value_source_and_each_consumers_verdict() {
+        let answer: factory_core::protocol::Payload = serde_json::from_value(serde_json::json!({
+            "kind": "metrics",
+            "values": [{ "id": "reported.finance.bookings_without_beleg", "value": 2.0, "as_of": "2026-10-20T09:00:00Z", "reason": null }],
+            "series": [],
+            "registry": [],
+            "rows": [{
+                "id": "reported.finance.bookings_without_beleg",
+                "source": { "kind": "service", "source": "finance", "scope": "finance", "service": "fava",
+                            "endpoint": "127.0.0.1:8793", "path": "/metrics", "url": "http://127.0.0.1:8793/metrics" },
+                "freshness": "fresh",
+                "max_age": "1w",
+                "consumers": [{ "kind": "policy", "id": "gobd/belegprinzip", "scope": "finance", "status": "not_met", "below": 0.0 }]
+            }]
+        }))
+        .unwrap();
+        let factory_core::protocol::Payload::Metrics { values, registry, rows, findings, .. } = answer else {
+            panic!("metrics payload")
+        };
+        let text = metrics_listing_text(&values, &registry, &rows, &findings);
+        assert!(text.contains("reported.finance.bookings_without_beleg"), "{text}");
+        assert!(text.contains("2.0000"), "{text}");
+        assert!(text.contains("fresh, max_age 1w"), "{text}");
+        assert!(text.contains("service fava at http://127.0.0.1:8793/metrics (scope finance)"), "{text}");
+        assert!(text.contains("used by  control gobd/belegprinzip @ finance: not met"), "{text}");
     }
 
     #[test]
