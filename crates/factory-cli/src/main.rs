@@ -7362,6 +7362,19 @@ mod tests {
     }
 
     #[test]
+    fn a_scale_count_is_absolute_or_a_signed_change() {
+        assert_eq!(scale_count("3").unwrap(), (Some(3), None));
+        assert_eq!(scale_count("+1").unwrap(), (None, Some(1)));
+        assert_eq!(scale_count("-2").unwrap(), (None, Some(-2)));
+        assert!(scale_count("three").unwrap_err().to_string().contains("+1"));
+        assert!(scale_count("+").is_err());
+        // `-1` is the count, not a flag.
+        let cli = Cli::try_parse_from(["factory", "agent", "scale", "root", "claude", "-1"]).unwrap();
+        assert!(matches!(cli.command, Command::Agent(AgentCmd::Scale { ref instances, .. }) if instances == "-1"));
+    }
+
+
+    #[test]
     fn release_recording_accepts_an_explicit_producing_run_scope_and_comparison() {
         let parsed = Cli::try_parse_from(["factory", "release", "add", "--scope", "demo", "--commit", "sha",
             "--build-run", "build-id", "--build-scope", "source", "--compare-to", "base-sha"]).unwrap();

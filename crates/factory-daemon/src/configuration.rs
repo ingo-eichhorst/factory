@@ -659,7 +659,17 @@ fn set_instances_text(
         .position(|(_, _, line)| indentation(line) == Some(child_indent) && key_rest(line, key).is_some())
         .map(|index| index + scope_index + 1)
         .ok_or_else(|| bad(format!("scope.{key} is missing from {}", path.display())))?;
-    let value_end = block_end(&lines, key_index, scope_end, child_indent);
+    // A list may sit at its key's own indent (`agents:` then `- name: x`
+    // straight below it); those lines are still the list's.
+    let value_end = (key_index + 1..scope_end)
+        .find(|index| {
+            let line = lines[*index].2;
+            is_content(line)
+                && indentation(line).is_some_and(|at| {
+                    at < child_indent || (at == child_indent && !line.trim_start().starts_with('-'))
+                })
+        })
+        .unwrap_or(scope_end);
     let key_value = scope_value
         .as_mapping()
         .and_then(|scope| scope.get(Value::String(key.into())))
@@ -2153,6 +2163,96 @@ mod tests {
         let parsed: ScopeFile = serde_yaml_ng::from_str(&text).unwrap();
         assert!(parsed.scope.agent.is_none());
         assert!(text.contains("runtime: herdr"));
+    }
+
+    fn file_text(scratch: &Scratch) -> String {
+        fs::read_to_string(scratch.0.join(FACTORY_DIR).join(CONFIG_FILE)).unwrap()
+    }
+
+    /// `#329`: a scale changes the one `instances:` line, or adds it, and
+    /// leaves every other byte a person wrote where it was.
+    #[test]
+    fn scaling_writes_one_line_and_leaves_comments_and_siblings_alone() {
+        let before = "version: 1\n# owned by a person\nscope:\n  id: scope-id\n  name: demo\n  agents:\n    # the one we talk to\n    - name: claude\n      harness: claude-code\n      lifetime: permanent   # keep it up\n      max_sessions: 5\n\n    - name: other\n      harness: pi\n      lifetime: temporary\n  runtime: herdr\n";
+        let scratch = Scratch::new("scale-list", before);
+        let engine = engine(&scratch);
+
+        assert_eq!(engine.set_agent_instances("demo", "claude", Some(3), None).unwrap(), ("demo".into(), 1, 3));
+        assert_eq!(file_text(&scratch), before.replace("      max_sessions: 5\n\n", "      max_sessions: 5\n      instances: 3\n\n"));
+        assert_eq!(engine.factory_snapshot().scope("demo").unwrap().declared_agents()[0].instances, Some(3), "live");
+
+        // The line that is there now is changed in place, comment and all.
+        let with_comment = file_text(&scratch).replace("      instances: 3\n", "      instances: 3  # three of them\n");
+        fs::write(scratch.0.join(FACTORY_DIR).join(CONFIG_FILE), &with_comment).unwrap();
+        assert_eq!(engine.set_agent_instances("demo", "claude", None, Some(-1)).unwrap(), ("demo".into(), 3, 2));
+        assert_eq!(file_text(&scratch), with_comment.replace("instances: 3  # three of them", "instances: 2 # three of them"));
+
+        // The last item of the list, which runs into the next scope key.
+        engine.set_agent_instances("demo", "other", Some(2), None).unwrap();
+        assert!(file_text(&scratch).ends_with("      lifetime: temporary\n      instances: 2\n  runtime: herdr\n"), "{}", file_text(&scratch));
+    }
+
+    #[test]
+    fn scaling_reaches_every_spelling_of_a_declaration() {
+        for (tag, yaml) in [
+            ("singular", "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agent:\n    name: claude\n    harness: claude-code\n    lifetime: permanent\n  runtime: herdr\n"),
+            ("first-key", "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents:\n  - instances: 1\n    name: claude\n    harness: claude-code\n    lifetime: permanent\n"),
+            ("flow-item", "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents:\n    - { name: claude, harness: claude-code, lifetime: permanent }\n    - name: other\n      harness: pi\n"),
+            ("inline-list", "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents: [{ name: claude, harness: claude-code, lifetime: permanent }]\n  runtime: herdr\n"),
+            ("flow-scope", "version: 1\nscope: { id: scope-id, name: demo, agents: [{ name: claude, harness: claude-code, lifetime: permanent }] }\n"),
+        ] {
+            let scratch = Scratch::new(&format!("scale-{tag}"), yaml);
+            let engine = engine(&scratch);
+            engine.set_agent_instances("demo", "claude", Some(2), None).unwrap_or_else(|e| panic!("{tag}: {e}"));
+            let text = file_text(&scratch);
+            let parsed: ScopeFile = serde_yaml_ng::from_str(&text).unwrap();
+            let declared = parsed.scope.declared_agents();
+            let claude = declared.iter().find(|a| a.name() == "claude").unwrap();
+            assert_eq!(claude.instances, Some(2), "{tag}: {text}");
+            assert_eq!(claude.lifetime, Lifetime::Permanent, "{tag}");
+            if tag == "flow-item" {
+                assert!(text.ends_with("    - name: other\n      harness: pi\n"), "the sibling is untouched: {text}");
+            }
+            if tag == "singular" {
+                assert!(text.contains("    lifetime: permanent\n    instances: 2\n  runtime: herdr\n"), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_scale_leaves_the_file_byte_for_byte_unchanged() {
+        let yaml = "version: 1\nscope:\n  id: scope-id\n  name: demo\n  max_sessions: 2\n  agents:\n    - name: claude\n      harness: claude-code\n      lifetime: permanent\n    - name: reviewer\n      harness: pi\n";
+        let scratch = Scratch::new("scale-refused", yaml);
+        let engine = engine(&scratch);
+        for (name, to, by, words) in [
+            ("claude", Some(3), None, "the scope's max_sessions is 2"),
+            ("claude", Some(0), None, "keep nothing up"),
+            ("claude", None, None, "say how many"),
+            ("reviewer", Some(2), None, "task agent"),
+            ("foreman", Some(2), None, "no local agent declaration"),
+        ] {
+            let e = engine.set_agent_instances("demo", name, to, by).unwrap_err().to_string();
+            assert!(e.contains(words), "{name}: {e}");
+        }
+        assert_eq!(file_text(&scratch), yaml);
+    }
+
+    #[test]
+    fn a_new_declaration_is_checked_for_instances_and_a_hash_in_its_name() {
+        let scratch = Scratch::new("configure-instances", "version: 1\nscope:\n  id: scope-id\n  name: demo\n");
+        let engine = engine(&scratch);
+        let mut too_many = agent("claude");
+        too_many.max_sessions = Some(1);
+        too_many.instances = Some(2);
+        let e = engine.configure_agent("demo", too_many).unwrap_err().to_string();
+        assert!(e.contains("instances: 2 but max_sessions: 1"), "{e}");
+        let e = engine.configure_agent("demo", agent("claude#2")).unwrap_err().to_string();
+        assert!(e.contains('#'), "{e}");
+        assert_eq!(file_text(&scratch), "version: 1\nscope:\n  id: scope-id\n  name: demo\n");
+        let mut two = agent("claude");
+        two.instances = Some(2);
+        engine.configure_agent("demo", two).unwrap();
+        assert!(file_text(&scratch).contains("instances: 2"), "{}", file_text(&scratch));
     }
 
     #[test]

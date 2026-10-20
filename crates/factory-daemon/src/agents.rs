@@ -1219,6 +1219,8 @@ mod tests {
         tx: std::sync::Mutex<Option<mpsc::Sender<RuntimeEvent>>>,
         starts: std::sync::Mutex<Vec<StartRequest>>,
         stops: std::sync::Mutex<Vec<SessionRef>>,
+        /// What `status` answers per session handle; `Unknown` otherwise.
+        statuses: std::sync::Mutex<std::collections::HashMap<String, RuntimeStatus>>,
     }
 
     impl StubRuntime {
@@ -1227,7 +1229,25 @@ mod tests {
                 tx: std::sync::Mutex::new(None),
                 starts: std::sync::Mutex::new(Vec::new()),
                 stops: std::sync::Mutex::new(Vec::new()),
+                statuses: std::sync::Mutex::new(Default::default()),
             }
+        }
+
+        /// The handle `start` gives the session it opens for `id`.
+        fn handle(id: &str) -> String {
+            format!("stub-{id}")
+        }
+
+        fn set_status(&self, id: &str, status: RuntimeStatus) {
+            self.statuses.lock().unwrap().insert(Self::handle(id), status);
+        }
+
+        fn started_ids(&self) -> Vec<String> {
+            self.starts.lock().unwrap().iter().map(|s| s.id.clone()).collect()
+        }
+
+        fn stopped_handles(&self) -> Vec<String> {
+            self.stops.lock().unwrap().iter().map(|s| s.handle.clone()).collect()
         }
     }
 
@@ -1240,15 +1260,15 @@ mod tests {
             self.starts.lock().unwrap().push(req.clone());
             Ok(SessionRef {
                 runtime: "stub".into(),
-                handle: format!("stub-{}", req.id),
+                handle: Self::handle(&req.id),
                 meta: Default::default(),
             })
         }
         async fn submit(&self, _session: &SessionRef, _text: &str) -> Result<()> {
             Ok(())
         }
-        async fn status(&self, _session: &SessionRef) -> Result<RuntimeStatus> {
-            Ok(RuntimeStatus::Unknown)
+        async fn status(&self, session: &SessionRef) -> Result<RuntimeStatus> {
+            Ok(self.statuses.lock().unwrap().get(&session.handle).copied().unwrap_or(RuntimeStatus::Unknown))
         }
         async fn send_text(&self, _session: &SessionRef, _text: &str) -> Result<()> {
             Ok(())
@@ -1274,6 +1294,19 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("factory-agent-args-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
+        let stub = Arc::new(StubRuntime::new());
+        let engine = recording_engine_over(scope_yaml, &root, stub.clone(), Arc::new(SqliteStore::in_memory().unwrap()));
+        (engine, stub, root)
+    }
+
+    /// The same engine over a store and a runtime that outlive it: a second
+    /// one built over both is a daemon restarted under sessions still running.
+    fn recording_engine_over(
+        scope_yaml: &str,
+        root: &std::path::Path,
+        stub: Arc<StubRuntime>,
+        store: Arc<SqliteStore>,
+    ) -> Arc<Engine> {
         let config = Config {
             version: 1,
             instance: Instance {
@@ -1313,19 +1346,297 @@ mod tests {
             ),
             "test",
         );
-        let stub = Arc::new(StubRuntime::new());
-        registry.add_runtime(stub.clone(), "test");
-        let engine = Arc::new(Engine::new(
+        registry.add_runtime(stub, "test");
+        Arc::new(Engine::new(
             Factory {
-                root: root.clone(),
+                root: root.to_path_buf(),
                 config,
             },
             registry,
-            Arc::new(SqliteStore::in_memory().unwrap()),
+            store,
             PathBuf::from("factory"),
             vec![],
-        ));
+        ))
+    }
+
+    /// A `demo` scope whose config is on disk as well as in the snapshot, so
+    /// a scale has a file to write: `agents` is its `agents:` list, written
+    /// the way a person would, two spaces in.
+    fn scaled_engine(agents: &str) -> (Arc<Engine>, Arc<StubRuntime>, PathBuf) {
+        let (engine, stub, root) =
+            recording_engine(&format!("id: scope-id\nname: demo\npath: .\nruntime: stub\nagents:\n{agents}"));
+        let indented: String = agents.lines().map(|line| format!("  {line}\n")).collect();
+        std::fs::create_dir_all(root.join(factory_core::config::FACTORY_DIR)).unwrap();
+        std::fs::write(
+            config_file(&root),
+            format!("version: 1\nscope:\n  id: scope-id\n  name: demo\n  runtime: stub\n  agents:\n{indented}"),
+        )
+        .unwrap();
         (engine, stub, root)
+    }
+
+    fn config_file(root: &std::path::Path) -> PathBuf {
+        root.join(factory_core::config::FACTORY_DIR).join(factory_core::config::CONFIG_FILE)
+    }
+
+    const THREE_WATCHERS: &str =
+        "  - name: watcher\n    harness: configured\n    lifetime: permanent\n    max_sessions: 5\n    instances: 3\n";
+
+    async fn scale(engine: &Arc<Engine>, instances: Option<u32>, by: Option<i64>) -> std::result::Result<ScaleReport, String> {
+        match engine
+            .handle_request(Request::AgentScale { scope: "demo".into(), name: "watcher".into(), instances, by })
+            .await
+        {
+            Response::Ok { data: Payload::Scaled { scale } } => Ok(scale),
+            Response::Error { message, .. } => Err(message),
+            other => panic!("unexpected answer {other:?}"),
+        }
+    }
+
+    /// A scale-up starts its new instances in the background; wait for them.
+    async fn started(stub: &StubRuntime, count: usize) -> Vec<String> {
+        for _ in 0..300 {
+            if stub.starts.lock().unwrap().len() >= count {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        stub.started_ids()
+    }
+
+    async fn rows(engine: &Engine) -> Vec<String> {
+        let mut ids: Vec<String> = engine.l3.agents.agents().await.unwrap().into_iter().map(|a| a.id).collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn instance_one_keeps_its_herdr_name_and_the_others_never_collide_with_a_declared_name() {
+        assert_eq!(runtime_name("demo", "watcher", 1), "factory-demo-watcher");
+        let second = runtime_name("demo", "watcher", 2);
+        assert!(is_valid_herdr_name(&second), "{second}");
+        assert!(second.starts_with("factory-demo-watcher-2-"), "readable, and carries its number: {second}");
+        assert_ne!(second, runtime_name("demo", "watcher-2", 1), "never an agent called watcher-2");
+        assert_ne!(second, runtime_name("demo", "watcher", 3));
+        assert_eq!(second, runtime_name("demo", "watcher", 2), "stable, so a restart adopts it");
+        let long = runtime_name("factory", "business-factory-claude", 2);
+        assert!(is_valid_herdr_name(&long), "{long}");
+        assert_ne!(long, runtime_name("factory", "business-factory-claude", 1));
+    }
+
+    #[tokio::test]
+    async fn instances_three_brings_up_three_standing_sessions_and_a_restart_adopts_all_of_them() {
+        let root = std::env::temp_dir().join(format!("factory-agent-instances-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let yaml = format!("name: demo\npath: .\nruntime: stub\nagents:\n{THREE_WATCHERS}");
+        let stub = Arc::new(StubRuntime::new());
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = recording_engine_over(&yaml, &root, stub.clone(), store.clone());
+
+        engine.l3_service().reconcile_agents().await;
+
+        let starts = stub.starts.lock().unwrap().clone();
+        let ids: Vec<&str> = starts.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["demo/watcher", "demo/watcher#2", "demo/watcher#3"]);
+        let labels: Vec<&str> = starts.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, ["watcher", "watcher #2", "watcher #3"]);
+        let names: std::collections::BTreeSet<&str> = starts.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names.len(), 3, "three herdr names: {names:?}");
+        assert_eq!(starts[0].name, "factory-demo-watcher", "instance 1 is named as before");
+
+        // `factory agents`: one row, three instances, each its own id and state.
+        let Response::Ok { data: Payload::Scopes { scopes, .. } } = engine.handle_request(Request::Agents).await else {
+            panic!("the roster");
+        };
+        let watcher = scopes[0].agents.iter().find(|a| a.name == "watcher").unwrap();
+        assert_eq!(watcher.wanted, Some(3));
+        assert_eq!(watcher.id.as_deref(), Some("demo/watcher"), "the row itself is instance 1's");
+        let listed: Vec<(&str, &str)> = watcher.instances.iter().map(|i| (i.id.as_str(), i.state.as_str())).collect();
+        assert_eq!(listed, [("demo/watcher", "ready"), ("demo/watcher#2", "ready"), ("demo/watcher#3", "ready")]);
+
+        // The daemon restarts: a new engine over the same rows and the same
+        // sessions adopts every one rather than starting a duplicate.
+        drop(engine);
+        let restarted = recording_engine_over(&yaml, &root, stub.clone(), store);
+        restarted.l3_service().reconcile_agents().await;
+        assert_eq!(stub.starts.lock().unwrap().len(), 3, "nothing started twice");
+        assert_eq!(rows(&restarted).await, ["demo/watcher", "demo/watcher#2", "demo/watcher#3"]);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_single_instance_declaration_is_unchanged_in_id_name_and_roster() {
+        let (engine, stub, root) = recording_engine(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: watcher\n    harness: configured\n    lifetime: permanent\n",
+        );
+        engine.l3_service().reconcile_agents().await;
+        let starts = stub.starts.lock().unwrap().clone();
+        assert_eq!(starts.len(), 1);
+        assert_eq!((starts[0].id.as_str(), starts[0].name.as_str()), ("demo/watcher", "factory-demo-watcher"));
+        let row = engine.l3.agents.get_agent("demo/watcher").await.unwrap().unwrap();
+        assert_eq!(row.instance, 1);
+        assert!(serde_json::to_value(&row).unwrap().get("instance").is_none(), "written exactly as before");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn every_live_instance_spends_a_slot_of_max_sessions() {
+        let (engine, _stub, root) =
+            recording_engine(&format!("name: demo\npath: .\nruntime: stub\nagents:\n{THREE_WATCHERS}"));
+        engine.l3_service().reconcile_agents().await;
+        let cap = engine.l4_service().capacity_for("demo", "watcher", Some(5)).await.unwrap();
+        assert_eq!((cap.in_use, cap.scope_in_use), (3, 3), "three standing instances, three slots");
+        assert!(!cap.held(), "two left for runs");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn scaling_up_writes_the_count_and_starts_the_new_instances() {
+        let (engine, stub, root) = scaled_engine(
+            "  - name: watcher   # the one we talk to\n    harness: configured\n    lifetime: permanent\n    max_sessions: 5\n",
+        );
+        engine.l3_service().reconcile_agents().await;
+        assert_eq!(stub.started_ids(), ["demo/watcher"]);
+
+        let report = scale(&engine, Some(3), None).await.unwrap();
+        assert_eq!((report.previous, report.wanted), (1, 3));
+        assert_eq!(report.started, ["demo/watcher#2", "demo/watcher#3"]);
+        assert!(report.stopped.is_empty() && report.kept.is_empty());
+        assert_eq!(started(&stub, 3).await, ["demo/watcher", "demo/watcher#2", "demo/watcher#3"]);
+
+        // Persisted where the YAML is the source of truth, comment and all,
+        // and live in the snapshot without a restart.
+        let text = std::fs::read_to_string(config_file(&root)).unwrap();
+        assert!(text.contains("  - name: watcher   # the one we talk to\n"), "{text}");
+        assert!(text.contains("      max_sessions: 5\n      instances: 3\n"), "{text}");
+        let live = engine.factory_snapshot();
+        assert_eq!(live.scope("demo").unwrap().declared_agents()[0].instances, Some(3));
+
+        // Relative, from the count the file now has.
+        let report = scale(&engine, None, Some(1)).await.unwrap();
+        assert_eq!((report.previous, report.wanted), (3, 4));
+        assert_eq!(started(&stub, 4).await.len(), 4);
+        assert!(std::fs::read_to_string(config_file(&root)).unwrap().contains("instances: 4\n"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn scaling_down_never_stops_a_busy_or_attended_instance_and_drains_it_once_idle() {
+        let (engine, stub, root) = scaled_engine(THREE_WATCHERS);
+        engine.l3_service().reconcile_agents().await;
+        // #3 is in the middle of a turn; a person has #2's terminal open.
+        stub.set_status("demo/watcher#3", RuntimeStatus::Working);
+        engine.l3_service().agent_screen("demo/watcher#2").await.unwrap();
+
+        let report = scale(&engine, Some(1), None).await.unwrap();
+        assert_eq!((report.previous, report.wanted, report.up), (3, 1, 3));
+        assert!(report.stopped.is_empty(), "{report:?}");
+        let kept: Vec<(&str, KeptUp)> = report.kept.iter().map(|k| (k.id.as_str(), k.why)).collect();
+        assert_eq!(kept, [("demo/watcher#3", KeptUp::Working), ("demo/watcher#2", KeptUp::Attached)]);
+        assert!(report.summary().contains("demo/watcher#3 left up because it is working"), "{}", report.summary());
+        assert!(stub.stopped_handles().is_empty(), "nothing was forced down");
+        assert!(std::fs::read_to_string(config_file(&root)).unwrap().contains("instances: 1\n"));
+
+        // #3 finishes its turn: the next supervision tick takes it. #2 is
+        // still in front of somebody, so it stays.
+        stub.set_status("demo/watcher#3", RuntimeStatus::Idle);
+        engine.l3_service().supervise_agents().await;
+        assert_eq!(stub.stopped_handles(), [StubRuntime::handle("demo/watcher#3")]);
+        assert_eq!(rows(&engine).await, ["demo/watcher", "demo/watcher#2"]);
+        // A surplus instance that dies is not brought back.
+        assert_eq!(stub.starts.lock().unwrap().len(), 3);
+
+        // The terminal is closed: #2 goes too, and #1 is left alone.
+        engine.l3.attention.forget("demo/watcher#2");
+        engine.l3_service().supervise_agents().await;
+        assert_eq!(rows(&engine).await, ["demo/watcher"]);
+        assert_eq!(stub.stopped_handles().len(), 2);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn scaling_down_idle_instances_stops_the_highest_first() {
+        let (engine, stub, root) = scaled_engine(THREE_WATCHERS);
+        engine.l3_service().reconcile_agents().await;
+        let report = scale(&engine, None, Some(-2)).await.unwrap();
+        assert_eq!(report.stopped, ["demo/watcher#3", "demo/watcher#2"]);
+        assert_eq!(report.up, 1);
+        assert_eq!(
+            stub.stopped_handles(),
+            [StubRuntime::handle("demo/watcher#3"), StubRuntime::handle("demo/watcher#2")]
+        );
+        // Admission sees the slots come back at once.
+        let cap = engine.l4_service().capacity_for("demo", "watcher", Some(5)).await.unwrap();
+        assert_eq!(cap.in_use, 1);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_scale_no_daemon_could_keep_is_refused_with_the_file_untouched() {
+        let (engine, stub, root) = scaled_engine(&format!(
+            "{THREE_WATCHERS}  - name: builder\n    harness: configured\n"
+        ));
+        engine.l3_service().reconcile_agents().await;
+        let before = std::fs::read_to_string(config_file(&root)).unwrap();
+        let starts = stub.starts.lock().unwrap().len();
+
+        let e = scale(&engine, Some(0), None).await.unwrap_err();
+        assert!(e.contains("keep nothing up"), "{e}");
+        let e = scale(&engine, None, Some(-3)).await.unwrap_err();
+        assert!(e.contains("keep nothing up"), "{e}");
+        let e = scale(&engine, Some(6), None).await.unwrap_err();
+        assert!(e.contains("instances: 6 but max_sessions: 5"), "names both numbers: {e}");
+        let e = match engine
+            .handle_request(Request::AgentScale { scope: "demo".into(), name: "builder".into(), instances: Some(2), by: None })
+            .await
+        {
+            Response::Error { message, .. } => message,
+            other => panic!("{other:?}"),
+        };
+        assert!(e.contains("task agent"), "{e}");
+        let e = match engine
+            .handle_request(Request::AgentScale { scope: "demo".into(), name: "nobody".into(), instances: Some(2), by: None })
+            .await
+        {
+            Response::Error { message, .. } => message,
+            other => panic!("{other:?}"),
+        };
+        assert!(e.contains("no local agent declaration"), "{e}");
+
+        assert_eq!(std::fs::read_to_string(config_file(&root)).unwrap(), before, "byte for byte");
+        assert_eq!(stub.starts.lock().unwrap().len(), starts, "nothing started");
+        assert!(stub.stopped_handles().is_empty(), "nothing stopped");
+        // The same count again is not an error, and writes nothing.
+        let report = scale(&engine, Some(3), None).await.unwrap();
+        assert_eq!((report.previous, report.wanted, report.up), (3, 3, 3));
+        assert_eq!(std::fs::read_to_string(config_file(&root)).unwrap(), before);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_gone_instance_is_brought_back_as_itself() {
+        let (engine, stub, root) =
+            recording_engine(&format!("name: demo\npath: .\nruntime: stub\nagents:\n{THREE_WATCHERS}"));
+        engine.l3_service().reconcile_agents().await;
+        stub.set_status("demo/watcher#2", RuntimeStatus::Gone);
+        engine.l3_service().supervise_agents().await;
+        assert_eq!(stub.started_ids().last().map(String::as_str), Some("demo/watcher#2"));
+        assert_eq!(stub.starts.lock().unwrap().len(), 4, "only the one that went");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_role_given_to_one_instance_is_worn_by_every_instance() {
+        let (engine, _stub, root) =
+            recording_engine(&format!("name: demo\npath: .\nruntime: stub\nagents:\n{THREE_WATCHERS}"));
+        engine.l3_service().reconcile_agents().await;
+        engine.l3_service().set_agent_role("demo/watcher#3", Some(Role::foreman())).await.unwrap();
+        for id in ["demo/watcher", "demo/watcher#2", "demo/watcher#3"] {
+            let row = engine.l3.agents.get_agent(id).await.unwrap().unwrap();
+            assert_eq!((row.role.clone(), row.assigned_role.clone()), (Role::foreman(), Some(Role::foreman())), "{id}");
+        }
+        assert_eq!(engine.l3_service().effective_role("demo", "watcher").await, Role::foreman());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[tokio::test]

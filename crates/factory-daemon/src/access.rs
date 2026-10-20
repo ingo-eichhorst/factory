@@ -2302,6 +2302,12 @@ mod tests {
             )
             .await
         );
+        // A scale rewrites the declaration too (`#329`): the same grant, the
+        // same reach, and never an agent scaling itself.
+        let scale = |scope: &str| Request::AgentScale { scope: scope.into(), name: "w".into(), instances: Some(2), by: None };
+        assert!(allowed(&e, &wearing("scope-editor"), scale("demo")).await);
+        assert!(!allowed(&e, &wearing("scope-editor"), scale("other")).await);
+        assert!(!allowed(&e, &wearing("self-editor"), scale("demo")).await);
     }
 
     #[tokio::test]
