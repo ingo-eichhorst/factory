@@ -132,6 +132,34 @@ fn adapter_err(e: impl std::fmt::Display) -> FactoryError {
     FactoryError::adapter("sqlite", e.to_string())
 }
 
+/// `agent_status` rows, by a query that takes one time as `?1`.
+fn status_rows(conn: &Connection, sql: &str, at: &str) -> Result<Vec<StatusChange>> {
+    let mut stmt = conn.prepare(sql).map_err(adapter_err)?;
+    let rows = stmt
+        .query_map(params![at], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(adapter_err)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (subject, scope, agent, status, at) = row.map_err(adapter_err)?;
+        out.push(StatusChange {
+            subject,
+            scope,
+            agent,
+            status: RuntimeStatus::parse(&status),
+            at: parse_time(&at)?,
+        });
+    }
+    Ok(out)
+}
+
 impl SqliteStore {
     pub fn open(path: &Path) -> Result<Self> {
         Self::open_named(path, "sqlite")
@@ -1059,35 +1087,30 @@ impl TaskStore for SqliteStore {
     async fn status_changes(&self, since: DateTime<Utc>) -> Result<Vec<StatusChange>> {
         let since = since.to_rfc3339();
         self.with_conn(move |conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT subject, scope, agent, status, at FROM agent_status
-                     WHERE at >= ?1 ORDER BY seq ASC",
-                )
-                .map_err(adapter_err)?;
-            let rows = stmt
-                .query_map(params![since], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
-                    ))
-                })
-                .map_err(adapter_err)?;
-            let mut out = Vec::new();
-            for row in rows {
-                let (subject, scope, agent, status, at) = row.map_err(adapter_err)?;
-                out.push(StatusChange {
-                    subject,
-                    scope,
-                    agent,
-                    status: RuntimeStatus::parse(&status),
-                    at: parse_time(&at)?,
-                });
-            }
-            Ok(out)
+            status_rows(
+                conn,
+                "SELECT subject, scope, agent, status, at FROM agent_status
+                 WHERE at >= ?1 ORDER BY seq ASC",
+                &since,
+            )
+        })
+        .await
+    }
+
+    async fn standing_status_before(&self, at: DateTime<Utc>) -> Result<Vec<StatusChange>> {
+        let at = at.to_rfc3339();
+        self.with_conn(move |conn| {
+            status_rows(
+                conn,
+                "SELECT subject, scope, agent, status, at FROM agent_status
+                 WHERE seq IN (
+                     SELECT MAX(seq) FROM agent_status
+                     WHERE at < ?1 AND subject NOT LIKE 'run:%'
+                     GROUP BY subject
+                 )
+                 ORDER BY seq ASC",
+                &at,
+            )
         })
         .await
     }
@@ -1196,6 +1219,35 @@ mod tests {
             queued_at: None,
             scheduled_for: None,
         }
+    }
+
+    // A standing agent idle for days has one row, days old, and that row is
+    // what says it is up. Only the newest one before the cut, and never a
+    // run's (#331).
+    #[tokio::test]
+    async fn the_newest_standing_change_before_a_time_is_found_however_old() {
+        let store = SqliteStore::in_memory().unwrap();
+        let cut = Utc::now();
+        let change = |subject: &str, status, days_ago: i64| StatusChange {
+            subject: subject.into(),
+            scope: "demo".into(),
+            agent: "w".into(),
+            status,
+            at: cut - chrono::Duration::days(days_ago),
+        };
+        for c in [
+            change("demo/w", RuntimeStatus::Working, 9),
+            change("demo/w", RuntimeStatus::Idle, 8),
+            change("run:r1", RuntimeStatus::Working, 7),
+            change("demo/w#2", RuntimeStatus::Gone, 3),
+            change("demo/w", RuntimeStatus::Working, -1),
+        ] {
+            store.append_status(&c).await.unwrap();
+        }
+        let before = store.standing_status_before(cut).await.unwrap();
+        let found: Vec<_> = before.iter().map(|c| (c.subject.as_str(), c.status)).collect();
+        assert_eq!(found, [("demo/w", RuntimeStatus::Idle), ("demo/w#2", RuntimeStatus::Gone)]);
+        assert_eq!(before[0].at, cut - chrono::Duration::days(8));
     }
 
     // The regression guard: a task this database actually holds must still

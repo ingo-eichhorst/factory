@@ -636,6 +636,9 @@
         <button id="occ-zoom-in" title="zoom in — or scroll over the chart; drag it to move in time" aria-label="zoom in">+</button>
         <button id="occ-now" title="back to the live window that follows now" disabled>now</button>
       </fieldset>
+      <fieldset class="seg" aria-label="filter the rows">
+        <button id="occ-standing" aria-pressed="false" title="show only standing agents -- the permanent and temporary ones with a session of their own">standing only</button>
+      </fieldset>
       <select id="occ-window" aria-label="time window" title="how far back the chart looks — choosing one also returns to now">
         <option value="60">last hour</option>
         <option value="360">last 6 hours</option>
@@ -644,7 +647,7 @@
         <option value="10080">last 7 days</option>
       </select>
     </div>
-    <section><div class="occ" id="occ" style="--lab:186px">loading…</div></section>
+    <section><div class="occ" id="occ">loading…</div></section>
   </div>
 
   <div id="view-roster" hidden>

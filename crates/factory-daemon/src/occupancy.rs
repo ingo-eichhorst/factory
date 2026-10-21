@@ -1,14 +1,16 @@
 //! The occupancy chart: what every agent was doing over a window.
 //!
 //! Assembled here rather than in a UI, so the web page, the CLI and anything
-//! that comes later draw the same picture from the same rules. Three layers,
+//! that comes later draw the same picture from the same rules. Four layers,
 //! deliberately kept apart:
 //!
 //! * **blocks** -- runs. Factory started them and the agent reported on them.
 //!   Record, not inference.
 //! * **planned** -- what a schedule says will happen next, drawn ahead of now.
-//! * **spans** -- what the runtime saw. Weaker evidence, and the only layer
-//!   that does not exist before Factory started writing it down.
+//! * **uptime** -- a standing session being there at all, one lane per
+//!   session (#331). Read off the liveness record, never counted as busy.
+//! * **spans** -- what the runtime saw. Weaker evidence, and with the uptime
+//!   the only layers that do not exist before Factory started writing it down.
 
 use chrono::{DateTime, Duration, Utc};
 use factory_core::adapter::agent::truncate_tail;
@@ -279,6 +281,19 @@ impl L4Service<'_> {
                 None
             }
         }
+    }
+
+    /// The liveness record a chart from `from` is drawn from: each standing
+    /// session's last change before the window -- the state it opened in,
+    /// however long ago that row was written -- then every change since, and
+    /// when recording began (#331).
+    pub(crate) async fn liveness_record(
+        &self,
+        from: DateTime<Utc>,
+    ) -> Result<(Vec<StatusChange>, Option<DateTime<Utc>>)> {
+        let mut changes = self.state.store.standing_status_before(from).await?;
+        changes.extend(self.state.store.status_changes(from).await?);
+        Ok((changes, self.state.store.status_origin().await?))
     }
 
     /// How long this task usually takes, from its own finished runs. The median

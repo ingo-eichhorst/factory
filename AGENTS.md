@@ -39,7 +39,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/{policy,policy-model}.js                               the L6 Policy tab and its pure shaping logic
     ui/js/{goals,goals-model}.js                                 the L6 Goals tab and its pure shaping logic
     ui/js/{budget,budget-model}.js                               the L6 Budget tab and its pure shaping logic (#164)
-    ui/js/occupancy-model.js                                     the occupancy chart's lane geometry (#120), pure
+    ui/js/occupancy-model.js                                     the occupancy chart's lane geometry (#120) and standing rows (#331), pure
     ui/js/usage-model.js                                         a run's and a task's usage block (#117), pure
     ui/js/pending-model.js                                       pending tasks split into due, scheduled later and manual (#124), pure
     ui/js/task-model.js                                          a task's board column, failure/close line and actions (#122), pure

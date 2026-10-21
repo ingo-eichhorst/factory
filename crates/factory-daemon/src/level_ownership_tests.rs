@@ -219,7 +219,7 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("l2_pages.rs", "services", 2),
     ("main.rs", "services", 5),
     ("metrics.rs", "services", 2),
-    ("occupancy_page.rs", "reach", 5),
+    ("occupancy_page.rs", "reach", 3),
     ("occupancy_page.rs", "services", 1),
     ("github_deployments.rs", "reach", 5),
     ("operations_report.rs", "reach", 8),

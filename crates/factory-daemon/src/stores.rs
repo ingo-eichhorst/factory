@@ -289,6 +289,10 @@ impl TaskStore for ScopedStores {
         self.ledger.status_changes(since).await
     }
 
+    async fn standing_status_before(&self, at: DateTime<Utc>) -> Result<Vec<StatusChange>> {
+        self.ledger.standing_status_before(at).await
+    }
+
     async fn status_origin(&self) -> Result<Option<DateTime<Utc>>> {
         self.ledger.status_origin().await
     }

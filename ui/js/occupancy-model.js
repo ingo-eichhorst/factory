@@ -22,12 +22,39 @@
 //!
 //! Which one a zoom or a drag leaves behind is decided by `settle`: a window
 //! that still has now in it is live, one that does not is fixed.
+//!
+//! And it holds what makes a standing agent visible (#331): its sessions'
+//! lanes and uptime bands, the util column that never calls an agent that is
+//! up `idle`, the slots it holds, and which rows the "standing only" filter
+//! keeps. The daemon assembled all of it; this only shapes it for the page.
 
-/// How many lanes a row is drawn with. A payload from a daemon that predates
-/// lanes has none, and is one lane.
-export function rowLanes(row) {
+/// The lanes a row's runs need, as the daemon packed them. A payload from a
+/// daemon that predates lanes has none, and is one lane.
+export function blockLanes(row) {
   const n = Number(row && row.lanes);
   return Number.isInteger(n) && n > 1 ? n : 1;
+}
+
+/// A standing row's sessions, one lane each (#331). Nothing for a task agent
+/// or a payload from a daemon that predates them.
+export function sessionsOf(row) {
+  return Array.isArray(row && row.sessions) ? row.sessions : [];
+}
+
+/// Where a row's runs start: below its sessions' lanes, so a run of the same
+/// agent name -- another session -- is never drawn over the standing one.
+export function blockOffset(row) {
+  return sessionsOf(row).length;
+}
+
+/// How many lanes a row is drawn with: one per session, then as many as its
+/// runs need -- or none for them, when a standing row has no run or schedule
+/// in the window. A row with neither is the one lane it always was.
+export function rowLanes(row) {
+  const sessions = sessionsOf(row).length;
+  if (!sessions) return blockLanes(row);
+  const work = (row.blocks && row.blocks.length) || (row.planned && row.planned.length);
+  return sessions + (work ? blockLanes(row) : 0);
 }
 
 /// The inline style a row carries: `--lanes` only when there is more than one,
@@ -39,10 +66,13 @@ export function rowStyle(row) {
 }
 
 /// The declaration a run block (and its estimate outline) adds to its style:
-/// `--lane` for every lane but the top one.
-export function laneStyle(block) {
+/// `--lane` for every lane but the top one. `offset` is the lanes above the
+/// runs (`blockOffset`): a standing row's sessions.
+export function laneStyle(block, offset = 0) {
   const lane = Number(block && block.lane);
-  return Number.isInteger(lane) && lane > 0 ? `--lane:${lane};` : "";
+  const base = Number.isInteger(offset) && offset > 0 ? offset : 0;
+  const n = (Number.isInteger(lane) && lane > 0 ? lane : 0) + base;
+  return n > 0 ? `--lane:${n};` : "";
 }
 
 /// `×3` while more than one run of the agent is live at once, `""` otherwise,
@@ -207,4 +237,139 @@ export function windowQuery(win) {
 /// Whether anything of `[start, end]` is inside the window.
 export function overlaps(start, end, win) {
   return end >= win.from && start <= win.to;
+}
+
+// -- standing agents (#331) ---------------------------------------------------
+
+/// A standing agent: one with a session of its own, permanent or temporary.
+export function isStanding(row) {
+  return !!row && (row.lifetime === "permanent" || row.lifetime === "temporary");
+}
+
+/// The rows of one scope group, split for drawing: standing first, each in
+/// the order it came in. The daemon already sends them that way; this keeps
+/// an older daemon's answer in the same shape. With `standingOnly` there are
+/// no task rows at all.
+export function groupRows(rows, standingOnly = false) {
+  const list = Array.isArray(rows) ? rows : [];
+  return {
+    standing: list.filter(isStanding),
+    task: standingOnly ? [] : list.filter((r) => !isStanding(r)),
+  };
+}
+
+/// The scope groups the chart draws: those `keep` (the scope selection) lets
+/// through, each with its rows grouped. Under `standingOnly` a group with no
+/// standing agent is left out -- an empty heading says nothing.
+export function visibleGroups(scopes, keep, standingOnly = false) {
+  const list = Array.isArray(scopes) ? scopes : [];
+  return list
+    .filter((sc) => !keep || keep(sc.name))
+    .map((sc) => ({ scope: sc, ...groupRows(sc.rows, standingOnly) }))
+    .filter((g) => !standingOnly || g.standing.length > 0);
+}
+
+const STATES = new Set(["ready", "starting", "gone", "stopped"]);
+
+/// The class of a standing row's state dot: its roster state, when it is one
+/// of the four a standing agent has; `""` otherwise.
+export function stateClass(row) {
+  return row && STATES.has(row.state) ? row.state : "";
+}
+
+/// The badge on a standing row's label: its lifetime, and the short form a
+/// narrow screen shows. `null` for a task agent.
+export function lifetimeBadge(row) {
+  if (!isStanding(row)) return null;
+  return {
+    text: row.lifetime,
+    short: row.lifetime === "permanent" ? "perm" : "temp",
+    title: row.lifetime === "permanent"
+      ? "permanent: Factory keeps its session up and restarts it when it goes"
+      : "temporary: started on demand, not kept up",
+  };
+}
+
+/// One session's uptime as bands to draw, in epoch milliseconds. A stretch
+/// still up runs to `now`. Each band carries how it ended, `null` while up.
+export function uptimeBands(session, now) {
+  const uptime = Array.isArray(session && session.uptime) ? session.uptime : [];
+  const out = [];
+  for (const u of uptime) {
+    const from = new Date(u.from).getTime();
+    const to = u.to ? new Date(u.to).getTime() : now;
+    if (!(to > from)) continue;
+    out.push({ from, to, ended: u.to ? (u.ended || "gone") : null });
+  }
+  return out;
+}
+
+const ENDINGS = {
+  restarted: "went away and came back up",
+  gone: "went away and has not been seen since",
+  stopped: "stopped by a person",
+};
+
+/// What a band's tooltip says. `when` formats epoch milliseconds, `span`
+/// seconds -- the page passes its own. A stretch the daemon opened at the
+/// window's start (`windowFrom`) was up before it, for however long the
+/// record does not say here.
+export function uptimeNote(band, when, span, windowFrom = -Infinity) {
+  const before = band.from <= windowFrom;
+  const start = before ? "before this window" : when(band.from);
+  const length = before ? `${span((band.to - band.from) / 1000)} of it in view` : span((band.to - band.from) / 1000);
+  if (!band.ended) return `up since ${start} (${length}), and up now`;
+  return `up ${before ? "from " : ""}${start} – ${when(band.to)} (${length}), then ${ENDINGS[band.ended] || band.ended}`;
+}
+
+/// The marks on a session's lane: where each stretch ended, and how.
+export function uptimeMarks(bands) {
+  return bands.filter((b) => b.ended).map((b) => ({ at: b.to, kind: b.ended, title: ENDINGS[b.ended] || b.ended }));
+}
+
+/// The util column of a standing row: how much of the window it was up and
+/// what it is doing now -- `up 100% · ready` -- never `idle` for an agent
+/// that is up. `elapsed` is the seconds of the window the answer covers; with
+/// no uptime recorded in it the state is all there is to say (`up` is then
+/// `null`). `null` for a task agent, whose column is its busy share as before.
+export function standingUtil(row, elapsed) {
+  if (!isStanding(row)) return null;
+  const state = row.state || "unknown";
+  const seconds = Number(row.up_seconds) || 0;
+  const share = elapsed > 0 ? Math.min(100, Math.round((seconds / elapsed) * 100)) : 0;
+  const up = seconds > 0 ? `up ${share}%` : null;
+  const text = up ? `${up} · ${state}` : state;
+  const busy = Number(row.busy_seconds) || 0;
+  const runs = busy > 0 && elapsed > 0 ? Math.min(100, Math.round((busy / elapsed) * 100)) : null;
+  const title = up
+    ? `its session was up ${share}% of the window and is ${state} now`
+    : `no uptime recorded in this window; it is ${state} now`;
+  return { text, up, state, runs, title };
+}
+
+/// The slots a row holds against its `max_sessions`, as admission and
+/// `factory status` count them: `1/5`, or `1 slot` with no cap. `null` when the
+/// daemon sent none, or for a task agent holding nothing.
+export function slotsLabel(row) {
+  const slots = row && row.slots;
+  if (!slots) return null;
+  const used = Number(slots.in_use) || 0;
+  const max = Number.isInteger(slots.max) && slots.max > 0 ? slots.max : null;
+  if (!isStanding(row) && used === 0) return null;
+  return {
+    text: max ? `${used}/${max}` : `${used} slot${used === 1 ? "" : "s"}`,
+    title: max
+      ? `holds ${used} of its ${max} sessions (max_sessions), as admission counts them`
+      : `holds ${used} session${used === 1 ? "" : "s"}; no max_sessions`,
+    full: !!max && used >= max,
+  };
+}
+
+/// What a session's lane is called in its tooltips when its row has more
+/// than one: its subject, the id the liveness record keeps it under. `""`
+/// for a row with one session -- the row's name already says it.
+export function sessionLabel(row, session, index) {
+  if (sessionsOf(row).length < 2) return "";
+  const subject = String((session && session.subject) || "");
+  return subject || `session ${index + 1}`;
 }
