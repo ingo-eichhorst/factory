@@ -198,8 +198,10 @@ impl Daemon {
     /// Fail closed before a task can open a pane: the daemon's herdr runtime
     /// has to be talking to the rig's own session. Its diagnostic is `herdr
     /// status --json` run in the daemon's own environment, so an inherited
-    /// `HERDR_SOCKET_PATH` -- which wins over `HERDR_SESSION` -- shows here as
-    /// the session it really reaches, not as the variable echoed back.
+    /// `HERDR_SOCKET_PATH` -- which wins over `HERDR_SESSION` -- shows here.
+    /// It shows in `endpoint`: herdr names the session after `HERDR_SESSION`
+    /// even when the socket it reaches belongs to another one, so the
+    /// session alone would pass.
     fn assert_own_herdr(&self) {
         let url = format!("{}/api/agent-runtime", self.base_url());
         let runtimes = expect_ok(&url, &get(&url))["runtimes"].clone();

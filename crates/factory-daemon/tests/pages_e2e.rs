@@ -168,7 +168,8 @@ impl Daemon {
 
     /// Fail closed before a task can open a pane: the daemon's herdr runtime
     /// -- `herdr status --json` in the daemon's own environment -- has to be
-    /// on the rig's own session.
+    /// on the rig's own session. `endpoint` is the part that tells: herdr
+    /// echoes `HERDR_SESSION` back even when the socket it reaches is not it.
     fn assert_own_herdr(&self) {
         let runtimes = call("GET", &format!("{}/api/agent-runtime", self.base_url()), None)["runtimes"].clone();
         let own = runtimes.as_array().into_iter().flatten().any(|runtime| {
