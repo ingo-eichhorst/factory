@@ -753,18 +753,17 @@ fn set_key_text(
         return Ok(replace(index, index + 1, &with_value(lines[index].2, key_name, rendered)));
     }
     let addition = format!("{}{key_name}: {rendered}\n", " ".repeat(key_indent));
-    match new_key {
+    match (new_key, first) {
         // A list item's first key shares its `- ` line: the new key takes
         // that place, and the key that was there moves down a line to sit
         // under it, its comment with it.
-        NewKey::First if first.is_some() => {
-            let item = first.unwrap_or_default();
+        (NewKey::First, Some(item)) => {
             let line = lines[item].2;
             let at = line.len() - line.trim_start()[1..].trim_start().len();
             let moved = format!("{}{key_name}: {rendered}\n{}{}", &line[..at], " ".repeat(key_indent), &line[at..]);
             Ok(replace(item, item + 1, &moved))
         }
-        NewKey::First => {
+        (NewKey::First, None) => {
             let first_key = (from..to).find(|index| is_content(lines[*index].2)).ok_or_else(|| {
                 bad(format!("the declaration in {} has no keys", path.display()))
             })?;
@@ -772,7 +771,7 @@ fn set_key_text(
         }
         // After the mapping's last line that says anything, so a comment or
         // blank line between it and the next entry stays between them.
-        NewKey::Last => {
+        (NewKey::Last, _) => {
             let last = last_content(&lines, from, to).or(first).ok_or_else(|| {
                 bad(format!("the declaration in {} has no keys", path.display()))
             })?;

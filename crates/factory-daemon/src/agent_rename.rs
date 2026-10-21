@@ -8,7 +8,7 @@
 //! its run under, so no run can start on the old name halfway through.
 use crate::l4_service::L4Service;
 use factory_agents::dispatch::Roster;
-use factory_core::task::{Task, TaskEntry, TaskFilter, TaskPatch};
+use factory_core::task::{SlotWait, Task, TaskEntry, TaskFilter, TaskPatch};
 use factory_kernel::{FactoryError, Result};
 use factory_process::rename::{self, RenameReport};
 
@@ -82,13 +82,15 @@ impl L4Service<'_> {
         let (sessions, to_start) = l3.port().rename(&check.scope, from, &check.to, by, source).await?;
         report.sessions = sessions;
         for task in waiting {
-            let patch = TaskPatch {
-                agent: Some(check.to.clone()),
-                // A wait names the agent it is waiting on; the next due tick
-                // queues it again under the new one.
-                clear_slot_wait: task.slot_wait.is_some(),
-                ..TaskPatch::default()
-            };
+            // A task held for a free slot keeps its place in the queue: the
+            // wait is the only record that its run is due, and it is the same
+            // agent's, so it moves to the new name with the task. An edit to a
+            // different agent drops the wait instead (`Engine::update`).
+            let slot_wait = task.slot_wait.clone().filter(|wait| wait.agent == from).map(|wait| SlotWait {
+                agent: check.to.clone(),
+                ..wait
+            });
+            let patch = TaskPatch { agent: Some(check.to.clone()), slot_wait, ..TaskPatch::default() };
             if let Err(e) = self.state.store.update(&task.id, &patch).await {
                 tracing::warn!(task = %task.id, "could not move a waiting task to the renamed agent: {e}");
                 continue;
@@ -173,7 +175,7 @@ mod tests {
     use factory_core::event::Event;
     use factory_core::protocol::{Payload, Request};
     use factory_core::role::Role;
-    use factory_core::task::{NewTask, Task, TaskPatch, TaskStatus};
+    use factory_core::task::{NewTask, SlotWait, Task, TaskPatch, TaskStatus};
     use factory_core::workflow::{WorkflowDefinition, WorkflowDraft};
     use factory_process::rename::RenameReport;
     use std::sync::Arc;
@@ -237,6 +239,17 @@ mod tests {
         set_status(&engine, &done.id, TaskStatus::Done).await;
         let bare_shell = create(&engine, "demo", "shell").await;
         let elsewhere = create(&engine, "other", "pi").await;
+        // Held for a free slot: its wait is the only record that its run is due.
+        let held = create(&engine, "demo", "pi").await;
+        let wait = SlotWait {
+            agent: "pi".into(),
+            scope: "demo".into(),
+            trigger: factory_core::run::Trigger::Schedule,
+            queued_at: chrono::Utc::now(),
+            scheduled_for: None,
+            since: chrono::Utc::now(),
+        };
+        engine.l4.store.update(&held.id, &TaskPatch { slot_wait: Some(wait.clone()), ..TaskPatch::default() }).await.unwrap();
         let mut events = engine.shared.bus.subscribe();
 
         let report = rename(&engine, "pi", " scratch ").await.unwrap();
@@ -245,7 +258,7 @@ mod tests {
         assert_eq!((report.from.as_str(), report.to.as_str()), ("pi", "scratch"));
         let mut moved = report.tasks.clone();
         moved.sort();
-        let mut expected = vec![pending.id.clone(), scheduled.id.clone(), blocked.id.clone()];
+        let mut expected = vec![pending.id.clone(), scheduled.id.clone(), blocked.id.clone(), held.id.clone()];
         expected.sort();
         assert_eq!(moved, expected, "pending, scheduled and blocked move; nothing else");
         for id in &expected {
@@ -263,6 +276,8 @@ mod tests {
             );
         }
         assert_eq!(task(&engine, &scheduled.id).await.schedule, scheduled.schedule, "its schedule is untouched");
+        let still_held = task(&engine, &held.id).await.slot_wait.expect("still queued for a slot");
+        assert_eq!((still_held.agent.as_str(), still_held.queued_at), ("scratch", wait.queued_at), "its place kept");
         assert_eq!(task(&engine, &done.id).await.agent, "pi", "history is not rewritten");
         assert_eq!(task(&engine, &bare_shell.id).await.agent, "shell", "a bare adapter is not this declaration");
         assert_eq!(task(&engine, &elsewhere.id).await.agent, "pi", "another scope's pi is another agent");
