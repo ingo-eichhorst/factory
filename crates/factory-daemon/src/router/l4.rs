@@ -362,28 +362,32 @@ impl Engine {
                 records: crate::facts::Facts::<factory_kernel::People>::new(self).get::<factory_kernel::ArtifactProvenance>(&id).await?,
             }),
             // `#343`: one command handler for the CLI, `POST /api/rpc` and
-            // `POST /api/pages/publish` alike.
+            // `POST /api/pages/publish` alike. Every page arm boxes its future,
+            // so a page's file I/O never grows this router's own state -- which
+            // every other L4 request carries on its stack in a debug build.
             Request::PagePublish { scope, name, title, html, data } => {
                 let publish = crate::pages::PublishPage { scope, name: name.clone(), title, html, data };
-                let (scope, version) = self.l4_service().publish_page(caller, publish).await?;
+                let (scope, version) = Box::pin(self.l4_service().publish_page(caller, publish)).await?;
                 Ok(Payload::PageVersion { scope, name, version })
             }
             // The pages and their versions are the `ScopePageFact`, read
             // live over the People side like any page composition.
             Request::Pages { scope } => Ok(Payload::Pages {
-                pages: crate::facts::Facts::<factory_kernel::People>::new(self)
-                    .get::<factory_kernel::ScopePageFact>(&factory_process::pages::ScopePagesQuery { scope, name: None })
-                    .await?,
+                pages: Box::pin(
+                    crate::facts::Facts::<factory_kernel::People>::new(self)
+                        .get::<factory_kernel::ScopePageFact>(&factory_process::pages::ScopePagesQuery { scope, name: None }),
+                )
+                .await?,
             }),
             Request::PageGet { scope, name } => Ok(Payload::Page {
-                page: self.scope_page(&scope, &name).await?,
+                page: Box::pin(self.scope_page(&scope, &name)).await?,
             }),
             Request::PageContent { scope, name, version, part } => Ok(Payload::PageContent {
-                content: self.l4_service().page_content(&scope, &name, version.as_deref(), part).await?,
+                content: Box::pin(self.l4_service().page_content(&scope, &name, version.as_deref(), part)).await?,
             }),
             Request::PageRollback { scope, name, version } => {
-                let scope = self.l4_service().rollback_page(caller, &scope, &name, &version).await?;
-                Ok(Payload::Page { page: self.scope_page(&scope, &name).await? })
+                let scope = Box::pin(self.l4_service().rollback_page(caller, &scope, &name, &version)).await?;
+                Ok(Payload::Page { page: Box::pin(self.scope_page(&scope, &name)).await? })
             }
             Request::RunApprove { id, reason } => Ok(Payload::Run {
                 run: Box::pin(self.decide_approval(

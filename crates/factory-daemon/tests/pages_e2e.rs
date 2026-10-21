@@ -309,14 +309,31 @@ fn a_shell_run_publishes_the_reference_page_and_a_rollback_survives_a_restart() 
     assert_eq!(dashboard["page_scopes"]["conference-radar"], "demo", "{dashboard}");
 
     // In a browser: the dashboard tile renders the reference page and hands
-    // it the version's data with postMessage.
+    // it the version's data with postMessage -- and the UI's own baseline CSP
+    // refuses nothing the UI itself does, on the dashboard or on the views
+    // that load scripts, draw on a canvas or open sockets of their own.
     if let Some(chrome) = chrome() {
         let log = chrome_console(&chrome, &format!("{base}/#all/dash/dashboard"), &daemon.root);
         assert!(
             log.contains("factory-page conference-radar rendered 12 conferences from factory data"),
             "the reference page never rendered the published data:\n{log}"
         );
+        assert_ui_csp_quiet(&log, &base);
+        for route in ["demo/dash/pages/demo/conference-radar", "all/dash/site", "all/imp/knowledge", "all/dir/policy", "all/harn/occupancy"] {
+            assert_ui_csp_quiet(&chrome_console(&chrome, &format!("{base}/#{route}"), &daemon.root), &base);
+        }
     }
+}
+
+/// No console line reports the UI's own CSP refusing something -- only a
+/// page's, from under `/pages/`, may.
+fn assert_ui_csp_quiet(log: &str, base: &str) {
+    let page_source = format!("source: {base}/pages/");
+    let refused: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("Content Security Policy") && !l.contains(&page_source))
+        .collect();
+    assert!(refused.is_empty(), "the UI's baseline CSP refused the UI itself:\n{}", refused.join("\n"));
 }
 
 /// The isolation claims, in a real browser: the probe page, shown in the UI's

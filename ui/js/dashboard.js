@@ -504,7 +504,10 @@ function patchChildren(old, next) {
       return;
     }
     const keys = pageKeysIn(stale);
-    if (keys && keys === pageKeysIn(fresh)) {
+    // The same page key in the same shape -- a lone tile still alone, a row
+    // still a row. A tile that moved into a row (or out of one) is redrawn.
+    const sameShape = stale.tagName === fresh.tagName && stale.classList.contains("drow") === fresh.classList.contains("drow");
+    if (keys && sameShape && keys === pageKeysIn(fresh)) {
       if (stale.dataset.pageKey) return; // the same page tile, frame and all
       // A row holding a page tile: keep the row, patch its tiles.
       for (const attr of ["class", "style"]) {
