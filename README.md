@@ -279,7 +279,9 @@ asked, under the fixed journal id `factory:agents` (`agent_started`,
 `agent_stopped`, `agent_attached`, `agent_scaled`, `agent_restarted` with the
 session it left, the one it came back on and the conversation, and
 `agent_start_refused` / `agent_restart_refused` for one that did not happen,
-with the reason; `source` is `owner` or `agent`, `data.by` names which). L3 keeps what it was asked in a bounded log and L4 reads it from
+with the reason, and `agent_restart_failed` for one that stopped its session
+and did not come back up, naming the conversation to pick up by hand; `source`
+is `owner` or `agent`, `data.by` names which). L3 keeps what it was asked in a bounded log and L4 reads it from
 a cursor on its tick (`StandingAgentActionsFact`), the way it reads L3's
 liveness observations, so an entry can trail the action by a tick.
 

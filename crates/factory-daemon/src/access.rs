@@ -736,32 +736,30 @@ impl Engine {
             // An instance id, as the L3 service will read it: `#1` is the bare
             // id (`#330`). Its own reach covers every instance of its own
             // declaration -- two instances of one declaration are one agent.
-            Request::AgentStop { id } | Request::AgentInput { id, .. } | Request::AgentStopCheck { id } => match def.reach {
+            //
+            // A restart has one more door. A harness is installed once for
+            // the whole host, so bringing every standing agent onto the one
+            // installed now is the instance's own upkeep: scope reach held in
+            // the root scope covers every scope's standing agents, the way the
+            // root scope alone holds backups. Anywhere else it is its own
+            // scope's, as for a stop.
+            Request::AgentStop { id }
+            | Request::AgentInput { id, .. }
+            | Request::AgentStopCheck { id }
+            | Request::AgentRestart { id, .. } => match def.reach {
                 Reach::Scope => match self.l4.store.get_agent(&AgentSession::canonical_id(id)).await? {
-                    Some(agent) => in_scope(&agent.scope),
+                    Some(agent) => match request {
+                        Request::AgentRestart { .. } => {
+                            in_scope(&agent.scope).or_else(|outside| in_root_scope().map_err(|_| outside))
+                        }
+                        _ => in_scope(&agent.scope),
+                    },
                     None => Ok(()),
                 },
                 Reach::Own if AgentSession::declaration_id(&AgentSession::canonical_id(id)) == AgentSession::id_for(scope, name) => {
                     Ok(())
                 }
                 Reach::Own => Err(deny("reach into another agent's session")),
-            },
-
-            // Read off the instance's row, like a stop -- with one more door.
-            // A harness is installed once for the whole host, so bringing
-            // every standing agent onto the one installed now is the
-            // instance's own upkeep: scope reach held in the root scope covers
-            // every scope's standing agents, the way the root scope alone
-            // holds backups. Anywhere else, scope reach is its own scope's.
-            Request::AgentRestart { id, .. } => match def.reach {
-                Reach::Scope => match self.l4.store.get_agent(&AgentSession::canonical_id(id)).await? {
-                    Some(agent) => in_scope(&agent.scope).or_else(|outside| in_root_scope().map_err(|_| outside)),
-                    None => Ok(()),
-                },
-                Reach::Own if AgentSession::declaration_id(&AgentSession::canonical_id(id)) == AgentSession::id_for(scope, name) => {
-                    Ok(())
-                }
-                Reach::Own => Err(deny("restart another agent")),
             },
 
             Request::RunInput { id, .. } | Request::RunAnswer { id, .. } => match def.reach {

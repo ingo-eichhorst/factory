@@ -531,9 +531,10 @@ impl L3Service<'_> {
     /// anything is stopped either way.
     pub async fn restart_asked(&self, id: &str, fresh: bool, asker: &Asker) -> Result<Restarted> {
         let found = self.require_agent(id).await?;
+        let mut stopped = false;
         let restarted = {
             let _held = self.state.lifecycle.hold(&found.id).await;
-            self.restart_held(&found.id, fresh, asker).await
+            self.restart_held(&found.id, fresh, asker, &mut stopped).await
         };
         let (action, message) = match &restarted {
             Ok(r) => (
@@ -551,13 +552,17 @@ impl L3Service<'_> {
                     }
                 ),
             ),
-            Err(e) => ("restart_refused", format!("{} asked to restart by {}, and it did not: {e}", found.id, asker.by)),
+            // Refused is nothing touched; failed is stopped and not back up.
+            Err(e) => (
+                if stopped { "restart_failed" } else { "restart_refused" },
+                format!("{} asked to restart by {}, and it did not: {e}", found.id, asker.by),
+            ),
         };
         self.asked(asker, action, &found.id, &found.scope, &found.name, message);
         restarted
     }
 
-    async fn restart_held(&self, id: &str, fresh: bool, asker: &Asker) -> Result<Restarted> {
+    async fn restart_held(&self, id: &str, fresh: bool, asker: &Asker, stopped: &mut bool) -> Result<Restarted> {
         // Read again now that it is held: whatever was on file before the
         // wait is not what is on file now.
         let mut agent = self.require_agent(id).await?;
@@ -665,9 +670,10 @@ impl L3Service<'_> {
         // Down, and confirmed down: two processes on one conversation is the
         // one thing a restart must never make, and a runtime that adopts a
         // session by name would hand a start the one still closing.
-        let stopped = runtime.stop(&session).await;
+        *stopped = true;
+        let stop = runtime.stop(&session).await;
         if !self.gone(runtime.as_ref(), &session).await {
-            let why = match stopped {
+            let why = match stop {
                 Err(e) => format!("its session would not stop ({e}); it was left as it was"),
                 Ok(()) => {
                     // Asked to stop and not seen to go: left down, and saying
@@ -892,7 +898,13 @@ impl L3Service<'_> {
         }
         let declared = self.role_of(&agent.scope, &agent.name);
         let mut answer = agent.clone();
-        for mut row in self.instances_of(&agent.scope, &agent.name).await? {
+        for listed in self.instances_of(&agent.scope, &agent.name).await? {
+            // Held, and read again: a row written back from before a restart
+            // finished would put its old session back.
+            let _held = self.state.lifecycle.hold(&listed.id).await;
+            let Some(mut row) = self.state.agents.get_agent(&listed.id).await? else {
+                continue;
+            };
             row.assigned_role = role.clone();
             row.role = row.role_with(&declared);
             row.last_seen_at = Utc::now();
@@ -1712,6 +1724,8 @@ pub(crate) mod tests {
         /// While set, `start` records its request and then waits here: a
         /// start that is under way, for as long as a test needs one.
         gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+        /// While set, `start` records its request and fails.
+        failing: std::sync::atomic::AtomicBool,
     }
 
     impl StubRuntime {
@@ -1724,6 +1738,7 @@ pub(crate) mod tests {
                 usages: std::sync::Mutex::new(Default::default()),
                 processes: std::sync::Mutex::new(Default::default()),
                 gate: std::sync::Mutex::new(None),
+                failing: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -1781,6 +1796,9 @@ pub(crate) mod tests {
             let gate = self.gate.lock().unwrap().clone();
             if let Some(gate) = gate {
                 gate.acquire().await.unwrap().forget();
+            }
+            if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(FactoryError::adapter("stub", "the pane would not open"));
             }
             // As herdr does: a named harness becomes a named agent a person can
             // attach to; a shell pane (`shell`'s empty command) does not.
@@ -2402,6 +2420,29 @@ pub(crate) mod tests {
         assert_eq!(stub.stopped_handles().len(), 1);
         assert_eq!(restarted.conversation.as_deref(), Some(CONVERSATION));
         assert_eq!(instance(&engine, "demo/keeper").await.state, AgentState::Ready);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_restart_that_stops_and_cannot_start_again_says_which_conversation_to_pick_up() {
+        let (engine, stub, root) = recording_engine(&keeper("[--model, opus]"));
+        engine.l3_service().reconcile_agents().await;
+        stub.set_status("demo/keeper", RuntimeStatus::Idle);
+        stub.set_usage("demo/keeper", "claude-code", CONVERSATION);
+        stub.failing.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let e = restart(&engine, "demo/keeper", false).await.unwrap_err();
+        assert!(e.contains("demo/keeper was stopped and did not come back up"), "{e}");
+        assert!(e.contains(&format!("(its conversation was {CONVERSATION})")), "{e}");
+        assert!(!e.contains("busy"), "a failure, not a try-later: {e}");
+        let row = instance(&engine, "demo/keeper").await;
+        assert_eq!((row.state, row.conversation.as_deref()), (AgentState::Gone, Some(CONVERSATION)));
+        assert!(row.error.is_some());
+        let journal = journal(&engine).await;
+        assert!(
+            journal.iter().any(|(_, kind, message)| kind == "agent_restart_failed" && message.contains(CONVERSATION)),
+            "{journal:#?}"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
