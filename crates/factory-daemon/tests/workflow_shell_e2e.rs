@@ -846,6 +846,90 @@ fn release_evidence_matches_a_real_build_and_sbom_and_survives_git_changes_and_r
     assert!(foreign["sboms"].as_array().unwrap().is_empty());
 }
 
+/// #342: a `--no-worktree` scope inside the instance's own repository, which
+/// does not ignore `.factory/artifacts/`. The real shell agent first reports
+/// while one of its artifacts is still being rewritten -- refused, and no
+/// copy left behind -- then reports three artifacts while another writer
+/// keeps changing a file elsewhere in the repository, which succeeds at once.
+#[test]
+fn a_no_worktree_scope_in_the_instance_repo_reports_artifacts_through_the_shell_agent() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let root = daemon.root.clone();
+    std::fs::create_dir_all(root.join("projects/radar/.factory")).unwrap();
+    std::fs::write(root.join("projects/radar/.factory/config.yaml"),
+        "version: 1\nscope:\n  id: 6b0f3c2e-342a-4c1d-9e57-000000000342\n  name: radar\n  agent:\n    harness: shell\n    lifetime: task\n").unwrap();
+    std::fs::write(root.join("projects/radar/README.md"), "the conference radar\n").unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").current_dir(&root).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["config", "user.email", "radar@example.invalid"]);
+    git(&["config", "user.name", "Radar QA"]);
+    // No .gitignore: the instance store, its database and this rig's log
+    // are all untracked files the company repository can see.
+    git(&["add", "projects/radar/README.md"]);
+    git(&["commit", "-q", "-m", "baseline"]);
+    daemon.spawn();
+
+    // Each writer is bounded, so a run that never reaches `kill` cannot
+    // leave it running for long.
+    let instructions = "mkdir -p out data\n\
+        printf 'radar html' > out/radar.html\nprintf 'radar md' > out/radar.md\nprintf '{\"events\":[]}' > data/events.json\n\
+        ( n=0; while [ $n -lt 300000 ]; do printf x >> out/radar.md; n=$((n+1)); done ) & writer=$!\n\
+        \"$FACTORY_BIN\" task report \"$FACTORY_TASK_ID\" --status done --artifact out/radar.html --artifact out/radar.md --artifact data/events.json --result 'radar' > ../../refused.txt 2>&1\n\
+        echo \"exit $?\" >> ../../refused.txt\n\
+        kill $writer; wait $writer 2>/dev/null\n\
+        ( n=0; while [ $n -lt 300000 ]; do printf x >> ../../company-notes.md; n=$((n+1)); done ) & churn=$!\n\
+        \"$FACTORY_BIN\" task report \"$FACTORY_TASK_ID\" --status done --artifact out/radar.html --artifact out/radar.md --artifact data/events.json --result 'radar built'\n\
+        reported=$?\n\
+        kill $churn; wait $churn 2>/dev/null\n\
+        exit $reported\n";
+    let base = daemon.base_url();
+    let task_url = format!("{base}/api/tasks");
+    let task = expect_ok(&task_url, &post(&task_url, &json!({ "title": "Conference radar", "instructions": instructions,
+        "scope": "radar", "agent": "shell", "worktree": false })))["task"].clone();
+    let task_id = task["id"].as_str().unwrap();
+    let run_url = format!("{task_url}/{task_id}/run");
+    expect_ok(&run_url, &post(&run_url, &json!({})));
+    wait_for("the radar reports its artifacts", Duration::from_secs(60), || {
+        tasks(&base).into_iter().find(|task| task["id"] == task_id && matches!(task["status"].as_str(), Some("done" | "failed" | "blocked")))
+    });
+    let refused = std::fs::read_to_string(root.join("refused.txt")).unwrap();
+    assert!(refused.contains("changed while"), "an artifact rewritten during its capture is refused: {refused}");
+    assert!(!refused.contains("exit 0"), "{refused}");
+    let history_url = format!("{task_url}/{task_id}/runs");
+    let run = expect_ok(&history_url, &get(&history_url))["runs"][0].clone();
+    assert_eq!(run["status"], "done", "{run}");
+    assert!(run["worktree_path"].is_null());
+    let run_id = run["id"].as_str().unwrap();
+    let provenance_url = format!("{base}/api/runs/{run_id}/provenance");
+    let records = wait_for("three artifacts are published", Duration::from_secs(10), || {
+        let records = expect_ok(&provenance_url, &get(&provenance_url))["records"].clone();
+        (records.as_array().map_or(0, Vec::len) == 3).then_some(records)
+    });
+    let mut names: Vec<_> = records.as_array().unwrap().iter()
+        .map(|record| record["artifact"]["name"].as_str().unwrap().to_owned()).collect();
+    names.sort();
+    assert_eq!(names, ["events.json", "radar.html", "radar.md"]);
+    assert!(std::fs::metadata(root.join("company-notes.md")).unwrap().len() > 0, "the other writer ran");
+    // Exactly the three published copies: the refused attempt left none.
+    let store = root.join(".factory/artifacts");
+    let mut copies = Vec::new();
+    let mut pending = vec![store.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            if entry.path().is_dir() { pending.push(entry.path()) } else { copies.push(entry.path()) }
+        }
+    }
+    assert_eq!(copies.len(), 3, "{copies:?}");
+    assert!(copies.iter().all(|copy| copy.starts_with(store.join(run_id))));
+    assert!(git(&["status", "--porcelain", "--untracked-files=all"]).contains(".factory/artifacts/"),
+        "the store is visible to the instance repository");
+}
+
 /// `true` (and prints why) when this binary and the environment cannot run
 /// any test in this file -- shared so a second test does not have to repeat
 /// (or drift from) the same two checks.
