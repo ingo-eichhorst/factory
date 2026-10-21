@@ -320,7 +320,7 @@ mod tests {
                 resumed_session: Some("conversation".into()), upstream: vec![UpstreamOutput {
                     node_id: "upstream-node".into(), task_id: "upstream-task".into(),
                     title: "upstream".into(), result: Some("result".into()),
-                }], knowledge: None, required_steps: vec![], agent_exits: vec![], deliver: None,
+                }], knowledge: None, required_steps: vec![], agent_exits: vec![], deliver: None, reply: None,
             }),
         };
         let wire = serde_json::to_value(WireContext::from(&ctx)).unwrap();

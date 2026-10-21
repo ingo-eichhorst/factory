@@ -44,9 +44,13 @@ impl Engine {
                 Ok(Payload::Ok)
             }
 
-            Request::Notify { channel, text, files } => Ok(Payload::Notified {
-                notified: Box::pin(self.l4_service().notify(caller, &channel, text, files)).await?,
+            Request::Notify { channel, text, files, reply_to, buttons } => Ok(Payload::Notified {
+                notified: Box::pin(self.l4_service().notify(caller, &channel, text, files, reply_to, buttons)).await?,
             }),
+            Request::ChannelRecord { channel, record } => {
+                self.l4_service().record_inbound(&channel, record).await?;
+                Ok(Payload::Ok)
+            }
             Request::TaskCreate(new) => Ok(Payload::Task {
                 task: self.l4_service().create(new).await?,
             }),
@@ -59,7 +63,11 @@ impl Engine {
             Request::TaskUpdate { id, mut patch, reason } => {
                 let asked = crate::operations::Asked::new(caller, reason);
                 let delivery = self.l4_service().delivery_change(&id, &mut patch).await?;
+                let schedule = self.l4_service().schedule_change(&id, &patch).await?;
                 let task = self.update(&id, patch, Some(&asked)).await?;
+                if let Some(change) = schedule {
+                    self.l4_service().record_schedule_change(&task, change, &asked).await;
+                }
                 if let Some(change) = delivery {
                     self.l4_service().record_delivery_change(&task, change, &asked).await?;
                 }

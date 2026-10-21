@@ -39,6 +39,11 @@ impl Engine {
                 let (attachment, document) = self.dependency_document(&scope, &id).await?;
                 Ok(Payload::DependencyDocument { attachment, document })
             }
+            // `#338`: the one getUpdates there is for a bot token. Boxed:
+            // it waits on Telegram and fetches files.
+            Request::ChannelPoll { channel, consumer, offset, wait } => Ok(Payload::ChannelUpdates {
+                batch: Box::pin(self.l2_service().poll(&channel, &consumer, offset, wait)).await?,
+            }),
             Request::TaskAttach { id, token, kind, filename: _, bytes } => {
                 let attachment = self.attach_dependency(&id, kind, bytes, Some(&token)).await?;
                 Ok(Payload::Attachment { attachment })

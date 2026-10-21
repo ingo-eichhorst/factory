@@ -297,6 +297,39 @@ pub enum Request {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<String>,
+        /// `#338`, the owner's only: the inbound message this answers. It
+        /// goes as a reply to it, and is never a repeat of an answer to
+        /// another message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<i64>,
+        /// `#338`, the owner's only: buttons under the message, whose
+        /// presses come back through `channel.poll`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        buttons: Vec<factory_environment::channels::Button>,
+    },
+    /// `#338`: one `getUpdates` for a channel's bot token -- what came in,
+    /// sorted against its `inbound:` allowlist, with an allowed message's
+    /// files saved. A bot token has exactly one consumer: the first to poll
+    /// holds it, in this daemon and on the host, and any other is refused
+    /// with who holds it. `offset` is the first update the caller has not
+    /// handled. The owner's only; the daemon's own Telegram gateway is its
+    /// caller.
+    #[serde(rename = "channel.poll")]
+    ChannelPoll {
+        channel: String,
+        consumer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait: Option<u64>,
+    },
+    /// `#338`: journal what became of something that came in on a channel
+    /// -- ignored, refused, a confirmation asked, given or declined -- on
+    /// the channels' own line (`factory:channels`). The owner's only.
+    #[serde(rename = "channel.record")]
+    ChannelRecord {
+        channel: String,
+        record: InboundRecord,
     },
     /// A harness's lifecycle hook saying the agent's turn ended. Its own
     /// request rather than a kind of `TaskReport`, so nothing can mistake the
@@ -1234,6 +1267,7 @@ impl Request {
             Request::Dependencies { .. } |
             Request::DependenciesVex { .. } |
             Request::DependencyDocument { .. } |
+            Request::ChannelPoll { .. } |
             Request::SecretSet { .. } => L2,
             // L3
             Request::RuntimeConnections |
@@ -1268,6 +1302,7 @@ impl Request {
             Request::TaskSkipNext { .. } |
             Request::TaskReport { .. } |
             Request::Notify { .. } |
+            Request::ChannelRecord { .. } |
             Request::TaskTurnEnded { .. } |
             Request::TaskEntries { .. } |
             Request::TaskOutput { .. } |
@@ -1504,6 +1539,10 @@ pub enum Payload {
     /// The answer to `Request::Notify`.
     Notified {
         notified: Notified,
+    },
+    /// The answer to `Request::ChannelPoll` (`#338`).
+    ChannelUpdates {
+        batch: factory_environment::channels::InboundBatch,
     },
     Dependencies {
         report: DependenciesReport,
@@ -2379,6 +2418,51 @@ pub struct Notified {
     /// For a repeat: when the identical message went.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One journal line about something that came in on a channel (`#338`).
+/// The kind is one of a fixed few, so nothing written this way can pass for
+/// a send, a run or an approval. `data` carries ids and counts, never what
+/// a message said.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InboundRecord {
+    pub kind: InboundKind,
+    pub message: String,
+    #[serde(default)]
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundKind {
+    /// The gateway started taking messages in.
+    Started,
+    /// Something came in that the allowlist or the chat does not let in.
+    Ignored,
+    /// The gateway could not poll: another consumer holds the token, or
+    /// Telegram refused.
+    Refused,
+    /// A change waits for the owner's confirmation.
+    Proposed,
+    Confirmed,
+    Declined,
+    /// Something an allowed message asked for could not be done.
+    Failed,
+}
+
+impl InboundKind {
+    /// The journal kind: `inbound_ignored`, ...
+    pub fn journal_kind(self) -> &'static str {
+        match self {
+            Self::Started => "inbound_started",
+            Self::Ignored => "inbound_ignored",
+            Self::Refused => "inbound_refused",
+            Self::Proposed => "inbound_proposed",
+            Self::Confirmed => "inbound_confirmed",
+            Self::Declined => "inbound_declined",
+            Self::Failed => "inbound_failed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

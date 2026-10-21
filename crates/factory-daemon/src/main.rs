@@ -105,7 +105,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use engine::Engine;
-use interfaces::{HttpInterface, SocketInterface};
+use interfaces::{HttpInterface, SocketInterface, TelegramInterface};
 
 const BUILD_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -422,6 +422,28 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
 
     if mounted.is_empty() {
         anyhow::bail!("no interfaces mounted; the daemon would be unreachable");
+    }
+
+    // `#338`: a channel that takes messages in is reached through its own
+    // interface -- the one getUpdates consumer of its bot token.
+    for channel in factory.config.channels.iter().filter(|c| c.inbound.is_some()) {
+        let ctx = InterfaceContext {
+            config: factory_core::config::InterfaceConfig { kind: "telegram".into(), settings: Default::default() },
+            root: factory.root.clone(),
+            factory_dir: factory.factory_dir(),
+        };
+        let (engine, rx) = (engine.clone(), shutdown_rx.clone());
+        let name = format!("telegram:{}", channel.name);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let iface = Arc::new(TelegramInterface::new(channel.name.clone()));
+        let watched = name.clone();
+        let handle = tokio::spawn(async move { watch_interface(watched, iface.serve(engine, ctx, rx), ready_tx).await });
+        match tokio::time::timeout(std::time::Duration::from_millis(400), ready_rx).await {
+            Ok(Ok(Err(e))) => anyhow::bail!("the {name} interface could not start: {e}"),
+            Ok(Ok(Ok(()))) => anyhow::bail!("the {name} interface stopped immediately"),
+            _ => {}
+        }
+        mounted.push((name, handle));
     }
 
     // Line up declared standing agents with whatever is still running before
