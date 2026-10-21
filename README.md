@@ -1615,6 +1615,67 @@ empty one is a finding and the control stays applicable — and every `n/a`, at
 whichever scope declared it, is always listed rather than left silent: ISO
 27001 calls this a Statement of Applicability, and ADR 0004 keeps the name.
 
+**Where a framework applies, decided at the root** (`#332`). Additive-only
+leaves one thing unsaid: a framework the root binds holds everywhere, even in
+a scope it has nothing to say about — the CRA in a `finance` scope that ships
+no product. So the root, and only the root, may say per framework where it
+applies. Each entry of the root's `policies.frameworks` is a name or an object:
+
+```yaml
+# .factory/config.yaml                  (instance root)
+policies:
+  frameworks:
+    - name: cra
+      except: [finance]          # the whole tree minus these subtrees
+    - name: dsgvo
+      except: [finance]
+    - name: finance
+      scopes: [finance]          # only these subtrees
+    - iso27001                   # a plain name: the whole tree, as before
+```
+
+`scopes` is the named scopes and everything below each (absent: the whole
+tree); `except` removes subtrees from that set, applied after `scopes`. Both
+may be given. Names are configured scope names — not paths, not leaf
+aliases — and ancestry is the path tree, the same as every chain above, so
+`except: [finance]` reaches `finance/ledger` but never a `finance-archive`
+beside it. Naming the root scope itself is the whole tree. A plain string,
+or an object with neither key, means exactly what a string always meant, so
+an existing config loads unchanged. A name no scope carries is a finding on
+the board (`unknown_scope`), never a load failure — a renamed scope must not
+stop the daemon — and the framework applies as if the name were absent: an
+unknown `except` removes nothing, and a `scopes` list of nothing but unknown
+names applies nowhere, which the board says rather than guessing a whole
+tree. Listing a framework twice with `scopes` or `except` on either entry is
+refused at load, since a person would be left guessing which one decides.
+
+The invariant above survives because a nested scope still only adds or
+tightens: its own `scope.policies` has no `scopes` or `except` — the daemon
+refuses one at load, naming the scope — but it may bind a framework the root
+left out for it, and then the root's tightening and `n/a` for that framework
+hold there as they would anywhere it applies. Adding is always allowed;
+dropping still is not. The root's own `scope:` block still refuses
+`policies` altogether. Resolution happens in one place,
+`policy_intent::chain_for_scope` (`Config::policy_chain_for_scope` calls
+it): the root's layer is narrowed to what applies at the scope being asked
+about, so everything that reads a chain — the board and its rollups, control
+detail, attestation, remediation, a control plan's `requires:`, the agent
+guide's list of frameworks, `compliance.<framework>` — agrees without
+knowing exclusions exist. A scope that no longer exists gets the root's
+layer as it applies at the root itself.
+
+Nothing about it is silent. `factory policy --scope S` and the L6 tab leave a
+framework excluded at `S` out of its rows and rollup, and say where it does
+apply instead; the instance-wide board says which scopes each framework
+covers. The report's `applicability` lists, per framework, the layers binding
+it, every scope it covers, the root's `scopes`/`except` (unknown names left
+out) and every scope that restriction excludes, with the root as the layer
+that decided it; `factory policy export` prints it as the Statement of
+Applicability's own section. `factory policy show`, `attest` and `remediate`
+refuse a control in a scope its framework is excluded from, and name the
+exclusion: `cra/annex-i-2-1 does not apply at "finance": the instance root
+("company") excludes cra from the "finance" subtree (except: [finance])`.
+
 **Checks and statuses.** Evidence is evaluated per check kind, and all thirteen
 are evaluated for real: `knowledge` (a vault page tagged
 `control/<framework>/<id>`, or a check's own `tag`), `attestation` (an
@@ -1783,7 +1844,8 @@ to is, not merely one.
 
 `factory policy [status] [--scope S] [--framework F] [--json]` shows this:
 every applicable control's status, findings, and every `n/a` in scope, rolled
-up per framework. `factory policy show <fw>/<id> [--scope S] [--json]` is one
+up per framework — and, once the root restricts any framework, an
+APPLICABILITY section saying where each one applies. `factory policy show <fw>/<id> [--scope S] [--json]` is one
 control's full detail, including its whole attestation history. `factory
 policy attest <fw>/<id> --scope S --evidence <pointer> --expires
 <30d|2027-01-01> [--note N]` records one; `factory policy withdraw
@@ -1807,6 +1869,7 @@ the exact reach rule `Request::TaskCreate` itself is checked against
 check) — this is not a second door into creating a task, it is the one
 door. Refused outright when the control is already `satisfied`, `attested`,
 or `n/a` at `S` — there is nothing to remediate; refused, naming the
+exclusion, when the root excludes the control's framework from `S`; refused, naming the
 existing task by id and title, when a non-terminal task already carries
 that label in `S` — a second `remediate` finds the same task rather than
 spawning a duplicate. `POST /api/policy/remediate` (`{control, scope,
@@ -1821,7 +1884,9 @@ it, and a refusal shows inline, next to the button — this page uses neither
 **Exporting for an audit.** `factory policy export [--scope S] [--format
 md|json]` prints a snapshot to stdout: an instance/scope/produced-at header
 and the "compliant means evidence complete, not certified" sentence, then
-per framework its rollup, then — scope by scope — every control that
+each framework's applicability — the layers binding it, every scope it
+covers, and every subtree the root excluded and by which rule — then per
+framework its rollup, then — scope by scope — every control that
 framework applies to there with its status, reasons, `refs` (the task, run,
 workflow run, bench run or attestation id behind it, never a page's own
 text), and its whole attestation history at that scope (evidence pointer,
@@ -4907,6 +4972,51 @@ ordinary directories get no row and cannot be selected or receive work.
 Discovery is performed at daemon startup; add or remove a marker, then restart
 to refresh the scope list. Duplicate IDs and names, malformed files, and
 missing IDs or names stop startup with the files involved named in the error.
+
+### Policy applicability (#332)
+
+The instance root's top-level `policies:` binds frameworks, tightens
+controls and marks them `n/a`; a nested scope's `scope.policies` does the
+same for its subtree, additive only (see "Policies" above). Only at the root
+may a `frameworks` entry say where it applies:
+
+```yaml
+# root .factory/config.yaml, top level (like `roles:`)
+policies:
+  frameworks:
+    - cra                        # the whole tree
+    - name: dsgvo                # the same as `- dsgvo`
+    - name: finance
+      scopes: [finance]          # these scopes and everything below them
+    - name: iso27001
+      scopes: [engineering, finance]
+      except: [sandbox]          # subtrees removed, after `scopes`
+  tighten:
+    cra/annex-i-2-1: { max_age: 14d }
+  not_applicable:
+    - { control: dsgvo/art-37, rationale: fewer than 20 people process personal data }
+```
+
+| key | where | meaning |
+| --- | --- | --- |
+| `frameworks[]: <name>` | root, nested | binds the framework to the whole tree (root) or the scope's subtree (nested) |
+| `frameworks[].name` | root, nested | the framework, a catalogue's file stem |
+| `frameworks[].scopes` | root only | configured scope names; the framework applies to each and everything below it. Absent: the whole tree |
+| `frameworks[].except` | root only | configured scope names whose subtrees are removed, applied after `scopes` |
+| `tighten`, `not_applicable` | root, nested | unchanged; the root's for an excluded framework hold only where something binds it back |
+
+```yaml
+# a nested scope: projects/demo/.factory/config.yaml
+scope:
+  name: demo
+  policies:
+    frameworks: [ai-act]         # add only: `scopes`/`except` here is refused at load
+```
+
+An unknown name is an `unknown_scope` finding on the board, not a load
+failure; a framework listed twice with `scopes`/`except` on either entry, and
+a misspelt key inside the object form, are refused at load like any other
+typo in a policy declaration.
 
 ### Where a scope's tasks live
 

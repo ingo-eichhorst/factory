@@ -122,9 +122,11 @@ fn control_section(
 
 /// The whole export as markdown: an instance/scope/produced-at header and
 /// the "compliant means evidence complete" sentence ADR 0004 asks every
-/// view of this to carry, then per framework its rollup and, scope by
-/// scope, every control that framework applies to there, then every `n/a`
-/// declaration with its rationale and declaring scope, then every finding.
+/// view of this to carry, then each framework's applicability -- the
+/// layers binding it, the scopes it covers and every subtree the root
+/// excluded -- then per framework its rollup and, scope by scope, every
+/// control that framework applies to there, then every `n/a` declaration
+/// with its rationale and declaring scope, then every finding.
 /// No page text anywhere in it -- every pointer is an id
 /// (`EvidenceRef`/`Attestation.evidence`), never a knowledge page's own
 /// content, exactly the issue's own "no page text, only pointers" rule.
@@ -153,6 +155,17 @@ pub fn export_markdown(export: &PolicyExport) -> String {
         .iter()
         .map(|c| (c.framework.as_str(), c.title.as_str()))
         .collect();
+
+    if !report.applicability.is_empty() {
+        out.push_str("\n## Applicability\n\n");
+        for a in &report.applicability {
+            let title = titles
+                .get(a.framework.as_str())
+                .copied()
+                .unwrap_or(a.framework.as_str());
+            out.push_str(&format!("- {title} ({}): {}\n", a.framework, a.describe()));
+        }
+    }
 
     for r in &report.rollup {
         let title = titles
@@ -287,6 +300,7 @@ mod tests {
                 scope: "demo".to_string(),
                 rationale: "we ship no hardware".to_string(),
             }],
+            applicability: vec![],
             findings: vec![Finding {
                 kind: FindingKind::EmptyRationale,
                 subject: "demo".to_string(),
@@ -368,6 +382,39 @@ mod tests {
         // Findings.
         assert!(text.contains("## Findings"), "{text}");
         assert!(text.contains("EmptyRationale"), "{text}");
+    }
+
+    #[test]
+    fn export_markdown_lists_each_frameworks_scope_set_and_every_root_exclusion() {
+        assert!(!export_markdown(&sample()).contains("## Applicability"));
+        let mut export = sample();
+        export.report.applicability = vec![crate::policy_report::FrameworkApplicability {
+            framework: "cra".to_string(),
+            bound_by: vec!["company".to_string()],
+            covers: vec!["company".to_string(), "demo".to_string()],
+            restricted_by: Some("company".to_string()),
+            scopes: None,
+            except: vec!["finance".to_string()],
+            excluded: vec!["finance".to_string(), "finance/ledger".to_string()],
+        }];
+        let text = export_markdown(&export);
+        assert!(text.contains("## Applicability"), "{text}");
+        assert!(
+            text.contains(
+                "- Cyber Resilience Act (cra): the instance root (company) binds it to the whole tree \
+                 minus the finance subtree(s) -- applies at company, demo; excluded at finance, finance/ledger"
+            ),
+            "{text}"
+        );
+        let json = serde_json::to_value(&export).unwrap();
+        assert_eq!(
+            json["report"]["applicability"][0]["excluded"],
+            serde_json::json!(["finance", "finance/ledger"])
+        );
+        assert_eq!(
+            json["report"]["applicability"][0]["restricted_by"],
+            "company"
+        );
     }
 
     #[test]

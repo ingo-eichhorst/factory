@@ -82,6 +82,42 @@ export function frameworkCards(report) {
   });
 }
 
+// ------------------------------------------------------------ applicability
+
+/// The rule half of `FrameworkApplicability::describe` (`policy_report.rs`,
+/// `#332`), ported word for word so this tab, `factory policy` and the
+/// export say the same thing: the subtrees the instance root bound a
+/// restricted framework to, or the layers binding an unrestricted one.
+export function applicabilityRule(a) {
+  if (a.restricted_by) {
+    let set = a.scopes == null
+      ? "the whole tree"
+      : a.scopes.length === 0
+        ? "no configured scope"
+        : `only the ${a.scopes.join(", ")} subtree(s)`;
+    if ((a.except || []).length) set += ` minus the ${a.except.join(", ")} subtree(s)`;
+    return `the instance root (${a.restricted_by}) binds it to ${set}`;
+  }
+  return `bound by ${(a.bound_by || []).join(", ")}`;
+}
+
+/// One row per framework in `report.applicability` -- or none while the
+/// root restricts nothing, the same rule `factory policy` prints its
+/// APPLICABILITY section by: every framework then applies wherever it is
+/// bound, which the cards already say. A framework excluded at the asked
+/// scope has no card, so this row is where it shows instead.
+export function applicabilityRows(report) {
+  const entries = report.applicability || [];
+  if (!entries.some((a) => a.restricted_by)) return [];
+  return entries.map((a) => ({
+    framework: a.framework,
+    title: frameworkTitle(report.catalogues, a.framework),
+    rule: applicabilityRule(a),
+    covers: a.covers || [],
+    excluded: a.excluded || [],
+  }));
+}
+
 // --------------------------------------------------------------------- gaps
 
 /// One row per `(scope, control)` where that scope's own evaluation is
@@ -157,6 +193,7 @@ const FINDING_LABELS = {
   empty_rationale: "n/a declared with no rationale",
   unknown_daemon_fact: "Names a daemon fact nothing recognizes",
   unknown_secrets_location: "Names a secrets location nothing recognizes",
+  unknown_scope: "Restricts a framework to a scope nothing is called",
 };
 export function findingLabel(kind) {
   return FINDING_LABELS[kind] || kind;

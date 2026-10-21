@@ -36,7 +36,10 @@ pub use factory_environment::declarations::{
 /// frameworks and tighten or mark a control `n/a`, never drop or loosen what
 /// an ancestor already committed the company to. That rule lives in
 /// `policy::applicable`, which folds a chain of these; nothing here enforces
-/// it on its own.
+/// it on its own. The one narrowing is the root's (`#332`): its
+/// `frameworks` entries may carry `scopes`/`except`, resolved per scope by
+/// `policy_intent::chain_for_scope`; a nested scope's never may
+/// (`refuse_scope_applicability`).
 ///
 /// `deny_unknown_fields`: a typo here -- `framework:` for `frameworks:` --
 /// would otherwise commit the company to nothing while parsing clean. For a
@@ -163,7 +166,7 @@ impl Config {
     /// for the built-in default, or `Some` naming the scope whose block
     /// answered -- the root's own configured scope name, or the instance
     /// name when the root never opted itself into being a scope at all
-    /// (`root_policy_layer`'s own naming rule, mirrored here). Never a
+    /// (`root_policy_name`'s own naming rule, mirrored here). Never a
     /// magic string like `"root"`: a scope can be named anything, including
     /// `root` or `default`, and the source is always either `None` or an
     /// actual name, never a word that could collide with one.
@@ -238,19 +241,27 @@ impl Config {
         Ok(())
     }
 
-    /// The instance root's own policy layer, if it declared any -- the top
-    /// of every chain `policy_chain_for_scope` builds, and what
-    /// `Factory::policy_chain` falls back to for a scope that no longer
-    /// exists. Named from the root's own configured scope when it has one --
-    /// the root refuses to also write `scope.policies`
-    /// (`refuse_root_scope_policies`), so `self.policies` *is* that scope's
-    /// layer -- or from the instance name, for an instance that never opted
-    /// its root into being a scope at all.
-    fn root_policy_layer(&self) -> Option<PolicyLayer> {
-        factory_direction::policy_intent::root_layer(
-            &self.policies,
+    /// The name the instance root's own policy layer carries -- the top of
+    /// every chain `policy_chain_for_scope` builds. Its own configured
+    /// scope's name when it has one -- the root refuses to also write
+    /// `scope.policies` (`refuse_root_scope_policies`), so `self.policies`
+    /// *is* that scope's layer -- or the instance name, for an instance that
+    /// never opted its root into being a scope at all.
+    fn root_policy_name(&self) -> &str {
+        factory_direction::policy_intent::root_name(
             self.scope.as_ref().map(|scope| scope.name.as_str()),
             &self.instance.name,
+        )
+    }
+
+    /// The instance root's own policy layer alone, as it applies at the
+    /// root itself: what `Factory::policy_chain` falls back to for a scope
+    /// that no longer exists, and so has nowhere in the tree to stand.
+    fn root_policy_chain(&self) -> Vec<PolicyLayer> {
+        factory_direction::policy_intent::root_chain(
+            &self.policies,
+            self.root_policy_name(),
+            &self.scopes,
         )
     }
 
@@ -266,20 +277,25 @@ impl Config {
     ///
     /// Discovery may also have placed the root's own `Scope` (path `.`) in
     /// `self.scopes`, which then surfaces as an "ancestor" of everything;
-    /// its `policies` is always empty (the same guard that keeps
-    /// `root_policy_layer` the sole way the root's commitments enter the
+    /// its `policies` is always empty (the same guard that keeps the
+    /// top-level `policies:` the sole way the root's commitments enter the
     /// chain), so skipping empty layers below -- exactly as
     /// `roles_for_scope` already does -- keeps it from ever appearing twice.
+    ///
+    /// The root's layer is narrowed to what applies at `scope` (#332): a
+    /// framework whose `scopes`/`except` leave `scope` out is not in it.
+    /// Only the root decides that; every layer below is taken whole.
     pub fn policy_chain_for_scope(&self, scope: &Scope) -> Vec<PolicyLayer> {
         factory_direction::policy_intent::chain_for_scope(
-            self.root_policy_layer(),
+            &self.policies,
+            self.root_policy_name(),
             &self.scopes,
             scope,
         )
     }
 
     /// The instance root's own quality layer, if it binds any profile --
-    /// named exactly as `root_policy_layer` names the root's policy layer,
+    /// named exactly as `root_policy_name` names the root's policy layer,
     /// and for the same reason (`refuse_root_scope_quality` keeps
     /// `self.quality` the root scope's only layer).
     fn root_quality_layer(&self) -> Option<QualityLayer> {
@@ -392,6 +408,7 @@ impl Config {
             scope.validate_dependencies()?;
             refuse_zero_max_sessions(scope)?;
             refuse_bad_instances(scope)?;
+            refuse_scope_applicability(scope)?;
             let roles = self.roles_for_scope(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
@@ -821,6 +838,24 @@ pub fn refuse_misplaced_scope_roles(document: &serde_yaml_ng::Value, path: &Path
         )));
     }
     Ok(())
+}
+
+/// Refuse `scopes:`/`except:` on a framework in a nested scope's own
+/// `scope.policies` (#332). Only the instance root decides where a framework
+/// applies; a nested layer may add a framework or tighten one, never exclude
+/// a subtree from anything -- or a child project could opt itself out of the
+/// GDPR, the very thing additive-only layering exists to prevent. Refused
+/// loudly, like a typo in the block, rather than quietly ignored.
+fn refuse_scope_applicability(scope: &Scope) -> Result<()> {
+    match scope.policies.applicability.keys().next() {
+        Some(framework) => Err(FactoryError::BadRequest(format!(
+            "scope {:?} gives the framework {framework:?} `scopes` or `except` in its `scope.policies`. \
+             Only the instance root's top-level `policies.frameworks` decides where a framework applies; \
+             a nested scope may only add a framework (`- {framework}`) or tighten one",
+            scope.name,
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Refuse a `policies:` block written at the top of a nested scope's own
@@ -1863,7 +1898,7 @@ impl Factory {
     pub fn policy_chain(&self, scope: &str) -> Vec<PolicyLayer> {
         match self.scope(scope) {
             Ok(found) => self.config.policy_chain_for_scope(found),
-            Err(_) => self.config.root_policy_layer().into_iter().collect(),
+            Err(_) => self.config.root_policy_chain(),
         }
     }
 
@@ -2757,6 +2792,95 @@ mod tests {
         let root_only = f.policy_chain("gone");
         assert_eq!(root_only.len(), 1);
         assert_eq!(root_only[0].frameworks, vec!["cra".to_string()]);
+    }
+
+    /// `#332`: the root decides per framework where it applies; the rest of
+    /// the tree is `policy_tree()`'s shape, with a `finance` beside it.
+    fn applicability_tree() -> Config {
+        let mut c = config_with(
+            "scope:\n  name: company\npolicies:\n  frameworks:\n    - name: cra\n      except: [finance]\n    \
+             - dsgvo\n    - name: finance\n      scopes: [finance]\n",
+        );
+        c.scopes = vec![
+            scope_with_policies("company", ".", ""),
+            scope_with_policies("finance", "finance", ""),
+            scope_with_policies("ledger", "finance/ledger", "  frameworks: [cra]\n"),
+            scope_with_policies("demo-app", "projects/demo", ""),
+        ];
+        c
+    }
+
+    #[test]
+    fn root_frameworks_take_strings_and_objects_and_the_chain_narrows_per_scope() {
+        let c = applicability_tree();
+        c.validate().unwrap();
+        let root_frameworks = |name: &str| {
+            c.policy_chain_for_scope(scope_named(&c, name))
+                .first()
+                .filter(|layer| layer.scope == "company")
+                .map(|layer| layer.frameworks.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(root_frameworks("company"), ["cra", "dsgvo"]);
+        assert_eq!(root_frameworks("demo-app"), ["cra", "dsgvo"]);
+        assert_eq!(root_frameworks("finance"), ["dsgvo", "finance"]);
+        assert_eq!(root_frameworks("ledger"), ["dsgvo", "finance"]);
+        let ledger = c.policy_chain_for_scope(scope_named(&c, "ledger"));
+        assert_eq!(
+            ledger[1].frameworks,
+            ["cra"],
+            "a nested scope still binds back what the root left out for it"
+        );
+
+        let mut f = factory_with(c.scopes.clone());
+        f.config = c;
+        assert_eq!(
+            f.policy_chain("finance"),
+            f.config.policy_chain_for_scope(f.scope("finance").unwrap())
+        );
+        assert_eq!(
+            f.policy_chain("gone")[0].frameworks,
+            ["cra", "dsgvo"],
+            "a vanished scope gets the root layer as it applies at the root itself"
+        );
+    }
+
+    #[test]
+    fn a_nested_scope_cannot_restrict_where_a_framework_applies() {
+        let mut c = applicability_tree();
+        c.scopes[1] = scope_with_policies(
+            "finance",
+            "finance",
+            "  frameworks:\n    - name: cra\n      except: [ledger]\n",
+        );
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("scope \"finance\""), "{e}");
+        assert!(
+            e.contains("Only the instance root's top-level `policies.frameworks`"),
+            "{e}"
+        );
+        c.scopes[1] = scope_with_policies(
+            "finance",
+            "finance",
+            "  frameworks:\n    - name: cra\n      scopes: [finance]\n",
+        );
+        assert!(
+            c.validate().is_err(),
+            "`scopes` narrows as surely as `except`"
+        );
+        c.scopes[1] = scope_with_policies("finance", "finance", "  frameworks:\n    - name: cra\n");
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn a_restricted_root_declaration_round_trips_through_yaml_and_a_string_stays_a_string() {
+        let c = applicability_tree();
+        let rendered = serde_yaml_ng::to_string(&c).unwrap();
+        assert!(rendered.contains("- dsgvo\n"), "{rendered}");
+        assert!(rendered.contains("- name: cra\n"), "{rendered}");
+        let reparsed: Config = serde_yaml_ng::from_str(&rendered).unwrap();
+        assert_eq!(reparsed.policies, c.policies);
+        assert_eq!(c.policies.frameworks, ["cra", "dsgvo", "finance"]);
     }
 
     #[test]

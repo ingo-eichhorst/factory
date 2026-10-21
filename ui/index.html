@@ -316,6 +316,17 @@
 
     <div class="pol-cards" id="policy-cards"></div>
 
+    <section id="policy-applicability-section" hidden>
+      <h3>Applicability</h3>
+      <p class="env-note">Where each framework applies. Only the instance root's
+        <code class="id">policies.frameworks</code> may limit one with <code class="id">scopes</code> or
+        <code class="id">except</code>; a framework excluded here has no card above.</p>
+      <table>
+        <thead><tr><th>Framework</th><th>Bound</th><th>Applies at</th><th>Excluded at</th></tr></thead>
+        <tbody id="policy-applicability"></tbody>
+      </table>
+    </section>
+
     <section>
       <h3>Open and stale controls</h3>
       <table>
