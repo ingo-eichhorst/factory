@@ -866,6 +866,108 @@ fn missing_prerequisites() -> bool {
     false
 }
 
+/// `#330` against a real daemon, a real herdr and the real `factory` CLI: two
+/// standing `shell` sessions of one declaration, each listed, stopped and
+/// started on its own; a stopped one stays down across a daemon restart;
+/// attach is refused with the reason (a shell pane has no named agent); and
+/// all of it is journaled under `factory:agents` with who asked.
+#[test]
+fn two_shell_standing_instances_are_stopped_started_and_journaled_one_at_a_time_through_the_cli() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision();
+    daemon.sigterm();
+    let path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["scope"]["agents"] =
+        serde_yaml_ng::from_str("[{ name: watcher, harness: shell, lifetime: permanent, instances: 2 }]").unwrap();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+    let (factory_bin, root) = (daemon.factory_bin.clone(), daemon.root.clone());
+
+    let cli = |args: &[&str]| {
+        let output = Command::new(&factory_bin)
+            .arg("--root")
+            .arg(&root)
+            .arg("--url")
+            .arg(&base)
+            .args(args)
+            .env_remove("FACTORY_TOKEN")
+            .env_remove("FACTORY_TASK_TOKEN")
+            .env_remove("FACTORY_RUN_TOKEN")
+            .env_remove("FACTORY_SOCKET")
+            .env_remove("FACTORY_URL")
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let states = || -> Vec<(String, String)> {
+        let roster = expect_ok(&format!("{base}/api/agents"), &get(&format!("{base}/api/agents")));
+        let watcher = roster["scopes"][0]["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == "watcher")
+            .cloned()
+            .unwrap_or_default();
+        watcher["instances"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|i| (i["id"].as_str().unwrap_or("").to_string(), i["state"].as_str().unwrap_or("").to_string()))
+            .collect()
+    };
+    let both = |first: &str, second: &str| {
+        vec![("demo/watcher".to_string(), first.to_string()), ("demo/watcher#2".to_string(), second.to_string())]
+    };
+
+    wait_for("two standing shell instances up", Duration::from_secs(30), || {
+        (states() == both("ready", "ready")).then(|| json!(true))
+    });
+    let (ok, listed, err) = cli(&["agents"]);
+    assert!(ok, "{err}");
+    assert!(listed.contains("#1   demo/watcher ") && listed.contains("#2   demo/watcher#2 "), "{listed}");
+
+    // #2 alone goes down, by its id; #1 keeps running.
+    let (ok, out, err) = cli(&["agent", "stop", "demo/watcher#2"]);
+    assert!(ok && out.contains("demo/watcher#2"), "{out}{err}");
+    assert_eq!(states(), both("ready", "stopped"));
+    let (ok, listed, _) = cli(&["agents"]);
+    assert!(ok && listed.contains("stopped by the owner"), "{listed}");
+
+    // A shell pane has no named agent: attach says why rather than print a
+    // command that fails, and a stopped instance has nothing to attach to.
+    let (ok, _, err) = cli(&["agent", "attach", "demo/watcher"]);
+    assert!(!ok && err.contains("a shell pane has no named agent"), "{err}");
+    let (ok, _, err) = cli(&["agent", "attach", "demo/watcher#2"]);
+    assert!(!ok && err.contains("is stopped"), "{err}");
+
+    // A restart adopts #1 and leaves #2 down: a person stopped it.
+    daemon.sigterm();
+    daemon.spawn();
+    wait_for("#1 adopted after the restart", Duration::from_secs(30), || {
+        (states() == both("ready", "stopped")).then(|| json!(true))
+    });
+
+    // Started again, by its id; #1 untouched.
+    let (ok, out, err) = cli(&["agent", "start", "demo/watcher#2"]);
+    assert!(ok, "{out}{err}");
+    wait_for("#2 back up", Duration::from_secs(30), || (states() == both("ready", "ready")).then(|| json!(true)));
+
+    // Journaled with who asked, read back through the CLI.
+    let journal = wait_for("the factory:agents journal", Duration::from_secs(15), || {
+        let (ok, text, _) = cli(&["task", "log", "factory:agents"]);
+        (ok && text.contains("demo/watcher#2 started by the owner")).then(|| json!(text))
+    });
+    let journal = journal.as_str().unwrap();
+    assert!(journal.contains("demo/watcher#2 stopped by the owner"), "{journal}");
+}
+
 fn provision_recovery(command: &str) -> (Daemon, serde_yaml_ng::Value) {
     let mut daemon = provision();
     daemon.sigterm();

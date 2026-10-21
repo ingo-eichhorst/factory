@@ -251,7 +251,8 @@ impl Engine {
             // run shares. Its own grant, never swept in by a wildcard, and
             // checked against the root scope -- see `authorize` below.
             Request::HostPowerModeSet { .. } => Grant::HostPower,
-            Request::AgentStop { .. } => Grant::AgentStop,
+            // Asking what stopping one would cost is part of stopping it (`#330`).
+            Request::AgentStop { .. } | Request::AgentStopCheck { .. } => Grant::AgentStop,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
             // Typing into a run's session, however narrowed (`#106`).
@@ -383,6 +384,9 @@ impl Engine {
             | Request::Budget { .. }
             | Request::AgentOutput { .. }
             | Request::AgentScreen { .. }
+            // The command `factory agents` already prints for anyone, resolved
+            // for one instance (`#330`); the terminal it opens is the runtime's.
+            | Request::AgentAttach { .. }
             | Request::RunScreen { .. }
             | Request::WorkflowGet { .. }
             | Request::WorkflowList { .. }
@@ -671,7 +675,7 @@ impl Engine {
                 }
             }
 
-            Request::AgentStart { scope: s, name: n } => match def.reach {
+            Request::AgentStart { scope: s, name: n, .. } => match def.reach {
                 Reach::Scope => in_scope(s),
                 Reach::Own if s == scope && n == name => Ok(()),
                 Reach::Own => Err(deny("start an agent other than itself")),
@@ -691,12 +695,17 @@ impl Engine {
                 }
             }
 
-            Request::AgentStop { id } | Request::AgentInput { id, .. } => match def.reach {
-                Reach::Scope => match self.l4.store.get_agent(id).await? {
+            // An instance id, as the L3 service will read it: `#1` is the bare
+            // id (`#330`). Its own reach covers every instance of its own
+            // declaration -- two instances of one declaration are one agent.
+            Request::AgentStop { id } | Request::AgentInput { id, .. } | Request::AgentStopCheck { id } => match def.reach {
+                Reach::Scope => match self.l4.store.get_agent(&AgentSession::canonical_id(id)).await? {
                     Some(agent) => in_scope(&agent.scope),
                     None => Ok(()),
                 },
-                Reach::Own if id == &AgentSession::id_for(scope, name) => Ok(()),
+                Reach::Own if AgentSession::declaration_id(&AgentSession::canonical_id(id)) == AgentSession::id_for(scope, name) => {
+                    Ok(())
+                }
                 Reach::Own => Err(deny("reach into another agent's session")),
             },
 
@@ -1790,6 +1799,7 @@ mod tests {
             Request::AgentStart {
                 scope: "other".into(),
                 name: "x".into(),
+                instance: None,
             },
             Request::AgentConfigure {
                 scope: "other".into(),
@@ -2072,6 +2082,7 @@ mod tests {
             Request::AgentStart {
                 scope: "demo".into(),
                 name: "w".into(),
+                instance: None,
             },
             Request::AgentConfigure {
                 scope: "demo".into(),
@@ -2131,6 +2142,7 @@ mod tests {
             Request::AgentStart {
                 scope: "demo".into(),
                 name: "w".into(),
+                instance: None,
             },
             Request::AgentConfigure {
                 scope: "demo".into(),
@@ -2196,6 +2208,7 @@ mod tests {
             Request::AgentStart {
                 scope: "other".into(),
                 name: "w".into(),
+                instance: None,
             },
             Request::AgentConfigure {
                 scope: "other".into(),
@@ -2327,6 +2340,47 @@ mod tests {
         assert!(allowed(&e, &wearing("scope-editor"), scale("demo")).await);
         assert!(!allowed(&e, &wearing("scope-editor"), scale("other")).await);
         assert!(!allowed(&e, &wearing("self-editor"), scale("demo")).await);
+    }
+
+    #[tokio::test]
+    async fn an_agent_with_its_own_reach_reaches_every_instance_of_itself_and_no_other() {
+        // `#330`: two instances of one declaration are one agent. Instance 2 of
+        // `w` may stop or type at `w` and `w#2`; neither may touch `w2`.
+        let e = engine_with_roles(
+            "roles:\n  stopper:\n    grants: [agent.stop, agent.input]\n    reach: own\n",
+        );
+        let me = wearing("stopper");
+        for id in ["demo/w", "demo/w#1", "demo/w#2", "demo/w#13"] {
+            assert!(allowed(&e, &me, Request::AgentStop { id: id.into() }).await, "{id}");
+            assert!(allowed(&e, &me, Request::AgentStopCheck { id: id.into() }).await, "{id}");
+            assert!(
+                allowed(&e, &me, Request::AgentInput { id: id.into(), text: Some("hi".into()), keys: vec![] }).await,
+                "{id}"
+            );
+        }
+        for id in ["demo/w2", "demo/w2#2", "other/w#2", "demo/ww"] {
+            assert!(!allowed(&e, &me, Request::AgentStop { id: id.into() }).await, "{id}");
+            assert!(!allowed(&e, &me, Request::AgentStopCheck { id: id.into() }).await, "{id}");
+        }
+        // Resolving an attach command needs no grant: `factory agents` prints
+        // the same line to anyone.
+        assert!(allowed(&e, &worker("w"), Request::AgentAttach { id: "other/x#2".into() }).await);
+    }
+
+    #[tokio::test]
+    async fn scope_reach_over_an_instance_is_read_off_its_row_and_a_hash_one_is_the_bare_id() {
+        let e = engine_with_roles("roles:\n  stopper:\n    grants: [agent.stop]\n    reach: scope\n");
+        let row = |scope: &str, instance: u32| {
+            AgentSession::new(scope, "w", "shell", "herdr", factory_core::agent::Lifetime::Permanent, Role::worker())
+                .as_instance(instance)
+        };
+        e.l4.store.put_agent(&row("other", 1)).await.unwrap();
+        e.l4.store.put_agent(&row("other", 2)).await.unwrap();
+        e.l4.store.put_agent(&row("demo", 2)).await.unwrap();
+        let me = wearing("stopper");
+        assert!(!allowed(&e, &me, Request::AgentStop { id: "other/w#2".into() }).await);
+        assert!(!allowed(&e, &me, Request::AgentStop { id: "other/w#1".into() }).await, "#1 is other/w");
+        assert!(allowed(&e, &me, Request::AgentStop { id: "demo/w#2".into() }).await);
     }
 
     #[tokio::test]
@@ -2567,7 +2621,7 @@ mod tests {
         assert!(
             !allowed(&e, &triager, Request::AgentConfigure { scope: "demo".into(), agent: declaration() }).await
         );
-        assert!(!allowed(&e, &triager, Request::AgentStart { scope: "demo".into(), name: "x".into() }).await);
+        assert!(!allowed(&e, &triager, Request::AgentStart { scope: "demo".into(), name: "x".into(), instance: None }).await);
         assert!(!allowed(&e, &triager, Request::WorkflowStart { id: "wf".into(), inputs: Default::default() }).await);
 
         // And intake in a sibling scope is exactly as far out of reach.

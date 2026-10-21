@@ -93,13 +93,20 @@ impl factory_kernel::Provide<factory_kernel::EffectiveRoleFact> for RoleProvider
 /// What L3 observed about standing agents' sessions, kept in order and bounded. L3 writes it as it looks at a session
 /// (the supervision tick, a start, a stop); it never calls anyone. L4 reads it as a fact from a cursor
 /// (`StandingAgentObservationsFact`) and appends what it reads to the occupancy record.
+///
+/// Beside it, and read the same way, what standing agents were *asked* to do and by whom (`#330`,
+/// `StandingAgentActionsFact`): L4 reads that from a cursor of its own and journals it under `factory:agents`.
 #[derive(Default)]
 pub(crate) struct LivenessLog {
     inner: std::sync::Mutex<(u64, std::collections::VecDeque<(u64, factory_kernel::StandingAgentObservation)>)>,
+    actions: std::sync::Mutex<(u64, std::collections::VecDeque<(u64, factory_kernel::StandingAgentAction)>)>,
 }
 
 /// More than a busy day of ticks; a reader away for longer than this misses only the oldest observations.
 const LIVENESS_LOG_CAPACITY: usize = 8192;
+
+/// Far more than anyone asks of the standing agents between two of L4's ticks.
+const ACTION_LOG_CAPACITY: usize = 1024;
 
 impl LivenessLog {
     pub(crate) fn push(&self, observation: factory_kernel::StandingAgentObservation) {
@@ -118,6 +125,37 @@ impl LivenessLog {
         let seen = guard.1.iter().filter(|(seq, _)| *seq > cursor).map(|(_, o)| o.clone()).collect();
         (seen, guard.0)
     }
+
+    /// The runtime's last word on one session L3 has looked at, if it is still kept.
+    pub(crate) fn last_status(&self, subject: &str) -> Option<String> {
+        let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        guard.1.iter().rev().find(|(_, o)| o.subject == subject).map(|(_, o)| o.status.clone())
+    }
+
+    pub(crate) fn push_action(&self, action: factory_kernel::StandingAgentAction) {
+        let mut guard = self.actions.lock().unwrap_or_else(|p| p.into_inner());
+        guard.0 += 1;
+        let seq = guard.0;
+        guard.1.push_back((seq, action));
+        while guard.1.len() > ACTION_LOG_CAPACITY {
+            guard.1.pop_front();
+        }
+    }
+
+    /// Every action after `cursor`, and the cursor to read from next.
+    pub(crate) fn actions_since(&self, cursor: u64) -> (Vec<factory_kernel::StandingAgentAction>, u64) {
+        let guard = self.actions.lock().unwrap_or_else(|p| p.into_inner());
+        let asked = guard.1.iter().filter(|(seq, _)| *seq > cursor).map(|(_, a)| a.clone()).collect();
+        (asked, guard.0)
+    }
+}
+
+/// Who asked for something done to a standing agent, as the router heard it: `by` is the access check's own
+/// description of the caller, `source` whether that was the owner or an agent. Plain words; L3 decides nothing on them.
+#[derive(Debug, Clone)]
+pub(crate) struct Asker {
+    pub(crate) by: String,
+    pub(crate) source: &'static str,
 }
 
 /// When a person last had each standing instance's terminal in front of them, as L3
@@ -126,9 +164,40 @@ impl LivenessLog {
 /// into it. A scale-down never stops an instance seen within `ATTENDED_FOR`. Only
 /// what reaches L3 can be seen this way: herdr reports no attached client per pane,
 /// so a person in `herdr agent attach` who has not typed is not visible here.
+///
+/// Each sighting also keeps *how* the person was seen (`#330`), so a confirmation before
+/// stopping one can name the attachment rather than just assert it.
 #[derive(Default)]
 pub(crate) struct Attention {
-    seen: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    seen: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Presence)>>,
+}
+
+/// How a person was last seen at a standing instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Presence {
+    /// A frame of its screen was read: its terminal is open in Factory.
+    Screen,
+    /// Its transcript was read (`factory agent output`).
+    Transcript,
+    /// A key was typed into it.
+    Typed,
+    /// `factory agent attach` was resolved for it, by whoever this names. What
+    /// follows is herdr's: it reports no attached client, so this is the last
+    /// Factory hears of it.
+    Attach(String),
+}
+
+impl Presence {
+    /// `"its terminal was open in Factory 4s ago"`.
+    pub(crate) fn words(&self, ago: std::time::Duration) -> String {
+        let ago = format!("{}s ago", ago.as_secs());
+        match self {
+            Self::Screen => format!("its terminal was open in Factory {ago}"),
+            Self::Transcript => format!("its transcript was read {ago}"),
+            Self::Typed => format!("someone typed into it {ago}"),
+            Self::Attach(by) => format!("{by} attached to it with factory agent attach {ago}"),
+        }
+    }
 }
 
 /// Long enough to cover a terminal that is open and a person reading what they
@@ -138,13 +207,26 @@ pub(crate) const ATTENDED_FOR: std::time::Duration = std::time::Duration::from_s
 
 impl Attention {
     pub(crate) fn touch(&self, id: &str) {
+        self.saw(id, Presence::Screen);
+    }
+
+    /// A person seen at `id` just now, this way.
+    pub(crate) fn saw(&self, id: &str, how: Presence) {
         let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
-        seen.insert(id.to_string(), std::time::Instant::now());
+        seen.insert(id.to_string(), (std::time::Instant::now(), how));
     }
 
     pub(crate) fn attended(&self, id: &str) -> bool {
+        self.presence(id).is_some()
+    }
+
+    /// How a person was last seen at `id`, and how long ago, while that is
+    /// within `ATTENDED_FOR`.
+    pub(crate) fn presence(&self, id: &str) -> Option<(Presence, std::time::Duration)> {
         let seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
-        seen.get(id).is_some_and(|at| at.elapsed() < ATTENDED_FOR)
+        seen.get(id)
+            .map(|(at, how)| (how.clone(), at.elapsed()))
+            .filter(|(_, ago)| *ago < ATTENDED_FOR)
     }
 
     pub(crate) fn forget(&self, id: &str) {
@@ -168,8 +250,33 @@ impl factory_kernel::Provide<factory_kernel::StandingAgentObservationsFact> for 
         Ok(factory_kernel::StandingAgentObservationsFact { observations, next })
     }
 }
+#[async_trait::async_trait]
+impl factory_kernel::Provide<factory_kernel::StandingAgentActionsFact> for LivenessProvider {
+    type Query = u64;
+    type Value = factory_kernel::StandingAgentActionsFact;
+    type Error = factory_core::error::FactoryError;
+    async fn get(&self, cursor: &u64) -> factory_core::error::Result<Self::Value> {
+        let (actions, next) = self.0.actions_since(*cursor);
+        Ok(factory_kernel::StandingAgentActionsFact { actions, next })
+    }
+}
 
 impl L3Service<'_> {
+    /// Write down that somebody asked for something done to a standing agent (`#330`): `subject` is the instance's
+    /// id, or the declaration's for something asked of every instance. L4 journals it; L3 only keeps it.
+    pub(crate) fn asked(&self, asker: &Asker, action: &str, subject: &str, scope: &str, agent: &str, message: String) {
+        self.state.liveness.push_action(factory_kernel::StandingAgentAction {
+            subject: subject.to_string(),
+            scope: scope.to_string(),
+            agent: agent.to_string(),
+            action: action.to_string(),
+            by: asker.by.clone(),
+            source: asker.source.to_string(),
+            message,
+            at: chrono::Utc::now(),
+        });
+    }
+
     /// Write down what the runtime says a standing agent's session is doing, as of now.
     pub(crate) fn observe(&self, subject: &str, scope: &str, agent: &str, status: factory_core::adapter::runtime::RuntimeStatus) {
         self.state.liveness.push(factory_kernel::StandingAgentObservation {

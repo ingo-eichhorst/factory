@@ -118,6 +118,8 @@ pub struct L4State {
     pub(crate) store: Arc<dyn TaskStore>,
     /// How far into L3's standing-agent observations the occupancy record has read.
     pub(crate) standing_cursor: tokio::sync::Mutex<u64>,
+    /// How far into what L3 was asked to do to its standing agents the `factory:agents` journal has read (`#330`).
+    pub(crate) actions_cursor: tokio::sync::Mutex<u64>,
     pub(crate) workflows: crate::workflows::WorkflowStore,
     pub(crate) workflow_edit: tokio::sync::Mutex<()>,
     /// L4 owns run-step evidence and immutable artifact provenance separately

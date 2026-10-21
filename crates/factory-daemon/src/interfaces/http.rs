@@ -220,6 +220,8 @@ fn router(engine: Arc<Engine>) -> Router {
             post(agent_configure).delete(agent_delete),
         )
         .route("/api/agents/stop", post(agent_stop))
+        .route("/api/agents/stop-check", post(agent_stop_check))
+        .route("/api/agents/attach", post(agent_attach))
         .route("/api/agents/scale", post(agent_scale))
         .route("/api/agents/role", post(agent_role))
         .route("/api/agents/input", post(agent_input))
@@ -2076,6 +2078,9 @@ async fn run_output(
 struct StartAgent {
     scope: String,
     name: String,
+    /// One instance only (`#330`); absent starts every instance it keeps.
+    #[serde(default)]
+    instance: Option<u32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2180,6 +2185,7 @@ async fn agent_start(
         Request::AgentStart {
             scope: body.scope,
             name: body.name,
+            instance: body.instance,
         },
     )
     .await
@@ -2239,6 +2245,16 @@ async fn agent_scale(State(engine): State<Arc<Engine>>, Json(body): Json<ScaleAg
 
 async fn agent_stop(State(engine): State<Arc<Engine>>, Json(body): Json<AgentId>) -> AxumResponse {
     run(&engine, Request::AgentStop { id: body.id }).await
+}
+
+/// `{id}`: what stopping that instance would cost, before the page stops it (`#330`).
+async fn agent_stop_check(State(engine): State<Arc<Engine>>, Json(body): Json<AgentId>) -> AxumResponse {
+    run(&engine, Request::AgentStopCheck { id: body.id }).await
+}
+
+/// `{id}`: the command that attaches a terminal to that instance (`#330`).
+async fn agent_attach(State(engine): State<Arc<Engine>>, Json(body): Json<AgentId>) -> AxumResponse {
+    run(&engine, Request::AgentAttach { id: body.id }).await
 }
 
 async fn agent_role(

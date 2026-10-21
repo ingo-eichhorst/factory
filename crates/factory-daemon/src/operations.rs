@@ -790,6 +790,8 @@ mod tests {
             attach: None,
             declared: true,
             error: None,
+            stopped_by: None,
+            stopped_at: None,
             started_at: Utc::now(),
             last_seen_at: Utc::now(),
         };

@@ -1,5 +1,7 @@
 //! The roster: every scope, the agents it declares, what each one is doing, and
-//! the buttons that start, stop and type at them.
+//! the buttons that start, stop and type at them -- per standing instance
+//! (#330): its own Terminal, Connect and Stop / Start, and a word in the page
+//! before stopping one that somebody would lose something by.
 
 import { $, esc, api, state, since, statusBadge } from "./core.js";
 import { inScope, scopeLabel } from "./scopes.js";
@@ -10,12 +12,22 @@ import { terminalBlock, wireTerminal, setTerminal } from "./terminal.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
 import { agentConfigurePayload, agentDeletePayload } from "./agent-config.js";
-import { canStart, instanceSummary, instancesOf, liveIds, scalePayload } from "./agents-model.js";
+import {
+  canStart, connectLines, findInstance, instanceActions, instanceDetail, instanceSummary, instancesOf,
+  isLive, liveIds, scalePayload, startInstancePayload, stopPrompt,
+} from "./agents-model.js";
 // The roster and the wiring open each other: the wiring builds the rail at
 // boot, and this is the other place /api/agents is refetched, which is the
 // only thing the rail's tree is made of. A cycle ES modules handle, because
 // nothing here runs until a page is shown.
 import { rebuildRail } from "./app.js";
+
+/// Which instances have their Connect panel open, by id; kept across the
+/// re-renders an event causes, so a panel does not close under the reader.
+const connectOpen = new Set();
+/// A stop waiting on the person's word (#330): `{ key, ids, prompt }`, shown
+/// in place where its Stop button was. One at a time.
+let confirming = null;
 
 export async function loadAgents() {
   try {
@@ -81,16 +93,22 @@ export function renderAgents() {
     const rows = s.agents.map(a => {
       const standing = a.lifetime !== "task";
       const live = a.state === "ready" || a.state === "starting";
-      // A standing agent may keep several standing sessions (#329): Start
-      // brings up whichever are down, Stop takes every live one down.
+      // A standing agent may keep several standing sessions (#329). With one,
+      // the row's buttons are that instance's; with several, Start brings up
+      // whichever are down and Stop takes every live one down, and each
+      // instance has its own line with its own buttons (#330).
       const summary = instanceSummary(a);
       const several = Boolean(summary && summary.several);
+      const instances = standing ? instancesOf(a) : [];
+      const only = !several ? instances[0] : null;
       const stopping = liveIds(a);
       const buttons = [];
-      if (standing) {
+      if (standing && only) {
+        buttons.push(instanceButtons(s.name, a, only));
+      } else if (standing) {
         buttons.push(`<button class="btn" data-act="start" data-scope="${esc(s.name)}" data-name="${esc(a.name)}" ${canStart(a) ? "" : "disabled"}>Start</button>`);
         buttons.push(`<button class="btn" data-act="stop" data-ids="${esc(stopping.join(" "))}" ${stopping.length ? "" : "disabled"}>Stop</button>`);
-        buttons.push(`<button class="btn" data-act="term" data-id="${esc(a.id || "")}" ${live ? "" : "disabled"}>Terminal</button>`);
+        if (!several) buttons.push(`<button class="btn" data-act="term" data-id="${esc(a.id || "")}" ${live ? "" : "disabled"}>Terminal</button>`);
       }
       // The count, and − / + where the declaration is this scope's own to
       // rewrite: the scale goes into its config, like Delete does.
@@ -115,25 +133,32 @@ export function renderAgents() {
            </select>`
         : "";
 
-      const attachLine = (cmd, session) => cmd
-        ? `<div class="attach"><span class="sub">attach</span><code>${esc(cmd)}</code>
-             <button class="btn" data-act="copy" data-copy="${esc(cmd)}">Copy</button></div>`
-        : (session ? `<div class="attach"><span class="sub">session</span><code>${esc(session)}</code></div>` : "");
-      // One standing session keeps the row's own attach line; several list
-      // each instance with its own id, state and attach line.
+      // One standing session: the row is the instance, with its id, uptime
+      // and whatever is open under it. Several: a line per instance, each
+      // with its own id, state, uptime and buttons.
       const attach = several
-        ? `<div class="instances">${instancesOf(a).map(i => `
+        ? `<div class="instances">${instances.map(i => `
             <div class="instance">
               <div class="line">
                 <span class="sub">#${esc(String(i.instance))}</span>
                 <code class="id">${esc(i.id)}</code>
                 ${statusBadge(i.state)}
                 ${i.surplus ? `<span class="tag warn" title="Above the count: stopped once nobody is using it">draining</span>` : ""}
+                ${seenTag(i)}
+                <span class="sub">${esc(instanceDetail(i))}</span>
+                <span style="margin-left:auto"></span>
+                <span class="row-btns">${instanceButtons(s.name, a, i)}</span>
               </div>
               ${i.error ? `<div class="err">${esc(i.error)}</div>` : ""}
-              ${attachLine(i.attach, i.session)}
+              ${instanceExtras(i)}
             </div>`).join("")}</div>`
-        : attachLine(a.attach, a.session);
+        : only
+          ? `<div class="instance one">
+               <div class="line"><code class="id">${esc(only.id)}</code>${seenTag(only)}
+                 <span class="sub">${esc(instanceDetail(only))}</span></div>
+               ${instanceExtras(only)}
+             </div>`
+          : "";
 
       const work = a.active.length
         ? `<div class="work">${a.active.map(w => `
@@ -141,9 +166,17 @@ export function renderAgents() {
               ${statusBadge(w.status)} <span class="jt">${esc(w.task_title)}</span>
               <span class="sub">attempt ${w.attempt} · ${esc(w.trigger)} · ${esc(w.runtime)}${w.session ? " " + esc(w.session) : ""} · ${since(w.started_at)}</span>
             </div>`).join("")}</div>`
-        : (standing && live
-            ? `<div class="work idle">up and waiting${a.started_at ? " · " + since(a.started_at) : ""}</div>`
-            : `<div class="work idle">nothing running</div>`);
+        : (standing && instances.length
+            // Each instance's own line already says how long it has been up.
+            ? ""
+            : standing && live
+              ? `<div class="work idle">up and waiting${a.started_at ? " · " + since(a.started_at) : ""}</div>`
+              : `<div class="work idle">nothing running</div>`);
+
+      // The row's Stop over more than one instance waits here; a stop of a
+      // single instance waits on that instance's own line.
+      const rowConfirm = confirming && several && confirming.ids.length > 1 && confirming.key === stopping.join(" ")
+        ? confirmBlock(confirming) : "";
 
       return `<div class="agent">
         <div class="line">
@@ -159,6 +192,7 @@ export function renderAgents() {
         </div>
         <div class="sub">${esc(a.description)}</div>
         ${a.error && !several ? `<div class="err">${esc(a.error)}</div>` : ""}
+        ${rowConfirm}
         ${attach}
         ${work}
       </div>`;
@@ -191,12 +225,45 @@ export async function agentAction(el) {
   try {
     if (act === "start") {
       el.disabled = true;
-      await api("/api/agents/start", { method: "POST", body: JSON.stringify({ scope: el.dataset.scope, name: el.dataset.name }) });
+      // One instance's Start names it; the row's starts every instance it keeps.
+      const body = el.dataset.instance
+        ? startInstancePayload(el.dataset.scope, el.dataset.name, el.dataset.instance)
+        : { scope: el.dataset.scope, name: el.dataset.name };
+      await api("/api/agents/start", { method: "POST", body: JSON.stringify(body) });
     } else if (act === "stop") {
       el.disabled = true;
-      for (const id of (el.dataset.ids || "").split(" ").filter(Boolean)) {
-        await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id }) });
+      const ids = (el.dataset.ids || "").split(" ").filter(Boolean);
+      // Asked first, stopped only if nobody would lose anything -- otherwise
+      // the page says who or what, and waits for the person's word.
+      const prompt = await stopCost(ids);
+      if (prompt) {
+        confirming = { key: el.dataset.ids, ids, prompt };
+        renderAgents();
+        return;
       }
+      await stopAll(ids);
+    } else if (act === "stop-confirm") {
+      const ids = confirming ? confirming.ids : [];
+      confirming = null;
+      el.disabled = true;
+      await stopAll(ids);
+    } else if (act === "stop-cancel") {
+      confirming = null;
+      renderAgents();
+      return;
+    } else if (act === "connect") {
+      const id = el.dataset.id;
+      if (connectOpen.has(id)) {
+        connectOpen.delete(id);
+      } else {
+        connectOpen.add(id);
+        // Shown and copied in one press: the first line is the one to paste.
+        const found = findInstance(state.scopes, id);
+        const first = found && connectLines(found.instance)[0];
+        if (first) await navigator.clipboard?.writeText(first.command).catch(() => {});
+      }
+      renderAgents();
+      return;
     } else if (act === "scale") {
       const payload = scalePayload(el.dataset.scope, el.dataset.name, Number(el.dataset.by), Number(el.dataset.wanted));
       el.disabled = true;
@@ -232,6 +299,73 @@ export async function agentAction(el) {
     alert(e.message);
   }
   loadAgents();
+}
+
+/// The buttons on one instance's line: Terminal, Connect, and Stop or Start
+/// for that instance only.
+function instanceButtons(scope, agent, instance) {
+  const can = instanceActions(instance);
+  const id = esc(instance.id);
+  const why = can.connect
+    ? "Show and copy the command that attaches a terminal to it"
+    : (isLive(instance) ? "A shell pane has no named agent to attach to: use Terminal" : "Not up");
+  return [
+    `<button class="btn" data-act="term" data-id="${id}" ${can.terminal ? "" : "disabled"}>Terminal</button>`,
+    `<button class="btn" data-act="connect" data-id="${id}" title="${esc(why)}" ${can.connect ? "" : "disabled"}>Connect</button>`,
+    can.stop
+      ? `<button class="btn" data-act="stop" data-ids="${id}">Stop</button>`
+      : `<button class="btn" data-act="start" data-scope="${esc(scope)}" data-name="${esc(agent.name)}" data-instance="${esc(String(instance.instance))}">Start</button>`,
+  ].join("");
+}
+
+/// A person seen at it within the last minute, said on its line.
+function seenTag(instance) {
+  return instance.attended ? `<span class="tag warn" title="${esc(instance.attended)}">attended</span>` : "";
+}
+
+/// What opens under one instance: its Connect panel, and a stop waiting on a
+/// confirmation, if either is.
+function instanceExtras(instance) {
+  let out = "";
+  if (connectOpen.has(instance.id)) {
+    const lines = connectLines(instance);
+    out += `<div class="connect">${lines.map(l => `
+      <div class="attach"><span class="sub">${esc(l.label)}</span><code>${esc(l.command)}</code>
+        <button class="btn" data-act="copy" data-copy="${esc(l.command)}">Copy</button></div>`).join("")
+      || `<div class="sub">Nothing to attach with.</div>`}</div>`;
+  }
+  if (confirming && confirming.key === instance.id) out += confirmBlock(confirming);
+  return out;
+}
+
+/// The page's own confirmation (never `window.confirm`): what stopping would
+/// cost, line by line, and the two ways out.
+function confirmBlock(pending) {
+  return `<div class="confirm-stop">
+    <b>${esc(pending.prompt.title)}</b>
+    ${pending.prompt.lines.map(l => `<div>${esc(l)}</div>`).join("")}
+    <div class="row-btns">
+      <button class="btn danger" data-act="stop-confirm">Stop anyway</button>
+      <button class="btn" data-act="stop-cancel">Keep it running</button>
+    </div>
+  </div>`;
+}
+
+/// What stopping these instances would cost, asked of the daemon now; `null`
+/// when nothing.
+async function stopCost(ids) {
+  const checks = [];
+  for (const id of ids) {
+    const answer = await api("/api/agents/stop-check", { method: "POST", body: JSON.stringify({ id }) });
+    if (answer && answer.check) checks.push(answer.check);
+  }
+  return stopPrompt(checks);
+}
+
+async function stopAll(ids) {
+  for (const id of ids) {
+    await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id }) });
+  }
 }
 
 function keptWords(why) {
@@ -329,12 +463,18 @@ async function createAgent(scope) {
   }
 }
 
+/// One instance's terminal (#330): the live web terminal for that instance's
+/// session alone, with its own Stop and Restart and the commands to attach
+/// from a shell. Stop asks first, like the roster's.
 export async function openAgent(id) {
   dropModal();
-  const found = findAgent(id);
+  const found = findInstance(state.scopes, id);
+  const instance = found ? found.instance : null;
+  const several = Boolean(found && instanceSummary(found.agent)?.several);
+  const title = found ? `${found.agent.name}${several ? ` #${instance.instance}` : ""}` : id;
   scrim(`
     <header>
-      <div><h2>${esc(found ? found.agent.name : id)}</h2>
+      <div><h2>${esc(title)}</h2>
            <code class="id">${esc(id)}</code></div>
       <button class="x" id="a-close">&times;</button>
     </header>
@@ -344,20 +484,39 @@ export async function openAgent(id) {
         <button class="btn" id="a-restart">Restart</button>
       </div>
       <div class="err" id="a-err"></div>
-      ${found && found.agent.attach
-        ? `<div class="attach"><span class="sub">attach</span><code>${esc(found.agent.attach)}</code></div>` : ""}
+      <div id="a-confirm"></div>
+      ${instance ? connectLines(instance).map(l => `
+        <div class="attach"><span class="sub">${esc(l.label)}</span><code>${esc(l.command)}</code>
+          <button class="btn" data-copy="${esc(l.command)}">Copy</button></div>`).join("") : ""}
       ${terminalBlock("Terminal")}
     </div>`);
   $("a-close").onclick = closeModal;
-  $("a-stop").onclick = async () => {
-    try { await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id }) }); closeModal(); loadAgents(); }
-    catch (e) { $("a-err").textContent = e.message; }
+  for (const button of document.querySelectorAll(".modal [data-copy]")) {
+    button.onclick = () => navigator.clipboard?.writeText(button.dataset.copy).catch(() => {});
+  }
+  const stop = async () => {
+    await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id }) });
+    closeModal();
+    loadAgents();
   };
+  $("a-stop").onclick = async () => {
+    try {
+      const prompt = await stopCost([id]);
+      if (!prompt) return await stop();
+      $("a-confirm").innerHTML = confirmBlock({ prompt });
+      $("a-confirm").querySelector('[data-act="stop-confirm"]').onclick = () => stop().catch(e => { $("a-err").textContent = e.message; });
+      $("a-confirm").querySelector('[data-act="stop-cancel"]').onclick = () => { $("a-confirm").innerHTML = ""; };
+    } catch (e) { $("a-err").textContent = e.message; }
+  };
+  // This instance only: stopped and brought back by its own number.
   $("a-restart").onclick = async () => {
     if (!found) return;
     try {
       await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id }) });
-      await api("/api/agents/start", { method: "POST", body: JSON.stringify({ scope: found.scope, name: found.agent.name }) });
+      await api("/api/agents/start", {
+        method: "POST",
+        body: JSON.stringify(startInstancePayload(found.scope, found.agent.name, instance.instance)),
+      });
       loadAgents();
       setTerminal("agent", id, true);
     } catch (e) { $("a-err").textContent = e.message; }
@@ -366,9 +525,8 @@ export async function openAgent(id) {
   setTerminal("agent", id, true);
 }
 
+/// The roster row an id belongs to -- instance 1's, or any other instance's.
 export function findAgent(id) {
-  for (const s of state.scopes) {
-    for (const a of s.agents) if (a.id === id) return { scope: s.name, agent: a };
-  }
-  return null;
+  const found = findInstance(state.scopes, id);
+  return found ? { scope: found.scope, agent: found.agent } : null;
 }

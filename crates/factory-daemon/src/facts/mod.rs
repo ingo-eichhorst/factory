@@ -353,6 +353,13 @@ port!(
     l3::liveness_provider
 );
 port!(
+    StandingAgentActionsFact,
+    crate::l3_service::LivenessProvider,
+    u64,
+    StandingAgentActionsFact,
+    l3::liveness_provider
+);
+port!(
     SessionStatusFact,
     factory_agents::runtime::StatusProvider<'a>,
     factory_kernel::SessionRef,
@@ -827,6 +834,7 @@ mod tests {
         registered::<AgentReportedFact>();
         registered::<EffectiveRoleFact>();
         registered::<StandingAgentObservationsFact>();
+        registered::<StandingAgentActionsFact>();
         registered::<SessionStatusFact>();
         registered::<HarnessVersionFact>();
         registered::<WorkflowFact>();

@@ -1,7 +1,19 @@
 //! Requests served by L3 Agent. The arms are moved verbatim from the single
 //! `dispatch_request` match; `Request::level` decides which file a request lands in.
 use crate::engine::*;
+use crate::l3_service::Asker;
 use super::misrouted;
+
+/// Who asked, in the plain words L3 journals (`#330`).
+fn asker(caller: &crate::access::Caller) -> Asker {
+    Asker {
+        by: caller.describe(),
+        source: match caller {
+            crate::access::Caller::Owner => "owner",
+            crate::access::Caller::Agent { .. } => "agent",
+        },
+    }
+}
 
 impl Engine {
     pub(super) async fn route_l3(
@@ -14,7 +26,8 @@ impl Engine {
                 runtimes: self.runtime_connections().await,
             }),
             Request::Agents => {
-                let (scopes, available) = self.scope_views().await?;
+                let (mut scopes, available) = self.scope_views().await?;
+                self.l3_service().decorate_instances(&mut scopes);
                 let (roles, scope_roles) = self.l3_service().role_views();
                 Ok(Payload::Scopes {
                     scopes,
@@ -41,8 +54,12 @@ impl Engine {
                 self.shared.bus.publish(Event::RolesChanged { scope, name });
                 Ok(Payload::Deleted { deleted: true })
             }
-            Request::AgentStart { scope, name } => Ok(Payload::Agent {
-                agent: self.l3_service().start_agent(&scope, &name).await?.redacted(),
+            Request::AgentStart { scope, name, instance } => Ok(Payload::Agent {
+                agent: self
+                    .l3_service()
+                    .start_asked(&scope, &name, instance, &asker(caller))
+                    .await?
+                    .redacted(),
             }),
             Request::AgentConfigure { scope, agent } => {
                 let (scope, agent) = self.configure_agent(&scope, agent)?;
@@ -80,6 +97,14 @@ impl Engine {
                 let (scale, to_start) = self.l3_service().scale_agent(&scope, &name, previous).await?;
                 let asked = caller.describe();
                 tracing::info!(scope, name, previous, wanted, by = %asked, "scaled: {}", scale.summary());
+                self.l3_service().asked(
+                    &asker(caller),
+                    "scaled",
+                    &AgentSession::id_for(&scope, &name),
+                    &scope,
+                    &name,
+                    format!("{} scaled {previous} -> {wanted} by {asked}: {}", AgentSession::id_for(&scope, &name), scale.summary()),
+                );
                 self.shared.bus.publish(Event::AgentScaled {
                     scope: scope.clone(),
                     name: name.clone(),
@@ -101,7 +126,13 @@ impl Engine {
                 Ok(Payload::Scaled { scale })
             }
             Request::AgentStop { id } => Ok(Payload::Agent {
-                agent: self.l3_service().stop_agent(&id).await?.redacted(),
+                agent: self.l3_service().stop_agent(&id, &asker(caller)).await?.redacted(),
+            }),
+            Request::AgentStopCheck { id } => Ok(Payload::StopCheck {
+                check: self.l3_service().stop_check(&id).await?,
+            }),
+            Request::AgentAttach { id } => Ok(Payload::Attach {
+                attach: self.l3_service().attach(&id, &asker(caller)).await?,
             }),
             Request::AgentRole { id, role } => Ok(Payload::Agent {
                 agent: self
