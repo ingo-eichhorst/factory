@@ -239,3 +239,6 @@ pub(crate) fn codex_home(metadata_home: &Path, isolated: bool) -> PathBuf {
     }
 }
 
+
+#[cfg(test)]
+mod tests;

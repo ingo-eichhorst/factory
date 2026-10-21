@@ -258,3 +258,48 @@ export function sortHarnesses(rows) {
     .sort((a, b) => (b.row.state === "unhealthy") - (a.row.state === "unhealthy") || a.i - b.i)
     .map(x => x.row);
 }
+
+// ------------------------------------------------------------- codex models
+
+/// Whether the Codex backend serves a model to the installed client (#340),
+/// as the page says it. Only `false` is a verdict: an unknown is not a fault.
+export function codexVerdictLabel(served) {
+  if (served === true) return "served";
+  if (served === false) return "not served";
+  return "not known";
+}
+
+/// The rows of the Codex models card: the config.toml default first, then
+/// each codex agent, the unserved ones first -- they are the reason to look --
+/// and the served list the backend gave, hidden models counted, not named.
+export function codexModelRows(models) {
+  if (!models) return null;
+  const rows = [];
+  if (models.default_model) {
+    rows.push({ who: "config.toml default", model: models.default_model, source: "", served: models.default_served ?? null, note: "" });
+  }
+  const agents = (models.agents || [])
+    .map((a, i) => ({ a, i }))
+    .sort((x, y) => (y.a.served === false) - (x.a.served === false) || x.i - y.i)
+    .map(({ a }) => ({
+      who: `${a.scope}/${a.agent}`,
+      model: a.model || MISSING,
+      source: SOURCES[a.source] || fact(a.source),
+      served: a.served ?? null,
+      note: a.note || "",
+    }));
+  rows.push(...agents);
+  const listed = models.served || [];
+  const shown = listed.filter(m => !m.hidden).map(m => m.slug);
+  const hidden = listed.length - shown.length;
+  return {
+    version: models.client_version || MISSING,
+    observedAt: models.observed_at || null,
+    issue: models.issue || "",
+    rows,
+    served: shown.join(", ") + (hidden ? ` (and ${hidden} hidden)` : ""),
+    unserved: rows.filter(r => r.served === false).length,
+  };
+}
+
+const SOURCES = { declared: "declared", profile: "profile", config_default: "config.toml", codex_default: "codex default" };

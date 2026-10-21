@@ -1437,6 +1437,11 @@ button.linklike:hover { color: var(--signal); }
 .tag.infra-harness-state[data-state="healthy"] { color: var(--run); border-color: var(--run); }
 .tag.infra-harness-state[data-state="unhealthy"] { color: var(--fault); border-color: var(--fault); }
 .tag.infra-harness-state[data-state="unprobed"] { color: var(--muted); }
+/* #340: a codex model the backend does not serve to the installed client. */
+.infra-card.infra-codex-models:not([data-unserved="0"]) { border-left-color: var(--fault); }
+.infra-codex-models .tag[data-served="true"] { color: var(--run); border-color: var(--run); }
+.infra-codex-models .tag[data-served="false"] { color: var(--fault); border-color: var(--fault); }
+.infra-codex-models .tag[data-served="null"] { color: var(--muted); }
 
 .infra-facts {
   margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px 16px;

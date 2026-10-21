@@ -8,7 +8,7 @@ export function datesQuery(scope) {
 export function expiryText(entry) {
   const item = entry?.observation;
   if (!item) return "unknown";
-  if (item.no_expiry) return item.source === "github_auth" ? "no reported expiry" : "no expiry";
+  if (item.no_expiry) return ({ github_auth: "no reported expiry", codex_model: "served" })[item.source] || "no expiry";
   return item.expires_at || "unknown";
 }
 

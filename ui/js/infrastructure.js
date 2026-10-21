@@ -16,6 +16,8 @@ import {
   MISSING,
   PROVIDERS_SNIPPET,
   agentHref,
+  codexModelRows,
+  codexVerdictLabel,
   daemonUptime,
   diskLevel,
   diskPercent,
@@ -226,6 +228,31 @@ function harnesses(rows) {
   return `<div class="infra-providers">${list.map(harnessCard).join("")}</div>`;
 }
 
+/// Which model each codex agent will ask for, and whether the backend serves
+/// it to the installed client (#340) -- L1's last observation, never fetched
+/// to draw the page.
+function codexModels(models) {
+  const view = codexModelRows(models);
+  if (!view) return "";
+  const lines = view.rows.map(r => `<div class="infra-fact" data-served="${esc(String(r.served))}">
+      <dt>${esc(r.who)}</dt>
+      <dd><code>${esc(r.model)}</code> <span class="tag" data-served="${esc(String(r.served))}">${esc(codexVerdictLabel(r.served))}</span>
+        ${r.source ? `<span class="sub">${esc(r.source)}</span>` : ""}
+        ${r.note ? `<span class="sub">${esc(r.note)}</span>` : ""}</dd>
+    </div>`).join("");
+  return `<div class="infra-providers"><article class="infra-card infra-codex-models" data-unserved="${view.unserved}">
+    <header class="infra-card-head">
+      <h3>codex ${esc(view.version)}</h3>
+      <span class="sub">${view.observedAt ? `list fetched ${esc(view.observedAt)}` : "no list yet"}</span>
+    </header>
+    <dl class="infra-facts">
+      ${lines}
+      ${view.served ? row("Served", view.served) : ""}
+      ${view.issue ? row("Issue", view.issue) : ""}
+    </dl>
+  </article></div>`;
+}
+
 function emptyProviders() {
   return `<article class="infra-card infra-empty">
     <header class="infra-card-head"><h3>No AI accounts declared</h3></header>
@@ -275,7 +302,9 @@ export function renderInfrastructure() {
   // under it. The DOM follows the same order, so a screen reader and the tab
   // key meet the cards in the order they are drawn.
   const programs = harnesses(data.harnesses);
+  const models = codexModels(data.codex_models);
   stack.innerHTML = [
+    ...(models ? [layer("Codex models", "what the backend serves to the installed client", models)] : []),
     layer("AI accounts", "what the agents' harnesses pay through", accounts),
     RUNS_ON,
     ...(programs
