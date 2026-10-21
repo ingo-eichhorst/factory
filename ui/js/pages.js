@@ -5,9 +5,9 @@
 //!
 //! A page is never part of this document. It is framed from `/pages/...`
 //! with `sandbox="allow-scripts"` and nothing else (`PAGE_SANDBOX`), and
-//! given its data by `postMessage`. The one message listener here answers a
-//! frame's `factory:page-ready` with that data and ignores everything else a
-//! page might post. `dashboard.js` shows `page` tiles through the same
+//! given its data by `postMessage`. The conference-radar page also sends a
+//! narrowly validated decision through this bridge; the parent saves it to
+//! that scope's tracker. `dashboard.js` shows `page` tiles through the same
 //! `wirePageFrames`, so a tile and this view hand a page its data the same way.
 //!
 //! A light poll while the view is on screen picks up a new version: a
@@ -18,6 +18,7 @@ import { $, api, esc, state, currentTheme } from "./core.js";
 import { writeHash } from "./scopes.js";
 import { refLinks } from "./policy-model.js";
 import {
+  conferenceChoice,
   dataMessage,
   dataUrl,
   findPage,
@@ -52,6 +53,31 @@ const rollbacks = new Map();
 const dataCache = new Map();
 const DATA_CACHE_SIZE = 8;
 let listening = false;
+let choiceWrites = Promise.resolve();
+const choiceGeneration = new WeakMap();
+
+function isRadarFrame(frame) {
+  return frame?.dataset.pageScope === "conference-radar" && frame.dataset.pageName === "conference-radar";
+}
+
+function choiceUrl() {
+  return "/api/pages/conference-choices?scope=conference-radar&name=conference-radar";
+}
+
+async function saveChoice(frame, message, generation) {
+  try {
+    await api("/api/pages/conference-choices", {
+      method: "POST",
+      body: JSON.stringify({
+        scope: "conference-radar", name: "conference-radar",
+        conference: message.conference, edition_year: message.edition_year, status: message.status,
+      }),
+    });
+    if (frame.isConnected && choiceGeneration.get(frame) === generation) await deliver(frame, { saved: true });
+  } catch (error) {
+    if (frame.isConnected && choiceGeneration.get(frame) === generation) await deliver(frame, { error: error.message });
+  }
+}
 
 function cachedData(frame) {
   const key = frame.dataset.pageKey;
@@ -69,15 +95,25 @@ function cachedData(frame) {
   return dataCache.get(key);
 }
 
-async function deliver(frame) {
+async function deliver(frame, save = null) {
+  const generation = choiceGeneration.get(frame) || 0;
   const data = await cachedData(frame);
   const target = frame.contentWindow;
-  if (!target) return;
+  if (!target || !frame.isConnected) return;
   const message = dataMessage(
     { scope: frame.dataset.pageScope, name: frame.dataset.pageName, version: frame.dataset.pageVersion },
     data,
     currentTheme()
   );
+  if (isRadarFrame(frame)) {
+    try {
+      message.conferenceChoices = (await api(choiceUrl())).choices;
+      if (save) message.conferenceSave = save;
+    } catch (error) {
+      message.conferenceSave = { error: error.message };
+    }
+    if ((choiceGeneration.get(frame) || 0) !== generation) return;
+  }
   // `*`: the frame's origin is opaque by design, so there is no origin to
   // name. The frame is ours and `frame-src 'self'` keeps it on this host.
   target.postMessage(message, "*");
@@ -94,14 +130,26 @@ function listen() {
   if (listening) return;
   listening = true;
   window.addEventListener("message", (event) => {
-    if (!isReadyMessage(event.data)) return;
     const frame = frameFor(event.source);
-    if (frame) void deliver(frame);
+    if (!frame) return;
+    if (isReadyMessage(event.data)) { void deliver(frame); return; }
+    if (!isRadarFrame(frame)) return;
+    const msg = conferenceChoice(event.data);
+    if (!msg) return;
+    const generation = (choiceGeneration.get(frame) || 0) + 1;
+    choiceGeneration.set(frame, generation);
+    choiceWrites = choiceWrites.catch(() => {}).then(() => saveChoice(frame, msg, generation));
   });
   // A theme switch is news to every page on screen.
   document.addEventListener("factory:theme", () => {
     for (const frame of document.querySelectorAll("iframe[data-page-key]")) void deliver(frame);
   });
+  // A second device can change a choice while this page stays open.
+  setInterval(() => {
+    for (const frame of document.querySelectorAll("iframe[data-page-key]")) {
+      if (isRadarFrame(frame)) void deliver(frame);
+    }
+  }, POLL_MS);
 }
 
 /// Hands every page frame under `root` its data once it loads. Called after

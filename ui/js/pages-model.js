@@ -12,15 +12,15 @@
 //! `allow-same-origin` to it.
 
 /// The whole sandbox. `allow-scripts` alone: no same origin, no forms, no
-/// popups, no top navigation, no downloads.
+/// popups, no top navigation, no downloads. The parent has one validated
+/// conference-radar choice bridge; all other page messages are ignored.
 export const PAGE_SANDBOX = "allow-scripts";
 
 /// What the UI posts to a page: its version's `--data` (or `null`), and
 /// which theme the UI is in. Posted once the frame has loaded, and again
 /// whenever the page asks with `READY_MESSAGE`.
 export const DATA_MESSAGE = "factory:page-data";
-/// What a page may post to ask for its data. Nothing else a page posts is
-/// ever acted on.
+/// What a page may post to ask for its data.
 export const READY_MESSAGE = "factory:page-ready";
 
 /// The key a shown frame is kept by: the same scope, page and version is the
@@ -90,6 +90,16 @@ export function dataMessage(frame, data, theme) {
 /// from a page the UI answers.
 export function isReadyMessage(msg) {
   return !!msg && typeof msg === "object" && msg.type === READY_MESSAGE;
+}
+
+/// A choice from the conference-radar frame. The caller must also verify
+/// that the sending frame is that declared page.
+export function conferenceChoice(msg) {
+  if (!msg || typeof msg !== "object" || msg.type !== "conference-radar:choice") return null;
+  if (typeof msg.conference !== "string" || !msg.conference || msg.conference.length > 250) return null;
+  if (typeof msg.edition_year !== "string" || !/^(20\d{2}|undated)$/.test(msg.edition_year)) return null;
+  if (!["unreviewed", "not_interested", "interested", "applied", "accepted", "waitlisted", "rejected", "withdrawn"].includes(msg.status)) return null;
+  return { conference: msg.conference, edition_year: msg.edition_year, status: msg.status };
 }
 
 // ------------------------------------------------------------------- shapes
