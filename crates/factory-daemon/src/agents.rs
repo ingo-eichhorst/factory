@@ -735,6 +735,7 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             secrets: Vec::new(),
+            channels: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -811,6 +812,7 @@ mod tests {
             failure: None,
             closure: None,
             slot_wait: None,
+            deliver: None,
         };
         let task = engine.l4.store.create(&task).await.unwrap();
         let run = engine
@@ -1073,6 +1075,7 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             secrets: Vec::new(),
+            channels: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -1247,6 +1250,7 @@ mod tests {
             failure: None,
             closure: None,
             slot_wait: None,
+            deliver: None,
         };
         engine.l4.store.create(&task).await.unwrap();
 

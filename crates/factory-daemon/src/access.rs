@@ -166,6 +166,14 @@ impl Engine {
     /// it will fail to compile until somebody says which it is.
     fn needs(request: &Request) -> Needs {
         Needs::Grant(match request {
+            // `#337`: a standing delivery approval (`Task::deliver`) is the
+            // owner's to give, move or withdraw. An agent that could set it
+            // on a task it may create or edit would be approving its own
+            // sends -- checked here, before the ordinary grants below, so
+            // no role and no workflow spawn (`authorize_workflow_spawn`
+            // asks this same question) carries it.
+            Request::TaskCreate(new) if new.deliver.is_some() => return Needs::Owner,
+            Request::TaskUpdate { patch, .. } if patch.deliver.is_some() || patch.clear_deliver => return Needs::Owner,
             Request::TaskCreate(_) => Grant::TaskCreate,
             Request::TaskUpdate { .. } => Grant::TaskEdit,
             // Intake (`#119`) used to reuse the task grants: handing
@@ -208,6 +216,15 @@ impl Engine {
             // `authorize` arm below still narrows it to the caller's own
             // run the ordinary way, as a courtesy, not as the gate.
             Request::TaskSuggest { .. } => return Needs::Nothing,
+            // `#337`: sending through a channel needs no grant, because no
+            // grant could say what its gate says. That gate is the task's
+            // own standing approval -- the channel its `deliver` names,
+            // which only the owner can set (above) -- checked in
+            // `L4Service::notify` against the run the caller's token names;
+            // anything else is refused there and the refusal journaled on
+            // the run. Not an outward-effect grant like `intake.publish`
+            // either: no role holds the approval, so no wildcard sweeps it in.
+            Request::Notify { .. } => return Needs::Nothing,
             // Create improvement task: the same door `PolicyRemediate` and
             // `QualityRemediate` open, checked against the scope the named
             // suggestion(s) were filed from -- never the root scope the
@@ -867,6 +884,7 @@ mod tests {
             quality: Default::default(),
             infrastructure: Default::default(),
             secrets: Vec::new(),
+            channels: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -1672,6 +1690,7 @@ mod tests {
             failure: None,
             closure: None,
             slot_wait: None,
+            deliver: None,
         };
         engine.l4.store.create(&task).await.unwrap()
     }

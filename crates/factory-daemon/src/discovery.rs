@@ -159,6 +159,8 @@ fn read_scope(path: &Path) -> Result<Scope> {
     factory_core::config::refuse_misplaced_scope_renewals(&document, path)?;
     // And `secrets:` (#244), for the same reason.
     refuse_misplaced_scope_secrets(&document, path)?;
+    // And `channels:` (#337), which names those secrets.
+    factory_core::config::refuse_misplaced_scope_channels(&document, path)?;
     let file: ScopeFile = serde_yaml_ng::from_value(document).map_err(parsing)?;
     Ok(file.scope)
 }
@@ -285,6 +287,7 @@ mod tests {
                 quality: Default::default(),
                 infrastructure: Default::default(),
                 secrets: Vec::new(),
+                channels: Vec::new(),
                 plugins_dir: None,
                 renewals: Vec::new(),
                 renewals_notify: None,

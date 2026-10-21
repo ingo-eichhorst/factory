@@ -3,7 +3,7 @@
 
 mod client;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use factory_core::bench::{BenchResult, BenchRun, Verdict};
 use factory_core::dataset::{Case, Dataset, DatasetFinding, DatasetSummary};
@@ -80,6 +80,25 @@ enum Command {
     /// account each agent's model calls go to. Read-only; never reads a
     /// credential.
     Infra,
+    /// Send the owner a message, and files, through a channel the instance
+    /// root's `channels:` declares (`#337`). The recipient is the channel's
+    /// own; nothing here can name another. From a run, only through the
+    /// channel its task's `--deliver` names -- anything else is refused and
+    /// journaled on the run. A text over 4096 characters goes as several
+    /// messages, cut at line breaks, at most ten; each file goes as a
+    /// document of at most 50 MB. The same message to the same channel
+    /// within 12 hours is not sent again. Journaled with the channel, sizes
+    /// and hashes, never the text or a file.
+    Notify {
+        /// The channel's name, as in `owner-telegram`.
+        channel: String,
+        /// What to say.
+        text: String,
+        /// A file to send with it; repeatable, at most five. A run's files
+        /// must be inside its working directory.
+        #[arg(long = "file", value_name = "PATH")]
+        files: Vec<PathBuf>,
+    },
     /// L1 Mac (`#260`): the host's macOS power mode for AC and battery, and
     /// whether Factory may change it. With a mode -- automatic,
     /// high-performance or energy-saving -- sets it for every power source
@@ -1366,6 +1385,12 @@ enum TaskCmd {
         /// Without it the task is planned as `default`.
         #[arg(long)]
         category: Option<String>,
+        /// The owner's standing approval for this task's runs to send its
+        /// result through this channel (`factory notify <channel>`), with
+        /// no person in the loop. Only that channel, and nothing else the
+        /// run does; only the owner can give it.
+        #[arg(long, value_name = "CHANNEL")]
+        deliver: Option<String>,
         /// Dispatch it immediately as well.
         #[arg(long)]
         run: bool,
@@ -1452,6 +1477,13 @@ enum TaskCmd {
         /// Go back to the default category.
         #[arg(long)]
         default_category: bool,
+        /// Give, or move, the standing approval for this task's result
+        /// delivery through a channel. Owner only; journaled.
+        #[arg(long, value_name = "CHANNEL", conflicts_with = "no_deliver")]
+        deliver: Option<String>,
+        /// Withdraw the task's standing delivery approval. Owner only.
+        #[arg(long)]
+        no_deliver: bool,
     },
     /// Show one task.
     Show { id: Option<String> },
@@ -1855,6 +1887,12 @@ async fn main() -> Result<()> {
         Command::Infra => {
             let payload = client.send(Request::Infrastructure).await?;
             print(&payload, cli.json, infrastructure_text)
+        }
+
+        Command::Notify { channel, text, files } => {
+            let files = notify_files(&files)?;
+            let payload = client.send(Request::Notify { channel, text, files }).await?;
+            print(&payload, cli.json, notified_text)
         }
 
         Command::PowerMode { mode } => {
@@ -2895,6 +2933,49 @@ fn power_mode_text(payload: &Payload) -> Option<String> {
         out.push_str(&format!("  last change {} · {}\n", last.at.format("%Y-%m-%d %H:%M"), last.message));
     }
     Some(out.trim_end().to_string())
+}
+
+/// `--file` paths as the daemon reads them: absolute, from where the
+/// command was typed. Checked here only to fail fast -- the daemon checks
+/// again, and decides.
+fn notify_files(files: &[PathBuf]) -> Result<Vec<String>> {
+    files
+        .iter()
+        .map(|file| {
+            let path = std::path::absolute(file).with_context(|| format!("--file {}", file.display()))?;
+            let meta = std::fs::metadata(&path).with_context(|| format!("--file {}", file.display()))?;
+            if !meta.is_file() {
+                bail!("--file {} is not a regular file", file.display());
+            }
+            if meta.len() > factory_core::channels::DOCUMENT_LIMIT {
+                bail!(
+                    "--file {} is {} bytes; Telegram's Bot API takes a document of at most 50 MB",
+                    file.display(),
+                    meta.len()
+                );
+            }
+            path.to_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow!("--file {} is not a UTF-8 path", file.display()))
+        })
+        .collect()
+}
+
+fn notified_text(payload: &Payload) -> Option<String> {
+    let Payload::Notified { notified } = payload else { return None };
+    Some(match notified.outcome {
+        factory_core::protocol::NotifyOutcome::Sent => format!(
+            "sent to {}: {} message(s), {} file(s)",
+            notified.channel, notified.messages, notified.documents
+        ),
+        factory_core::protocol::NotifyOutcome::Skipped => {
+            let ago = notified
+                .sent_at
+                .map(|at| format!(" {} minutes ago", (chrono::Utc::now() - at).num_minutes()))
+                .unwrap_or_default();
+            format!("skipped: the same message went to {}{ago}", notified.channel)
+        }
+    })
 }
 
 fn infrastructure_text(payload: &Payload) -> Option<String> {
@@ -5539,6 +5620,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             no_worktree,
             knowledge_hints,
             category,
+            deliver,
             run,
         } => {
             let schedule = schedule
@@ -5587,6 +5669,7 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                     worktree,
                     knowledge_hints,
                     category,
+                    deliver,
                 }))
                 .await?;
             let created = match &payload {
@@ -5645,6 +5728,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             reason,
             category,
             default_category,
+            deliver,
+            no_deliver,
         } => {
             let retry = retry.as_deref().map(parse_retry).transpose()?;
             let estimate_range = estimate_from_args(
@@ -5694,6 +5779,8 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
                 },
                 category,
                 clear_category: default_category,
+                deliver,
+                clear_deliver: no_deliver,
                 ..Default::default()
             };
             let payload = client
@@ -7144,6 +7231,9 @@ fn detail(t: &Task) -> String {
     if t.knowledge_hints {
         s.push_str("  knowledge  matching pages handed to each run\n");
     }
+    if let Some(channel) = &t.deliver {
+        s.push_str(&format!("  delivers   its result to {channel}, approved by the owner\n"));
+    }
     if t.runs > 0 {
         s.push_str(&format!("  runs       {}\n", t.runs));
     }
@@ -7289,6 +7379,48 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn notify_takes_a_channel_a_text_and_files_and_never_a_recipient() {
+        let cli = Cli::try_parse_from(["factory", "notify", "owner-telegram", "Radar: 2 neue CFPs", "--file", "out/a.html", "--file", "b.pdf"]).unwrap();
+        let Command::Notify { channel, text, files } = cli.command else { panic!("notify") };
+        assert_eq!((channel.as_str(), text.as_str()), ("owner-telegram", "Radar: 2 neue CFPs"));
+        assert_eq!(files, vec![PathBuf::from("out/a.html"), PathBuf::from("b.pdf")]);
+        for extra in ["--chat", "--to", "--recipient"] {
+            assert!(Cli::try_parse_from(["factory", "notify", "owner-telegram", "hi", extra, "42"]).is_err(), "{extra}");
+        }
+        assert!(Cli::try_parse_from(["factory", "notify", "owner-telegram"]).is_err(), "a text is required");
+    }
+
+    #[test]
+    fn notify_files_are_made_absolute_and_checked_for_telegrams_limit_before_anything_is_sent() {
+        let dir = std::env::temp_dir().join(format!("factory-cli-notify-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let small = dir.join("report.html");
+        std::fs::write(&small, "<p>hi</p>").unwrap();
+        let paths = notify_files(std::slice::from_ref(&small)).unwrap();
+        assert_eq!(paths, vec![small.display().to_string()]);
+        assert!(notify_files(&[PathBuf::from("no-such-report.html")]).unwrap_err().to_string().contains("--file no-such-report.html"));
+        let big = dir.join("big.bin");
+        std::fs::File::create(&big).unwrap().set_len(factory_core::channels::DOCUMENT_LIMIT + 1).unwrap();
+        assert!(notify_files(&[big]).unwrap_err().to_string().contains("at most 50 MB"));
+        assert!(notify_files(std::slice::from_ref(&dir)).unwrap_err().to_string().contains("not a regular file"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deliver_is_given_on_create_and_moved_or_withdrawn_on_edit() {
+        let cli = Cli::try_parse_from([
+            "factory", "task", "create", "Konferenz-Radar", "--scope", "conferenz-radar", "--schedule", "0 9 * * 1",
+            "--timezone", "Europe/Berlin", "--no-worktree", "--deliver", "owner-telegram",
+        ])
+        .unwrap();
+        let Command::Task(TaskCmd::Create { deliver, .. }) = cli.command else { panic!("task create") };
+        assert_eq!(deliver.as_deref(), Some("owner-telegram"));
+        let cli = Cli::try_parse_from(["factory", "task", "edit", "t1", "--no-deliver"]).unwrap();
+        assert!(matches!(cli.command, Command::Task(TaskCmd::Edit { no_deliver: true, deliver: None, .. })));
+        assert!(Cli::try_parse_from(["factory", "task", "edit", "t1", "--deliver", "a", "--no-deliver"]).is_err());
+    }
+
     #[test]
     fn offline_recovery_cli_requires_explicit_reported_fields_and_keeps_unknown_checks_optional() {
         let cli = Cli::try_parse_from(["factory", "--root", "/tmp/instance", "recovery-journal", "start", "--scope", "demo",

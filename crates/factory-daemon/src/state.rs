@@ -96,6 +96,8 @@ pub struct L2State {
     /// `sandbox: openshell` prerequisites, kept in the background (`#234`).
     pub(crate) provision: crate::provision::Provisioner,
     pub(crate) credential_expiries: crate::renewals::store::CredentialExpiryStore,
+    /// The outbound channels' repeat ledger (`#337`).
+    pub(crate) channels: crate::channels::ChannelState,
 }
 
 /// L3 Agent: harness health.

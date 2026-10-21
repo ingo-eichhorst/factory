@@ -503,6 +503,14 @@ pub struct Task {
     /// reads as not waiting, exactly what those tasks were doing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_wait: Option<SlotWait>,
+    /// The channel the owner approved this task's own result delivery to
+    /// (`#337`, `--deliver`): a standing approval, recorded on the task and
+    /// journaled, that lets its runs send through that one channel with no
+    /// person in the loop. Nothing else -- no other channel, no other
+    /// external effect. Absent on every task written before this existed,
+    /// which reads as no approval, exactly what those tasks had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver: Option<String>,
 }
 
 impl Task {
@@ -617,6 +625,9 @@ pub struct NewTask {
     /// See `Task::category`. Absent is the default category.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// See `Task::deliver`. Only the owner may give it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver: Option<String>,
 }
 
 /// A partial update. `None` means "leave alone" throughout, so a store can
@@ -746,6 +757,12 @@ pub struct TaskPatch {
     pub slot_wait: Option<SlotWait>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clear_slot_wait: bool,
+    /// Give or move the standing delivery approval (`Task::deliver`);
+    /// `clear_deliver` withdraws it. Only the owner may send either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_deliver: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -358,6 +358,7 @@ mod tests {
             failure: None,
             closure: None,
             slot_wait: None,
+            deliver: None,
         }
     }
 

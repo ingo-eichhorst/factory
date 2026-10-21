@@ -30,6 +30,7 @@ mod agents;
 mod backup;
 mod bench;
 mod budgets;
+mod channels;
 mod configuration;
 mod costs;
 mod datasets;
@@ -53,6 +54,7 @@ mod host_power;
 mod intake;
 mod interfaces;
 mod metrics;
+mod notify;
 mod occupancy;
 mod occupancy_page;
 mod openshell;
@@ -237,6 +239,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         quality: Default::default(),
         infrastructure: Default::default(),
         secrets: Vec::new(),
+        channels: Vec::new(),
         plugins_dir: None,
         renewals: Vec::new(),
         renewals_notify: None,
@@ -359,6 +362,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let infrastructure_expiries = renewals::store::InfrastructureExpiryStore::open(&factory.database_path())?;
     let credential_expiries = renewals::store::CredentialExpiryStore::open(&factory.database_path())?;
     let renewal_alerts = renewals::store::AlertStore::open(&factory.database_path())?;
+    let channel_ledger = factory_environment::channel_ledger::ChannelLedger::open(&factory.database_path())?;
     let engine = Arc::new(
         Engine::new(factory.clone(), registry, store, factory_bin(), interface_names)
             .with_workflow_store(workflow_store)
@@ -369,7 +373,8 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
             .with_goals_store(goals_store)
             .with_backup_store(backup_store)
             .with_environment_store(environment_store)
-            .with_renewal_stores(infrastructure_expiries, credential_expiries, renewal_alerts),
+            .with_renewal_stores(infrastructure_expiries, credential_expiries, renewal_alerts)
+            .with_channel_ledger(channel_ledger),
     );
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

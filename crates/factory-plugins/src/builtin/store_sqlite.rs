@@ -517,6 +517,12 @@ impl TaskStore for SqliteStore {
             if let Some(v) = patch.slot_wait {
                 task.slot_wait = Some(v);
             }
+            if patch.clear_deliver {
+                task.deliver = None;
+            }
+            if let Some(v) = patch.deliver {
+                task.deliver = Some(v);
+            }
             task.updated_at = Utc::now();
 
             write_task(conn, &task)?;
@@ -1175,6 +1181,7 @@ mod tests {
             failure: None,
             closure: None,
             slot_wait: None,
+            deliver: None,
         }
     }
 

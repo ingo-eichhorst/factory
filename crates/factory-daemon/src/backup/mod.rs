@@ -866,6 +866,7 @@ mod tests {
             ))
             .unwrap(),
             secrets: Vec::new(),
+            channels: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -910,6 +911,7 @@ mod tests {
             ))
             .unwrap(),
             secrets: Vec::new(),
+            channels: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -992,6 +994,7 @@ mod tests {
             ))
             .unwrap(),
             secrets: Vec::new(),
+            channels: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -1064,6 +1067,7 @@ mod tests {
             ))
             .unwrap(),
             secrets: Vec::new(),
+            channels: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -1340,6 +1344,7 @@ mod tests {
             ))
             .unwrap(),
             secrets: Vec::new(),
+            channels: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,

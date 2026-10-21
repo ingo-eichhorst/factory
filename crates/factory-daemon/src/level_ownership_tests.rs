@@ -61,6 +61,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("l2_service.rs", L2),
     ("provision/", L2),
     ("secrets.rs", L2),
+    ("channels.rs", L2),
     ("secrets/", L2),
     ("dependencies.rs", L2),
     ("openshell.rs", L2),
@@ -91,6 +92,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("worktree.rs", L4),
     ("worktree/", L4),
     ("artifacts.rs", L4),
+    ("notify.rs", L4),
     ("production.rs", Wiring), // the People-side production endpoint: reads L4's fact as a page
     ("recovery_journal.rs", L4),
     ("admission.rs", L4),

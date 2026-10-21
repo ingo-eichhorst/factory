@@ -79,6 +79,7 @@ pub(crate) fn process_with<'a>(
                 .collect(),
             default_agent: snapshot.config.daemon.default_agent.clone(),
             default_runtime: snapshot.config.daemon.default_runtime.clone(),
+            channels: snapshot.config.channels.iter().map(|c| c.name.clone()).collect(),
         },
     }
 }

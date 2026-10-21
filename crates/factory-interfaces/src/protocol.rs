@@ -251,6 +251,23 @@ pub enum Request {
         id: String,
         suggestion: SuggestionReport,
     },
+    /// `#337`: send the owner a message, and files, through a declared
+    /// channel (`factory notify <channel>`). The recipient is the channel's
+    /// own, fixed in the instance root's config; nothing here can name one.
+    /// From a run -- identified by its token, never by an id given here --
+    /// only through the channel its task's `deliver` names, the owner's
+    /// standing approval; anything else is refused and journaled on the run.
+    /// The owner (no token) may send through any declared channel. `files`
+    /// are absolute paths the daemon reads: for a run, inside its working
+    /// directory. Journaled with the channel, sizes and hashes -- never the
+    /// text or a file.
+    #[serde(rename = "notify")]
+    Notify {
+        channel: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
+    },
     /// A harness's lifecycle hook saying the agent's turn ended. Its own
     /// request rather than a kind of `TaskReport`, so nothing can mistake the
     /// harness speaking for the agent reporting.
@@ -1217,6 +1234,7 @@ impl Request {
             Request::TaskReopen { .. } |
             Request::TaskSkipNext { .. } |
             Request::TaskReport { .. } |
+            Request::Notify { .. } |
             Request::TaskTurnEnded { .. } |
             Request::TaskEntries { .. } |
             Request::TaskOutput { .. } |
@@ -1437,6 +1455,10 @@ pub enum Payload {
     },
     Attachment {
         attachment: Attachment,
+    },
+    /// The answer to `Request::Notify`.
+    Notified {
+        notified: Notified,
     },
     Dependencies {
         report: DependenciesReport,
@@ -2237,6 +2259,33 @@ pub struct UndeclaredCredential {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days_left: Option<i64>,
     pub state: factory_environment::secrets::ExpiryState,
+}
+
+/// What became of one `Request::Notify` (`#337`). Counts and ids only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Notified {
+    pub channel: String,
+    pub outcome: NotifyOutcome,
+    /// The channel ledger's id for the send -- for a repeat, the earlier
+    /// send it repeats.
+    pub delivery: String,
+    /// How many messages the text went as, and how many files went.
+    #[serde(default)]
+    pub messages: usize,
+    #[serde(default)]
+    pub documents: usize,
+    /// For a repeat: when the identical message went.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyOutcome {
+    Sent,
+    /// Not sent again: the same message went to this channel within the
+    /// repeat window (`channels::REPEAT_WINDOW_HOURS`).
+    Skipped,
 }
 
 /// One journaled metadata change. Metadata only, as the journal holds it.

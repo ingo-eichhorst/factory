@@ -106,6 +106,13 @@ pub struct Config {
     /// an entry with `credential: { secret: <name> }`. See `secrets`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<factory_environment::secrets::SecretDecl>,
+    /// Outbound channels (`#337`): where a run with its task's standing
+    /// approval (`--deliver`), or the owner, can send the owner a message
+    /// and files. Each names its bot token in `secrets:` and fixes its one
+    /// recipient here, never in a request. Only the instance root declares
+    /// them (`refuse_misplaced_scope_channels`). See `channels`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<factory_environment::channels::ChannelDecl>,
     /// Where the daemon looks for out-of-process adapters, relative to
     /// `.factory/`. Defaults to `plugins`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -378,6 +385,7 @@ impl Config {
         self.validate_dashboards(self.scopes.iter())?;
         self.infrastructure.validate()?;
         factory_environment::secrets::validate(&self.secrets)?;
+        factory_environment::channels::validate(&self.channels, &self.secrets)?;
         self.validate_environments()?;
         for scope in self.scope.iter().chain(&self.scopes) {
             factory_infrastructure::renewals::validate(&scope.renewals, None)?;
@@ -478,6 +486,7 @@ impl Config {
         self.validate_dashboards(std::iter::empty())?;
         self.infrastructure.validate()?;
         factory_environment::secrets::validate(&self.secrets)?;
+        factory_environment::channels::validate(&self.channels, &self.secrets)?;
         if let Some(scope) = &self.scope {
             factory_infrastructure::renewals::validate(&scope.renewals, None)?;
             scope.validate_dependencies()?;
@@ -689,6 +698,22 @@ pub fn refuse_misplaced_scope_secrets(document: &serde_yaml_ng::Value, path: &Pa
     if misplaced {
         return Err(FactoryError::BadRequest(format!(
             "scope config {} has a `secrets:` block, which only the instance root's config reads. \
+             Move its entries into the root .factory/config.yaml",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// A `channels:` block in a nested scope's file (`#337`): only the instance
+/// root's is read, like `secrets:`, whose entries its tokens name.
+pub fn refuse_misplaced_scope_channels(document: &serde_yaml_ng::Value, path: &Path) -> Result<()> {
+    let misplaced = document
+        .as_mapping()
+        .is_some_and(|root| root.contains_key(serde_yaml_ng::Value::String("channels".into())));
+    if misplaced {
+        return Err(FactoryError::BadRequest(format!(
+            "scope config {} has a `channels:` block, which only the instance root's config reads. \
              Move its entries into the root .factory/config.yaml",
             path.display()
         )));
@@ -1842,6 +1867,7 @@ mod tests {
                 quality: Vec::new(),
                 infrastructure: Infrastructure::default(),
                 secrets: Vec::new(),
+                channels: Vec::new(),
                 plugins_dir: None,
                 renewals: Vec::new(),
                 renewals_notify: None,
@@ -3319,6 +3345,36 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("twice"));
+    }
+
+    #[test]
+    fn the_channels_block_is_read_from_the_root_and_checked_against_the_secrets_catalogue() {
+        const SECRETS: &str = "secrets:\n  - { name: telegram-bot-token, kind: token, source: { from: keychain, service: factory-telegram-bot }, expires: never }\n";
+        let good = config_with(&format!(
+            "{SECRETS}channels:\n  - name: owner-telegram\n    kind: telegram\n    token: {{ secret: telegram-bot-token }}\n    chat: {{ from: env, name: FACTORY_OWNER_TELEGRAM_CHAT }}\n"
+        ));
+        good.validate().unwrap();
+        good.validate_instance().unwrap();
+        assert_eq!(good.channels[0].name, "owner-telegram");
+        // Additive: a config without the block reads and writes as before.
+        assert!(config_with(SECRETS).channels.is_empty());
+        assert!(!serde_yaml_ng::to_string(&config_with(SECRETS)).unwrap().contains("channels"));
+
+        let undeclared = config_with(
+            "channels:\n  - { name: owner-telegram, kind: telegram, token: { secret: telegram-bot-token }, chat: { from: env, name: C } }\n",
+        );
+        for e in [undeclared.validate().unwrap_err(), undeclared.validate_instance().unwrap_err()] {
+            assert!(e.to_string().contains("does not declare (it declares: nothing)"), "{e}");
+        }
+
+        let document: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("scope:\n  id: s\n  name: demo\nchannels: []\n").unwrap();
+        let e = refuse_misplaced_scope_channels(&document, Path::new("/x/projects/demo/.factory/config.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("`channels:`") && e.contains("only the instance root"), "{e}");
+        let fine: serde_yaml_ng::Value = serde_yaml_ng::from_str("scope:\n  id: s\n  name: demo\n").unwrap();
+        refuse_misplaced_scope_channels(&fine, Path::new("x")).unwrap();
     }
 
     #[test]

@@ -7,7 +7,8 @@ use crate::l1_service::L1Service;
 use crate::l2_service::L2Service;
 use crate::l3_service::L3Service;
 use factory_agents::adapter::AgentContext;
-use factory_agents::dispatch::{Assignments, Environments, HarnessCommands, SessionStart, Supervision};
+use factory_agents::dispatch::{Assignments, Channels, Environments, HarnessCommands, SessionStart, Supervision};
+use factory_environment::channels::{ChannelSends, Outgoing, Receipt};
 use factory_infrastructure::host_commands::HostCommands;
 use factory_environment::provision::{Note, Notes, PrepareRequest, Prepared, Provision, Reconcile, Resolved, RunLedger};
 use factory_agents::harness::HeldTask;
@@ -163,6 +164,13 @@ impl Provision for L2Port<'_> {
     }
 }
 
+#[async_trait::async_trait]
+impl ChannelSends for L2Port<'_> {
+    async fn deliver(&self, outgoing: Outgoing) -> Result<Receipt> {
+        Box::pin(self.0.deliver(outgoing)).await
+    }
+}
+
 /// L1's command port, as the daemon serves it: what a `Commands<L2, _>` wraps.
 pub(crate) struct L1Port<'a>(pub(crate) L1Service<'a>);
 
@@ -234,5 +242,13 @@ impl Environments for L3Port<'_> {
     }
     async fn allow_sleep(&self, run_id: &str) {
         self.0.wiring.provision().port().allow_sleep(run_id).await;
+    }
+}
+
+/// L3 passes a channel send to L2 (`Commands<L3, L2Port>`), untouched.
+#[async_trait::async_trait]
+impl Channels for L3Port<'_> {
+    async fn deliver(&self, outgoing: Outgoing) -> Result<Receipt> {
+        self.0.wiring.provision().port().deliver(outgoing).await
     }
 }
