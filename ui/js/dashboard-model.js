@@ -25,7 +25,11 @@
 /// whatever `/api/metrics` answers for it; `DEFAULT_DASHBOARD` below still
 /// has none, since the hard requirement is that the built-in default stays
 /// exactly what it always drew.
-export const TILE_KINDS = Object.freeze(["metric", "view"]);
+///
+/// #343 adds a third: a `page` tile names a scope page (`scope.pages`) --
+/// `{ page: "<name>" | "<scope>/<name>", size }` -- and draws it in a
+/// sandboxed frame, never as markup in this document.
+export const TILE_KINDS = Object.freeze(["metric", "view", "page"]);
 
 /// Sizes name a span on a 12-column row, not a pixel width -- the same
 /// indirection a metric's `unit` gives a number. `packRows` below is what
@@ -98,16 +102,19 @@ export const RENDERABLE_VIEW_IDS = Object.freeze([
   "important_dates",
 ]);
 
-/// `"view"` or `"metric"` for a well-shaped tile, `null` for anything else
-/// (including one naming both or neither). Used by `validateTile` and by
-/// anything that needs to branch on kind without repeating the `in` checks.
+/// `"view"`, `"metric"` or `"page"` for a well-shaped tile, `null` for
+/// anything else (including one naming more than one, or none). Used by
+/// `validateTile` and by anything that needs to branch on kind without
+/// repeating the `in` checks.
 export function tileKind(tile) {
   if (!tile || typeof tile !== "object") return null;
-  const hasView = Object.prototype.hasOwnProperty.call(tile, "view");
-  const hasMetric = Object.prototype.hasOwnProperty.call(tile, "metric");
-  if (hasView === hasMetric) return null; // both or neither -- not a tile
-  return hasView ? "view" : "metric";
+  const named = TILE_KINDS.filter((kind) => Object.prototype.hasOwnProperty.call(tile, kind));
+  return named.length === 1 ? named[0] : null; // several, or none -- not a tile
 }
+
+/// A page tile's reference: a page name (lowercase letters, digits and
+/// `-`), optionally after `<scope>/` -- the shape the daemon accepts.
+const PAGE_REFERENCE = /^(?:.+\/)?[a-z0-9][a-z0-9-]*$/;
 
 /// The columns a tile's `size` spans, or `null` for an unknown size --
 /// distinct from 0 so a caller cannot mistake "unknown" for "spans
@@ -130,7 +137,11 @@ export function validateTile(tile) {
   const errors = [];
   const kind = tileKind(tile);
   if (kind === null) {
-    errors.push("a tile names exactly one of `view` or `metric`");
+    errors.push("a tile names exactly one of `view`, `metric` or `page`");
+  } else if (kind === "page") {
+    if (typeof tile.page !== "string" || !PAGE_REFERENCE.test(tile.page)) {
+      errors.push(`unknown page tile ${JSON.stringify(tile.page)}`);
+    }
   } else if (kind === "view") {
     if (typeof tile.view !== "string" || !VIEW_IDS.includes(tile.view)) {
       errors.push(`unknown view tile ${JSON.stringify(tile.view)}`);
@@ -241,6 +252,8 @@ export function resolveDashboard(fetchedTiles) {
 export function isTileRenderable(tile) {
   const kind = tileKind(tile);
   if (kind === "metric") return typeof tile.metric === "string" && tile.metric.trim() !== "";
+  // #343: a page tile draws its own card -- the page, or why it cannot yet.
+  if (kind === "page") return typeof tile.page === "string" && PAGE_REFERENCE.test(tile.page);
   return kind === "view" && RENDERABLE_VIEW_IDS.includes(tile.view);
 }
 

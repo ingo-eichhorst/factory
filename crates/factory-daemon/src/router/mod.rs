@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn every_request_has_exactly_one_arm_and_it_is_in_its_levels_router() {
         let table = table();
-        assert_eq!(table.len(), 155, "the routing table covers every Request variant");
+        assert_eq!(table.len(), 163, "the routing table covers every Request variant");
         let mut seen = BTreeSet::new();
         for (level, source) in FILES {
             let expected: BTreeSet<String> = table
@@ -109,6 +109,6 @@ mod tests {
                 assert!(seen.insert(name.clone()), "{name} has arms in two routers");
             }
         }
-        assert_eq!(seen.len(), 155);
+        assert_eq!(seen.len(), 163);
     }
 }

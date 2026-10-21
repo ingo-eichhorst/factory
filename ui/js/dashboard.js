@@ -89,6 +89,8 @@ import { openCreate } from "./task-form.js";
 import { hasFailed } from "./task-model.js";
 import { notStarted } from "./pending-model.js";
 import { scrim, closeModal, dropModal } from "./modal.js";
+import { frameHtml, tilePage, tileFrameClass, pageKey, shortSha } from "./pages-model.js";
+import { wirePageFrames } from "./pages.js";
 import { packRows, resolveDashboard, isTileRenderable, tileKind, rowTemplate, rowIsAllSmall, SIZES } from "./dashboard-model.js";
 import {
   neededEndpoints,
@@ -149,6 +151,11 @@ let production;
 /// in the bar (`renderDashSource`).
 let layoutTiles;
 let layoutSource = null;
+/// `#343`: the dashboard answer's `page_scopes` -- which scope declares the
+/// page each `page` tile names -- and the last `/api/pages` answer those
+/// tiles draw from (`undefined` until fetched, `null` when that failed).
+let layoutPageScopes = {};
+let tilePages;
 
 /// The four new shared reads #162's tiles draw from -- each `undefined`
 /// until its first fetch, `null` when that fetch failed, the same "three
@@ -213,7 +220,19 @@ async function loadTileData(tiles) {
     needs.policy ? loadTilePolicy() : Promise.resolve(),
     needs.costs ? loadTileCosts() : Promise.resolve(),
     needs.dates ? loadTileDates() : Promise.resolve(),
+    needs.pages ? loadTilePages() : Promise.resolve(),
   ]);
+}
+
+/// `/api/pages`, every scope's: a `page` tile may name a page any scope
+/// declares (`<scope>/<name>`), and which one it is was resolved by the
+/// daemon (`layoutPageScopes`), not by the rail.
+async function loadTilePages() {
+  try {
+    tilePages = (await api("/api/pages")).pages;
+  } catch {
+    tilePages = null;
+  }
 }
 
 /// One `/api/metrics?ids=…&scope=&window=` request for every metric tile on
@@ -303,9 +322,11 @@ async function loadLayout() {
     const answer = await api(`/api/dashboard${query}`);
     layoutTiles = answer.tiles;
     layoutSource = answer.source;
+    layoutPageScopes = answer.page_scopes || {};
   } catch {
     layoutTiles = null;
     layoutSource = null;
+    layoutPageScopes = {};
   }
 }
 
@@ -351,7 +372,8 @@ export function renderDashboard() {
   const calWasAtEdge = !oldCal || oldCal.scrollLeft >= oldCal.scrollWidth - oldCal.clientWidth - 2;
   const calScrollLeft = oldCal ? oldCal.scrollLeft : 0;
 
-  el.innerHTML = renderTiles(resolveDashboard(layoutTiles), { tasks, scopes, prod, everFinished });
+  patchDash(el, renderTiles(resolveDashboard(layoutTiles), { tasks, scopes, prod, everFinished }));
+  wirePageFrames(el);
 
   wireCalToggle();
   // An `inbox` view tile (#162) draws its own `.inbox-item` rows inside
@@ -424,7 +446,81 @@ function placeholderTile(tile) {
 
 function renderTile(tile, ctx) {
   if (!isTileRenderable(tile)) return placeholderTile(tile);
-  return tileKind(tile) === "metric" ? metricTile(tile) : VIEW_RENDERERS[tile.view](ctx);
+  const kind = tileKind(tile);
+  if (kind === "page") return pageTile(tile);
+  return kind === "metric" ? metricTile(tile) : VIEW_RENDERERS[tile.view](ctx);
+}
+
+/// `#343`: a scope page, in the same sandboxed frame the Pages view uses
+/// (`frameHtml`, `pages-model.js`) -- never its markup in this document.
+/// `data-page-key` names scope, page and version, which is what lets
+/// `patchDash` leave a live frame alone across a redraw.
+function pageTile(tile) {
+  const { scope, name, page } = tilePage(tile, layoutPageScopes, tilePages);
+  const open = scope && name ? `${routeHref(state.scope, "pages")}/${[scope, name].map(encodeURIComponent).join("/")}` : null;
+  const link = open ? `<a href="${esc(open)}">open</a>` : "";
+  if (!page) {
+    const why = tilePages === undefined ? "loading…" : `${esc(tile.page)} — no such page${scope ? ` in ${esc(scope)}` : ""}`;
+    return `<section class="dcard"><h3>${esc(name || tile.page)}<span class="r">${link}</span></h3><div class="empty">${why}</div></section>`;
+  }
+  const v = page.current;
+  if (!v) {
+    return `<section class="dcard"><h3>${esc(page.title)}<span class="r">${esc(page.scope)} · ${link}</span></h3>
+      <div class="empty">Not published yet — declared by ${esc(page.scope)}.</div></section>`;
+  }
+  return `<section class="dcard page-tile" data-page-key="${esc(pageKey(page.scope, page.name, v.sha256))}">
+      <h3>${esc(v.title || page.title)}<span class="r">${esc(page.scope)} · ${esc(shortSha(v.sha256))} · ${link}</span></h3>
+      ${frameHtml(page, v, tileFrameClass(tile.size))}
+    </section>`;
+}
+
+/// Puts `html` into `#dash` without reloading a page frame that is still
+/// there: a redraw happens on every task event, and a page reloaded each
+/// time would lose whatever a person was doing in it. With no page frame on
+/// screen this is the plain `innerHTML` it always was; otherwise a top-level
+/// tile or row that carries the same page key stays where it is, and
+/// everything around it is replaced.
+function patchDash(el, html) {
+  if (!el.querySelector || !el.querySelector("[data-page-key]")) {
+    el.innerHTML = html;
+    return;
+  }
+  const next = document.createElement("div");
+  next.innerHTML = html;
+  patchChildren(el, next);
+}
+
+function pageKeysIn(node) {
+  const own = node.dataset?.pageKey ? [node.dataset.pageKey] : [];
+  return [...own, ...[...node.querySelectorAll("section[data-page-key]")].map((n) => n.dataset.pageKey)].join("|");
+}
+
+function patchChildren(old, next) {
+  const before = [...old.children];
+  const after = [...next.children];
+  after.forEach((fresh, i) => {
+    const stale = before[i];
+    if (!stale) {
+      old.appendChild(fresh);
+      return;
+    }
+    const keys = pageKeysIn(stale);
+    // The same page key in the same shape -- a lone tile still alone, a row
+    // still a row. A tile that moved into a row (or out of one) is redrawn.
+    const sameShape = stale.tagName === fresh.tagName && stale.classList.contains("drow") === fresh.classList.contains("drow");
+    if (keys && sameShape && keys === pageKeysIn(fresh)) {
+      if (stale.dataset.pageKey) return; // the same page tile, frame and all
+      // A row holding a page tile: keep the row, patch its tiles.
+      for (const attr of ["class", "style"]) {
+        if (fresh.hasAttribute(attr)) stale.setAttribute(attr, fresh.getAttribute(attr));
+        else stale.removeAttribute(attr);
+      }
+      patchChildren(stale, fresh);
+      return;
+    }
+    stale.replaceWith(fresh);
+  });
+  for (const extra of before.slice(after.length)) extra.remove();
 }
 
 /// Assembles the page from a tile list: pack tiles into 12-column rows
@@ -1255,6 +1351,10 @@ function editingScopeName() {
 /// never named).
 function editorTileLabel(tile) {
   if (tile.view) return VIEW_LABELS[tile.view] || tile.view;
+  if (tile.page) {
+    const found = editorCatalogue.find((e) => e.kind === "page" && e.id === tile.page);
+    return found ? `${found.title} (page)` : `page ${tile.page}`;
+  }
   const found = editorCatalogue.find((e) => e.kind === "metric" && e.id === tile.metric);
   return (found && found.title) || tile.metric;
 }
@@ -1271,7 +1371,7 @@ function editorHtml(offerReset) {
         </div>
         <div class="de-col">
           <h3>Add a tile</h3>
-          <input id="de-search" type="text" placeholder="Search views and metrics…">
+          <input id="de-search" type="text" placeholder="Search views, pages and metrics…">
           <div id="de-results"></div>
         </div>
       </div>
@@ -1385,6 +1485,7 @@ async function submitEditor(method) {
     });
     layoutTiles = answer.tiles;
     layoutSource = answer.source;
+    layoutPageScopes = answer.page_scopes || {};
     closeEditor();
     await loadTileData(resolveDashboard(layoutTiles));
     renderDashboard();
@@ -1427,13 +1528,12 @@ async function openDashboardEditor() {
   wireEditorChrome();
   renderEditorBody();
 
-  let registry = [];
-  try {
-    registry = (await api("/api/metrics")).registry;
-  } catch {
-    registry = [];
-  }
+  const [registry, pages] = await Promise.all([
+    api("/api/metrics").then((a) => a.registry).catch(() => []),
+    // `#343`: every declared page can be a tile.
+    api("/api/pages").then((a) => a.pages).catch(() => []),
+  ]);
   if (!isDashboardEditorOpen()) return; // closed while the fetch was in flight
-  editorCatalogue = buildCatalogue(registry);
+  editorCatalogue = buildCatalogue(registry, pages, scope);
   renderEditorBody();
 }

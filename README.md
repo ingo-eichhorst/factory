@@ -2997,6 +2997,156 @@ and `consumers`. With `ids`, or with no scope, the answer is what it always
 was and carries no `rows`. Every value comes from one ordinary metrics read,
 so a service-backed source is asked once per listing. No poll: the tab
 reloads when it is shown and when the rail selection changes.
+## Scope pages
+
+What a scope's agents produce for a person to look at (`#343`): an HTML page
+the scope declares, its agents publish at runtime, and Factory shows under the
+scope -- the **Pages** view beside the Dashboard -- and as a dashboard tile.
+No daemon rebuild and no UI release: a new version is on screen the next time
+the view reads.
+
+```yaml
+# a scope's .factory/config.yaml
+scope:
+  name: conferenz-radar
+  pages:
+    - name: conference-radar      # lowercase letters, digits and -
+      title: Konferenz-Radar      # optional; the name when left out
+      max_bytes: 20MB             # optional, default 20MB; bytes, or KB/MB/GB, KiB/MiB/GiB
+      keep: 10                    # optional, default 10: versions kept for rollback
+  dashboard:
+    tiles:
+      - { page: conference-radar, size: xl }
+```
+
+```sh
+# inside a run: FACTORY_TOKEN says which run and scope this is
+factory page publish conference-radar \
+  --title "Konferenz-Radar" \
+  --file out/conference-radar-page.html \
+  --data data/ingo-conference-radar.json     # optional, handed to the page
+factory page list [--scope <scope>]           # declared pages and what is shown
+factory page show conference-radar --scope conferenz-radar
+factory page rollback conference-radar --scope conferenz-radar --version 3f2a1b9
+```
+
+**A page is a plugin of kind `page`.** Unlike the `agent` and `task` kinds
+(see "Writing a plugin") it has no process and no manifest: it is declared by
+its scope's `pages:` and its content is supplied at runtime. A declared page
+with nothing published yet shows "not published yet" with the declaring scope.
+A scope's `pages:` is its own -- it is not inherited down the tree -- and is
+checked at load: a name that is not a slug, the same name twice, `max_bytes`
+outside 1 byte to 32 MiB or `keep` outside 1 to 100 stops startup with the
+scope and the entry named.
+
+**Publishing** is one command, `Request::PagePublish`, with one handler for
+every way in: `factory page publish` over the socket, `POST /api/rpc` from a
+sandboxed run (`#218`) and `POST /api/pages/publish` all reach
+`Engine::handle`, so `access.rs` checks the caller before the handler runs.
+It needs the `page.publish` grant (`worker` and `foreman` hold it). An agent
+publishes only its own scope's pages -- `--scope` left out is that scope, and
+a worker publishes only from a run of its own; the owner may publish any
+scope's declared page and has to name the scope. The handler refuses, with the
+reason and with nothing stored:
+
+- a page the scope does not declare (the message lists what it does declare);
+- a page over its `max_bytes`, the HTML and the `--data` together;
+- a page whose markup loads something its CSP would block -- a `<script src>`,
+  a linked stylesheet, an image, font or CSS `url()` that is not a `data:` URI,
+  a frame, an object, `<base>`, a meta refresh, a WebRTC peer connection (which
+  no CSP governs). Each finding is listed with its line. This is a preflight of
+  the markup, never a substitute for the CSP itself: what a script builds at
+  runtime is still refused in the browser.
+
+Every publish from a run is journaled on that run (`page_published`: scope,
+page, version, size and sha256).
+
+**Storage.** L4 owns the page store. A version is content-addressed under the
+instance's own `.factory/pages/<scope>/<name>/<sha256>/` -- `page.html`,
+`data.json` when there is data, `version.json` with who published it, when,
+from which run -- never inside the scope's directory, so publishing never
+changes a scope's source. A scope name is one percent-encoded directory, so
+`a/b`'s pages can never be mistaken for scope `a`'s. The address covers the
+HTML and the data, so new data is a new version; the same content again is the
+same version, made current. A `current` file names the version shown: a
+publish points it at the new one, a rollback at an older one, and either holds
+across a restart because it is a file. The newest `keep` versions are kept and
+the rest removed -- never the current one, however old. Published versions are
+run output, not authored content, so an instance backup's catalogue (see
+"Backup") does not copy `.factory/pages/`; the next publish makes a page again.
+What is declared and
+published is the live L0 fact `ScopePageFact` ("pages of scope S, the version
+shown and every version kept"), read on every request; the Pages view, the
+dashboard and the CLI read it over the interface and never touch
+`.factory/pages/` themselves.
+
+**Isolation.** A page is agent-authored HTML, so it never becomes part of the
+UI's own document:
+
+- It is served from its own path, `GET /pages/<scope>/<name>[?v=<sha256>]`,
+  with its own Content-Security-Policy: `default-src 'none'; script-src
+  'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src
+  data:; connect-src 'none'; frame-ancestors 'self'; base-uri 'none';
+  form-action 'none'; sandbox allow-scripts` -- plus `nosniff`,
+  `Referrer-Policy: no-referrer`, `X-DNS-Prefetch-Control: off` and
+  `no-store`. The `sandbox` directive means even a page opened on its own,
+  outside the UI, runs in an opaque origin.
+- The UI shows it in `<iframe sandbox="allow-scripts">` and nothing more --
+  never `allow-same-origin`, forms, popups or top navigation. Its scripts run,
+  in an opaque origin: they cannot read the UI's `localStorage` or cookies,
+  cannot call `/api/*` as the person looking, and make no network request at
+  all; everything a page shows is inline or a `data:` URI.
+- The UI itself now has a baseline CSP too: scripts and frames only from
+  itself (`script-src 'self'`, `frame-src 'self'`; the theme script moved out
+  of `index.html` into `ui/js/theme-boot.js` for it), styles from itself and
+  inline, the IBM Plex fonts from Google, sockets back to the host it was
+  loaded from, `object-src 'none'`, `base-uri 'none'`, `frame-ancestors 'self'`.
+
+`crates/factory-daemon/tests/pages_e2e.rs` proves these in a real browser when
+Google Chrome is installed: a probe page shown in the UI's Pages view tries the
+UI's storage and document, `/api/*` (reads, and a `POST` that would create a
+task), `fetch`, XHR, `sendBeacon`, WebSocket, EventSource, images, scripts, CSS,
+prefetch, a popup and top-level navigation, and every one is refused, with no
+request reaching a canary server; the same probe served plainly outside the
+sandbox reaches both, so the test cannot pass by probing nothing. What it
+does not prove away, and what is true of browsers rather than of Factory: a
+frame may navigate *itself*. To another origin that is refused by the UI's
+`frame-src 'self'`, though Chrome may open (and drop) a bare TCP connection to
+the target before it checks -- no request is sent. To the UI's own origin it
+is a plain `GET`, which changes nothing and whose answer the page can no
+longer read. Links in a page therefore do not open anything; show a URL as
+text.
+
+**Data.** `--data` is any JSON document, stored with the version and counted
+toward `max_bytes`. The page never fetches it: once the frame has loaded, the
+UI posts it in, and posts it again whenever the page asks --
+
+```js
+// what the UI posts into the frame
+{ type: "factory:page-data", scope, name, version, data /* or null */, theme /* "foundry-dark" | "foundry-light" */ }
+// what a page may post to ask for it -- the only message the UI answers
+window.parent.postMessage({ type: "factory:page-ready" }, "*");
+```
+
+so a page template can re-render from fresh data without being republished.
+`GET /api/pages/data?scope=&name=&version=` is where the UI reads it.
+
+**In the UI.** The **Pages** view (Dashboard row) lists the pages of the
+selected scope and the scopes below it -- title, version, published when and
+by whom -- and opens one full width, with its version history: preview any
+kept version, or **Show this version** to roll back (`POST
+/api/pages/rollback`; `page.publish` with `scope` reach for an agent). A
+dashboard tile `{ page: <name>, size: <s|m|l|xl> }` shows the same frame; see
+"Dashboard configuration" below for how the name resolves. A dashboard redraw
+leaves a page frame that is still showing the same version alone, so what a
+person did in it survives the page's own refreshes.
+
+**Reference page.** `examples/pages/conference-radar.html` with
+`examples/pages/conference-radar.json` -- invented conferences only -- is a
+month calendar and six-month roadmap of CFP deadlines and events, a world map
+drawn as inline SVG, and a filterable, sortable table, all under the CSP above
+and re-rendered from the posted data. The tests publish it from a `shell` run
+and check it renders on the dashboard with its data.
 
 ## Intake
 
@@ -5225,6 +5375,8 @@ scope:
   skills:                    # optional: procedures a run may improve (#339)
     - path: skill/
       learn: propose         # propose | apply | off
+  pages:                     # what its agents may publish (#343, "Scope pages")
+    - { name: status, title: Status, max_bytes: 5MB, keep: 10 }
 ```
 
 An agent declaration, in `agents:` or the singular `agent:` block, takes
@@ -5346,15 +5498,25 @@ scope:
 ```
 
 A tile is exactly one of `metric` (any registry `MetricId` -- see "Goals"
-above for the registry, including a bound family like `compliance.cra`) or
+above for the registry, including a bound family like `compliance.cra`),
 `view` (one of a fixed catalogue: `kpis`, `throughput`, `on_the_line`,
 `production_year`, `by_scope`, `agent_hours_by_scope`,
-`agent_hours_by_agent`, `occupancy_strip`, `inbox`, `compliance`, `cost`),
+`agent_hours_by_agent`, `occupancy_strip`, `inbox`, `compliance`, `cost`)
+or `page` (`#343`, a scope page -- see "Scope pages" above),
 plus a `size` of `s`, `m`, `l` or `xl`. `kpis` is today's KPI row. No tile
 takes a query, a filter or a `group_by` -- design §8's rule against a query
 language holds here exactly as it does for metrics and policy checks; a
 metric family's own bound segment (`compliance.cra`) is the only
 parameter a tile ever carries.
+
+A `page` tile names a page by its bare name -- the nearest scope that declares
+it, from the scope whose `dashboard:` block names it up through its ancestors
+(the root's own scope for the top-level block) -- or as `<scope>/<name>`, exactly
+that scope's page, wherever it sits; that is how the instance root's dashboard
+shows a page a project scope publishes. A page name never contains `/`, so the
+last one splits them. `Payload::Dashboard` carries the answer beside the tiles,
+`page_scopes: { "<page:>": "<declaring scope>" }`, so the UI never resolves it
+itself (`Factory::page_tile_scopes`).
 
 **Resolution**, in one place (`Config::dashboard_for_scope`, the same chain
 `roles_for_scope` walks by `Scope.path`, never by name or up the tree): the
@@ -5380,7 +5542,11 @@ dashboard.tiles[2].metric "compliance" is not a known metric`); a tile
 naming both `metric` and `view`, or neither, the same way. A metric the
 registry knows but cannot compute yet is **not** an error -- the tile is
 valid and shows its own reason, exactly as an unavailable metric already
-does elsewhere. `view` and `size` are closed enums, so an unrecognised
+does elsewhere. A `page` tile naming a page no scope in its chain declares is
+refused the same way (`scope "demo" dashboard.tiles[0].page "roadmapp" is not a
+page "demo" or a scope above it declares; it declares conference-radar,
+roadmap; ...`), checked once discovery has run, since `<scope>/<name>` may name
+any scope. `view` and `size` are closed enums, so an unrecognised
 value is refused by the parser itself, the file and the bad value both
 named, the same as an unrecognised `lifetime:` or `sandbox:` elsewhere in
 this file. The instance root writes its dashboard only in its top-level
@@ -5859,7 +6025,7 @@ Put it in `.factory/plugins/<name>/` with a manifest:
 
 ```yaml
 name: my-agent
-kind: agent                  # agent | task
+kind: agent                  # agent | task  (a page is declared by its scope, below)
 description: what it is
 command: ["python3", "adapter.py"]
 timeout_seconds: 30
@@ -5903,6 +6069,11 @@ belongs in the instance's ledger store instead.
 
 A plugin may not take the name of an adapter that already exists; the registry
 refuses the collision rather than silently shadowing a built-in.
+
+A **page** is the third kind (`#343`), and the only one with no process: a
+scope declares it under `scope.pages`, an agent supplies its HTML at runtime
+with `factory page publish`, and the UI shows it sandboxed -- see "Scope
+pages". Nothing goes in `.factory/plugins/` for one.
 
 ## Interfaces
 
@@ -5957,10 +6128,16 @@ the L1 Operations tab under `GET /api/environments?scope=`, a deployment's
 start and end under `POST /api/deployments` and
 `POST /api/deployments/{id}/finish`, and `POST /api/releases` (see
 "Operations" above),
+scope pages (`#343`) under `GET /api/pages?scope=`,
+`GET /api/pages/page?scope=&name=`, `GET /api/pages/data?scope=&name=&version=`,
+`POST /api/pages/publish` and `POST /api/pages/rollback`, a page itself at
+`GET /pages/<scope>/<name>?v=` under its own CSP (see "Scope pages"),
 workflow CRUD under
 `/api/workflows`, workflow-run
 start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
-`POST /api/rpc` for the raw envelope. `GET /ws`
+`POST /api/rpc` for the raw envelope (its body may be as large as the
+biggest page a scope may declare, 96 MiB, where every other route keeps
+axum's 2 MB default). `GET /ws`
 is the event stream: a snapshot of every task first, then one message per event.
 
 Adding an interface — mcp, or anything else — means translating to that
@@ -5974,7 +6151,7 @@ messages in".
 ## The web UI
 
 The views are grouped by level in the header: **Dashboard** is the landing view,
-then **Activity**, **Site plan**, **Inbox**, **Tasks**, **Workflows**,
+then **Pages** (`#343`, see "Scope pages"), **Activity**, **Site plan**, **Inbox**, **Tasks**, **Workflows**,
 **Occupancy**, **Roster**, **Agent-runtime**, **Roles**, **Sandboxes**,
 **Secrets**, **Benchmarks** and **Knowledge**. Switching between them is a small
 registry — one container shown, one button lit,
@@ -6658,7 +6835,7 @@ the command ladder between them are in place (#193); see Architecture.
     crates/factory-infrastructure L1: backup, running environments, renewal behaviour and their SQLite stores
     crates/factory-environment    L2: sandbox planning, secrets, dependencies and credential expiry store
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context, session usage, scope memory and skills
-    crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy, TaskStore and run evidence/provenance store
+    crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy, TaskStore, run evidence/provenance store and the scope page store (#343)
     crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam
     crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data, GoalsStore and policy receipt store
     crates/factory-composition    outside stack: instance config/scope loading and dashboard/site/Line page projections
@@ -6674,6 +6851,8 @@ the command ladder between them are in place (#193); see Architecture.
     ui/js/app.js               the wiring: which page shows, what an event means
     ui/js/{tasks,task-form,agents,occupancy,terminal,modal}.js   one per view
     ui/js/{dashboard,activity,site,site-render}.js               the new views
+    ui/js/{pages,pages-model}.js                                 the Pages view and page tiles' sandboxed frame, data hand-over and shaping (#343)
+    ui/js/theme-boot.js                                          the theme, applied before the first paint; a file so the UI's CSP needs no inline script
     ui/js/{sandboxes,secrets,dependencies}.js                    L2's three tabs
     ui/js/secrets-model.js                                       the Secrets tab's declared catalogue (#244), pure
     ui/js/dependencies-model.js                                  Dependencies' pure shaping logic
@@ -6686,4 +6865,5 @@ the command ladder between them are in place (#193); see Architecture.
     ui/js/{doctor,doctor-model}.js                               the L1 Doctor dependency view and its pure shaping logic
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
+    examples/pages           the reference scope page (#343): calendar/roadmap, map and table over invented data
     examples/openshell       `sandbox: openshell` (#218): the image recipe, provider profiles, the awesome-herdr block

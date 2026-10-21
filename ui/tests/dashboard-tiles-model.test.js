@@ -43,22 +43,24 @@ test("neededEndpoints reads false everywhere for DEFAULT_DASHBOARD -- the hard r
     occupancy: false,
     operations: false,
     policy: false,
-    costs: false, dates: false,
+    costs: false, dates: false, pages: false,
   });
 });
 
 test("neededEndpoints flags exactly the endpoint each tile kind reads", () => {
   const only = (tile) => neededEndpoints([tile]);
-  assert.deepEqual(only({ metric: "throughput_week", size: "s" }), { metrics: true, occupancy: false, operations: false, policy: false, costs: false, dates: false });
-  assert.deepEqual(only({ view: "agent_hours_by_scope", size: "m" }), { metrics: false, occupancy: true, operations: false, policy: false, costs: false, dates: false });
-  assert.deepEqual(only({ view: "agent_hours_by_agent", size: "m" }), { metrics: false, occupancy: true, operations: false, policy: false, costs: false, dates: false });
-  assert.deepEqual(only({ view: "occupancy_strip", size: "m" }), { metrics: false, occupancy: true, operations: false, policy: false, costs: false, dates: false });
-  assert.deepEqual(only({ view: "inbox", size: "m" }), { metrics: false, occupancy: false, operations: true, policy: false, costs: false, dates: false });
-  assert.deepEqual(only({ view: "compliance", size: "m" }), { metrics: false, occupancy: false, operations: false, policy: true, costs: false, dates: false });
-  assert.deepEqual(only({ view: "cost", size: "m" }), { metrics: false, occupancy: false, operations: false, policy: false, costs: true, dates: false });
+  assert.deepEqual(only({ metric: "throughput_week", size: "s" }), { metrics: true, occupancy: false, operations: false, policy: false, costs: false, dates: false, pages: false });
+  assert.deepEqual(only({ view: "agent_hours_by_scope", size: "m" }), { metrics: false, occupancy: true, operations: false, policy: false, costs: false, dates: false, pages: false });
+  assert.deepEqual(only({ view: "agent_hours_by_agent", size: "m" }), { metrics: false, occupancy: true, operations: false, policy: false, costs: false, dates: false, pages: false });
+  assert.deepEqual(only({ view: "occupancy_strip", size: "m" }), { metrics: false, occupancy: true, operations: false, policy: false, costs: false, dates: false, pages: false });
+  assert.deepEqual(only({ view: "inbox", size: "m" }), { metrics: false, occupancy: false, operations: true, policy: false, costs: false, dates: false, pages: false });
+  assert.deepEqual(only({ view: "compliance", size: "m" }), { metrics: false, occupancy: false, operations: false, policy: true, costs: false, dates: false, pages: false });
+  assert.deepEqual(only({ view: "cost", size: "m" }), { metrics: false, occupancy: false, operations: false, policy: false, costs: true, dates: false, pages: false });
+  // #343: every page tile shares the one /api/pages read.
+  assert.deepEqual(only({ page: "conference-radar", size: "xl" }), { metrics: false, occupancy: false, operations: false, policy: false, costs: false, dates: false, pages: true });
   // The five #163 views read state/production already in hand, nothing new.
   for (const view of ["kpis", "throughput", "on_the_line", "production_year", "by_scope"]) {
-    assert.deepEqual(only({ view, size: "s" }), { metrics: false, occupancy: false, operations: false, policy: false, costs: false, dates: false }, view);
+    assert.deepEqual(only({ view, size: "s" }), { metrics: false, occupancy: false, operations: false, policy: false, costs: false, dates: false, pages: false }, view);
   }
 });
 
@@ -69,7 +71,7 @@ test("neededEndpoints combines flags across a mixed layout, each read at most on
     { metric: "unit_cost", size: "s" },
     { view: "cost", size: "m" },
   ];
-  assert.deepEqual(neededEndpoints(tiles), { metrics: true, occupancy: true, operations: false, policy: false, costs: true, dates: false });
+  assert.deepEqual(neededEndpoints(tiles), { metrics: true, occupancy: true, operations: false, policy: false, costs: true, dates: false, pages: false });
 });
 
 // ------------------------------------------------------------ metric tiles

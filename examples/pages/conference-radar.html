@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Konferenz-Radar (sample)</title>
+<!--
+  The reference scope page for Factory (#343). Everything is inline: Factory
+  serves a page with `default-src 'none'; script-src 'unsafe-inline';
+  style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'` and
+  frames it with sandbox="allow-scripts", so a page can fetch nothing and
+  load nothing from anywhere. Its data is not fetched either: Factory hands
+  the version's `--data` JSON to the page with postMessage, and the page
+  re-renders from it. Opened on its own, it draws the built-in sample below.
+
+  Every conference, date and URL in it is invented.
+-->
+<style>
+  :root {
+    --bg: #14161a; --panel: #1b1e24; --ink: #e8e6e1; --muted: #9a978f; --line: #2c3038;
+    --accent: #f0a63a; --cfp: #6cc3a0; --closed: #6b6f78; --event: #f0a63a; --land: #262a31; --sea: #171a1f;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f4ef; --panel: #ffffff; --ink: #22252b; --muted: #6b6f78; --line: #e2ded5;
+    --accent: #b86e00; --cfp: #1f8a63; --closed: #a3a6ad; --event: #c97a06; --land: #e6e1d6; --sea: #f1eee7;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-size: 13px; line-height: 1.45; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; padding: 14px 18px 8px; }
+  h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: .01em; }
+  h2 { margin: 0 0 8px; font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .meta { color: var(--muted); font-size: 12px; }
+  main { display: grid; gap: 14px; padding: 6px 18px 18px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; min-width: 0; }
+  .wide { grid-column: 1 / -1; }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; }
+  .k-cfp { background: var(--cfp); transform: rotate(45deg) scale(.8); }
+  .k-closed { background: var(--closed); transform: rotate(45deg) scale(.8); }
+  .k-event { background: var(--event); border-radius: 2px; }
+  /* roadmap */
+  .road { position: relative; }
+  .road-head, .road-row { display: grid; grid-template-columns: 170px minmax(0, 1fr); align-items: center; }
+  .road-head .track { height: 20px; }
+  .road-row { height: 24px; border-top: 1px solid var(--line); cursor: default; }
+  .road-row.hit { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .road-row .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 8px; }
+  .track { position: relative; height: 100%; }
+  .month { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line); }
+  .month span { position: absolute; top: 2px; left: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .today { position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--accent); opacity: .7; }
+  .bar { position: absolute; top: 7px; height: 10px; border-radius: 2px; background: var(--event); min-width: 4px; }
+  .dia { position: absolute; top: 7px; width: 10px; height: 10px; margin-left: -5px; transform: rotate(45deg); }
+  .dia.open { background: var(--cfp); } .dia.closed { background: var(--closed); }
+  /* month calendar */
+  .cal-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .cal-bar strong { min-width: 130px; text-align: center; }
+  button { font: inherit; color: var(--ink); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 2px 9px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
+  .dow { font-size: 11px; color: var(--muted); text-align: center; padding-bottom: 2px; }
+  .day { min-height: 54px; border: 1px solid var(--line); border-radius: 3px; padding: 2px 4px; font-size: 11px; overflow: hidden; }
+  .day.out { opacity: .35; }
+  .day.now { border-color: var(--accent); }
+  .day .n { color: var(--muted); }
+  .day .e { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .e.cfp::before { content: "◆ "; color: var(--cfp); }
+  .e.ev::before { content: "■ "; color: var(--event); }
+  /* map */
+  svg.map { width: 100%; height: auto; display: block; background: var(--sea); border-radius: 4px; }
+  .land { fill: var(--land); stroke: var(--line); stroke-width: .3; }
+  .grat { stroke: var(--line); stroke-width: .2; fill: none; }
+  .pin { stroke: var(--bg); stroke-width: .5; cursor: pointer; }
+  .pin.open { fill: var(--cfp); } .pin.closed { fill: var(--closed); }
+  .pin.hit { stroke: var(--ink); stroke-width: 1; }
+  /* table */
+  .filter { width: 100%; margin-bottom: 8px; padding: 5px 8px; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; }
+  .scroll { max-height: 360px; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11px; color: var(--muted); font-weight: 600; padding: 4px 6px; border-bottom: 1px solid var(--line); cursor: pointer; white-space: nowrap; position: sticky; top: 0; background: var(--panel); }
+  th[aria-sort="ascending"]::after { content: " ▲"; } th[aria-sort="descending"]::after { content: " ▼"; }
+  td { padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr.hit td { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .left { font-size: 11px; color: var(--muted); }
+  .left.soon { color: var(--accent); }
+  .tag { display: inline-block; font-size: 10px; padding: 0 5px; margin: 1px 2px 1px 0; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); }
+  .url { font-family: ui-monospace, Menlo, monospace; font-size: 10px; color: var(--muted); user-select: all; }
+  .empty { color: var(--muted); padding: 10px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Konferenz-Radar (sample)</h1>
+  <span class="meta" id="stamp"></span>
+  <span class="meta" id="source">built-in sample data</span>
+</header>
+<main>
+  <section class="wide">
+    <h2>Roadmap · CFP deadlines and events</h2>
+    <div class="legend"><span><i class="k-cfp"></i>CFP open</span><span><i class="k-closed"></i>CFP closed</span><span><i class="k-event"></i>event</span></div>
+    <div class="road" id="road"></div>
+  </section>
+  <section>
+    <h2>Month</h2>
+    <div class="cal-bar"><button id="prev" type="button" aria-label="previous month">‹</button><strong id="month"></strong><button id="next" type="button" aria-label="next month">›</button></div>
+    <div class="cal" id="cal"></div>
+  </section>
+  <section>
+    <h2>Map</h2>
+    <svg class="map" id="map" viewBox="0 0 360 180" role="img" aria-label="conference locations"></svg>
+  </section>
+  <section class="wide">
+    <h2>Table</h2>
+    <input class="filter" id="filter" type="search" placeholder="Filter by name, city, country or topic…">
+    <div class="scroll"><table>
+      <thead><tr>
+        <th data-key="name">Conference</th><th data-key="city">City</th><th data-key="cfp_deadline">CFP deadline</th>
+        <th data-key="start">Dates</th><th data-key="topics">Topics</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </section>
+</main>
+<script>
+"use strict";
+(function () {
+  // A small built-in sample, so the page draws something when it is opened
+  // on its own. In Factory the version's --data replaces it.
+  var SAMPLE = {
+    title: "Konferenz-Radar (sample)",
+    generated_at: "2026-10-19",
+    conferences: [
+      { id: "lorem-devdays", name: "Lorem DevDays", city: "Berlin", country: "DE", lat: 52.52, lon: 13.40, cfp_deadline: "2026-11-14", start: "2027-02-10", end: "2027-02-12", topics: ["agents"], url: "https://example.org/lorem-devdays" },
+      { id: "sed-do-tokyo", name: "Sed Do Tokyo", city: "Tokyo", country: "JP", lat: 35.68, lon: 139.69, cfp_deadline: "2026-11-20", start: "2027-01-28", end: "2027-01-29", topics: ["agents"], url: "https://example.org/sed-do" },
+      { id: "adipiscing-days", name: "Adipiscing Days", city: "Austin", country: "US", lat: 30.27, lon: -97.74, cfp_deadline: "2026-12-15", start: "2027-03-03", end: "2027-03-05", topics: ["llm"], url: "https://example.org/adipiscing" }
+    ]
+  };
+
+  // A low-poly world outline, [lon, lat] rings -- enough to place a city.
+  var LAND = [
+    [[-168,66],[-140,70],[-95,72],[-80,63],[-62,58],[-55,50],[-67,45],[-75,38],[-81,31],[-80,25],[-97,26],[-97,19],[-87,21],[-83,10],[-78,8],[-92,15],[-105,20],[-112,30],[-118,34],[-124,40],[-124,48],[-135,58],[-150,60],[-165,60]],
+    [[-78,8],[-60,10],[-50,0],[-35,-5],[-39,-15],[-48,-26],[-58,-38],[-66,-55],[-73,-50],[-71,-30],[-70,-18],[-81,-5],[-79,2]],
+    [[-55,60],[-42,60],[-20,70],[-18,80],[-40,83],[-65,78],[-72,76],[-55,68]],
+    [[-10,36],[-9,43],[-2,44],[-5,48],[2,51],[8,54],[10,58],[5,62],[15,69],[28,71],[40,67],[42,60],[30,55],[28,46],[40,42],[28,41],[23,36],[20,40],[15,38],[12,44],[8,44],[3,43],[-5,36]],
+    [[-5,50],[1,51],[2,53],[-2,56],[-5,58],[-6,55],[-3,54]],
+    [[-17,21],[-10,30],[-6,36],[10,37],[20,32],[32,31],[35,28],[43,12],[51,12],[42,-1],[40,-15],[35,-25],[20,-35],[17,-29],[12,-17],[13,-6],[9,4],[-8,4],[-17,14]],
+    [[28,41],[40,42],[48,30],[57,25],[66,25],[72,20],[78,8],[82,17],[90,22],[98,16],[103,1],[108,11],[108,21],[122,30],[122,40],[130,43],[141,46],[142,53],[160,60],[180,66],[180,72],[140,73],[110,77],[80,73],[60,70],[40,67],[42,60],[30,55],[28,46]],
+    [[130,31],[135,34],[140,36],[142,40],[141,45],[139,40],[136,36],[131,34]],
+    [[114,-22],[122,-17],[131,-12],[137,-12],[142,-11],[146,-19],[153,-26],[150,-37],[141,-38],[131,-31],[115,-34]]
+  ];
+
+  var DAY = 86400000;
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var state = { data: SAMPLE, source: "built-in sample data", sort: { key: "cfp_deadline", dir: 1 }, filter: "", hit: null, month: null };
+
+  function $(id) { return document.getElementById(id); }
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function svg(tag, attrs) {
+    var e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+  function day(iso) { var t = Date.parse(iso + "T00:00:00Z"); return isFinite(t) ? t : null; }
+  function fmt(t) { var d = new Date(t); return d.getUTCDate() + " " + MONTHS[d.getUTCMonth()] + " " + d.getUTCFullYear(); }
+  function today() { return day(state.data.generated_at) || Math.floor(Date.now() / DAY) * DAY; }
+  function cfpOpen(c) { var d = day(c.cfp_deadline); return d != null && d >= today(); }
+  function list() {
+    var all = Array.isArray(state.data.conferences) ? state.data.conferences : [];
+    return all.filter(function (c) { return c && typeof c.name === "string"; });
+  }
+
+  // ------------------------------------------------------------- roadmap
+  function renderRoad() {
+    var host = $("road");
+    host.textContent = "";
+    var t0 = new Date(today()); t0 = Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth(), 1);
+    var t1 = Date.UTC(new Date(t0).getUTCFullYear(), new Date(t0).getUTCMonth() + 6, 1);
+    var span = t1 - t0;
+    function pct(t) { return Math.max(0, Math.min(100, (t - t0) / span * 100)); }
+    function months(track) {
+      for (var m = 0; m < 6; m++) {
+        var start = Date.UTC(new Date(t0).getUTCFullYear(), new Date(t0).getUTCMonth() + m, 1);
+        var line = el("div", "month"); line.style.left = pct(start) + "%";
+        if (track.label) line.appendChild(el("span", null, MONTHS[new Date(start).getUTCMonth()] + " " + new Date(start).getUTCFullYear()));
+        track.node.appendChild(line);
+      }
+      var now = el("div", "today"); now.style.left = pct(today()) + "%"; now.title = "today";
+      track.node.appendChild(now);
+    }
+    var head = el("div", "road-head");
+    head.appendChild(el("div", "name"));
+    var headTrack = el("div", "track");
+    months({ node: headTrack, label: true });
+    head.appendChild(headTrack);
+    host.appendChild(head);
+    var rows = list().slice().sort(function (a, b) { return (day(a.cfp_deadline) || 0) - (day(b.cfp_deadline) || 0); });
+    rows.forEach(function (c) {
+      var row = el("div", "road-row" + (state.hit === c.id ? " hit" : ""));
+      row.dataset.id = c.id;
+      row.appendChild(el("div", "name", c.name));
+      var track = el("div", "track");
+      months({ node: track, label: false });
+      var s = day(c.start), e = day(c.end) || s;
+      if (s != null && e + DAY > t0 && s < t1) {
+        var bar = el("div", "bar");
+        bar.style.left = pct(s) + "%";
+        bar.style.width = Math.max(0.6, pct(e + DAY) - pct(s)) + "%";
+        bar.title = c.name + ": " + fmt(s) + (e !== s ? " – " + fmt(e) : "");
+        track.appendChild(bar);
+      }
+      var d = day(c.cfp_deadline);
+      if (d != null && d >= t0 && d < t1) {
+        var dia = el("div", "dia " + (cfpOpen(c) ? "open" : "closed"));
+        dia.style.left = pct(d) + "%";
+        dia.title = "CFP " + c.name + ": " + fmt(d);
+        track.appendChild(dia);
+      }
+      row.appendChild(track);
+      row.onclick = function () { select(c.id); };
+      host.appendChild(row);
+    });
+  }
+
+  // ------------------------------------------------------- month calendar
+  function renderCal() {
+    var host = $("cal");
+    host.textContent = "";
+    if (state.month == null) { var t = new Date(today()); state.month = Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 1); }
+    var m = new Date(state.month);
+    $("month").textContent = MONTHS[m.getUTCMonth()] + " " + m.getUTCFullYear();
+    ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].forEach(function (d) { host.appendChild(el("div", "dow", d)); });
+    var first = (m.getUTCDay() + 6) % 7;
+    var start = state.month - first * DAY;
+    for (var i = 0; i < 42; i++) {
+      var t = start + i * DAY;
+      var cell = el("div", "day" + (new Date(t).getUTCMonth() !== m.getUTCMonth() ? " out" : "") + (t === today() ? " now" : ""));
+      cell.appendChild(el("span", "n", String(new Date(t).getUTCDate())));
+      list().forEach(function (c) {
+        if (day(c.cfp_deadline) === t) cell.appendChild(el("span", "e cfp", c.name));
+        var s = day(c.start), e = day(c.end) || s;
+        if (s != null && t >= s && t <= e) cell.appendChild(el("span", "e ev", c.name));
+      });
+      host.appendChild(cell);
+    }
+  }
+  function shiftMonth(n) {
+    var m = new Date(state.month);
+    state.month = Date.UTC(m.getUTCFullYear(), m.getUTCMonth() + n, 1);
+    renderCal();
+  }
+
+  // ------------------------------------------------------------------ map
+  function renderMap() {
+    var host = $("map");
+    host.textContent = "";
+    for (var lon = -150; lon <= 150; lon += 30) host.appendChild(svg("line", { x1: lon + 180, y1: 0, x2: lon + 180, y2: 180, "class": "grat" }));
+    for (var lat = -60; lat <= 60; lat += 30) host.appendChild(svg("line", { x1: 0, y1: 90 - lat, x2: 360, y2: 90 - lat, "class": "grat" }));
+    LAND.forEach(function (ring) {
+      host.appendChild(svg("polygon", { points: ring.map(function (p) { return (p[0] + 180) + "," + (90 - p[1]); }).join(" "), "class": "land" }));
+    });
+    list().forEach(function (c) {
+      if (typeof c.lat !== "number" || typeof c.lon !== "number") return;
+      var pin = svg("circle", { cx: c.lon + 180, cy: 90 - c.lat, r: state.hit === c.id ? 3.4 : 2.4, "class": "pin " + (cfpOpen(c) ? "open" : "closed") + (state.hit === c.id ? " hit" : "") });
+      var title = svg("title", {}); title.textContent = c.name + " · " + c.city + " · CFP " + c.cfp_deadline;
+      pin.appendChild(title);
+      pin.addEventListener("click", function () { select(c.id); });
+      host.appendChild(pin);
+    });
+  }
+
+  // ---------------------------------------------------------------- table
+  function cmp(a, b) {
+    var k = state.sort.key, x = a[k], y = b[k];
+    if (Array.isArray(x)) x = x.join(","); if (Array.isArray(y)) y = y.join(",");
+    return String(x == null ? "" : x).localeCompare(String(y == null ? "" : y)) * state.sort.dir;
+  }
+  function renderTable() {
+    var body = $("rows");
+    body.textContent = "";
+    var q = state.filter.trim().toLowerCase();
+    var rows = list().filter(function (c) {
+      if (!q) return true;
+      return [c.name, c.city, c.country].concat(c.topics || []).join(" ").toLowerCase().indexOf(q) >= 0;
+    }).sort(cmp);
+    if (!rows.length) {
+      var tr = el("tr"); var td = el("td", "empty", "No conference matches."); td.colSpan = 5; tr.appendChild(td); body.appendChild(tr);
+    }
+    rows.forEach(function (c) {
+      var tr = el("tr", state.hit === c.id ? "hit" : "");
+      tr.dataset.id = c.id;
+      var name = el("td"); name.appendChild(el("div", null, c.name)); if (c.url) name.appendChild(el("div", "url", c.url));
+      tr.appendChild(name);
+      tr.appendChild(el("td", null, c.city + (c.country ? ", " + c.country : "")));
+      var cfp = el("td"); var d = day(c.cfp_deadline);
+      cfp.appendChild(el("div", null, d != null ? fmt(d) : "—"));
+      if (d != null) {
+        var left = Math.round((d - today()) / DAY);
+        cfp.appendChild(el("div", "left" + (left >= 0 && left <= 21 ? " soon" : ""), left < 0 ? "closed" : left === 0 ? "today" : "in " + left + " days"));
+      }
+      tr.appendChild(cfp);
+      var s = day(c.start), e = day(c.end);
+      tr.appendChild(el("td", null, s != null ? fmt(s) + (e && e !== s ? " – " + fmt(e) : "") : "—"));
+      var topics = el("td"); (c.topics || []).forEach(function (t) { topics.appendChild(el("span", "tag", t)); });
+      tr.appendChild(topics);
+      tr.onclick = function () { select(c.id); };
+      body.appendChild(tr);
+    });
+    document.querySelectorAll("th[data-key]").forEach(function (th) {
+      if (th.dataset.key === state.sort.key) th.setAttribute("aria-sort", state.sort.dir > 0 ? "ascending" : "descending");
+      else th.removeAttribute("aria-sort");
+    });
+  }
+
+  function select(id) {
+    state.hit = state.hit === id ? null : id;
+    renderAll();
+    var row = document.querySelector('#rows tr[data-id="' + (window.CSS && CSS.escape ? CSS.escape(String(id)) : id) + '"]');
+    if (row && state.hit) row.scrollIntoView({ block: "nearest" });
+  }
+
+  function renderAll() {
+    $("title").textContent = state.data.title || "Konferenz-Radar";
+    document.title = $("title").textContent;
+    $("stamp").textContent = state.data.generated_at ? "as of " + state.data.generated_at : "";
+    $("source").textContent = state.source;
+    renderRoad();
+    renderCal();
+    renderMap();
+    renderTable();
+  }
+
+  // ---------------------------------------------------------------- wiring
+  $("prev").onclick = function () { shiftMonth(-1); };
+  $("next").onclick = function () { shiftMonth(1); };
+  $("filter").oninput = function () { state.filter = this.value; renderTable(); };
+  document.querySelectorAll("th[data-key]").forEach(function (th) {
+    th.onclick = function () {
+      state.sort = state.sort.key === th.dataset.key ? { key: th.dataset.key, dir: -state.sort.dir } : { key: th.dataset.key, dir: 1 };
+      renderTable();
+    };
+  });
+  if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) document.documentElement.dataset.theme = "light";
+
+  // Factory hands the version's data over with postMessage: once after the
+  // frame loads, and again whenever the page asks. Nothing is fetched.
+  window.addEventListener("message", function (event) {
+    if (event.source !== window.parent) return;
+    var msg = event.data;
+    if (!msg || msg.type !== "factory:page-data") return;
+    if (msg.theme) document.documentElement.dataset.theme = msg.theme === "foundry-light" ? "light" : "dark";
+    if (!msg.data || typeof msg.data !== "object") return;
+    state.data = msg.data;
+    state.month = null;
+    state.source = "data from Factory" + (msg.version ? " · version " + String(msg.version).slice(0, 12) : "");
+    renderAll();
+    console.log("factory-page conference-radar rendered " + list().length + " conferences from factory data");
+  });
+
+  renderAll();
+  console.log("factory-page conference-radar rendered " + list().length + " conferences from the built-in sample");
+  if (window.parent !== window) window.parent.postMessage({ type: "factory:page-ready" }, "*");
+})();
+</script>
+</body>
+</html>

@@ -236,7 +236,25 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/agents/role", post(agent_role))
         .route("/api/agents/input", post(agent_input))
         .route("/api/agents/output", post(agent_output))
-        .route("/api/rpc", post(rpc))
+        // The raw envelope is how a sandboxed run reaches the daemon at all,
+        // `page publish` included (`#343`), so its body may be as large as a
+        // page and its data together can be, JSON-escaped.
+        .merge(
+            Router::new()
+                .route("/api/rpc", post(rpc))
+                .route("/api/pages/publish", post(page_publish))
+                .layer(DefaultBodyLimit::max(PUBLISH_BODY_LIMIT))
+                .with_state(engine.clone()),
+        )
+        // `#343`: scope pages. The list and a page's versions are the
+        // `ScopePageFact`; the content is served on its own path below.
+        .route("/api/pages", get(pages_list))
+        .route("/api/pages/page", get(page_get))
+        .route("/api/pages/data", get(page_data))
+        .route("/api/pages/rollback", post(page_rollback))
+        // A page itself: agent-authored HTML, served under its own strict
+        // CSP and never as part of the UI's own documents.
+        .route("/pages/{*path}", get(page_html))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}", get(get_task))
         .route("/api/tasks/{id}", patch(update_task))
@@ -278,9 +296,40 @@ fn router(engine: Arc<Engine>) -> Router {
         .with_state(engine)
 }
 
-async fn index() -> impl IntoResponse {
+/// The largest request body `POST /api/rpc` and `POST /api/pages/publish`
+/// take: the largest page any declaration may allow (`MAX_BYTES_CEILING`),
+/// with room for JSON escaping and its envelope.
+const PUBLISH_BODY_LIMIT: usize = 3 * factory_process::pages::MAX_BYTES_CEILING as usize;
+
+/// The UI's own baseline Content-Security-Policy (`#343`): its scripts and
+/// styles from itself (styles inline too -- the views write `style=`), the
+/// IBM Plex stylesheet and fonts from Google, its sockets back to the host
+/// it was loaded from, and frames only from itself -- which is where a scope
+/// page is shown, sandboxed, under a policy of its own. A frame that tries to
+/// navigate anywhere else is refused by `frame-src`.
+fn ui_csp(host: Option<&str>) -> String {
+    let sockets = match host.filter(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))) {
+        Some(host) => format!(" ws://{host} wss://{host}"),
+        None => String::new(),
+    };
+    format!(
+        "default-src 'self'; script-src 'self'; \
+         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+         font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; \
+         connect-src 'self'{sockets}; frame-src 'self'; worker-src 'self'; object-src 'none'; \
+         base-uri 'none'; form-action 'self'; frame-ancestors 'self'"
+    )
+}
+
+async fn index(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
     (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+            (header::CONTENT_SECURITY_POLICY, ui_csp(host)),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (header::REFERRER_POLICY, "same-origin".to_string()),
+        ],
         crate::ui::INDEX_HTML,
     )
 }
@@ -1640,6 +1689,142 @@ async fn suggest_task(
     run(&engine, Request::TaskSuggest { id, suggestion }).await
 }
 
+// ------------------------------------------------------------ pages (#343)
+
+#[derive(serde::Deserialize)]
+struct PagesQuery {
+    scope: Option<String>,
+}
+
+/// `GET /api/pages?scope=` -- the pages a scope and the scopes below it
+/// declare, each with its current and kept versions.
+async fn pages_list(State(engine): State<Arc<Engine>>, Query(q): Query<PagesQuery>) -> AxumResponse {
+    let scope = q.scope.filter(|s| !s.trim().is_empty());
+    run(&engine, Request::Pages { scope }).await
+}
+
+#[derive(serde::Deserialize)]
+struct PageQuery {
+    scope: String,
+    name: String,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+/// `GET /api/pages/page?scope=&name=` -- one page and its versions.
+async fn page_get(State(engine): State<Arc<Engine>>, Query(q): Query<PageQuery>) -> AxumResponse {
+    run(&engine, Request::PageGet { scope: q.scope, name: q.name }).await
+}
+
+/// `GET /api/pages/data?scope=&name=&version=` -- a version's `--data`, which
+/// the UI hands to the page with `postMessage`. The page never fetches it.
+async fn page_data(State(engine): State<Arc<Engine>>, Query(q): Query<PageQuery>) -> AxumResponse {
+    run(
+        &engine,
+        Request::PageContent {
+            scope: q.scope,
+            name: q.name,
+            version: q.version,
+            part: factory_core::protocol::PagePart::Data,
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct PageRollbackBody {
+    scope: String,
+    name: String,
+    version: String,
+}
+
+/// `POST /api/pages/rollback` -- show an older kept version again.
+async fn page_rollback(State(engine): State<Arc<Engine>>, Json(body): Json<PageRollbackBody>) -> AxumResponse {
+    run(&engine, Request::PageRollback { scope: body.scope, name: body.name, version: body.version }).await
+}
+
+#[derive(serde::Deserialize)]
+struct PagePublishBody {
+    #[serde(default)]
+    scope: Option<String>,
+    name: String,
+    #[serde(default)]
+    title: Option<String>,
+    html: String,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+    /// A run's token, when a run publishes this way rather than through
+    /// `factory page publish`: it says which run and scope this is, exactly
+    /// as the envelope's token does. Absent is the owner.
+    #[serde(default)]
+    token: Option<String>,
+}
+
+/// `POST /api/pages/publish` -- `Request::PagePublish` over REST, the same
+/// handler `factory page publish` reaches through the socket or `/api/rpc`.
+async fn page_publish(State(engine): State<Arc<Engine>>, Json(body): Json<PagePublishBody>) -> AxumResponse {
+    let request = Request::PagePublish {
+        scope: body.scope,
+        name: body.name,
+        title: body.title,
+        html: body.html,
+        data: body.data,
+    };
+    run_as(&engine, request, body.token).await
+}
+
+#[derive(serde::Deserialize)]
+struct PageVersionQuery {
+    #[serde(default)]
+    v: Option<String>,
+}
+
+/// The headers every response on `/pages/` carries, a refusal included:
+/// the page's own strict CSP (sandboxed even when opened on its own, never
+/// on the UI's origin), no sniffing, no referrer, no DNS prefetching, and no
+/// caching -- the current version changes under the same URL.
+fn page_headers(content_type: &'static str) -> [(header::HeaderName, &'static str); 6] {
+    [
+        (header::CONTENT_TYPE, content_type),
+        (header::CONTENT_SECURITY_POLICY, factory_process::pages::PAGE_CSP),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::REFERRER_POLICY, "no-referrer"),
+        (header::X_DNS_PREFETCH_CONTROL, "off"),
+        (header::CACHE_CONTROL, "no-store"),
+    ]
+}
+
+/// `GET /pages/<scope>/<name>[?v=<sha256>]` -- one version of a page, as the
+/// raw HTML the UI frames with `sandbox="allow-scripts"`. A scope name may
+/// itself contain `/`; a page name never does, so the last segment is the
+/// page. Read through `Engine::handle` like every other route.
+async fn page_html(
+    State(engine): State<Arc<Engine>>,
+    Path(path): Path<String>,
+    Query(q): Query<PageVersionQuery>,
+) -> AxumResponse {
+    let Some((scope, name)) = path.rsplit_once('/') else {
+        return (StatusCode::NOT_FOUND, page_headers("text/plain; charset=utf-8"), "no such page").into_response();
+    };
+    let request = Request::PageContent {
+        scope: scope.to_string(),
+        name: name.to_string(),
+        version: q.v.filter(|v| !v.trim().is_empty()),
+        part: factory_core::protocol::PagePart::Html,
+    };
+    let response = Box::pin(engine.handle(Envelope { request, token: None })).await;
+    let code = status_for(&response);
+    let text = page_headers("text/plain; charset=utf-8");
+    match response {
+        Response::Ok { data: Payload::PageContent { content } } => match content.html {
+            Some(html) => (page_headers("text/html; charset=utf-8"), html).into_response(),
+            None => (StatusCode::NOT_FOUND, text, "no such page").into_response(),
+        },
+        Response::Ok { .. } => (StatusCode::INTERNAL_SERVER_ERROR, text, "unexpected answer").into_response(),
+        Response::Error { message, .. } => (code, text, message).into_response(),
+    }
+}
+
 async fn benchmarks(State(engine): State<Arc<Engine>>) -> AxumResponse {
     run(&engine, Request::Benchmarks).await
 }
@@ -2720,6 +2905,132 @@ mod tests {
         (status, serde_json::from_str(payload).unwrap_or(serde_json::Value::Null))
     }
 
+    /// The same, returning the raw response head beside the body, for a
+    /// route whose headers are the point (`#343`).
+    async fn raw(engine: Arc<Engine>, method: &str, path: &str, body: Option<&str>) -> (u16, String, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(engine)).await.unwrap() });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let body = body.unwrap_or("");
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let status: u16 = text.split(' ').nth(1).unwrap().parse().unwrap();
+        let (head, payload) = text.split_once("\r\n\r\n").unwrap();
+        (status, head.to_ascii_lowercase(), payload.to_string())
+    }
+
+    fn engine_with_pages() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-http-pages-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory")).unwrap();
+        let mut radar: Scope = serde_yaml_ng::from_str(
+            "id: radar-id\nname: radar\npages:\n  - { name: conference-radar, max_bytes: 30MiB }\n",
+        )
+        .unwrap();
+        radar.path = PathBuf::from("projects/radar");
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+            scope: None,
+            scopes: vec![radar],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Vec::new(),
+            infrastructure: Default::default(),
+            secrets: Vec::new(),
+            channels: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    /// `#343`: the UI itself carries a baseline CSP: scripts only from
+    /// itself, sockets only back to the host it came from, frames only from
+    /// itself.
+    #[tokio::test]
+    async fn the_ui_is_served_with_a_baseline_csp() {
+        let (status, head, body) = raw(engine_with_quality(), "GET", "/", None).await;
+        assert_eq!(status, 200);
+        let csp = head.lines().find(|l| l.starts_with("content-security-policy:")).expect("a CSP header");
+        for directive in [
+            "default-src 'self'",
+            "script-src 'self';",
+            "frame-src 'self'",
+            "object-src 'none'",
+            "base-uri 'none'",
+            "frame-ancestors 'self'",
+            "connect-src 'self' ws://127.0.0.1:",
+        ] {
+            assert!(csp.contains(directive), "{directive} missing from {csp}");
+        }
+        assert!(!csp.contains("script-src 'self' 'unsafe-inline'"), "{csp}");
+        assert!(head.contains("x-content-type-options: nosniff"));
+        assert!(!body.contains("<script>"), "no inline script for the CSP to refuse");
+    }
+
+    /// `#343`: a published page is served from its own path, under its own
+    /// strict CSP -- sandboxed even when opened on its own -- and a page the
+    /// scope does not declare is a 4xx under the same headers.
+    #[tokio::test]
+    async fn a_page_is_served_under_its_own_strict_csp_and_sandbox() {
+        let engine = engine_with_pages();
+        // A body past axum's default 2 MB limit: the publish route and
+        // `/api/rpc` take a page as large as a declaration allows.
+        let html = format!("<!doctype html><title>radar</title><p>{}</p>", "x".repeat(3 * 1024 * 1024));
+        let body = serde_json::json!({ "scope": "radar", "name": "conference-radar", "html": html, "data": {"n": 1} }).to_string();
+        let (status, _, answer) = raw(engine.clone(), "POST", "/api/pages/publish", Some(&body)).await;
+        assert_eq!(status, 200, "{}", &answer[..answer.len().min(400)]);
+        let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        let sha = answer["data"]["version"]["sha256"].as_str().unwrap().to_string();
+
+        let (status, head, served) = raw(engine.clone(), "GET", &format!("/pages/radar/conference-radar?v={sha}"), None).await;
+        assert_eq!(status, 200);
+        assert_eq!(served, html);
+        let csp = head.lines().find(|l| l.starts_with("content-security-policy:")).expect("a CSP header");
+        for directive in [
+            "default-src 'none'",
+            "script-src 'unsafe-inline'",
+            "style-src 'unsafe-inline'",
+            "img-src data: blob:",
+            "font-src data:",
+            "connect-src 'none'",
+            "frame-ancestors 'self'",
+            "sandbox allow-scripts",
+        ] {
+            assert!(csp.contains(directive), "{directive} missing from {csp}");
+        }
+        assert!(!csp.contains("allow-same-origin"), "{csp}");
+        assert!(head.contains("content-type: text/html; charset=utf-8"));
+        assert!(head.contains("x-content-type-options: nosniff"));
+        assert!(head.contains("referrer-policy: no-referrer"));
+        assert!(head.contains("cache-control: no-store"));
+
+        let (status, head, _) = raw(engine.clone(), "GET", "/pages/radar/not-declared", None).await;
+        assert_eq!(status, 400);
+        assert!(head.contains("sandbox allow-scripts"), "a refusal is served under the page CSP too");
+
+        let (status, _, data) = raw(engine.clone(), "GET", "/api/pages/data?scope=radar&name=conference-radar", None).await;
+        assert_eq!(status, 200);
+        let data: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(data["data"]["content"]["data"], serde_json::json!({"n": 1}));
+
+        let (status, json) = request(engine, "GET", "/api/pages?scope=radar", None).await;
+        assert_eq!(status, 200);
+        assert_eq!(json["data"]["pages"][0]["current"]["sha256"], sha.as_str());
+    }
+
     /// A runtime whose `stop` takes a while, the way closing a sandboxed
     /// run's pane and starting its teardown does.
     struct SlowStop;
@@ -3133,6 +3444,7 @@ mod tests {
             quality: vec!["baseline".into()],
             infrastructure: Default::default(),
             secrets: Vec::new(),
+            channels: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -3207,6 +3519,7 @@ mod tests {
             quality: Vec::new(),
             infrastructure: Default::default(),
             secrets: Vec::new(),
+            channels: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,

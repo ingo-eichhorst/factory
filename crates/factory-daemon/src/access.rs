@@ -280,6 +280,10 @@ impl Engine {
             | Request::DatasetDeleteCase { .. }
             | Request::DatasetDelete { .. } => Grant::DatasetEdit,
             Request::BenchRunStart { .. } | Request::BenchRunCancel { .. } => Grant::BenchRun,
+            // `#343`: publishing a page its scope declares, and showing an
+            // older version of one again -- checked against the page's own
+            // scope in `authorize` below.
+            Request::PagePublish { .. } | Request::PageRollback { .. } => Grant::PagePublish,
             // Recording and withdrawing are the same grant, checked against
             // the root scope like `knowledge.write` -- see `in_root_scope`.
             Request::PolicyAttest { .. } | Request::PolicyWithdraw { .. } => Grant::PolicyAttest,
@@ -401,6 +405,11 @@ impl Engine {
             | Request::WorkflowLint { .. }
             | Request::RunAttestations { .. }
             | Request::RunProvenance { .. }
+            // `#343`: the page store read live, and a version's content --
+            // shown to anyone who can open the UI, like every other read.
+            | Request::Pages { .. }
+            | Request::PageGet { .. }
+            | Request::PageContent { .. }
             | Request::RoleList { .. }
             // `#339`: a scope's memory, its skills, their proposals and the
             // archives are read like everything else here: open to all.
@@ -873,6 +882,26 @@ impl Engine {
                     Reach::Own => Err(deny("add a release outside a run of its own")),
                 }
             }
+
+            // `#343`: a page is its declaring scope's, so an agent publishes
+            // only its own scope's -- `scope` left out is that one. Own reach
+            // publishes from a run of its own, the run the publish is
+            // journaled on; the handler then refuses a page the scope does
+            // not declare.
+            Request::PagePublish { scope: s, .. } => {
+                in_scope(s.as_deref().unwrap_or(scope))?;
+                match def.reach {
+                    Reach::Scope => Ok(()),
+                    Reach::Own if run_id.is_some() => Ok(()),
+                    Reach::Own => Err(deny("publish a page outside a run of its own")),
+                }
+            }
+            // Showing an older version again is a decision about the page,
+            // not a run's output.
+            Request::PageRollback { scope: s, .. } => match def.reach {
+                Reach::Scope => in_scope(s),
+                Reach::Own => Err(deny("roll a page back; that requires scope reach")),
+            },
 
             // Reads returned above, and anything needing a grant nobody holds
             // was refused above. Nothing should arrive here.

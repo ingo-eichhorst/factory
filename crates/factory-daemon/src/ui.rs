@@ -10,6 +10,11 @@ pub const INDEX_HTML: &str = include_str!("../../../ui/index.html");
 
 /// Everything the page asks for after the first byte, by request path.
 const ASSETS: &[(&str, &str, &str)] = &[
+    // `#343`: the head's theme script, a file of its own so the UI's CSP
+    // needs no `'unsafe-inline'` for scripts; the Pages view and its model.
+    ("js/theme-boot.js", "text/javascript; charset=utf-8", include_str!("../../../ui/js/theme-boot.js")),
+    ("js/pages.js", "text/javascript; charset=utf-8", include_str!("../../../ui/js/pages.js")),
+    ("js/pages-model.js", "text/javascript; charset=utf-8", include_str!("../../../ui/js/pages-model.js")),
     (
         "js/budget.js",
         "text/javascript; charset=utf-8",

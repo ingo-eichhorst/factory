@@ -51,9 +51,14 @@ export function neededMetricIds(tiles) {
 /// these: every flag here reads `false` for it, which is what keeps the
 /// hard requirement that the default page start no new fetch.
 export function neededEndpoints(tiles) {
-  const need = { metrics: false, occupancy: false, operations: false, policy: false, costs: false, dates: false };
+  const need = { metrics: false, occupancy: false, operations: false, policy: false, costs: false, dates: false, pages: false };
   for (const tile of tiles || []) {
     const kind = tileKind(tile);
+    // #343: every page tile shares one `/api/pages` read.
+    if (kind === "page") {
+      need.pages = true;
+      continue;
+    }
     if (kind === "metric") {
       if (typeof tile.metric === "string" && tile.metric.trim()) need.metrics = true;
       continue;

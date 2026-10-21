@@ -59,6 +59,7 @@ mod notify;
 mod occupancy;
 mod occupancy_page;
 mod openshell;
+mod pages;
 mod provision;
 mod renewals;
 mod codex_models;
@@ -229,6 +230,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         backup: None,
         memory: None,
         skills: Vec::new(),
+        pages: Vec::new(),
     };
     let config = Config {
         version: 1,

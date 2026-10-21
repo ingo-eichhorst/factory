@@ -29,6 +29,18 @@ pub(crate) async fn import_recovery_journal(engine: &Engine) -> Vec<String> {
     provider(engine).import_recovery_journal().await
 }
 
+/// `#343`: the page store read fresh from the instance's `.factory/pages/`,
+/// with the declarations and scope identities captured for this read. A read
+/// needs no lock: versions and the `current` pointer are written by rename.
+pub(super) fn pages_provider(engine: &Engine) -> factory_process::pages::Provider {
+    let snapshot = engine.factory_snapshot();
+    factory_process::pages::Provider::new(
+        factory_process::pages::PageStore::new(&snapshot.factory_dir()),
+        snapshot.scope_tree(),
+        snapshot.config.page_declarations(),
+    )
+}
+
 /// Capture current scope identities for each read; no hub enters the owner.
 pub(super) fn measurement_provider(
     engine: &Engine,

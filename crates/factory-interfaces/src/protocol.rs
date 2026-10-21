@@ -23,6 +23,8 @@ pub use factory_kernel::{MemoryTarget, ScopeMemory};
 pub use factory_agents::skills::{
     ArchiveRecord, CurationReport, Proposal, ProposalState, SkillRow, SkillSubmission, SubmittedFile,
 };
+// `#343`: the CLI prints these, through `factory_core::protocol::*`.
+pub use factory_kernel::{PageVersionFact, ScopePageFact};
 use factory_composition::building::{Activity, Cues, RepoMetrics, Shape};
 use factory_composition::config::ScopeAgent;
 use factory_environment::dependencies::{
@@ -469,6 +471,55 @@ pub enum Request {
     /// Append-only artifact provenance for this completed run (#158).
     #[serde(rename = "run.provenance")]
     RunProvenance { id: String },
+    /// `#343`: publish a version of a page a scope declares (`scope.pages`).
+    /// `scope` defaults to the caller's own; an agent publishes only its own
+    /// scope's pages, the owner any scope's. `html` is the page, UTF-8;
+    /// `data` is stored beside it and handed to the page with `postMessage`
+    /// when it is shown. Journaled on the publishing run. Refused over the
+    /// page's `max_bytes`, and when its markup loads something the page CSP
+    /// would block -- never stored half broken.
+    #[serde(rename = "page.publish")]
+    PagePublish {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        html: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<serde_json::Value>,
+    },
+    /// `#343`: the pages a scope and every scope below it declare -- every
+    /// scope's, with no `scope` -- each with its current and kept versions.
+    /// The live `ScopePageFact`, read on every call.
+    #[serde(rename = "pages")]
+    Pages {
+        #[serde(default)]
+        scope: Option<String>,
+    },
+    /// One declared page, by its scope and name.
+    #[serde(rename = "page.get")]
+    PageGet { scope: String, name: String },
+    /// A version's HTML or its data, for showing it -- the current version
+    /// when `version` (a sha256, or a unique prefix of seven or more) is
+    /// left out.
+    #[serde(rename = "page.content")]
+    PageContent {
+        scope: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default)]
+        part: PagePart,
+    },
+    /// Show an older kept version of a page again (`#343`). A file under
+    /// `.factory/pages/`, so it holds across a restart.
+    #[serde(rename = "page.rollback")]
+    PageRollback {
+        scope: String,
+        name: String,
+        version: String,
+    },
     /// Person/functionary decisions for enforced approval and rework.
     #[serde(rename = "run.approve")]
     RunApprove { id: String, reason: String },
@@ -1397,6 +1448,11 @@ impl Request {
             Request::WorkflowLint { .. } |
             Request::RunAttestations { .. } |
             Request::RunProvenance { .. } |
+            Request::PagePublish { .. } |
+            Request::Pages { .. } |
+            Request::PageGet { .. } |
+            Request::PageContent { .. } |
+            Request::PageRollback { .. } |
             Request::RunApprove { .. } |
             Request::RunReject { .. } |
             Request::RunRework { .. } |
@@ -1477,6 +1533,28 @@ impl Request {
     }
 }
 
+/// Which half of a page version `Request::PageContent` reads (`#343`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PagePart {
+    #[default]
+    Html,
+    Data,
+}
+
+/// One page version's content: the HTML, or the `--data` JSON handed to it
+/// with `postMessage` -- whichever `PagePart` asked for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PageContentBody {
+    pub scope: String,
+    pub name: String,
+    pub version: factory_kernel::PageVersionFact,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
 /// Struct variants throughout: an internally tagged enum can only carry a map,
 /// and a `Tasks(Vec<Task>)` newtype would fail at serialization time rather
 /// than at compile time.
@@ -1485,6 +1563,24 @@ impl Request {
 pub enum Payload {
     RunProvenance {
         records: Vec<factory_kernel::ArtifactProvenance>,
+    },
+    /// `#343`: what `Request::PagePublish` stored.
+    PageVersion {
+        scope: String,
+        name: String,
+        version: factory_kernel::PageVersionFact,
+    },
+    /// `#343`: `Request::Pages`.
+    Pages {
+        pages: Vec<factory_kernel::ScopePageFact>,
+    },
+    /// `#343`: `Request::PageGet` and `Request::PageRollback`.
+    Page {
+        page: factory_kernel::ScopePageFact,
+    },
+    /// `#343`: `Request::PageContent`.
+    PageContent {
+        content: PageContentBody,
     },
     Ok,
     Status {
@@ -1835,6 +1931,11 @@ pub enum Payload {
     Dashboard {
         tiles: Option<Vec<factory_composition::dashboard::Tile>>,
         source: Option<String>,
+        /// `#343`: for each `page` tile, keyed by its `page:`, the scope
+        /// that declares it -- `Factory::page_tile_scopes`. Absent with no
+        /// page tile.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        page_scopes: std::collections::BTreeMap<String, String>,
     },
     /// The L6 Goals tab -- see `GoalsReport`.
     Goals {
@@ -3152,6 +3253,7 @@ mod tests {
         let payload = Payload::Dashboard {
             tiles: None,
             source: None,
+            page_scopes: Default::default(),
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["kind"], "dashboard");
@@ -3165,11 +3267,13 @@ mod tests {
         let tile = factory_composition::dashboard::Tile {
             metric: Some(factory_assurance::metrics::MetricId::new("throughput_week").unwrap()),
             view: None,
+            page: None,
             size: factory_composition::dashboard::TileSize::S,
         };
         let payload = Payload::Dashboard {
             tiles: Some(vec![tile]),
             source: Some("demo".into()),
+            page_scopes: Default::default(),
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["source"], "demo");
@@ -3179,6 +3283,30 @@ mod tests {
             json["tiles"][0].get("view").is_none(),
             "view is omitted, not null, when absent"
         );
+        assert!(json.get("page_scopes").is_none(), "absent with no page tile");
+    }
+
+    #[test]
+    fn page_requests_parse_from_the_wire_and_publish_carries_text_not_bytes() {
+        let env: Envelope = serde_json::from_str(
+            r#"{"op":"page.publish","params":{"name":"radar","html":"<p>hi</p>","data":{"n":1}}}"#,
+        )
+        .expect("request parses");
+        match env.request {
+            Request::PagePublish { scope, name, title, html, data } => {
+                assert_eq!((scope, name.as_str(), title, html.as_str()), (None, "radar", None, "<p>hi</p>"));
+                assert_eq!(data, Some(serde_json::json!({"n": 1})));
+            }
+            other => panic!("{other:?}"),
+        }
+        let env: Envelope = serde_json::from_str(
+            r#"{"op":"page.content","params":{"scope":"demo","name":"radar"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(env.request, Request::PageContent { part: PagePart::Html, version: None, .. }));
+        let env: Envelope = serde_json::from_str(r#"{"op":"pages","params":{}}"#).unwrap();
+        assert!(matches!(env.request, Request::Pages { scope: None }));
+        assert_eq!(Request::PageRollback { scope: "a".into(), name: "b".into(), version: "c".into() }.level(), RouteLevel::L4);
     }
 
     #[test]

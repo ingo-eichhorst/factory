@@ -354,6 +354,61 @@ enum Command {
         #[command(subcommand)]
         command: Option<IntakeCmd>,
     },
+    /// Scope pages (`#343`): an HTML page a scope declares under
+    /// `scope.pages` and its agents publish, shown in the web UI's Pages view
+    /// and as a dashboard tile, sandboxed under a strict CSP. With no
+    /// subcommand, lists them -- the same thing `factory page list` prints.
+    Page {
+        #[command(subcommand)]
+        command: Option<PageCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PageCmd {
+    /// Publish a new version of a page your scope declares and make it the
+    /// one shown. From inside a run, FACTORY_TOKEN says which run and scope
+    /// this is, and the publish is journaled on that run.
+    Publish {
+        /// The page's name, as `scope.pages` declares it.
+        name: String,
+        /// The page itself: one self-contained HTML file. Everything inline
+        /// or `data:` -- the page CSP loads nothing from the network.
+        #[arg(long)]
+        file: PathBuf,
+        /// What the UI shows as its title. Defaults to the declared title.
+        #[arg(long)]
+        title: Option<String>,
+        /// A JSON document stored with this version and handed to the page
+        /// with postMessage when it is shown -- the page never fetches it.
+        #[arg(long)]
+        data: Option<PathBuf>,
+        /// Whose page. Defaults to the calling run's own scope; the owner
+        /// must name one.
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Every declared page, with its current version: a scope and the
+    /// scopes below it, or every scope.
+    List {
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// One page and every version still kept.
+    Show {
+        name: String,
+        #[arg(long)]
+        scope: String,
+    },
+    /// Show an older kept version of a page again.
+    Rollback {
+        name: String,
+        #[arg(long)]
+        scope: String,
+        /// The version's sha256, or at least its first seven characters.
+        #[arg(long)]
+        version: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2334,7 +2389,7 @@ async fn main() -> Result<()> {
         Command::Dashboard { scope } => {
             let payload = client.send(Request::Dashboard { scope }).await?;
             print(&payload, cli.json, |p| match p {
-                Payload::Dashboard { tiles, source } => Some(dashboard_text(tiles, source)),
+                Payload::Dashboard { tiles, source, .. } => Some(dashboard_text(tiles, source)),
                 _ => None,
             })
         }
@@ -2477,7 +2532,108 @@ async fn main() -> Result<()> {
         }
         Command::Memory { command } => learning::memory_cmd(cli.json, &client, command).await,
         Command::Skill { command } => learning::skill_cmd(cli.json, &client, command).await,
+        Command::Page { command } => {
+            page_cmd(cli.json, &client, command.unwrap_or(PageCmd::List { scope: None })).await
+        }
     }
+}
+
+async fn page_cmd(json: bool, client: &Client, cmd: PageCmd) -> Result<()> {
+    match cmd {
+        PageCmd::Publish { name, file, title, data, scope } => {
+            let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            let html = String::from_utf8(bytes)
+                .map_err(|_| anyhow!("{} is not UTF-8 text; a page is one UTF-8 HTML file", file.display()))?;
+            let data = match data {
+                Some(path) => {
+                    let text = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+                    Some(serde_json::from_slice::<serde_json::Value>(&text)
+                        .with_context(|| format!("{} is not JSON", path.display()))?)
+                }
+                None => None,
+            };
+            let payload = client.send(Request::PagePublish { scope, name, title, html, data }).await?;
+            print(&payload, json, |p| match p {
+                Payload::PageVersion { scope, name, version } => Some(format!(
+                    "published {scope}/{name} version {} ({} bytes)",
+                    &version.sha256[..12],
+                    version.bytes
+                )),
+                _ => None,
+            })
+        }
+        PageCmd::List { scope } => {
+            let payload = client.send(Request::Pages { scope }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Pages { pages } => Some(pages_text(pages)),
+                _ => None,
+            })
+        }
+        PageCmd::Show { name, scope } => {
+            let payload = client.send(Request::PageGet { scope, name }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Page { page } => Some(page_detail_text(page)),
+                _ => None,
+            })
+        }
+        PageCmd::Rollback { name, scope, version } => {
+            let payload = client.send(Request::PageRollback { scope, name, version }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Page { page } => Some(match &page.current {
+                    Some(current) => format!("{}/{} shows version {} again", page.scope, page.name, &current.sha256[..12]),
+                    None => format!("{}/{} has no version to show", page.scope, page.name),
+                }),
+                _ => None,
+            })
+        }
+    }
+}
+
+fn pages_text(pages: &[factory_core::protocol::ScopePageFact]) -> String {
+    if pages.is_empty() {
+        return "no scope declares a page (scope.pages)".into();
+    }
+    pages
+        .iter()
+        .map(|p| match &p.current {
+            Some(v) => format!(
+                "{}/{}  {}  version {}  {} bytes  {}  by {}",
+                p.scope,
+                p.name,
+                p.title,
+                &v.sha256[..12],
+                v.bytes,
+                v.published_at.format("%Y-%m-%d %H:%M UTC"),
+                v.published_by
+            ),
+            None => format!("{}/{}  {}  not published yet", p.scope, p.name, p.title),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn page_detail_text(page: &factory_core::protocol::ScopePageFact) -> String {
+    let mut out = format!(
+        "{}/{}  {}\nmax {} bytes, keeps {} versions\n",
+        page.scope, page.name, page.title, page.max_bytes, page.keep
+    );
+    if page.versions.is_empty() {
+        out.push_str("not published yet\n");
+    }
+    for v in &page.versions {
+        let shown = page.current.as_ref().is_some_and(|c| c.sha256 == v.sha256);
+        out.push_str(&format!(
+            "{} {}  {} bytes{}  {}  by {}{}\n",
+            if shown { "*" } else { " " },
+            &v.sha256[..12],
+            v.bytes,
+            v.data_bytes.map(|d| format!(" ({d} data)")).unwrap_or_default(),
+            v.published_at.format("%Y-%m-%d %H:%M UTC"),
+            v.published_by,
+            v.run_id.as_deref().map(|r| format!(", run {r}")).unwrap_or_default()
+        ));
+    }
+    out.trim_end().to_string()
 }
 
 async fn intake_cmd(json: bool, client: &Client, cmd: IntakeCmd) -> Result<()> {

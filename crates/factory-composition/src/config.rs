@@ -225,20 +225,93 @@ impl Config {
     /// `validate` (every scope) and `validate_instance` (the root only, the
     /// one layer that instance-only file can see) -- the same split those
     /// two already draw for roles.
-    fn validate_dashboards<'a>(&self, scopes: impl Iterator<Item = &'a Scope>) -> Result<()> {
+    ///
+    /// `resolve_pages` (`#343`) also checks that every `page` tile names a
+    /// page some scope declares -- only once discovery has run, since a
+    /// `<scope>/<name>` reference can name any scope in the tree.
+    fn validate_dashboards<'a>(&self, scopes: impl Iterator<Item = &'a Scope>, resolve_pages: bool) -> Result<()> {
         if let Some(dashboard) = &self.dashboard {
             dashboard
                 .validate("dashboard")
                 .map_err(FactoryError::BadRequest)?;
+            if resolve_pages {
+                self.validate_page_tiles(None, dashboard, "dashboard")?;
+            }
         }
         for scope in scopes {
             if let Some(dashboard) = &scope.dashboard {
-                dashboard
-                    .validate(&format!("scope {:?} dashboard", scope.name))
-                    .map_err(FactoryError::BadRequest)?;
+                let path = format!("scope {:?} dashboard", scope.name);
+                dashboard.validate(&path).map_err(FactoryError::BadRequest)?;
+                if resolve_pages {
+                    self.validate_page_tiles(Some(scope), dashboard, &path)?;
+                }
             }
         }
         Ok(())
+    }
+
+    fn validate_page_tiles(&self, block: Option<&Scope>, dashboard: &DashboardConfig, path: &str) -> Result<()> {
+        for (i, tile) in dashboard.tiles.iter().enumerate() {
+            if let Some(page) = &tile.page {
+                self.page_tile_scope(block, page).map_err(|why| {
+                    FactoryError::BadRequest(format!("{path}.tiles[{i}].page {page:?} {why}"))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `#343`: the scope and page a dashboard tile's `page:` names, for the
+    /// `dashboard:` block `block` writes (`None`: the instance root's own
+    /// top-level block, whose scope is the root's). A bare name is the
+    /// nearest scope that declares it, from the block's own scope up through
+    /// its ancestors -- `dashboard_for_scope`'s chain; `<scope>/<name>` is
+    /// exactly that scope's page, wherever it sits. `Err` says why it names
+    /// nothing, the way an unknown metric is refused.
+    pub fn page_tile_scope(&self, block: Option<&Scope>, reference: &str) -> std::result::Result<(String, String), String> {
+        let (named, name) = factory_process::pages::split_page_reference(reference);
+        let declares = |scope: &Scope| scope.pages.iter().any(|p| p.name == name);
+        if let Some(scope_name) = named {
+            let Some(scope) = self.scope.iter().chain(&self.scopes).find(|s| s.name == scope_name) else {
+                return Err(format!("names the scope {scope_name:?}, which is not configured"));
+            };
+            return if declares(scope) {
+                Ok((scope.name.clone(), name.to_string()))
+            } else {
+                Err(format!("is not a page scope {scope_name:?} declares{}", declared_pages(scope)))
+            };
+        }
+        let chain: Vec<&Scope> = match block {
+            Some(scope) => self.ancestors_of(scope).into_iter().chain(std::iter::once(scope)).rev().collect(),
+            None => self.scope.iter().collect(),
+        };
+        chain
+            .iter()
+            .find(|scope| declares(scope))
+            .map(|scope| (scope.name.clone(), name.to_string()))
+            .ok_or_else(|| match chain.first() {
+                Some(scope) => format!(
+                    "is not a page {:?} or a scope above it declares{}; declare it under `scope.pages`, or write <scope>/{name}",
+                    scope.name,
+                    declared_pages(scope)
+                ),
+                None => format!("names no scope's page: this instance root is not a scope; write <scope>/{name}"),
+            })
+    }
+
+    /// `#343`: every scope's `pages:`, by scope name, in configuration order
+    /// -- the plain declarations L4 reads a `ScopePageFact` with. The root
+    /// scope can be listed twice (`scope:` and, once discovered, `scopes:`);
+    /// it is read once.
+    pub fn page_declarations(&self) -> Vec<(String, Vec<factory_process::pages::PageDecl>)> {
+        let mut out: Vec<(String, Vec<factory_process::pages::PageDecl>)> = Vec::new();
+        for scope in self.scope.iter().chain(&self.scopes) {
+            if scope.pages.is_empty() || out.iter().any(|(name, _)| *name == scope.name) {
+                continue;
+            }
+            out.push((scope.name.clone(), scope.pages.clone()));
+        }
+        out
     }
 
     /// The name the instance root's own policy layer carries -- the top of
@@ -398,7 +471,7 @@ impl Config {
         self.refuse_root_scope_quality()?;
         self.refuse_root_scope_intake()?;
         self.refuse_root_scope_dashboard()?;
-        self.validate_dashboards(self.scopes.iter())?;
+        self.validate_dashboards(self.scopes.iter(), true)?;
         self.infrastructure.validate()?;
         factory_environment::secrets::validate(&self.secrets)?;
         factory_environment::channels::validate(&self.channels, &self.secrets)?;
@@ -406,6 +479,8 @@ impl Config {
         self.validate_memory(self.scope.iter().chain(&self.scopes))?;
         for scope in self.scope.iter().chain(&self.scopes) {
             factory_infrastructure::renewals::validate(&scope.renewals, None)?;
+            factory_process::pages::validate_declarations(&scope.name, &scope.pages)
+                .map_err(FactoryError::BadRequest)?;
             scope.validate_dependencies()?;
             refuse_zero_max_sessions(scope)?;
             refuse_bad_instances(scope)?;
@@ -540,12 +615,14 @@ impl Config {
         self.refuse_root_scope_quality()?;
         self.refuse_root_scope_intake()?;
         self.refuse_root_scope_dashboard()?;
-        self.validate_dashboards(std::iter::empty())?;
+        self.validate_dashboards(std::iter::empty(), false)?;
         self.infrastructure.validate()?;
         factory_environment::secrets::validate(&self.secrets)?;
         factory_environment::channels::validate(&self.channels, &self.secrets)?;
         if let Some(scope) = &self.scope {
             factory_infrastructure::renewals::validate(&scope.renewals, None)?;
+            factory_process::pages::validate_declarations(&scope.name, &scope.pages)
+                .map_err(FactoryError::BadRequest)?;
             scope.validate_dependencies()?;
             refuse_zero_max_sessions(scope)?;
             refuse_bad_instances(scope)?;
@@ -952,6 +1029,19 @@ pub fn refuse_misplaced_scope_quality(document: &serde_yaml_ng::Value, path: &Pa
         )));
     }
     Ok(())
+}
+
+/// `"; it declares a, b"`, or `"; it declares no pages"` -- the tail of a
+/// page-tile refusal, so the fix is in the message.
+fn declared_pages(scope: &Scope) -> String {
+    if scope.pages.is_empty() {
+        "; it declares no pages".into()
+    } else {
+        format!(
+            "; it declares {}",
+            scope.pages.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+        )
+    }
 }
 
 /// Refuse a `dashboard:` block written at the top of a nested scope's own
@@ -1647,6 +1737,13 @@ pub struct Scope {
     /// (`learn: propose | apply | off`). See `factory_agents::skills`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<factory_agents::memory::SkillDecl>,
+    /// `#343`: the pages this scope's agents may publish -- each a name, a
+    /// title, a `max_bytes` and how many versions to `keep`. The content
+    /// arrives at runtime through `factory page publish` and is stored by L4
+    /// under the instance's `.factory/pages/`, never here. Own-scope data
+    /// like `environments`: nothing inherits down. Checked at load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<factory_process::pages::PageDecl>,
 }
 
 /// `scope.metrics`, exactly as written -- plain strings, no validation.
@@ -1982,6 +2079,32 @@ impl Factory {
                 Ok((dashboard.cloned(), source))
             }
         }
+    }
+
+    /// `#343`: the scope each `page` tile of `dashboard` names, keyed by the
+    /// tile's own `page:`, for the block `source` names -- what
+    /// `dashboard_for` returned beside it. A nested scope's own block is
+    /// resolved from that scope up; anything else is the instance root's
+    /// top-level block. A reference that names nothing is left out: load
+    /// refuses one, so it cannot reach here from a validated config.
+    pub fn page_tile_scopes(&self, dashboard: &DashboardConfig, source: Option<&str>) -> BTreeMap<String, String> {
+        let block = source.and_then(|name| {
+            self.config
+                .scopes
+                .iter()
+                .find(|s| s.name == name && s.dashboard.is_some())
+        });
+        dashboard
+            .tiles
+            .iter()
+            .filter_map(|tile| tile.page.as_ref())
+            .filter_map(|page| {
+                self.config
+                    .page_tile_scope(block, page)
+                    .ok()
+                    .map(|(scope, _)| (page.clone(), scope))
+            })
+            .collect()
     }
 
     /// Every policy layer that applies to the scope a name resolves to, root
