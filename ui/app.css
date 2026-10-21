@@ -411,6 +411,14 @@ select.rolepick:disabled { opacity: .38; cursor: default; }
   border: 1px solid var(--wait); background: var(--wait-wash); font-size: 12px; color: var(--ink-2);
 }
 .confirm-stop b { color: var(--ink); }
+/* What the last rename in a scope said (#351), until dismissed: amber while a
+   workflow still names the old agent, which nothing rewrote. */
+.renamed {
+  margin: 8px 0; padding: 8px 10px; display: grid; gap: 5px; border-radius: 3px;
+  border: 1px solid var(--line-soft); font-size: 12px; color: var(--ink-2);
+}
+.renamed.stale { border-color: var(--wait); background: var(--wait-wash); }
+.renamed b { color: var(--ink); }
 .work { margin-top: 8px; display: grid; gap: 6px; }
 .work .job { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; cursor: pointer; }
 .work .job:hover .jt { color: var(--signal); }

@@ -7,7 +7,7 @@ use crate::l1_service::L1Service;
 use crate::l2_service::L2Service;
 use crate::l3_service::L3Service;
 use factory_agents::adapter::AgentContext;
-use factory_agents::dispatch::{Assignments, Channels, Environments, HarnessCommands, SessionStart, Supervision};
+use factory_agents::dispatch::{Assignments, Channels, Environments, HarnessCommands, Roster, SessionStart, Supervision};
 use factory_environment::channels::{ChannelSends, Outgoing, Receipt};
 use factory_infrastructure::host_commands::HostCommands;
 use factory_environment::provision::{Note, Notes, PrepareRequest, Prepared, Provision, Reconcile, Resolved, RunLedger};
@@ -114,6 +114,30 @@ impl HarnessCommands for L3Port<'_> {
 impl Supervision for L3Port<'_> {
     async fn supervise(&self) {
         self.0.supervise_agents().await;
+    }
+}
+
+#[async_trait::async_trait]
+impl Roster for L3Port<'_> {
+    async fn rename_check(&self, scope: &str, from: &str, to: &str) -> Result<factory_agents::agent::RenameCheck> {
+        self.0.rename_check(scope, from, to).await
+    }
+    async fn rename(
+        &self,
+        scope: &str,
+        from: &str,
+        to: &str,
+        by: &str,
+        source: &str,
+    ) -> Result<(factory_agents::agent::RenameSessions, Vec<u32>)> {
+        let asker = crate::l3_service::Asker {
+            by: by.to_string(),
+            source: if source == "agent" { "agent" } else { "owner" },
+        };
+        self.0.rename_agent(scope, from, to, &asker).await
+    }
+    async fn start_instance(&self, scope: &str, name: &str, instance: u32) -> Result<()> {
+        self.0.start_instance(scope, name, instance).await.map(|_| ())
     }
 }
 

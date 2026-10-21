@@ -9,7 +9,8 @@ use chrono::Utc;
 use factory_core::adapter::agent::AgentContext;
 use factory_core::adapter::runtime::{RuntimeStatus, Screen, StartRequest};
 use factory_core::agent::{
-    AgentSession, AgentState, AttachTarget, KeptInstance, KeptUp, Lifetime, ScaleReport, StopCheck, StopReason,
+    AgentSession, AgentState, AttachTarget, KeptInstance, KeptUp, Lifetime, MovedInstance, RenameCheck, RenameSessions,
+    ScaleReport, StopCheck, StopReason,
 };
 use factory_core::role::Role;
 use factory_core::config::ScopeAgent;
@@ -977,6 +978,109 @@ impl L3Service<'_> {
         Ok((report, to_start))
     }
 
+    /// What renaming `name` now would interrupt (`#351`): the first of its
+    /// instances that is starting, working, waiting on an answer or has a
+    /// person at it -- the things a scale-down never stops one for -- named.
+    async fn rename_blocker(&self, scope: &str, name: &str) -> Result<Option<String>> {
+        for agent in self.instances_of(scope, name).await? {
+            if agent.state == AgentState::Starting {
+                return Ok(Some(format!("{} is starting", agent.id)));
+            }
+            if agent.state.is_live() {
+                if let Some(why) = self.kept_up_by(&agent).await {
+                    return Ok(Some(format!("{}: {}", agent.id, why.words())));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether `from` can be renamed to `to` now, with nothing written: the
+    /// name checked by the configuration owner exactly as the rename will
+    /// check it, and no instance in flight. A rename never interrupts one.
+    pub async fn rename_check(&self, scope: &str, from: &str, to: &str) -> Result<RenameCheck> {
+        let planned = self.wiring.rename_declaration(scope, from, to, false)?;
+        let check = RenameCheck {
+            scope: planned.scope,
+            from: planned.from,
+            to: planned.to,
+            changed: planned.changed,
+            default_harness: planned.default_harness,
+        };
+        if check.changed {
+            if let Some(why) = self.rename_blocker(&check.scope, from).await? {
+                return Err(FactoryError::BadRequest(format!(
+                    "{from:?} in {:?} has a standing instance in flight ({why}); rename it once it is idle. \
+                     Nothing was changed",
+                    check.scope
+                )));
+            }
+        }
+        Ok(check)
+    }
+
+    /// Rename a declared agent (`#351`): its declaration first, so a refused
+    /// edit never touches a session, then every standing instance on file
+    /// moved onto the new name -- the same instance number, the role
+    /// somebody gave it and, for one a person stopped, that stop. The
+    /// sessions that were up are closed; the answer says which instance
+    /// numbers to bring up again under the new name, which the caller does
+    /// in the background the way a scale does. One that was gone stays gone,
+    /// for the supervisor to restart if its declaration starts itself.
+    pub async fn rename_agent(&self, scope: &str, from: &str, to: &str, asker: &Asker) -> Result<(RenameSessions, Vec<u32>)> {
+        let check = self.rename_check(scope, from, to).await?;
+        if !check.changed {
+            return Ok((RenameSessions::default(), Vec::new()));
+        }
+        let (scope, to) = (check.scope, check.to);
+        let rows = self.instances_of(&scope, from).await?;
+        self.wiring.rename_declaration(&scope, from, &to, true)?;
+        let decl = self.declared(&scope, &to)?;
+
+        let mut sessions = RenameSessions::default();
+        let mut to_start = Vec::new();
+        for old in rows {
+            let was_live = old.state.is_live();
+            if let Some(session) = &old.session {
+                if let Ok(runtime) = self.wiring.registry().runtime(&session.runtime) {
+                    let _ = runtime.stop(session).await;
+                }
+            }
+            if was_live {
+                self.observe(&old.id, &old.scope, &old.name, RuntimeStatus::Gone);
+            }
+            self.state.attention.forget(&old.id);
+            self.state.agents.delete_agent(&old.id).await?;
+            self.wiring.bus().publish(Event::AgentRemoved { id: old.id.clone() });
+            // A surplus instance a scale-down was still draining is not one
+            // of the count: it goes, rather than coming back under the new name.
+            if old.instance > decl.instance_count() {
+                continue;
+            }
+            let mut new = AgentSession::new(&scope, &to, &decl.harness, &old.runtime, decl.lifetime, decl.role.clone())
+                .as_instance(old.instance);
+            new.assigned_role = old.assigned_role.clone();
+            new.role = new.role_with(&decl.role);
+            if old.state == AgentState::Stopped {
+                new.stopped_by = old.stopped_by.clone();
+                new.stopped_at = old.stopped_at;
+            } else if !was_live {
+                new.state = old.state;
+            }
+            self.state.agents.put_agent(&new).await?;
+            self.wiring.bus().publish(Event::AgentUpdated { agent: new.clone() });
+            if was_live {
+                sessions.started.push(new.id.clone());
+                to_start.push(new.instance);
+            }
+            sessions.moved.push(MovedInstance { from: old.id, to: new.id });
+        }
+        let (was, now) = (AgentSession::id_for(&scope, from), AgentSession::id_for(&scope, &to));
+        self.asked(asker, "renamed", &now, &scope, &to, format!("{was} renamed {now} by {}", asker.by));
+        tracing::info!(from = %was, to = %now, by = %asker.by, "standing agent renamed");
+        Ok((sessions, to_start))
+    }
+
     /// The standing-agent watchdog. Deliberately not the run watchdog: a
     /// permanent agent that has said nothing for an hour is doing its job.
     pub async fn supervise_agents(&self) {
@@ -1147,7 +1251,7 @@ pub(crate) mod tests {
         ))
     }
 
-    fn session(handle: &str) -> SessionRef {
+    pub(crate) fn session(handle: &str) -> SessionRef {
         SessionRef {
             runtime: "herdr".into(),
             handle: handle.into(),
@@ -1164,7 +1268,7 @@ pub(crate) mod tests {
     }
 
     /// A task with one active run, its session set to `sess`.
-    async fn task_and_run(engine: &Engine, scope: &str, agent_name: &str, sess: SessionRef) -> (Task, String) {
+    pub(crate) async fn task_and_run(engine: &Engine, scope: &str, agent_name: &str, sess: SessionRef) -> (Task, String) {
         let now = Utc::now();
         let task = Task {
             after: None,
@@ -1406,15 +1510,15 @@ pub(crate) mod tests {
             format!("stub-{id}")
         }
 
-        fn set_status(&self, id: &str, status: RuntimeStatus) {
+        pub(crate) fn set_status(&self, id: &str, status: RuntimeStatus) {
             self.statuses.lock().unwrap().insert(Self::handle(id), status);
         }
 
-        fn started_ids(&self) -> Vec<String> {
+        pub(crate) fn started_ids(&self) -> Vec<String> {
             self.starts.lock().unwrap().iter().map(|s| s.id.clone()).collect()
         }
 
-        fn stopped_handles(&self) -> Vec<String> {
+        pub(crate) fn stopped_handles(&self) -> Vec<String> {
             self.stops.lock().unwrap().iter().map(|s| s.handle.clone()).collect()
         }
     }
@@ -1529,7 +1633,7 @@ pub(crate) mod tests {
     /// A `demo` scope whose config is on disk as well as in the snapshot, so
     /// a scale has a file to write: `agents` is its `agents:` list, written
     /// the way a person would, two spaces in.
-    fn scaled_engine(agents: &str) -> (Arc<Engine>, Arc<StubRuntime>, PathBuf) {
+    pub(crate) fn scaled_engine(agents: &str) -> (Arc<Engine>, Arc<StubRuntime>, PathBuf) {
         let (engine, stub, root) =
             recording_engine(&format!("id: scope-id\nname: demo\npath: .\nruntime: stub\nagents:\n{agents}"));
         let indented: String = agents.lines().map(|line| format!("  {line}\n")).collect();
@@ -1542,7 +1646,7 @@ pub(crate) mod tests {
         (engine, stub, root)
     }
 
-    fn config_file(root: &std::path::Path) -> PathBuf {
+    pub(crate) fn config_file(root: &std::path::Path) -> PathBuf {
         root.join(factory_core::config::FACTORY_DIR).join(factory_core::config::CONFIG_FILE)
     }
 
@@ -1561,7 +1665,7 @@ pub(crate) mod tests {
     }
 
     /// A scale-up starts its new instances in the background; wait for them.
-    async fn started(stub: &StubRuntime, count: usize) -> Vec<String> {
+    pub(crate) async fn started(stub: &StubRuntime, count: usize) -> Vec<String> {
         for _ in 0..300 {
             if stub.starts.lock().unwrap().len() >= count {
                 break;
@@ -1571,7 +1675,7 @@ pub(crate) mod tests {
         stub.started_ids()
     }
 
-    async fn rows(engine: &Engine) -> Vec<String> {
+    pub(crate) async fn rows(engine: &Engine) -> Vec<String> {
         let mut ids: Vec<String> = engine.l3.agents.agents().await.unwrap().into_iter().map(|a| a.id).collect();
         ids.sort();
         ids
@@ -1802,21 +1906,21 @@ pub(crate) mod tests {
     }
 
     /// Two standing `shell` sessions of one declaration (`#330`).
-    const TWO_SHELLS: &str = "  - name: watcher\n    harness: shell\n    lifetime: permanent\n    instances: 2\n";
+    pub(crate) const TWO_SHELLS: &str = "  - name: watcher\n    harness: shell\n    lifetime: permanent\n    instances: 2\n";
 
-    async fn ask(engine: &Arc<Engine>, request: Request) -> std::result::Result<Payload, String> {
+    pub(crate) async fn ask(engine: &Arc<Engine>, request: Request) -> std::result::Result<Payload, String> {
         match engine.handle_request(request).await {
             Response::Ok { data } => Ok(data),
             Response::Error { message, .. } => Err(message),
         }
     }
 
-    async fn instance(engine: &Engine, id: &str) -> AgentSession {
+    pub(crate) async fn instance(engine: &Engine, id: &str) -> AgentSession {
         engine.l3.agents.get_agent(id).await.unwrap().unwrap_or_else(|| panic!("no row {id}"))
     }
 
     /// What the `factory:agents` journal says, once L4 has read L3's log.
-    async fn journal(engine: &Engine) -> Vec<(String, String, String)> {
+    pub(crate) async fn journal(engine: &Engine) -> Vec<(String, String, String)> {
         engine.l4_service().sample_standing_agents().await;
         engine
             .l4
