@@ -70,7 +70,8 @@ async function saveChoice(frame, message, generation) {
       method: "POST",
       body: JSON.stringify({
         scope: "conference-radar", name: "conference-radar",
-        conference: message.conference, edition_year: message.edition_year, status: message.status,
+        conference: message.conference, edition_year: message.edition_year,
+        kind: message.kind, status: message.status,
       }),
     });
     if (frame.isConnected && choiceGeneration.get(frame) === generation) await deliver(frame, { saved: true });

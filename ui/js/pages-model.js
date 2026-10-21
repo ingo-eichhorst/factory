@@ -98,8 +98,11 @@ export function conferenceChoice(msg) {
   if (!msg || typeof msg !== "object" || msg.type !== "conference-radar:choice") return null;
   if (typeof msg.conference !== "string" || !msg.conference || msg.conference.length > 250) return null;
   if (typeof msg.edition_year !== "string" || !/^(20\d{2}|undated)$/.test(msg.edition_year)) return null;
-  if (!["unreviewed", "not_interested", "not_this_time", "interested", "applied", "accepted", "waitlisted", "rejected", "withdrawn"].includes(msg.status)) return null;
-  return { conference: msg.conference, edition_year: msg.edition_year, status: msg.status };
+  const kind = msg.kind ?? "conference";
+  if (kind !== "conference" && kind !== "rfp") return null;
+  if (!["unreviewed", "not_interested", "not_this_time", "interested", "applied", "accepted", "waitlisted", "rejected", "withdrawn", "attending"].includes(msg.status)) return null;
+  if (kind === "rfp" && msg.status === "attending") return null;
+  return { conference: msg.conference, edition_year: msg.edition_year, kind, status: msg.status };
 }
 
 // ------------------------------------------------------------------- shapes
