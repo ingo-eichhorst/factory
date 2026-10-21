@@ -24,6 +24,7 @@ use futures_util::{sink::SinkExt, stream::StreamExt};
 use std::sync::Arc;
 
 use crate::engine::Engine;
+use crate::pages::ConferenceChoice;
 
 pub struct HttpInterface;
 
@@ -251,6 +252,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/pages", get(pages_list))
         .route("/api/pages/page", get(page_get))
         .route("/api/pages/data", get(page_data))
+        .route("/api/pages/conference-choices", get(conference_choices).post(conference_choice_set))
         .route("/api/pages/rollback", post(page_rollback))
         // A page itself: agent-authored HTML, served under its own strict
         // CSP and never as part of the UI's own documents.
@@ -1729,6 +1731,27 @@ async fn page_data(State(engine): State<Arc<Engine>>, Query(q): Query<PageQuery>
         },
     )
     .await
+}
+
+#[derive(serde::Deserialize)]
+struct ConferenceChoicesQuery {
+    scope: String,
+    name: String,
+}
+
+fn conference_choice_answer(result: Result<Vec<crate::pages::ConferenceChoiceRow>>) -> AxumResponse {
+    match result {
+        Ok(choices) => (StatusCode::OK, Json(serde_json::json!({"status":"ok","data":{"choices":choices}}))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(Response::error("bad_request", e.to_string()))).into_response(),
+    }
+}
+
+async fn conference_choices(State(engine): State<Arc<Engine>>, Query(q): Query<ConferenceChoicesQuery>) -> AxumResponse {
+    conference_choice_answer(engine.conference_choices(&q.scope, &q.name).await)
+}
+
+async fn conference_choice_set(State(engine): State<Arc<Engine>>, Json(choice): Json<ConferenceChoice>) -> AxumResponse {
+    conference_choice_answer(engine.save_conference_choice(choice).await)
 }
 
 #[derive(serde::Deserialize)]
