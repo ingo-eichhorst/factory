@@ -112,11 +112,12 @@ fn directory_digest(root: &Path) -> std::io::Result<String> {
 /// `dir` and below, never the rest of a larger repository it sits in -- a
 /// `--no-worktree` scope inside the company repository is digested as
 /// itself, so another agent's edit elsewhere is not a change to this run's
-/// source -- and never Factory's own store. For a run in the instance root
-/// that store is `dir/.factory`: artifact copies, worktrees, logs and the
+/// source -- and never `dir/.factory`, Factory's own state. For a run in the
+/// instance root that is the store: artifact copies, worktrees, logs and the
 /// database are Factory's writes, and counting them would let a capture
-/// refuse itself. A worktree run's directory is its repository's root, so
-/// its digest is unchanged by the pathspec.
+/// refuse itself. Below it, it is a scope's own marker config. A worktree
+/// run's directory is its repository's root, so its digest is unchanged by
+/// the pathspec.
 const SOURCE_PATHSPEC: [&str; 2] = [".", ":(exclude).factory"];
 
 /// HEAD plus the exact tracked diff and untracked bytes an attestation
