@@ -58,6 +58,8 @@ impl Daemon {
             .env_remove("FACTORY_TOKEN")
             .env_remove("FACTORY_TASK_TOKEN")
             .env_remove("FACTORY_URL")
+            // Without the stack cargo gives every child, as a hand-started daemon runs.
+            .env_remove("RUST_MIN_STACK")
             .stdout(Stdio::from(log.try_clone().expect("dup log fd")))
             .stderr(Stdio::from(log))
             .spawn()

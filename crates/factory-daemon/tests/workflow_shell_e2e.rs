@@ -52,6 +52,8 @@ impl Daemon {
             .env("FACTORY_BIN", &self.factory_bin)
             .env("FACTORY_HERDR_BIN", &self.herdr_bin)
             .env("FACTORY_RENEWALS_DISCOVERY", "0")
+            // Without the stack cargo gives every child, as a hand-started daemon runs.
+            .env_remove("RUST_MIN_STACK")
             .stdout(Stdio::from(log.try_clone().expect("dup log fd")))
             .stderr(Stdio::from(log));
         if let Some(directory) = &self.github_path {
