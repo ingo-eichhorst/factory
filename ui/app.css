@@ -2559,3 +2559,26 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
 .sug-form input[type="text"] { flex: 1 1 220px; }
 .sug-err { color: var(--fault); flex-basis: 100%; }
 .sug-ask-answer { margin-top: 6px; }
+
+/* Scope pages (#343). A page is shown only ever in a sandboxed frame from
+   /pages/...; these rules size the frame and lay out the list around it. */
+#view-pages > .env-note { margin: 10px 14px 0; }
+#pages-list-host, #pages-detail { padding: 10px 14px; }
+.pages-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.pages-table th { text-align: left; font: 600 9.5px/1 var(--cond); letter-spacing: .12em; text-transform: uppercase; color: var(--faint); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.pages-table td { padding: 6px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+.pages-table tr.on td { background: var(--panel-2); }
+.pages-row { cursor: pointer; }
+.pages-row:hover td, .pages-row:focus td { background: var(--panel-2); }
+.pages-title { font-weight: 600; color: var(--ink); }
+.pages-actions { white-space: nowrap; text-align: right; }
+.pages-actions .err { margin-left: 8px; }
+#pages-detail-head h3 { margin: 0 0 4px; font-size: 15px; }
+#pages-detail-head .sub { text-transform: none; letter-spacing: 0; }
+.pages-preview { margin-top: 8px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); font-size: 12px; }
+.pages-history { margin: 10px 0; }
+.pages-history summary { cursor: pointer; font: 600 10px/1.6 var(--cond); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.page-frame { display: block; width: 100%; height: 420px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+.page-frame-tall { height: 640px; }
+.page-frame-full { height: calc(100vh - 220px); min-height: 480px; }
+.page-tile .page-frame { margin-top: 2px; }

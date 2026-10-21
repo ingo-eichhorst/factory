@@ -79,7 +79,7 @@ test("Important Dates is served, navigable and a valid gated dashboard tile", ()
   assert.match(app, /important_dates_updated/);
   assert.match(assets, /"js\/dates-model.js"/);
   assert.deepEqual(validateTile({ view: "important_dates", size: "m" }), []);
-  assert.deepEqual(neededEndpoints([{ view: "important_dates", size: "m" }]), { metrics: false, occupancy: false, operations: false, policy: false, costs: false, dates: true });
+  assert.deepEqual(neededEndpoints([{ view: "important_dates", size: "m" }]), { metrics: false, occupancy: false, operations: false, policy: false, costs: false, dates: true, pages: false });
   assert.equal(datesQuery("a/b & c"), "/api/important-dates?scope=a%2Fb+%26+c");
 });
 

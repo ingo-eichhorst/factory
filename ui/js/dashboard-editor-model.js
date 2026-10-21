@@ -42,7 +42,11 @@ export const VIEW_LABELS = Object.freeze({
 /// registry (not fetched yet, or the fetch failed) still gives every view
 /// tile, so the catalogue is never empty just because `/api/metrics` is
 /// slow -- only the metric half of it is.
-export function buildCatalogue(registry) {
+///
+/// `pages` (#343) is `/api/pages`' answer: every declared scope page becomes
+/// a `page` entry. Its `id` is the tile's own reference -- the bare name for
+/// a page `editingScope` declares itself, `<scope>/<name>` for any other.
+export function buildCatalogue(registry, pages, editingScope) {
   const views = VIEW_IDS.map((id) => ({
     kind: "view",
     id,
@@ -55,7 +59,13 @@ export function buildCatalogue(registry) {
     title: def.title || def.id,
     subtitle: def.description || "metric",
   }));
-  return [...views, ...metrics];
+  const pageEntries = (Array.isArray(pages) ? pages : []).map((p) => ({
+    kind: "page",
+    id: p.scope === editingScope ? p.name : `${p.scope}/${p.name}`,
+    title: p.title || p.name,
+    subtitle: `page · ${p.scope}`,
+  }));
+  return [...views, ...pageEntries, ...metrics];
 }
 
 /// Case-insensitive substring match against an entry's id and title -- the
@@ -72,6 +82,7 @@ export function searchCatalogue(catalogue, query) {
 /// both keys, so a tile built here is indistinguishable from one that came
 /// off the wire.
 export function entryToTile(entry, size) {
+  if (entry.kind === "page") return { page: entry.id, size };
   return entry.kind === "view" ? { view: entry.id, size } : { metric: entry.id, size };
 }
 

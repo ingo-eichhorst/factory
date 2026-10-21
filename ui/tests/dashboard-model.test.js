@@ -24,8 +24,8 @@ import {
 
 // --------------------------------------------------------- the vocabulary
 
-test("tile kinds are exactly metric and view", () => {
-  assert.deepEqual(TILE_KINDS, ["metric", "view"]);
+test("tile kinds are exactly metric, view and page (#343)", () => {
+  assert.deepEqual(TILE_KINDS, ["metric", "view", "page"]);
 });
 
 test("sizes span a 12-column row, and l + m fill one exactly", () => {

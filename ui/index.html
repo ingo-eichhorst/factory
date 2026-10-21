@@ -37,7 +37,7 @@
      `LEVEL_VIEWS` in app.js. -->
 <nav class="levels" id="levels" aria-label="Primary menu">
   <button id="lv-dash" class="lvl on" data-level="dash">
-    <span class="lv-n">Overview</span><span class="lv-name">Dashboard</span><span class="lv-sub">Site, activity and inbox</span>
+    <span class="lv-n">Overview</span><span class="lv-name">Dashboard</span><span class="lv-sub">Pages, site, activity and inbox</span>
   </button>
   <button id="lv-dir" class="lvl" data-level="dir" data-lv="6">
     <span class="lv-n">L6</span><span class="lv-name">Direction</span><span class="lv-sub">Goals, budget, policy, scenarios</span>
@@ -65,6 +65,7 @@
      right even a moment before the boot script runs. -->
 <nav class="tabs" aria-label="View">
   <button id="tab-dashboard" class="on">Dashboard</button>
+  <button id="tab-pages">Pages</button>
   <button id="tab-site">Site plan</button>
   <button id="tab-activity">Activity</button>
   <button id="tab-inbox">Inbox</button>
@@ -117,6 +118,28 @@
     </div>
     <div class="dash" id="dash">loading…</div>
     <section id="dash-signposts" hidden></section>
+  </div>
+
+  <!-- Scope pages (#343): what a scope's agents publish, each shown in a
+       sandboxed frame from /pages/..., never inside this document. -->
+  <div id="view-pages" hidden>
+    <div class="bar">
+      <h2>Pages</h2>
+      <span class="sub" id="pages-count"></span>
+      <span class="sp"></span>
+      <button class="btn" id="pages-back" hidden>All pages</button>
+      <button class="btn" id="pages-refresh">Refresh</button>
+    </div>
+    <p class="env-note bad" id="pages-error" hidden></p>
+    <div id="pages-list-host"><div class="empty">loading…</div></div>
+    <div id="pages-detail" hidden>
+      <div id="pages-detail-head"></div>
+      <details class="pages-history">
+        <summary>Versions <span class="sub" id="pages-versions-count"></span></summary>
+        <div id="pages-versions"></div>
+      </details>
+      <div id="pages-frame"></div>
+    </div>
   </div>
 
   <div id="view-inbox" hidden>

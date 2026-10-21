@@ -2764,6 +2764,131 @@ mod tests {
         (status, serde_json::from_str(payload).unwrap_or(serde_json::Value::Null))
     }
 
+    /// The same, returning the raw response head beside the body, for a
+    /// route whose headers are the point (`#343`).
+    async fn raw(engine: Arc<Engine>, method: &str, path: &str, body: Option<&str>) -> (u16, String, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(engine)).await.unwrap() });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let body = body.unwrap_or("");
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let status: u16 = text.split(' ').nth(1).unwrap().parse().unwrap();
+        let (head, payload) = text.split_once("\r\n\r\n").unwrap();
+        (status, head.to_ascii_lowercase(), payload.to_string())
+    }
+
+    fn engine_with_pages() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-http-pages-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory")).unwrap();
+        let mut radar: Scope = serde_yaml_ng::from_str(
+            "id: radar-id\nname: radar\npages:\n  - { name: conference-radar, max_bytes: 30MiB }\n",
+        )
+        .unwrap();
+        radar.path = PathBuf::from("projects/radar");
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+            scope: None,
+            scopes: vec![radar],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Vec::new(),
+            infrastructure: Default::default(),
+            secrets: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    /// `#343`: the UI itself carries a baseline CSP: scripts only from
+    /// itself, sockets only back to the host it came from, frames only from
+    /// itself.
+    #[tokio::test]
+    async fn the_ui_is_served_with_a_baseline_csp() {
+        let (status, head, body) = raw(engine_with_quality(), "GET", "/", None).await;
+        assert_eq!(status, 200);
+        let csp = head.lines().find(|l| l.starts_with("content-security-policy:")).expect("a CSP header");
+        for directive in [
+            "default-src 'self'",
+            "script-src 'self';",
+            "frame-src 'self'",
+            "object-src 'none'",
+            "base-uri 'none'",
+            "frame-ancestors 'self'",
+            "connect-src 'self' ws://127.0.0.1:",
+        ] {
+            assert!(csp.contains(directive), "{directive} missing from {csp}");
+        }
+        assert!(!csp.contains("script-src 'self' 'unsafe-inline'"), "{csp}");
+        assert!(head.contains("x-content-type-options: nosniff"));
+        assert!(!body.contains("<script>"), "no inline script for the CSP to refuse");
+    }
+
+    /// `#343`: a published page is served from its own path, under its own
+    /// strict CSP -- sandboxed even when opened on its own -- and a page the
+    /// scope does not declare is a 4xx under the same headers.
+    #[tokio::test]
+    async fn a_page_is_served_under_its_own_strict_csp_and_sandbox() {
+        let engine = engine_with_pages();
+        // A body past axum's default 2 MB limit: the publish route and
+        // `/api/rpc` take a page as large as a declaration allows.
+        let html = format!("<!doctype html><title>radar</title><p>{}</p>", "x".repeat(3 * 1024 * 1024));
+        let body = serde_json::json!({ "scope": "radar", "name": "conference-radar", "html": html, "data": {"n": 1} }).to_string();
+        let (status, _, answer) = raw(engine.clone(), "POST", "/api/pages/publish", Some(&body)).await;
+        assert_eq!(status, 200, "{}", &answer[..answer.len().min(400)]);
+        let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        let sha = answer["data"]["version"]["sha256"].as_str().unwrap().to_string();
+
+        let (status, head, served) = raw(engine.clone(), "GET", &format!("/pages/radar/conference-radar?v={sha}"), None).await;
+        assert_eq!(status, 200);
+        assert_eq!(served, html);
+        let csp = head.lines().find(|l| l.starts_with("content-security-policy:")).expect("a CSP header");
+        for directive in [
+            "default-src 'none'",
+            "script-src 'unsafe-inline'",
+            "style-src 'unsafe-inline'",
+            "img-src data: blob:",
+            "font-src data:",
+            "connect-src 'none'",
+            "frame-ancestors 'self'",
+            "sandbox allow-scripts",
+        ] {
+            assert!(csp.contains(directive), "{directive} missing from {csp}");
+        }
+        assert!(!csp.contains("allow-same-origin"), "{csp}");
+        assert!(head.contains("content-type: text/html; charset=utf-8"));
+        assert!(head.contains("x-content-type-options: nosniff"));
+        assert!(head.contains("referrer-policy: no-referrer"));
+        assert!(head.contains("cache-control: no-store"));
+
+        let (status, head, _) = raw(engine.clone(), "GET", "/pages/radar/not-declared", None).await;
+        assert_eq!(status, 400);
+        assert!(head.contains("sandbox allow-scripts"), "a refusal is served under the page CSP too");
+
+        let (status, _, data) = raw(engine.clone(), "GET", "/api/pages/data?scope=radar&name=conference-radar", None).await;
+        assert_eq!(status, 200);
+        let data: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(data["data"]["content"]["data"], serde_json::json!({"n": 1}));
+
+        let (status, json) = request(engine, "GET", "/api/pages?scope=radar", None).await;
+        assert_eq!(status, 200);
+        assert_eq!(json["data"]["pages"][0]["current"]["sha256"], sha.as_str());
+    }
+
     /// A runtime whose `stop` takes a while, the way closing a sandboxed
     /// run's pane and starting its teardown does.
     struct SlowStop;

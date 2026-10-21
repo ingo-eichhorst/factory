@@ -41,6 +41,7 @@ import { loadSuggestions, reloadSuggestions, wireSuggestions } from "./suggestio
 import { loadScenarios, reloadScenarios, wireScenarios } from "./scenarios.js";
 import { loadBudget, reloadBudget, wireBudget } from "./budget.js";
 import { budgetEvent } from "./budget-model.js";
+import { showPages, hidePages, loadPages, pagesTailNow, readPagesTailNow } from "./pages.js";
 
 // ------------------------------------------------------------------ views
 //
@@ -58,6 +59,9 @@ let activityStarted = false;
 
 const VIEWS = {
   dashboard: { onShow: loadDashboard },
+  // Scope pages (`#343`): polled lightly while shown, since a new version
+  // arrives with a run's report rather than an event of its own.
+  pages: { onShow: showPages, onHide: hidePages, tail: { write: pagesTailNow, read: readPagesTailNow } },
   // The daemon's attention list, every scope -- the same exceptions the
   // Line tab shows per scope (`#106`), so there is one list, filtered
   // two ways, and not two derivations that can disagree.
@@ -240,7 +244,7 @@ function applyModal([taskId, runId]) {
 // This single map drives the second row, menu switching and the hash
 // fallback in `scopes.js`.
 const LEVEL_VIEWS = {
-  dash: ["dashboard", "site", "activity", "inbox"],
+  dash: ["dashboard", "pages", "site", "activity", "inbox"],
   // Direction: intent, its resource limits, rules, then what-if outcomes.
   dir: ["goals", "budget", "policy", "scenarios"],
   // The work first, then how it is running. Intake sits beside Tasks: it
@@ -329,6 +333,8 @@ function rerender(route) {
   if (state.tab === "dashboard") { loadDashboard(); return; }
   // The Inbox is every scope's, whatever the rail says -- nothing to redo.
   if (state.tab === "inbox") { renderInbox(); return; }
+  // The daemon narrows the page list to the selected subtree.
+  if (state.tab === "pages") { void loadPages(); return; }
   // The daemon narrows the report to the selected subtree (`operations.js`'s
   // header), so a rail change refetches.
   if (state.tab === "line") { loadOperations().catch(error => console.warn("Line refresh failed", error)); return; }
