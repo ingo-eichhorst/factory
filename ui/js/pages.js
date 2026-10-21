@@ -64,31 +64,18 @@ function choiceUrl() {
   return "/api/pages/conference-choices?scope=conference-radar&name=conference-radar";
 }
 
-async function deliverChoices(frame) {
-  if (!isRadarFrame(frame)) return;
-  const generation = choiceGeneration.get(frame) || 0;
+async function saveChoice(frame, message, generation) {
   try {
-    const answer = await api(choiceUrl());
-    if (frame.isConnected && (choiceGeneration.get(frame) || 0) === generation) {
-      frame.contentWindow?.postMessage({ type: "conference-radar:decisions", choices: answer.choices }, "*");
-    }
-  } catch (error) {
-    if (frame.isConnected) frame.contentWindow?.postMessage({ type: "conference-radar:error", message: error.message }, "*");
-  }
-}
-
-async function saveChoice(frame, message) {
-  try {
-    const answer = await api("/api/pages/conference-choices", {
+    await api("/api/pages/conference-choices", {
       method: "POST",
       body: JSON.stringify({
         scope: "conference-radar", name: "conference-radar",
         conference: message.conference, edition_year: message.edition_year, status: message.status,
       }),
     });
-    if (frame.isConnected) frame.contentWindow?.postMessage({ type: "conference-radar:saved", choices: answer.choices }, "*");
+    if (frame.isConnected && choiceGeneration.get(frame) === generation) await deliver(frame, { saved: true });
   } catch (error) {
-    if (frame.isConnected) frame.contentWindow?.postMessage({ type: "conference-radar:error", message: error.message }, "*");
+    if (frame.isConnected && choiceGeneration.get(frame) === generation) await deliver(frame, { error: error.message });
   }
 }
 
@@ -108,19 +95,28 @@ function cachedData(frame) {
   return dataCache.get(key);
 }
 
-async function deliver(frame) {
+async function deliver(frame, save = null) {
+  const generation = choiceGeneration.get(frame) || 0;
   const data = await cachedData(frame);
   const target = frame.contentWindow;
-  if (!target) return;
+  if (!target || !frame.isConnected) return;
   const message = dataMessage(
     { scope: frame.dataset.pageScope, name: frame.dataset.pageName, version: frame.dataset.pageVersion },
     data,
     currentTheme()
   );
+  if (isRadarFrame(frame)) {
+    try {
+      message.conferenceChoices = (await api(choiceUrl())).choices;
+      if (save) message.conferenceSave = save;
+    } catch (error) {
+      message.conferenceSave = { error: error.message };
+    }
+    if ((choiceGeneration.get(frame) || 0) !== generation) return;
+  }
   // `*`: the frame's origin is opaque by design, so there is no origin to
   // name. The frame is ours and `frame-src 'self'` keeps it on this host.
   target.postMessage(message, "*");
-  void deliverChoices(frame);
 }
 
 function frameFor(source) {
@@ -140,8 +136,9 @@ function listen() {
     if (!isRadarFrame(frame)) return;
     const msg = conferenceChoice(event.data);
     if (!msg) return;
-    choiceGeneration.set(frame, (choiceGeneration.get(frame) || 0) + 1);
-    choiceWrites = choiceWrites.catch(() => {}).then(() => saveChoice(frame, msg));
+    const generation = (choiceGeneration.get(frame) || 0) + 1;
+    choiceGeneration.set(frame, generation);
+    choiceWrites = choiceWrites.catch(() => {}).then(() => saveChoice(frame, msg, generation));
   });
   // A theme switch is news to every page on screen.
   document.addEventListener("factory:theme", () => {
@@ -150,7 +147,7 @@ function listen() {
   // A second device can change a choice while this page stays open.
   setInterval(() => {
     for (const frame of document.querySelectorAll("iframe[data-page-key]")) {
-      if (isRadarFrame(frame)) void deliverChoices(frame);
+      if (isRadarFrame(frame)) void deliver(frame);
     }
   }, POLL_MS);
 }
