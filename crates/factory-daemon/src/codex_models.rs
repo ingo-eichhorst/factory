@@ -90,6 +90,10 @@ async fn observe(endpoint: &str, tools: &Tools, now: DateTime<Utc>) -> Observati
             return observation;
         }
     }
+    if !models::endpoint_allowed(endpoint) {
+        observation.issue = Some("the configured models endpoint is neither https nor this host's loopback, so the login is not sent to it".into());
+        return observation;
+    }
     let login = match models::read_bounded(&tools.codex_home.join("auth.json")).await {
         Some(bytes) => models::login_from_auth(&bytes),
         None => Err("codex has no ChatGPT login on this host (`codex login`)"),
@@ -106,7 +110,7 @@ async fn observe(endpoint: &str, tools: &Tools, now: DateTime<Utc>) -> Observati
     drop(login);
     let answered = probes::read_only(
         &tools.curl,
-        &["-sS", "--max-time", "15", "-H", "@-", "-w", "\n%{http_code}", "--url", &url],
+        &["-sS", "--proto", "=https,http", "--max-time", "15", "-H", "@-", "-w", "\n%{http_code}", "--url", &url],
         Some(&headers),
         20,
     )

@@ -4366,7 +4366,10 @@ infrastructure:
     endpoint: https://chatgpt.com/backend-api/codex/models   # the default
 ```
 
-The observation honours `FACTORY_RENEWALS_DISCOVERY=0` like every other
+The login is only ever sent to an `https://` endpoint, or to plain `http://`
+on this host's loopback (a test's fake backend); anything else is an issue,
+and nothing is sent. curl is held to those two protocols and follows no
+redirect. The observation honours `FACTORY_RENEWALS_DISCOVERY=0` like every other
 discovery, and finds codex on the same augmented `PATH` the other probes use.
 
 ### Continuing after an infrastructure failure (#178)

@@ -285,6 +285,10 @@ async fn a_refused_login_a_silent_endpoint_or_no_login_is_an_issue_and_decides_n
 
     let missing = probe(&factory(&s.0, &url), &tools(&s.0, &s.0.join("no-codex"), &home), Utc::now()).await.unwrap();
     assert!(missing.observation.issue.unwrap().contains("not found"));
+
+    codex_home(&s.0, "gpt-6.1-sol");
+    let elsewhere = probe(&factory(&s.0, "http://example.invalid/m"), &tools(&s.0, &codex, &home), Utc::now()).await.unwrap();
+    assert!(elsewhere.observation.issue.unwrap().contains("neither https nor"));
 }
 
 #[tokio::test]

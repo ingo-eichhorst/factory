@@ -528,6 +528,14 @@ pub fn login_from_auth(bytes: &[u8]) -> std::result::Result<Login, &'static str>
     Ok(Login { access_token, account_id })
 }
 
+/// Whether the login may be sent to `endpoint` at all: `https://` anywhere,
+/// plain `http://` only to this host's loopback (a test's fake backend).
+pub fn endpoint_allowed(endpoint: &str) -> bool {
+    let clean = !endpoint.is_empty() && endpoint.chars().all(|c| c.is_ascii_graphic());
+    let loopback = ["http://127.0.0.1:", "http://127.0.0.1/", "http://localhost:", "http://localhost/", "http://[::1]:", "http://[::1]/"];
+    clean && (endpoint.starts_with("https://") || loopback.iter().any(|prefix| endpoint.starts_with(prefix)))
+}
+
 /// The list's URL for `client_version`, which must already be valid.
 pub fn models_url(endpoint: &str, client_version: &str) -> String {
     let separator = if endpoint.contains('?') { '&' } else { '?' };
@@ -738,6 +746,16 @@ model_provider = "ollama"
         assert!(!valid_version("latest"));
         assert_eq!(models_url(DEFAULT_ENDPOINT, "0.157.0"), "https://chatgpt.com/backend-api/codex/models?client_version=0.157.0");
         assert_eq!(models_url("http://127.0.0.1:9/m?a=b", "1.0.0"), "http://127.0.0.1:9/m?a=b&client_version=1.0.0");
+    }
+
+    #[test]
+    fn the_login_only_ever_goes_to_https_or_this_hosts_loopback() {
+        assert!(endpoint_allowed(DEFAULT_ENDPOINT));
+        assert!(endpoint_allowed("http://127.0.0.1:41234/backend-api/codex/models"));
+        assert!(endpoint_allowed("http://localhost:8080/m"));
+        for refused in ["http://example.com/m", "http://127.0.0.1.example.com/m", "file:///etc/passwd", "ftp://x/m", "", "https://a b/"] {
+            assert!(!endpoint_allowed(refused), "{refused}");
+        }
     }
 
     #[test]
