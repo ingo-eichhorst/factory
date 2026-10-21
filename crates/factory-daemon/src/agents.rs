@@ -670,8 +670,10 @@ impl L3Service<'_> {
         // Down, and confirmed down: two processes on one conversation is the
         // one thing a restart must never make, and a runtime that adopts a
         // session by name would hand a start the one still closing.
-        *stopped = true;
         let stop = runtime.stop(&session).await;
+        // A stop that errored with the session still there changed nothing:
+        // that is a refusal, not a failure.
+        *stopped = stop.is_ok();
         if !self.gone(runtime.as_ref(), &session).await {
             let why = match stop {
                 Err(e) => format!("its session would not stop ({e}); it was left as it was"),
@@ -701,6 +703,8 @@ impl L3Service<'_> {
             };
             return Err(FactoryError::BadRequest(format!("{} was not restarted: {why}", agent.id)));
         }
+        // Gone, however the stop answered: from here a failure is a failure.
+        *stopped = true;
         self.observe(&agent.id, &agent.scope, &agent.name, RuntimeStatus::Gone);
 
         let resumed = resume.as_ref().map(|r| r.conversation.clone());
@@ -1726,6 +1730,9 @@ pub(crate) mod tests {
         gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
         /// While set, `start` records its request and fails.
         failing: std::sync::atomic::AtomicBool,
+        /// While set, `stop` records its request and fails, leaving the
+        /// session as it was.
+        stop_failing: std::sync::atomic::AtomicBool,
     }
 
     impl StubRuntime {
@@ -1739,6 +1746,7 @@ pub(crate) mod tests {
                 processes: std::sync::Mutex::new(Default::default()),
                 gate: std::sync::Mutex::new(None),
                 failing: std::sync::atomic::AtomicBool::new(false),
+                stop_failing: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -1832,6 +1840,9 @@ pub(crate) mod tests {
         }
         async fn stop(&self, session: &SessionRef) -> Result<()> {
             self.stops.lock().unwrap().push(session.clone());
+            if self.stop_failing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(FactoryError::adapter("stub", "the pane would not close"));
+            }
             self.statuses.lock().unwrap().insert(session.handle.clone(), RuntimeStatus::Gone);
             Ok(())
         }
@@ -2443,6 +2454,27 @@ pub(crate) mod tests {
             journal.iter().any(|(_, kind, message)| kind == "agent_restart_failed" && message.contains(CONVERSATION)),
             "{journal:#?}"
         );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_session_that_would_not_stop_is_left_as_it_was_and_journaled_as_refused() {
+        let (engine, stub, root) = recording_engine(&keeper("[--model, opus]"));
+        engine.l3_service().reconcile_agents().await;
+        stub.set_status("demo/keeper", RuntimeStatus::Idle);
+        stub.set_usage("demo/keeper", "claude-code", CONVERSATION);
+        let mut before = row(&engine, "demo/keeper").await;
+        stub.stop_failing.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let e = restart(&engine, "demo/keeper", false).await.unwrap_err();
+        assert!(e.contains("its session would not stop") && e.contains("it was left as it was"), "{e}");
+        // Only the conversation, written down before the stop was asked.
+        before["conversation"] = CONVERSATION.into();
+        assert_eq!(row(&engine, "demo/keeper").await, before);
+        assert_eq!(stub.starts.lock().unwrap().len(), 1, "nothing started");
+        let journal = journal(&engine).await;
+        let kinds = |kind: &str| journal.iter().filter(|(_, k, _)| k == kind).count();
+        assert_eq!((kinds("agent_restart_refused"), kinds("agent_restart_failed")), (1, 0), "{journal:#?}");
         std::fs::remove_dir_all(root).ok();
     }
 
