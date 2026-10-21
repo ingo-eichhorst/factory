@@ -887,48 +887,19 @@ mod tests {
 
     fn build_engine(scope_path: std::path::PathBuf) -> Arc<Engine> {
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
             // `power_assertion` off: these tests dispatch real bench
             // attempts through the real `Engine`, and the default would
             // fork a real `caffeinate` on whatever machine runs the tests --
             // see the same note on `engine::tests::test_engine`.
             daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            scope: None,
             scopes: vec![Scope {
                 id: "scope-id".into(),
                 name: "demo".into(),
                 path: scope_path,
-                agent: None,
-                agents: Vec::new(),
-                runtime: None,
-                git: None,
-                task_store: None,
-                max_sessions: None,
-                roles: Default::default(),
-                dashboard: None,
-                policies: Default::default(),
-                quality: Default::default(),
-                intake: Default::default(),
-                dependencies: Default::default(),
-                environments: Vec::new(),
-                renewals: Vec::new(),
-                metrics: None,
-                backup: None,
-                memory: None,
-                skills: Vec::new(),
-                pages: Vec::new(),
+                ..Default::default()
             }],
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory {
             root: std::env::temp_dir().join(format!("factory-bench-engine-test-{}", uuid::Uuid::new_v4())),

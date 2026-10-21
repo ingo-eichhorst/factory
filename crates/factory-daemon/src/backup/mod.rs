@@ -837,7 +837,7 @@ mod tests {
     /// A throwaway instance with a real database file, its root scope's own
     /// config and a knowledge page, backing up to a sibling directory.
     fn engine_backing_up(keep: &str, destination: &str) -> (Arc<Engine>, PathBuf) {
-        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_core::config::{Config, Instance};
         use factory_plugins::{Registry, SqliteStore};
         let base = std::env::temp_dir().join(format!("factory-backup-engine-{}", uuid::Uuid::new_v4()));
         let root = base.join("instance");
@@ -851,25 +851,15 @@ mod tests {
         company.path = PathBuf::from(".");
         let destination = base.join(destination);
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![company],
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
-            quality: Default::default(),
             infrastructure: serde_yaml_ng::from_str(&format!(
                 "backup:\n  destination: {}\n  keep: {keep}\n",
                 destination.display()
             ))
             .unwrap(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root, config };
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
@@ -882,7 +872,7 @@ mod tests {
     /// round trip through `backup_report`/`backup_run`, not just
     /// `archive.rs`'s own unit tests of `take` itself.
     fn engine_backing_up_with_scope_include(keep: &str, destination: &str) -> (Arc<Engine>, PathBuf) {
-        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_core::config::{Config, Instance};
         use factory_plugins::{Registry, SqliteStore};
         let base = std::env::temp_dir().join(format!("factory-backup-engine-scope-include-{}", uuid::Uuid::new_v4()));
         let root = base.join("instance");
@@ -896,25 +886,15 @@ mod tests {
         company.path = PathBuf::from(".");
         let destination = base.join(destination);
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![company],
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
-            quality: Default::default(),
             infrastructure: serde_yaml_ng::from_str(&format!(
                 "backup:\n  destination: {}\n  keep: {keep}\n",
                 destination.display()
             ))
             .unwrap(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root, config };
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
@@ -964,7 +944,7 @@ mod tests {
     /// `backup_run`/`backup_verify`/`backup_restore`, not just `archive.rs`'s
     /// own unit tests.
     fn engine_backing_up_encrypted(keep: &str, destination: &str, recipient: &str) -> (Arc<Engine>, PathBuf) {
-        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_core::config::{Config, Instance};
         use factory_plugins::{Registry, SqliteStore};
         let base = std::env::temp_dir().join(format!("factory-backup-encrypted-engine-{}", uuid::Uuid::new_v4()));
         let root = base.join("instance");
@@ -979,25 +959,15 @@ mod tests {
         company.path = PathBuf::from(".");
         let destination = base.join(destination);
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![company],
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
-            quality: Default::default(),
             infrastructure: serde_yaml_ng::from_str(&format!(
                 "backup:\n  destination: {}\n  keep: {keep}\n  encrypt_to: {recipient}\n",
                 destination.display()
             ))
             .unwrap(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root, config };
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
@@ -1037,7 +1007,7 @@ mod tests {
         encrypt_to: Option<&str>,
         booted_at: DateTime<Utc>,
     ) -> (Arc<Engine>, PathBuf) {
-        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_core::config::{Config, Instance};
         use factory_plugins::{Registry, SqliteStore};
         let base = std::env::temp_dir().join(format!("factory-backup-drill-engine-{}", uuid::Uuid::new_v4()));
         let root = base.join("instance");
@@ -1052,25 +1022,15 @@ mod tests {
         let destination = base.join(destination);
         let encrypt_line = encrypt_to.map(|r| format!("\n  encrypt_to: {r}")).unwrap_or_default();
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![company],
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
-            quality: Default::default(),
             infrastructure: serde_yaml_ng::from_str(&format!(
                 "backup:\n  destination: {}\n  keep: {keep}\n  verify_schedule: {{ cron: \"{verify_cron}\" }}{encrypt_line}\n",
                 destination.display()
             ))
             .unwrap(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root, config };
         let mut engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
@@ -1304,7 +1264,7 @@ mod tests {
     /// report to prove the lazy evidence wiring end to end, not just
     /// `resolve_backup_fact` on its own.
     fn engine_backing_up_with_backup_policy(keep: &str, destination: &str) -> (Arc<Engine>, PathBuf) {
-        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_core::config::{Config, Instance, PolicyDeclaration};
         use factory_plugins::{Registry, SqliteStore};
         let base = std::env::temp_dir().join(format!("factory-backup-policy-engine-{}", uuid::Uuid::new_v4()));
         let root = base.join("instance");
@@ -1329,25 +1289,16 @@ mod tests {
         company.path = PathBuf::from(".");
         let destination = base.join(destination);
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![company],
-            roles: Default::default(),
-            dashboard: None,
             policies: PolicyDeclaration { frameworks: vec!["dsgvo".to_string()], ..Default::default() },
-            quality: Default::default(),
             infrastructure: serde_yaml_ng::from_str(&format!(
                 "backup:\n  destination: {}\n  keep: {keep}\n",
                 destination.display()
             ))
             .unwrap(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root, config };
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())

@@ -1,13 +1,26 @@
 //! Check the actual public read API from an external crate, not a surrogate
 //! trait assertion. Each invalid edge must fail for the Below bound itself.
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// The tests in this file run as threads of one process, and macOS clocks only
+/// resolve microseconds, so pid and time alone can name two fixtures the same.
+/// The counter keeps them apart; pid and time keep other processes apart.
+/// `scratch_root` takes the clock reading so a test can hold it fixed.
+static NEXT: AtomicU64 = AtomicU64::new(0);
+
+fn scratch_root(nonce: u128) -> PathBuf {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("factory-fact-direction-{}-{nonce}-{n}", std::process::id()))
+}
 
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("factory-fact-direction-{}-{nonce}", std::process::id()));
+        let root = scratch_root(nonce);
         std::fs::create_dir_all(root.join("src")).unwrap();
         let kernel = Path::new(env!("CARGO_MANIFEST_DIR")).to_str().unwrap();
         let manifest = format!(
@@ -45,6 +58,13 @@ impl Drop for Fixture {
         // Only this test's uniquely created scratch directory is removed.
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn scratch_roots_are_unique_within_the_process() {
+    // Every fixture started in the same microsecond still gets its own directory.
+    let roots: HashSet<PathBuf> = (0..100).map(|_| scratch_root(0)).collect();
+    assert_eq!(roots.len(), 100);
 }
 
 fn read_source(producer: &str, reader: &str) -> String {

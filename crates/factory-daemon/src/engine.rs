@@ -1492,7 +1492,6 @@ mod tests {
     /// reach either.
     fn test_engine(scope_path: PathBuf) -> Arc<Engine> {
         let config = Config {
-            version: 1,
             instance: Instance {
                 id: "test".into(),
                 name: "test".into(),
@@ -1511,41 +1510,13 @@ mod tests {
                 power_assertion: false,
                 ..DaemonConfig::default()
             },
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            scope: None,
             scopes: vec![Scope {
                 id: "scope-id".into(),
                 name: "demo".into(),
                 path: scope_path,
-                agent: None,
-                agents: Vec::new(),
-                runtime: None,
-                git: None,
-                task_store: None,
-                max_sessions: None,
-                roles: Default::default(),
-                dashboard: None,
-                policies: Default::default(),
-                quality: Default::default(),
-                intake: Default::default(),
-                dependencies: Default::default(),
-                environments: Vec::new(),
-                renewals: Vec::new(),
-                metrics: None,
-                backup: None,
-                memory: None,
-                skills: Vec::new(),
-                pages: Vec::new(),
+                ..Default::default()
             }],
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory {
             root: std::env::temp_dir().join(format!("factory-engine-test-{}", uuid::Uuid::new_v4())),
@@ -1682,48 +1653,22 @@ mod tests {
         fn capacity_engine(agents: Vec<ScopeAgent>, scope_max_sessions: Option<u32>) -> Arc<Engine> {
             let scope_path = temp_dir("capacity");
             let config = Config {
-                version: 1,
                 instance: Instance { id: "test".into(), name: "test".into() },
                 daemon: DaemonConfig {
                     power_assertion: false,
                     harness_health: HarnessHealthConfig { enabled: false, ..Default::default() },
                     ..DaemonConfig::default()
                 },
-                roles: Default::default(),
-                dashboard: None,
-                policies: Default::default(),
-                quality: Default::default(),
-                scope: None,
                 scopes: vec![Scope {
                     id: "scope-id".into(),
                     name: "demo".into(),
                     path: scope_path,
-                    agent: None,
                     agents,
                     runtime: Some("stub".into()),
-                    git: None,
-                    task_store: None,
                     max_sessions: scope_max_sessions,
-                    roles: Default::default(),
-                    dashboard: None,
-                    policies: Default::default(),
-                    quality: Default::default(),
-                    intake: Default::default(),
-                    dependencies: Default::default(),
-                    environments: Vec::new(),
-                    renewals: Vec::new(),
-                    metrics: None,
-                    backup: None,
-                    memory: None,
-                    skills: Vec::new(),
-                    pages: Vec::new(),
+                    ..Default::default()
                 }],
-                infrastructure: Default::default(),
-                secrets: Vec::new(),
-                channels: Vec::new(),
-                plugins_dir: None,
-                renewals: Vec::new(),
-                renewals_notify: None,
+                ..Default::default()
             };
             let factory = Factory {
                 root: std::env::temp_dir().join(format!("factory-capacity-test-{}", uuid::Uuid::new_v4())),
@@ -4990,44 +4935,15 @@ mod tests {
 
         fn continue_engine(scope_path: PathBuf, resumable: bool, runtime_status: RuntimeStatus) -> (Arc<Engine>, Arc<RecordingRuntime>) {
             let config = Config {
-                version: 1,
                 instance: Instance { id: "test".into(), name: "test".into() },
                 daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
-                roles: Default::default(),
-                dashboard: None,
-                policies: Default::default(),
-                quality: Default::default(),
-                scope: None,
                 scopes: vec![Scope {
                     id: "scope-id".into(),
                     name: "demo".into(),
                     path: scope_path,
-                    agent: None,
-                    agents: Vec::new(),
-                    runtime: None,
-                    git: None,
-                    task_store: None,
-                    max_sessions: None,
-                    roles: Default::default(),
-                    dashboard: None,
-                    policies: Default::default(),
-                    quality: Default::default(),
-                    intake: Default::default(),
-                    dependencies: Default::default(),
-                    environments: Vec::new(),
-                    renewals: Vec::new(),
-                    metrics: None,
-                    backup: None,
-                    memory: None,
-                    skills: Vec::new(),
-                    pages: Vec::new(),
+                    ..Default::default()
                 }],
-                infrastructure: Default::default(),
-                secrets: Vec::new(),
-                channels: Vec::new(),
-                plugins_dir: None,
-                renewals: Vec::new(),
-                renewals_notify: None,
+                ..Default::default()
             };
             let factory = Factory {
                 root: std::env::temp_dir().join(format!("factory-continue-test-{}", uuid::Uuid::new_v4())),
@@ -5051,44 +4967,15 @@ mod tests {
         /// every other test in this module already destructures as a pair.
         fn continue_engine_recording_upstream(scope_path: PathBuf) -> (Arc<Engine>, Arc<RecordingAgent>) {
             let config = Config {
-                version: 1,
                 instance: Instance { id: "test".into(), name: "test".into() },
                 daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
-                roles: Default::default(),
-                dashboard: None,
-                policies: Default::default(),
-                quality: Default::default(),
-                scope: None,
                 scopes: vec![Scope {
                     id: "scope-id".into(),
                     name: "demo".into(),
                     path: scope_path,
-                    agent: None,
-                    agents: Vec::new(),
-                    runtime: None,
-                    git: None,
-                    task_store: None,
-                    max_sessions: None,
-                    roles: Default::default(),
-                    dashboard: None,
-                    policies: Default::default(),
-                    quality: Default::default(),
-                    intake: Default::default(),
-                    dependencies: Default::default(),
-                    environments: Vec::new(),
-                    renewals: Vec::new(),
-                    backup: None,
-                    pages: Vec::new(),
-                    metrics: None,
-                    memory: None,
-                    skills: Vec::new(),
+                    ..Default::default()
                 }],
-                infrastructure: Default::default(),
-                secrets: Vec::new(),
-                channels: Vec::new(),
-                plugins_dir: None,
-                renewals: Vec::new(),
-                renewals_notify: None,
+                ..Default::default()
             };
             let factory = Factory {
                 root: std::env::temp_dir().join(format!("factory-continue-test-{}", uuid::Uuid::new_v4())),

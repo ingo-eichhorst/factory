@@ -3713,9 +3713,11 @@ inspection, unreadable dummy-token metadata, source-command nonexecution,
 native clock behavior, durable push receipts and a real daemon HTTP/CLI
 restart/scheduled-warning check. These fixtures do not themselves prove a
 particular live gateway or curator credential is installed and usable.
-When running a debug daemon directly outside Cargo, use the repository's
-configured debug stack headroom (`RUST_MIN_STACK=8388608`); Cargo supplies this
-automatically for its subprocesses. This is not a release-build requirement.
+A debug daemon started directly, outside Cargo, needs no `RUST_MIN_STACK`: a
+debug `factory-daemon` gives its own tokio threads 8MiB stacks, enough for a
+debug build's unoptimised futures. `RUST_MIN_STACK=8388608` in
+`.cargo/config.toml` remains for `cargo test`, whose `#[tokio::test]` bodies
+run on libtest's threads. Release builds keep tokio's default sizes.
 
 ## Line
 
