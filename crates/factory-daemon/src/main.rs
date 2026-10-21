@@ -144,8 +144,31 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// The stack every runtime thread gets in a debug build -- workers and the
+/// blocking pool alike, since one size covers both.
+///
+/// A debug build's async state machines are not optimised, and the poll of a
+/// run's `factory task report` -- `serve_connection`, `Engine::handle`,
+/// `route_l4`, `L4Service::report`, down to the store's `spawn_blocking` --
+/// needs just over tokio's 2MiB default: a hand-started debug daemon died of
+/// it on the first report, whatever the harness. 8MiB is the headroom
+/// `.cargo/config.toml` gives every process cargo spawns, which is why no
+/// test ever saw it. Release builds keep tokio's own sizes, untouched. The
+/// cost is that `RUST_MIN_STACK` no longer reaches tokio's threads in a debug
+/// build: an explicit size overrides it. `.cargo/config.toml` still matters
+/// for `#[tokio::test]`, whose bodies run on libtest's threads, not these.
+const DEBUG_THREAD_STACK: usize = 8 * 1024 * 1024;
+
+fn main() -> anyhow::Result<()> {
+    let mut runtime = tokio::runtime::Builder::new_multi_thread();
+    runtime.enable_all();
+    if cfg!(debug_assertions) {
+        runtime.thread_stack_size(DEBUG_THREAD_STACK);
+    }
+    runtime.build()?.block_on(daemon_main())
+}
+
+async fn daemon_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
