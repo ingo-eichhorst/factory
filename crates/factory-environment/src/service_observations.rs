@@ -693,10 +693,16 @@ mod tests {
                 .join(format!("factory-service-evidence-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&root).unwrap();
             let cli = root.join("openshell");
-            let base = vec![cli.display().to_string()];
+            // `#362`: the fake CLI is interpreted by /bin/sh, not executed.
+            // The first exec of a newly written executable goes through one
+            // host-wide queue that a parallel suite can hold past `cli()`'s
+            // 5 s deadline; interpreting the script through /bin/sh does not.
+            let base = vec!["/bin/sh".into(), cli.display().to_string()];
             let run = "aaaabbbb-run";
             let state_dir = root.join(".factory/openshell").join(run);
             std::fs::create_dir_all(&state_dir).unwrap();
+            let mut delete = base.clone();
+            delete.extend(["sandbox", "delete", "factory-aaaabbbb"].map(String::from));
             let teardown = Teardown {
                 sandbox: "factory-aaaabbbb".into(),
                 state_dir: state_dir.clone(),
@@ -704,12 +710,7 @@ mod tests {
                 download: None,
                 download_dir: state_dir.join("download"),
                 fast_forward: false,
-                delete: vec![
-                    base[0].clone(),
-                    "sandbox".into(),
-                    "delete".into(),
-                    "factory-aaaabbbb".into(),
-                ],
+                delete,
                 service_evidence: None,
                 task: String::new(),
                 workdir: String::new(),
@@ -738,12 +739,7 @@ mod tests {
             let labels = serde_json::json!({"labels": {"factory.instance": instance, "factory.run": self.context.run}});
             let script = format!("#!/bin/sh\necho \"$*\" >> '{}/calls'\ncase \"$1 $2\" in\n'sandbox get') printf '%s\\n' '{}' ;;\n'logs factory-aaaabbbb') if [ {} = 1 ]; then echo SECRET_ERROR >&2; exit 1; fi; /bin/cat '{}/logs'; echo log-read >> '{}/calls' ;;\n'sandbox delete') test -d '{}/.factory/logs/service-evidence' ;;\nesac\n", self.root.display(), labels,
                 if failure { 1 } else { 0 }, self.root.display(), self.root.display(), self.root.display());
-            std::fs::write(&self.context.base[0], script).unwrap();
-            std::fs::set_permissions(
-                &self.context.base[0],
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .unwrap();
+            std::fs::write(&self.context.base[1], script).unwrap();
         }
 
         fn provider(&self) -> Provider {
