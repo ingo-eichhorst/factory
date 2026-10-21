@@ -173,6 +173,17 @@ impl Engine {
             }
             Request::Metrics { ids, scope, window } => {
                 let now = Utc::now();
+                // `#333`: no ids with a scope is the Metrics tab's listing.
+                if let (true, Some(scope)) = (ids.is_empty(), scope.as_deref()) {
+                    let (metrics, rows) = self.metrics_listing(scope, now, window).await?;
+                    return Ok(Payload::Metrics {
+                        values: metrics.values,
+                        series: metrics.series,
+                        registry: metrics.registry,
+                        findings: metrics.findings,
+                        rows,
+                    });
+                }
                 let ids = if ids.is_empty() { self.default_metric_ids().await } else { ids };
                 let metrics = self.metrics_for(&ids, now, scope.as_deref(), window).await?;
                 Ok(Payload::Metrics {
@@ -180,6 +191,7 @@ impl Engine {
                     series: metrics.series,
                     registry: metrics.registry,
                     findings: metrics.findings,
+                    rows: Vec::new(),
                 })
             }
             Request::Signposts => Ok(Payload::Signposts {

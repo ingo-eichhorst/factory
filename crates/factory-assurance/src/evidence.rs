@@ -1077,6 +1077,7 @@ mod tests {
                             better: Some("higher".into()),
                         },
                     ],
+                    ..Default::default()
                 }),
             }],
         };

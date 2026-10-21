@@ -211,6 +211,8 @@ pub(crate) fn reported_configuration(
                         factory_assurance::reported::RawSource {
                             id: source.id.clone(),
                             file: source.file.clone(),
+                            service: source.service.clone(),
+                            path: source.path.clone(),
                             declare: declaration
                                 .declare
                                 .iter()
@@ -219,6 +221,20 @@ pub(crate) fn reported_configuration(
                                     title: declared.title.clone(),
                                     unit: declared.unit.clone(),
                                     better: declared.better.clone(),
+                                })
+                                .collect(),
+                            // `#333`: the scope's own declared services, so a
+                            // `service:` source resolves against exactly
+                            // what L2 Dependencies lists for it.
+                            services: scope
+                                .dependencies
+                                .services
+                                .iter()
+                                .map(|service| factory_assurance::reported::RawService {
+                                    name: service.name.clone(),
+                                    network: service.transport
+                                        == factory_core::config::DependencyTransport::Network,
+                                    endpoints: service.endpoints.clone(),
                                 })
                                 .collect(),
                         }
@@ -1375,6 +1391,7 @@ mod tests {
             source: Some(factory_core::config::ScopeMetricsSource {
                 id: Some("finance".into()),
                 file: Some("metrics.json".into()),
+                ..Default::default()
             }),
             declare: vec![factory_core::config::ScopeMetricsDeclared {
                 id: Some("beleg_coverage".into()),
@@ -1598,6 +1615,7 @@ mod tests {
                 source: Some(factory_core::config::ScopeMetricsSource {
                     id: Some(id.to_string()),
                     file: Some(file.to_string()),
+                    ..Default::default()
                 }),
                 declare: Vec::new(),
             })

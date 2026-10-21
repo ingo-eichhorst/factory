@@ -26,6 +26,7 @@ pub mod facts;
 pub mod knowledge;
 pub mod knowledge_provider;
 pub mod metrics;
+pub mod metrics_catalogue;
 pub mod metrics_service;
 pub mod metric_values;
 pub mod reported;

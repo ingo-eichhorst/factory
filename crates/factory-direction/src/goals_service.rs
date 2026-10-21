@@ -357,6 +357,32 @@ pub fn metric_ids(catalogue: &goals::GoalsCatalogue) -> Vec<MetricId> {
     ids
 }
 
+/// `#333`: every key result of the cycle current at `now` that reads a
+/// metric, as the plain reader L5's Metrics tab judges it with -- L6's
+/// authored intent projected down, never a score or band.
+pub fn metric_key_results(
+    catalogue: &goals::GoalsCatalogue,
+    now: DateTime<Utc>,
+) -> Vec<factory_assurance::metrics_catalogue::GoalKeyResult> {
+    let Some(cycle) = goals::current_cycle(&catalogue.cycles, now) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for objective in &cycle.objectives {
+        for kr in &objective.key_results {
+            if let Some(metric) = kr.bound_metric(&objective.id) {
+                out.push(factory_assurance::metrics_catalogue::GoalKeyResult {
+                    id: format!("{}/{}", objective.id, kr.id),
+                    metric,
+                    baseline: kr.baseline,
+                    target: kr.target,
+                });
+            }
+        }
+    }
+    out
+}
+
 fn push_if_known(ids: &mut Vec<MetricId>, id: &MetricId) {
     if !matches!(metrics::resolve(id), Err(MetricError::Unknown(_))) {
         ids.push(id.clone());

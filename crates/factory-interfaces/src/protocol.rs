@@ -842,9 +842,15 @@ pub enum Request {
     },
     /// Every named metric, computed fresh (`factory-daemon`'s `metrics.rs`)
     /// -- lazy like a policy fact: only the ids actually asked are computed.
-    /// `ids` empty means every non-parameterised metric plus whatever the
-    /// loaded goals catalogue and policy catalogues imply (see
-    /// `Engine::metrics`'s own doc comment). Read-only.
+    /// `ids` empty and no `scope` means every non-parameterised metric plus
+    /// whatever the loaded goals catalogue and policy catalogues imply (see
+    /// `Engine::metrics`'s own doc comment). `ids` empty *with* a `scope` is
+    /// the L5 Metrics tab's listing (`#333`): exactly the metrics that
+    /// subtree is measured by -- applicable policy `metric` checks, bound
+    /// quality measures, current key results when the scope is the
+    /// instance root, and its own declared `reported.*` metrics -- each
+    /// with its source and consumers in `Payload::Metrics::rows`.
+    /// Read-only.
     #[serde(rename = "metrics")]
     Metrics {
         #[serde(default)]
@@ -1740,6 +1746,11 @@ pub enum Payload {
         /// wire when there is nothing to report.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         findings: Vec<factory_assurance::reported::Finding>,
+        /// `#333`: on a scoped listing (`ids` empty, a `scope` given), one
+        /// row per value with where it comes from, its freshness and each
+        /// consumer's verdict. Empty on the wire for every other request.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rows: Vec<factory_assurance::metrics_catalogue::MetricRow>,
     },
     /// The answer to `Request::Dashboard`: the resolved tile list, or `null`
     /// on the wire for "no block anywhere in the chain names one -- use the

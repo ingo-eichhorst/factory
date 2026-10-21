@@ -212,12 +212,15 @@ enum Command {
     /// Every named metric, computed fresh off data Factory already records
     /// -- the shared vocabulary the L6 Goals tab's key results (and, later,
     /// Scenarios) read from. With no ids, every non-parameterised metric
-    /// plus whatever the loaded goals and policy catalogues imply.
+    /// plus whatever the loaded goals and policy catalogues imply; with no
+    /// ids and `--scope`, the L5 Metrics tab's listing (#333): what that
+    /// subtree is measured by, each with its source and its consumers.
     Metrics {
         /// e.g. `throughput_week`, `compliance.cra`, `bench.resolve_rate.eval-set-a`.
         ids: Vec<String>,
         /// Only this scope and its descendants (instance-wide metrics say so
-        /// in their registry definition and ignore this selection).
+        /// in their registry definition and ignore this selection). With no
+        /// ids, list only the metrics this subtree is measured by.
         #[arg(long)]
         scope: Option<String>,
         /// Override run-backed metric intervals: day, 14d, or 90d.
@@ -2304,7 +2307,10 @@ async fn main() -> Result<()> {
             let ids = ids.map_err(|e| anyhow!(e))?;
             let payload = client.send(Request::Metrics { ids, scope, window }).await?;
             print(&payload, cli.json, |p| match p {
-                Payload::Metrics { values, series, registry, findings } => {
+                Payload::Metrics { values, series, registry, findings, rows } if !rows.is_empty() => {
+                    Some(metrics_listing_text(values, registry, rows, findings))
+                }
+                Payload::Metrics { values, series, registry, findings, .. } => {
                     Some(metrics_text(values, series, registry, findings))
                 }
                 _ => None,
@@ -4350,6 +4356,81 @@ fn metrics_text(
             .unwrap_or_default();
         let reason = v.reason.as_deref().map(|r| format!("  ({r})")).unwrap_or_default();
         out.push_str(&format!("{:<40} {:<12} {value:>10}{trend}{reason}\n", v.id.as_str(), title));
+    }
+    if !findings.is_empty() {
+        out.push_str("\nscope.metrics declaration findings:\n");
+        for f in findings {
+            out.push_str(&format!("  {}: {}\n", f.subject, f.detail));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `#333`: `factory metrics --scope S` with no ids -- every metric the
+/// subtree is measured by, each with its value (or `--` and why), how fresh
+/// it is, where it comes from, and every consumer's verdict.
+fn metrics_listing_text(
+    values: &[factory_core::metrics::MetricValue],
+    registry: &[factory_core::protocol::MetricDefView],
+    rows: &[factory_core::metrics_catalogue::MetricRow],
+    findings: &[factory_core::reported::Finding],
+) -> String {
+    use factory_core::metrics_catalogue::{ConsumerStatus, Freshness, MetricSource};
+    let mut out = String::new();
+    for row in rows {
+        let value = values.iter().find(|v| v.id == row.id);
+        let def = registry.iter().find(|d| d.id == row.id.as_str());
+        let title = def.map(|d| d.title.as_str()).unwrap_or(row.id.as_str());
+        let shown = match value.and_then(|v| v.value) {
+            Some(n) => format!("{n:.4}"),
+            None => "--".to_string(),
+        };
+        let freshness = match row.freshness {
+            Freshness::Fresh => "fresh",
+            Freshness::Stale => "stale",
+            Freshness::NoData => "no data",
+            Freshness::NoWindow => "no window",
+        };
+        let as_of = value
+            .map(|v| v.as_of.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_default();
+        out.push_str(&format!("{:<40} {title}\n", row.id.as_str()));
+        out.push_str(&format!("  value    {shown}  as of {as_of}  ({freshness}"));
+        if let Some(max_age) = row.max_age {
+            out.push_str(&format!(", max_age {max_age}"));
+        }
+        out.push_str(")\n");
+        if let Some(reason) = value.and_then(|v| v.reason.as_deref()) {
+            out.push_str(&format!("  reason   {reason}\n"));
+        }
+        let source = match &row.source {
+            MetricSource::BuiltIn => "built-in".to_string(),
+            MetricSource::File { scope, path, .. } => format!("file {path} (scope {scope})"),
+            MetricSource::Service { scope, service, url, .. } => {
+                format!("service {service} at {url} (scope {scope})")
+            }
+            MetricSource::Unresolved { service, reason, .. } => match service {
+                Some(service) => format!("service {service}, unresolved: {reason}"),
+                None => format!("unresolved: {reason}"),
+            },
+        };
+        out.push_str(&format!("  source   {source}\n"));
+        for consumer in &row.consumers {
+            let status = match consumer.status {
+                ConsumerStatus::Met => "met",
+                ConsumerStatus::NotMet => "not met",
+                ConsumerStatus::Stale => "stale",
+                ConsumerStatus::NoData => "no data",
+                ConsumerStatus::Draft => "draft",
+            };
+            let kind = match consumer.kind {
+                factory_core::metrics_catalogue::ConsumerKind::Policy => "control",
+                factory_core::metrics_catalogue::ConsumerKind::Quality => "scenario",
+                factory_core::metrics_catalogue::ConsumerKind::Goal => "key result",
+            };
+            let at = consumer.scope.as_deref().map(|s| format!(" @ {s}")).unwrap_or_default();
+            out.push_str(&format!("  used by  {kind} {}{at}: {status}\n", consumer.id));
+        }
     }
     if !findings.is_empty() {
         out.push_str("\nscope.metrics declaration findings:\n");
@@ -8891,6 +8972,36 @@ mod tests {
             _ => panic!("summary"),
         }
         assert!(Cli::try_parse_from(["factory", "stats", "--window", "9d"]).is_err());
+    }
+
+    /// `#333`: the scoped listing names each metric's value, freshness,
+    /// source and every consumer's verdict.
+    #[test]
+    fn the_metrics_listing_names_value_source_and_each_consumers_verdict() {
+        let answer: factory_core::protocol::Payload = serde_json::from_value(serde_json::json!({
+            "kind": "metrics",
+            "values": [{ "id": "reported.finance.bookings_without_beleg", "value": 2.0, "as_of": "2026-10-20T09:00:00Z", "reason": null }],
+            "series": [],
+            "registry": [],
+            "rows": [{
+                "id": "reported.finance.bookings_without_beleg",
+                "source": { "kind": "service", "source": "finance", "scope": "finance", "service": "fava",
+                            "endpoint": "127.0.0.1:8793", "path": "/metrics", "url": "http://127.0.0.1:8793/metrics" },
+                "freshness": "fresh",
+                "max_age": "1w",
+                "consumers": [{ "kind": "policy", "id": "gobd/belegprinzip", "scope": "finance", "status": "not_met", "below": 0.0 }]
+            }]
+        }))
+        .unwrap();
+        let factory_core::protocol::Payload::Metrics { values, registry, rows, findings, .. } = answer else {
+            panic!("metrics payload")
+        };
+        let text = metrics_listing_text(&values, &registry, &rows, &findings);
+        assert!(text.contains("reported.finance.bookings_without_beleg"), "{text}");
+        assert!(text.contains("2.0000"), "{text}");
+        assert!(text.contains("fresh, max_age 1w"), "{text}");
+        assert!(text.contains("service fava at http://127.0.0.1:8793/metrics (scope finance)"), "{text}");
+        assert!(text.contains("used by  control gobd/belegprinzip @ finance: not met"), "{text}");
     }
 
     #[test]
