@@ -933,6 +933,49 @@ impl Fact for SignpostFact {
     type Producer = L5;
 }
 
+/// One stored version of a scope page (`#343`): the content's address, how
+/// big it is and who published it. `sha256` is the version's identity and
+/// the name of its directory under `.factory/pages/`; `data_bytes` is set
+/// when the version carries a `--data` JSON document beside its HTML.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageVersionFact {
+    pub sha256: String,
+    /// The HTML and the data together, what `max_bytes` is checked against.
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_bytes: Option<u64>,
+    pub title: String,
+    pub published_at: DateTime<Utc>,
+    /// Who published it, as `Caller::describe` says it.
+    pub published_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+}
+
+/// A page a scope declares (`scope.pages`, `#343`) and what is published for
+/// it right now: the version shown (`current`, `None` until the first
+/// publish -- "not published yet") and every version still kept, newest
+/// first. `current` is usually the newest, and is an older one after a
+/// rollback. Read live from the page store on every request; nothing about
+/// it is cached or copied anywhere else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopePageFact {
+    pub scope: String,
+    pub name: String,
+    pub title: String,
+    pub max_bytes: u64,
+    pub keep: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<PageVersionFact>,
+    #[serde(default)]
+    pub versions: Vec<PageVersionFact>,
+}
+impl Fact for ScopePageFact {
+    type Producer = L4;
+}
+
 /// One row of [`FACT_CATALOGUE`]: a fact's name, the level that produces it,
 /// which levels read it today, and where its shared schema lives.
 #[derive(Debug, Clone, Copy)]
@@ -1255,6 +1298,13 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         readers: &["L5 quality", "L6 policy (the `roles`/`sandbox` checks)"],
         lives_in_kernel: true,
         note: "moved with its nested shared vocabulary in phase 2",
+    },
+    FactCatalogueEntry {
+        fact: "ScopePageFact",
+        producer: "L4",
+        readers: &["People Pages view", "People dashboard page tiles"],
+        lives_in_kernel: true,
+        note: "declared scope pages with their current and kept versions, read live from the page store (#343)",
     },
 ];
 

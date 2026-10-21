@@ -65,6 +65,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<CostReport, L4>("CostReport", "L4");
     assert_producer::<GateFact, L5>("GateFact", "L5");
     assert_producer::<KnowledgeTags, L5>("KnowledgeTags", "L5");
+    assert_producer::<ScopePageFact, L4>("ScopePageFact", "L4");
 }
 
 #[test]
@@ -273,6 +274,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "CostReport",
         "GateFact",
         "KnowledgeTags",
+        "ScopePageFact",
     ];
     let mut actual: Vec<_> = FACT_CATALOGUE.iter().map(|entry| entry.fact).collect();
     actual.sort_unstable();

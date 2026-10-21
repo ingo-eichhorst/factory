@@ -18,6 +18,7 @@ pub mod occupancy;
 pub mod occupancy_history;
 pub mod operations;
 pub mod origin;
+pub mod pages;
 pub mod production;
 mod process_metrics;
 pub mod ready;

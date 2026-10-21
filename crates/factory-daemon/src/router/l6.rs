@@ -57,30 +57,16 @@ impl Engine {
                 let (filename, body) = l6.policy_export_render(scope.as_deref(), &format).await?;
                 Ok(Payload::PolicyExport { format, filename, body })
             }
-            Request::Dashboard { scope } => {
-                let (dashboard, source) = self.dashboard_for(scope.as_deref())?;
-                Ok(Payload::Dashboard {
-                    tiles: dashboard.map(|d| d.tiles),
-                    source,
-                })
-            }
+            Request::Dashboard { scope } => self.dashboard_payload(scope.as_deref()),
             Request::DashboardSet { scope, tiles } => {
                 let scope = self.set_dashboard(&scope, tiles)?;
                 self.shared.bus.publish(Event::DashboardChanged { scope: scope.clone() });
-                let (dashboard, source) = self.dashboard_for(Some(&scope))?;
-                Ok(Payload::Dashboard {
-                    tiles: dashboard.map(|d| d.tiles),
-                    source,
-                })
+                self.dashboard_payload(Some(&scope))
             }
             Request::DashboardReset { scope } => {
                 let scope = self.reset_dashboard(&scope)?;
                 self.shared.bus.publish(Event::DashboardChanged { scope: scope.clone() });
-                let (dashboard, source) = self.dashboard_for(Some(&scope))?;
-                Ok(Payload::Dashboard {
-                    tiles: dashboard.map(|d| d.tiles),
-                    source,
-                })
+                self.dashboard_payload(Some(&scope))
             }
             Request::Goals { scope, cycle } => Ok(Payload::Goals {
                 report: l6.goals_report(scope.as_deref(), cycle.as_deref()).await?,

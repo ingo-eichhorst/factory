@@ -1399,6 +1399,7 @@ mod tests {
             backup: None,
             memory: None,
             skills: Vec::new(),
+            pages: Vec::new(),
         }
     }
 

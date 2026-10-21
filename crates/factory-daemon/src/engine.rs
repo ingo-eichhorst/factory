@@ -294,6 +294,7 @@ impl Engine {
                 workflow_edit: tokio::sync::Mutex::new(()),
                 run_evidence: factory_process::evidence_store::RunEvidenceStore::in_memory()
                     .expect("an in-memory run evidence store should open"),
+                pages: factory_process::pages::PageStore::new(&factory.factory_dir()),
                 usage_edit: tokio::sync::Mutex::new(()),
                 turn_usage_pending: Default::default(),
                 verifying: Default::default(),
@@ -452,6 +453,21 @@ impl Engine {
         scope: Option<&str>,
     ) -> Result<(Option<factory_core::dashboard::DashboardConfig>, Option<String>)> {
         self.factory_snapshot().dashboard_for(scope)
+    }
+
+    /// `Request::Dashboard`'s whole answer: `dashboard_for`, with the scope
+    /// each `page` tile names (`#343`) beside it.
+    pub fn dashboard_payload(&self, scope: Option<&str>) -> Result<Payload> {
+        let (dashboard, source) = self.dashboard_for(scope)?;
+        let page_scopes = dashboard
+            .as_ref()
+            .map(|d| self.factory_snapshot().page_tile_scopes(d, source.as_deref()))
+            .unwrap_or_default();
+        Ok(Payload::Dashboard {
+            tiles: dashboard.map(|d| d.tiles),
+            source,
+            page_scopes,
+        })
     }
 
     /// Every policy layer in effect for `scope` right now, root first --
@@ -1521,6 +1537,7 @@ mod tests {
                 backup: None,
                 memory: None,
                 skills: Vec::new(),
+                pages: Vec::new(),
             }],
             infrastructure: Default::default(),
             secrets: Vec::new(),
@@ -1698,6 +1715,7 @@ mod tests {
                     backup: None,
                     memory: None,
                     skills: Vec::new(),
+                    pages: Vec::new(),
                 }],
                 infrastructure: Default::default(),
                 secrets: Vec::new(),
@@ -5001,6 +5019,7 @@ mod tests {
                     backup: None,
                     memory: None,
                     skills: Vec::new(),
+                    pages: Vec::new(),
                 }],
                 infrastructure: Default::default(),
                 secrets: Vec::new(),
@@ -5058,6 +5077,7 @@ mod tests {
                     environments: Vec::new(),
                     renewals: Vec::new(),
                     backup: None,
+                    pages: Vec::new(),
                     metrics: None,
                     memory: None,
                     skills: Vec::new(),

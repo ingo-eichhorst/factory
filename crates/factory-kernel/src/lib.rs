@@ -110,6 +110,7 @@ pub use facts::{
 };
 pub use facts::{AgentReportedFact, RunSnapshotFact, RunSnapshotQuery, TaskSnapshotFact};
 pub use facts::{SignpostFact, SignpostObservation};
+pub use facts::{PageVersionFact, ScopePageFact};
 pub use facts::{
     BackupFact, CodexAgentModel, CodexModelSource, CodexModelsFact, CodexServedModel, DaemonConfigFact, Fact,
     FactCatalogueEntry, Level, SecretsPresence, VerifySummary,

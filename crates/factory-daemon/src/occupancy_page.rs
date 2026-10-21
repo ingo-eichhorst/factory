@@ -347,7 +347,10 @@ mod tests {
             engine.l4.store.append_status(&c).await.unwrap();
         }
         // A person stops it: L3 writes it down as gone, and L4 reads that as a fact.
-        engine.l3_service().stop_agent("demo/watcher").await.unwrap();
+        engine.l3_service().stop_agent("demo/watcher", &crate::l3_service::Asker {
+            by: "the owner".into(),
+            source: "owner",
+        }).await.unwrap();
         engine.l4_service().sample_standing_agents().await;
 
         let occ = engine.occupancy(Some(60), None, None).await.unwrap();

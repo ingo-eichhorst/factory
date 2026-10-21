@@ -1,0 +1,19 @@
+{
+  "title": "Konferenz-Radar (sample)",
+  "generated_at": "2026-10-19",
+  "note": "Fake data for the reference page in examples/pages/. Every conference, date and URL here is invented.",
+  "conferences": [
+    { "id": "lorem-devdays", "name": "Lorem DevDays", "city": "Berlin", "country": "DE", "lat": 52.52, "lon": 13.40, "cfp_deadline": "2026-11-14", "start": "2027-02-10", "end": "2027-02-12", "topics": ["agents", "platform"], "url": "https://example.org/lorem-devdays" },
+    { "id": "ipsum-ai-summit", "name": "Ipsum AI Summit", "city": "Lisbon", "country": "PT", "lat": 38.72, "lon": -9.14, "cfp_deadline": "2026-10-31", "start": "2027-01-20", "end": "2027-01-21", "topics": ["llm", "evaluation"], "url": "https://example.org/ipsum-ai" },
+    { "id": "dolor-cloud-week", "name": "Dolor Cloud Week", "city": "Amsterdam", "country": "NL", "lat": 52.37, "lon": 4.90, "cfp_deadline": "2026-12-05", "start": "2027-03-16", "end": "2027-03-18", "topics": ["platform", "ops"], "url": "https://example.org/dolor-cloud" },
+    { "id": "sit-amet-conf", "name": "Sit Amet Conf", "city": "Munich", "country": "DE", "lat": 48.14, "lon": 11.58, "cfp_deadline": "2026-11-28", "start": "2027-02-24", "end": "2027-02-25", "topics": ["security"], "url": "https://example.org/sit-amet" },
+    { "id": "consectetur-live", "name": "Consectetur Live", "city": "London", "country": "GB", "lat": 51.51, "lon": -0.13, "cfp_deadline": "2027-01-09", "start": "2027-04-13", "end": "2027-04-15", "topics": ["agents", "product"], "url": "https://example.org/consectetur" },
+    { "id": "adipiscing-days", "name": "Adipiscing Days", "city": "Austin", "country": "US", "lat": 30.27, "lon": -97.74, "cfp_deadline": "2026-12-15", "start": "2027-03-03", "end": "2027-03-05", "topics": ["llm", "platform"], "url": "https://example.org/adipiscing" },
+    { "id": "elit-forum", "name": "Elit Forum", "city": "Toronto", "country": "CA", "lat": 43.65, "lon": -79.38, "cfp_deadline": "2027-01-30", "start": "2027-04-27", "end": "2027-04-28", "topics": ["evaluation"], "url": "https://example.org/elit-forum" },
+    { "id": "sed-do-tokyo", "name": "Sed Do Tokyo", "city": "Tokyo", "country": "JP", "lat": 35.68, "lon": 139.69, "cfp_deadline": "2026-11-20", "start": "2027-01-28", "end": "2027-01-29", "topics": ["agents"], "url": "https://example.org/sed-do" },
+    { "id": "eiusmod-sydney", "name": "Eiusmod Sydney", "city": "Sydney", "country": "AU", "lat": -33.87, "lon": 151.21, "cfp_deadline": "2027-02-06", "start": "2027-05-11", "end": "2027-05-12", "topics": ["ops", "security"], "url": "https://example.org/eiusmod" },
+    { "id": "tempor-saopaulo", "name": "Tempor São Paulo", "city": "São Paulo", "country": "BR", "lat": -23.55, "lon": -46.63, "cfp_deadline": "2026-12-20", "start": "2027-03-24", "end": "2027-03-26", "topics": ["platform"], "url": "https://example.org/tempor" },
+    { "id": "incididunt-nairobi", "name": "Incididunt Nairobi", "city": "Nairobi", "country": "KE", "lat": -1.29, "lon": 36.82, "cfp_deadline": "2027-01-15", "start": "2027-04-06", "end": "2027-04-07", "topics": ["product", "llm"], "url": "https://example.org/incididunt" },
+    { "id": "labore-zurich", "name": "Labore Zürich", "city": "Zurich", "country": "CH", "lat": 47.38, "lon": 8.54, "cfp_deadline": "2026-11-07", "start": "2027-01-13", "end": "2027-01-14", "topics": ["security", "evaluation"], "url": "https://example.org/labore" }
+  ]
+}

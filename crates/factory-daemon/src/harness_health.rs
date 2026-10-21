@@ -820,6 +820,7 @@ pub(crate) mod tests {
                     backup: None,
                     memory: None,
                     skills: Vec::new(),
+                    pages: Vec::new(),
                 }],
                 infrastructure: Default::default(),
                 secrets: Vec::new(),

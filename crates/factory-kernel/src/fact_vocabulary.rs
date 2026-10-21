@@ -214,10 +214,14 @@ pub enum Grant {
     /// Energy saving (`#260`). Owner-only, even when a role names the grant.
     #[serde(rename = "host.power")]
     HostPower,
+    /// Publish a version of a page the caller's own scope declares, or show
+    /// an older kept version again (`#343`).
+    #[serde(rename = "page.publish")]
+    PagePublish,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 36] = [
+    pub const ALL: [Grant; 37] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -254,6 +258,7 @@ impl Grant {
         Grant::DeployPublish,
         Grant::SecretsEdit,
         Grant::HostPower,
+        Grant::PagePublish,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -294,6 +299,7 @@ impl Grant {
             Self::DeployRecord => "deploy.record",
             Self::DeployPublish => "deploy.publish",
             Self::HostPower => "host.power",
+            Self::PagePublish => "page.publish",
         }
     }
     pub fn describe(self) -> &'static str {
@@ -336,6 +342,7 @@ impl Grant {
             Self::DeployRecord => "record a deployment or a release",
             Self::DeployPublish => "approve publishing a deployment to GitHub",
             Self::HostPower => "change the host's power mode (Automatic, High performance, Energy saving)",
+            Self::PagePublish => "publish or roll back a page its scope declares",
         }
     }
     pub fn group(self) -> &'static str {
@@ -373,6 +380,7 @@ impl Grant {
             Self::SecretsEdit => "Secrets",
             Self::DeployRecord | Self::DeployPublish => "Deployments",
             Self::HostPower => "Host",
+            Self::PagePublish => "Pages",
         }
     }
 }
