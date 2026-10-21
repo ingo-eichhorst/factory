@@ -3,8 +3,8 @@
 
 use async_trait::async_trait;
 use factory_core::adapter::agent::{
-    truncate_tail, Agent, AgentContext, LaunchKind, LaunchSpec, ResumeSpec, UpstreamOutput,
-    UPSTREAM_RESULT_BYTE_CAP,
+    memory_section, truncate_tail, Agent, AgentContext, LaunchKind, LaunchSpec, ResumeSpec,
+    UpstreamOutput, UPSTREAM_RESULT_BYTE_CAP,
 };
 use factory_core::adapter::KnowledgeHints;
 use factory_core::error::{FactoryError, Result};
@@ -196,6 +196,12 @@ impl Agent for HarnessAgent {
                 prompt.push_str("\n\n");
                 prompt.push_str(&upstream_section(&binding.upstream));
             }
+            // Unlike the knowledge hints, memory is read again for every run:
+            // the run being resumed may itself have changed it (`#339`).
+            if let Some(memory) = &binding.memory {
+                prompt.push_str("\n\n");
+                prompt.push_str(&memory_section(memory));
+            }
             return Ok(prompt);
         }
         let instructions = if task.instructions.trim().is_empty() {
@@ -247,6 +253,13 @@ impl Agent for HarnessAgent {
         if let Some(hints) = &binding.knowledge {
             prompt.push('\n');
             prompt.push_str(&knowledge_section(hints));
+        }
+        // Task content as well: what this scope keeps between runs (`#339`),
+        // read from its files at dispatch. The commands that change it are in
+        // the contract, with the rest.
+        if let Some(memory) = &binding.memory {
+            prompt.push('\n');
+            prompt.push_str(&memory_section(memory));
         }
         prompt.push_str(&format!(
             "\n{instructions}\n\
@@ -371,6 +384,9 @@ impl Agent for ShellAgent {
         if let Some(path) = ctx.write_knowledge_file()? {
             env.insert("FACTORY_KNOWLEDGE_FILE".into(), path.display().to_string());
         }
+        if let Some(path) = ctx.write_memory_file()? {
+            env.insert("FACTORY_MEMORY_FILE".into(), path.display().to_string());
+        }
         Ok(LaunchSpec {
             kind: LaunchKind::Command(Vec::new()),
             args: Vec::new(),
@@ -406,6 +422,13 @@ impl Agent for ShellAgent {
             .write_knowledge_file()?
             .and_then(|path| shell_single_quote(&path.display().to_string()))
             .map(|quoted| format!("export FACTORY_KNOWLEDGE_FILE={quoted}\n"))
+            .unwrap_or_default();
+        // And the scope's memory and skills (`#339`): `{facts, profile,
+        // skills}` as JSON, the same way again.
+        let export_memory = ctx
+            .write_memory_file()?
+            .and_then(|path| shell_single_quote(&path.display().to_string()))
+            .map(|quoted| format!("export FACTORY_MEMORY_FILE={quoted}\n"))
             .unwrap_or_default();
 
         // Everything the report needs -- the running/done/failed calls, the
@@ -444,7 +467,7 @@ impl Agent for ShellAgent {
              _factory_rc=$(mktemp \"${{TMPDIR:-/tmp}}/factory-rc-XXXXXX\")\n\
              \"$_factory_bin\" task report \"$_factory_id\" --status running --message 'shell agent started' >/dev/null\n\
              {{ (\n\
-             {export_upstream}{export_knowledge}{command}\n\
+             {export_upstream}{export_knowledge}{export_memory}{command}\n\
              ); echo $? > \"$_factory_rc\"; }} | tee \"$_factory_out\"\n\
              _factory_code=$(cat \"$_factory_rc\")\n\
              if [ \"$_factory_code\" = 0 ]; then\n\
@@ -585,6 +608,7 @@ mod tests {
                 resumed_session: None,
                 upstream: Vec::new(),
                 knowledge: None,
+                memory: None,
                 required_steps: Vec::new(),
                 agent_exits: Vec::new(),
                 deliver: None,
@@ -1127,6 +1151,90 @@ mod tests {
 
         let written: KnowledgeHints = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written, context.task.as_ref().unwrap().knowledge.clone().unwrap());
+        std::fs::remove_dir_all(&context.guides_dir).ok();
+    }
+
+    fn ctx_with_memory() -> AgentContext {
+        let mut context = ctx(None);
+        context.task.as_mut().unwrap().memory = Some(factory_agents::memory::ScopeMemory {
+            facts: Some(factory_agents::memory::MemoryFile {
+                path: "/co/projects/radar/memory/MEMORY.md".into(),
+                max_chars: 2200,
+                chars: 54,
+                entries: vec!["Ingo is accepted for DevLand 2027.".into(), "Track CFPs\nbroadly.".into()],
+                shared: false,
+                error: None,
+            }),
+            profile: Some(factory_agents::memory::MemoryFile {
+                path: "/co/memory/USER.md".into(),
+                max_chars: 1400,
+                chars: 29,
+                entries: vec!["Prefers to be asked in German.".into()],
+                shared: true,
+                error: None,
+            }),
+            skills: vec![
+                factory_agents::memory::SkillHandle {
+                    name: "conference-radar-tracking".into(),
+                    path: "/co/projects/radar/skill".into(),
+                    learn: factory_agents::memory::Learn::Propose,
+                    archived: None,
+                    error: None,
+                },
+                factory_agents::memory::SkillHandle {
+                    name: "old-map".into(),
+                    path: "/co/projects/radar/old".into(),
+                    learn: factory_agents::memory::Learn::Apply,
+                    archived: Some("radar/old-map-20260101T000000Z".into()),
+                    error: None,
+                },
+            ],
+        });
+        context
+    }
+
+    /// `#339`: every harness is handed the scope's facts and the owner
+    /// profile in full, numbered, and each skill by path -- on a fresh run
+    /// and a resumed one alike, since memory may have changed in between --
+    /// and its contract names the commands that change them.
+    #[tokio::test]
+    async fn every_harness_prompt_carries_the_scopes_memory_and_skills_and_the_commands_for_them() {
+        let context = ctx_with_memory();
+        for agent in [HarnessAgent::claude_code(), HarnessAgent::codex(), HarnessAgent::pi()] {
+            let prompt = agent.prompt(&context).await.unwrap();
+            assert!(prompt.contains("This scope's facts (/co/projects/radar/memory/MEMORY.md, 54 of 2200 characters):\n[1] Ingo is accepted for DevLand 2027.\n[2] Track CFPs\n    broadly.\n"), "{prompt}");
+            assert!(prompt.contains("The owner's profile, shared by every scope that keeps one (/co/memory/USER.md, 29 of 1400 characters):\n[1] Prefers to be asked in German.\n"), "{prompt}");
+            assert!(prompt.contains("- conference-radar-tracking: /co/projects/radar/skill/SKILL.md (learn: propose"), "{prompt}");
+            assert!(prompt.contains("- old-map: archived by curation, so this run does not have it"), "{prompt}");
+            assert!(prompt.contains("memory add --task t1"), "{prompt}");
+            assert!(prompt.contains("Add `--profile` to any of these for the owner profile"), "{prompt}");
+            assert!(prompt.contains("skill submit --task t1"), "{prompt}");
+            assert!(prompt.contains("Skills (conference-radar-tracking)"), "an archived skill is not offered for change: {prompt}");
+            assert!(prompt.find("keeps between runs").unwrap() < prompt.find("Report progress").unwrap());
+
+            let mut resumed = context.clone();
+            resumed.task.as_mut().unwrap().resumed_session = Some("s-1".into());
+            let prompt = agent.prompt(&resumed).await.unwrap();
+            assert!(prompt.contains("[1] Ingo is accepted for DevLand 2027."), "a resumed run gets it too: {prompt}");
+        }
+        let codex = HarnessAgent::codex().prompt(&context).await.unwrap();
+        assert!(codex.contains("memory add --task t1 --run-token "), "codex's contract carries the token: {codex}");
+
+        let plain = HarnessAgent::claude_code().prompt(&ctx(None)).await.unwrap();
+        assert!(!plain.contains("keeps between runs") && !plain.contains("memory add"), "{plain}");
+    }
+
+    #[tokio::test]
+    async fn the_shell_agent_exports_the_memory_file_in_its_launch_and_its_script() {
+        let context = ctx_with_memory();
+        let launch = ShellAgent.launch_spec(&context).await.unwrap();
+        let path = launch.env.get("FACTORY_MEMORY_FILE").expect("exported").clone();
+        ShellAgent.prompt(&context).await.unwrap();
+        let script = std::fs::read_to_string(context.shell_script_path().unwrap()).unwrap();
+        assert!(script.contains(&format!("export FACTORY_MEMORY_FILE='{path}'")), "{script}");
+        let written: factory_agents::memory::ScopeMemory = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written, context.task.as_ref().unwrap().memory.clone().unwrap());
+        assert!(!ShellAgent.launch_spec(&ctx(None)).await.unwrap().env.contains_key("FACTORY_MEMORY_FILE"));
         std::fs::remove_dir_all(&context.guides_dir).ok();
     }
 

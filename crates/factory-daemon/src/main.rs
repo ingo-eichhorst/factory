@@ -79,6 +79,8 @@ mod schedule;
 mod site;
 mod stores;
 mod suggestions;
+mod learning;
+mod memory;
 #[cfg(test)]
 mod storage_owner_tests;
 #[cfg(test)]
@@ -225,6 +227,8 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         renewals: Vec::new(),
         metrics: None,
         backup: None,
+        memory: None,
+        skills: Vec::new(),
     };
     let config = Config {
         version: 1,
@@ -500,6 +504,9 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     let provisioning = tokio::spawn(provision::run(engine.clone(), shutdown_rx.clone()));
     let recovery_receipts = tokio::spawn(recovery_journal::run(engine.clone(), shutdown_rx.clone()));
     let important_dates = tokio::spawn(renewals::run(engine.clone(), shutdown_rx.clone()));
+    // `daemon.skill_curation` (`#339`): archiving takes a moment per skill,
+    // and nothing else should wait behind it.
+    let curation = tokio::spawn(memory::run(engine.clone(), shutdown_rx.clone()));
 
     engine.shared.bus.publish(Event::DaemonStarted {
         at: chrono::Utc::now(),
@@ -543,6 +550,7 @@ async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
     provisioning.abort();
     recovery_receipts.abort();
     important_dates.abort();
+    curation.abort();
     engine.shared.registry.shutdown().await;
     Ok(())
 }

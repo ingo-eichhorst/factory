@@ -161,6 +161,8 @@ fn read_scope(path: &Path) -> Result<Scope> {
     refuse_misplaced_scope_secrets(&document, path)?;
     // And `channels:` (#337), which names those secrets.
     factory_core::config::refuse_misplaced_scope_channels(&document, path)?;
+    // And a top-level `memory:`/`skills:` (#339), which belong under `scope:`.
+    factory_core::config::refuse_misplaced_memory(&document, path)?;
     let file: ScopeFile = serde_yaml_ng::from_value(document).map_err(parsing)?;
     Ok(file.scope)
 }

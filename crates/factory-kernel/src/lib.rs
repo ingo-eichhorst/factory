@@ -63,6 +63,8 @@ pub use slug::is_slug;
 pub use workflow_identity::{WorkflowOrigin, WorkflowWorkspace};
 mod knowledge_hints;
 pub use knowledge_hints::{KnowledgeHints, KnowledgeHit};
+mod scope_memory;
+pub use scope_memory::{Learn, MemoryFile, MemoryTarget, ScopeMemory, SkillHandle};
 mod process_metrics;
 mod metric_values;
 pub use metric_values::{is_metric_segment, MetricId, MetricValue, MetricValuesFact};

@@ -166,7 +166,7 @@ test("the Inbox lists the attention queue, every scope, with the reason inline",
   // attention queue now -- `answering` hands both the same operations-
   // shaped body, so the clock side contributes nothing (`.clock` is
   // `undefined` on it), same as a daemon that predates the endpoint.
-  assert.deepEqual([...requested].sort(), ["/api/important-dates", "/api/operations", "/api/policy/clock", "/api/signposts"]);
+  assert.deepEqual([...requested].sort(), ["/api/important-dates", "/api/operations", "/api/policy/clock", "/api/signposts", "/api/skills/proposals?state=open"]);
   const html = el.inbox.innerHTML;
   assert.equal((html.match(/class="inbox-item"/g) || []).length, REPORT.attention.length);
   assert.match(html, /summarise support inbox<\/b> — blocked/);

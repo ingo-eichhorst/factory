@@ -477,6 +477,8 @@ mod tests {
             renewals: Vec::new(),
             backup: None,
             metrics: None,
+            memory: None,
+            skills: Vec::new(),
         };
         let root = Scope {
             id: "root-id".into(),
@@ -514,6 +516,8 @@ mod tests {
             renewals: Vec::new(),
             backup: None,
             metrics: None,
+            memory: None,
+            skills: Vec::new(),
         };
         let config = Config {
             version: 1,

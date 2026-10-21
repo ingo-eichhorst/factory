@@ -51,6 +51,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<StandingAgentActionsFact, L3>("StandingAgentActionsFact", "L3");
     assert_producer::<SessionStatusFact, L3>("SessionStatusFact", "L3");
     assert_producer::<HarnessVersionFact, L3>("HarnessVersionFact", "L3");
+    assert_producer::<ScopeMemory, L3>("ScopeMemory", "L3");
     assert_producer::<WorkflowFact, L4>("WorkflowFact", "L4");
     assert_producer::<EnvironmentRecoveryFact, L4>("EnvironmentRecoveryFact", "L4");
     assert_producer::<RecoveryJournalFact, L4>("RecoveryJournalFact", "L4");
@@ -258,6 +259,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "StandingAgentActionsFact",
         "SessionStatusFact",
         "HarnessVersionFact",
+        "ScopeMemory",
         "WorkflowFact",
         "EnvironmentRecoveryFact",
         "RecoveryJournalFact",

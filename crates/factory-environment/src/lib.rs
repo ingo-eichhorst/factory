@@ -1,4 +1,5 @@
-//! L2 environment domain: sandbox plans, secrets and declared dependencies.
+//! L2 environment domain: sandbox plans, secrets (and the check that a text
+//! holds none, `secret_scan`) and declared dependencies.
 //!
 //! Configuration validation and planning do not reach into whole-instance
 //! configuration, adapter traits, process tasks, or the router.
@@ -16,5 +17,6 @@ pub mod provision;
 mod provider_tests;
 pub mod sandbox;
 pub mod sandbox_runtime;
+pub mod secret_scan;
 pub mod secrets;
 pub mod service_observations;

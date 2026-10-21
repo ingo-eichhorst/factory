@@ -50,3 +50,13 @@ pub(crate) fn liveness_provider(engine: &Engine) -> crate::l3_service::LivenessP
 pub(crate) fn session_status_provider(engine: &Engine) -> factory_agents::runtime::StatusProvider<'_> {
     factory_agents::runtime::StatusProvider { runtimes: &engine.shared.registry }
 }
+
+/// `#339`: the scope's memory and skills, read from its files on every ask.
+pub(crate) fn memory_provider(engine: &Engine) -> factory_agents::memory::Provider {
+    let snapshot = engine.factory_snapshot();
+    factory_agents::memory::Provider {
+        state_dir: crate::memory::state_dir(&snapshot),
+        scopes: snapshot.config.memory_scopes(),
+        root: snapshot.root,
+    }
+}

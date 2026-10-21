@@ -82,6 +82,7 @@ import { inboxClockRows } from "./clock-model.js";
 import { signpostObservations } from "./signposts-model.js";
 import { fetchDates } from "./dates.js";
 import { renewalInboxRows, datesSummary } from "./dates-model.js";
+import { SKILL_ACTION_LABELS, SKILL_PROPOSALS_PATH, isSkillAction, skillActionRequest, skillInboxRows } from "./skills-model.js";
 import { taskUsageLine, costFigure } from "./usage-model.js";
 import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
@@ -964,6 +965,9 @@ let inboxReport;
 /// `inboxClockRows` already returns `[]` for a `null` clock (`clock-model.js`).
 let clockReport;
 let renewalReport;
+/// The last open skill proposals (`#339`), the same way: `null` when the
+/// read failed, and then simply no rows.
+let skillReport;
 let signpostReport;
 let signpostsAsked = 0;
 let inboxAsked = 0;
@@ -1002,6 +1006,14 @@ function renderSignposts() {
   }
 }
 
+async function fetchSkillProposals() {
+  try {
+    return await api(SKILL_PROPOSALS_PATH);
+  } catch {
+    return null;
+  }
+}
+
 async function fetchClock() {
   try {
     return (await api("/api/policy/clock")).clock;
@@ -1034,7 +1046,7 @@ function clockFindingHref(scope) {
 /// each block is already ordered within itself, and a missed legal
 /// deadline leads.
 function inboxRows(elapsedS) {
-  return [...inboxClockRows(clockReport, elapsedS, clockReportTitle, clockFindingHref), ...renewalInboxRows(renewalReport), ...inboxItems(inboxReport, elapsedS)];
+  return [...inboxClockRows(clockReport, elapsedS, clockReportTitle, clockFindingHref), ...renewalInboxRows(renewalReport), ...inboxItems(inboxReport, elapsedS), ...skillInboxRows(skillReport)];
 }
 
 /// The Inbox is the daemon's attention list (`#106`), every scope, minus
@@ -1047,11 +1059,12 @@ export async function loadInbox() {
   // Two refetches can overlap; only the newest one's answer is drawn, or a
   // slow old read could land last and bring back what was just resolved.
   const mine = ++inboxAsked;
-  const [ops, clock, renewals] = await Promise.all([fetchOperationsReport(), fetchClock(), fetchDates(), loadSignposts()]);
+  const [ops, clock, renewals, , skills] = await Promise.all([fetchOperationsReport(), fetchClock(), fetchDates(), loadSignposts(), fetchSkillProposals()]);
   if (mine !== inboxAsked) return;
   inboxReport = ops;
   clockReport = clock;
   renewalReport = renewals;
+  skillReport = skills;
   inboxReceivedAt = Date.now();
   renderInbox();
 }
@@ -1068,13 +1081,17 @@ function inboxItemRow(it) {
   const href = it.task_id ? "" : fallbackHref;
   // The reason is the agent's own words when it gave any -- a blocked
   // run's question, a failure's last error -- and the daemon's otherwise.
-  return `<div class="inbox-item"${it.task_id ? ` data-task="${esc(it.task_id)}"` : ""}${it.run_id ? ` data-run="${esc(it.run_id)}"` : ""}${href ? ` data-href="${esc(href)}"` : ""}>
+  // `it.diff`: a skill change a run proposed (`#339`) -- the diff is what
+  // the owner decides on, so it opens right here rather than elsewhere.
+  const diff = it.diff ? `<details class="inbox-diff"><summary>diff</summary><pre>${esc(it.diff)}</pre></details>` : "";
+  const labels = { ...ACTION_LABELS, ...SKILL_ACTION_LABELS };
+  return `<div class="inbox-item"${it.task_id ? ` data-task="${esc(it.task_id)}"` : ""}${it.run_id ? ` data-run="${esc(it.run_id)}"` : ""}${it.proposal ? ` data-proposal="${esc(it.proposal)}"` : ""}${href ? ` data-href="${esc(href)}"` : ""}>
       <span class="it-dot" style="background:var(--${it.tone})"></span>
       <span class="it-t"><b>${esc(it.title || it.agent || "")}</b> — ${esc(it.label)}${it.suspicion ? ` <span class="ops-suspect">suspicion</span>` : ""}
-        <span class="sub">${esc(it.reason)}${it.scope ? ` · ${esc(it.scope)}` : ""}</span>
+        <span class="sub">${esc(it.reason)}${it.scope ? ` · ${esc(it.scope)}` : ""}</span>${diff}
       </span>
       <span class="it-age">${esc(fmtAge(it.age))}</span>
-      ${(it.actions || []).filter(a => ["approve", "reject", "accept_rework"].includes(a)).map(a => `<button type="button" class="btn inbox-action" data-action="${esc(a)}">${esc(ACTION_LABELS[a] || a)}</button>`).join("")}
+      ${(it.actions || []).filter(a => ["approve", "reject", "accept_rework"].includes(a) || isSkillAction(a)).map(a => `<button type="button" class="btn inbox-action" data-action="${esc(a)}">${esc(labels[a] || a)}</button>`).join("")}
     </div>`;
 }
 
@@ -1087,19 +1104,32 @@ function wireInboxRows(host) {
       else if (row.dataset.href) location.hash = row.dataset.href;
     };
   }
+  // Reading a skill change's diff is not opening its run.
+  for (const details of host.querySelectorAll(".inbox-diff")) {
+    details.onclick = (event) => event.stopPropagation();
+  }
   for (const button of host.querySelectorAll(".inbox-action")) {
     button.onclick = async (event) => {
       event.stopPropagation();
       const row = button.closest(".inbox-item");
-      const items = inboxItems(inboxReport, (Date.now() - inboxReceivedAt) / 1000);
-      const item = items.find(it => it.run_id === row?.dataset.run);
-      if (!item) return;
       const action = button.dataset.action;
-      const reason = ["approve", "reject"].includes(action)
-        ? window.prompt(`${ACTION_LABELS[action]} reason:`)
-        : "";
-      if (["approve", "reject"].includes(action) && !reason?.trim()) return;
-      const req = actionRequest(action, item, { reason });
+      let req;
+      if (isSkillAction(action)) {
+        // A skill change (`#339`) is named by its proposal, not a run.
+        if (!row?.dataset.proposal) return;
+        const reason = action === "reject_skill" ? window.prompt("Reject reason:") : "";
+        if (action === "reject_skill" && !reason?.trim()) return;
+        req = skillActionRequest(action, row.dataset.proposal, { reason });
+      } else {
+        const items = inboxItems(inboxReport, (Date.now() - inboxReceivedAt) / 1000);
+        const item = items.find(it => it.run_id === row?.dataset.run);
+        if (!item) return;
+        const reason = ["approve", "reject"].includes(action)
+          ? window.prompt(`${ACTION_LABELS[action]} reason:`)
+          : "";
+        if (["approve", "reject"].includes(action) && !reason?.trim()) return;
+        req = actionRequest(action, item, { reason });
+      }
       if (!req) return;
       button.disabled = true;
       try {

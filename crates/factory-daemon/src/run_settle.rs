@@ -6,7 +6,7 @@
 //! S10) it reaches through `L4Service::core`; `level_ownership_tests` counts those call sites and lets them only shrink.
 use chrono::Utc;
 use factory_core::adapter::agent::{
-    knowledge_hints_path, run_guide_path, run_hook_settings_path, run_shell_script_path,
+    knowledge_hints_path, memory_path, run_guide_path, run_hook_settings_path, run_shell_script_path,
     upstream_output_path,
 };
 use factory_core::adapter::runtime::RuntimeStatus;
@@ -963,6 +963,8 @@ impl L4Service<'_> {
         // And the knowledge-hints file, the same way for the same reader.
         let knowledge = knowledge_hints_path(&self.wiring.snapshot().guides_dir(), &run.task_id);
         let _ = std::fs::remove_file(knowledge);
+        // And the scope-memory file (`#339`), the same way again.
+        let _ = std::fs::remove_file(memory_path(&self.wiring.snapshot().guides_dir(), &run.task_id));
         // The shell agent's generated wrapper script, keyed by *run* id
         // rather than task id (see `run_shell_script_path`'s own comment) --
         // a retry's fresh run must never lose its script to this cleanup of
