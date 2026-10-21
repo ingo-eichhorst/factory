@@ -55,6 +55,7 @@ fn choice_status(value: &str) -> Option<&'static str> {
     match value {
         "unreviewed" => Some("watchlist"),
         "not_interested" => Some("not interested"),
+        "not_this_time" => Some("not this time"),
         "interested" => Some("interested"),
         "applied" => Some("submitted/applied"),
         "accepted" => Some("accepted/participating"),
@@ -68,6 +69,7 @@ fn choice_status(value: &str) -> Option<&'static str> {
 fn display_status(value: &str) -> &'static str {
     match value {
         "not interested" => "not_interested",
+        "not this time" => "not_this_time",
         "interested" => "interested",
         "submitted/applied" => "applied",
         "accepted/participating" => "accepted",
@@ -453,6 +455,7 @@ mod tests {
             status: "interested".into(),
         };
         assert_eq!(choice_status("interested"), Some("interested"));
+        assert_eq!(choice_status("not_this_time"), Some("not this time"));
         assert_eq!(choice_status("malicious"), None);
         assert_eq!(edition_year(&tracker["conferences"][0]), "2026");
         assert!(apply_choice(&mut tracker, &choice, "interested").unwrap());
@@ -468,6 +471,8 @@ mod tests {
         );
         assert_eq!(tracker["notes"][0], "keep");
         assert_eq!(tracker_rows(&tracker).unwrap()[0].status, "interested");
+        assert!(apply_choice(&mut tracker, &choice, "not this time").unwrap());
+        assert_eq!(tracker_rows(&tracker).unwrap()[0].status, "not_this_time");
         let missing = ConferenceChoice {
             edition_year: "2028".into(),
             ..choice
