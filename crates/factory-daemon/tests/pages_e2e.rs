@@ -6,12 +6,11 @@
 //!
 //! Skips (prints why, does not fail) without `herdr` on PATH or the `factory`
 //! binary built next to `factory-daemon`, like `workflow_shell_e2e.rs`; the
-//! browser half skips on its own without Chrome. Run it on a headless herdr
-//! session of its own, never the live one:
-//!
-//!     env -u HERDR_SOCKET_PATH HERDR_SESSION=qa-343 herdr server &
-//!     env -u HERDR_SOCKET_PATH -u FACTORY_SOCKET -u FACTORY_TOKEN HERDR_SESSION=qa-343 \
-//!         cargo test -p factory-daemon --test pages_e2e -- --nocapture
+//! browser half skips on its own without Chrome. Needs no herdr server of its
+//! own: like that file's, every `provision()` starts a headless herdr on a
+//! session of its own, strips the live instance's variables from what it
+//! starts and checks the daemon reports that session before any task runs, so
+//! it is safe from a Factory run's shell or a herdr pane.
 //!
 //! The rig is a copy of `workflow_shell_e2e.rs`'s, cut down to what this file
 //! uses, rather than a shared module both would have to agree on.
@@ -31,12 +30,106 @@ const CHROME: &str = "/Applications/Google Chrome.app/Contents/MacOS/Google Chro
 
 // ------------------------------------------------------------- test rig
 
+/// What a Factory run's shell, or any herdr pane, carries that points at the
+/// live instance. Named one by one rather than every `FACTORY_*`, so an
+/// operator's opt-ins still reach the daemon.
+const LIVE_INSTANCE_ENV: &[&str] = &[
+    "HERDR_SOCKET_PATH",
+    "HERDR_CLIENT_SOCKET_PATH",
+    "HERDR_PANE_ID",
+    "HERDR_TAB_ID",
+    "HERDR_WORKSPACE_ID",
+    "HERDR_ENV",
+    "FACTORY_SOCKET",
+    "FACTORY_URL",
+    "FACTORY_ROOT",
+    "FACTORY_BIN",
+    "FACTORY_TOKEN",
+    "FACTORY_TASK_TOKEN",
+    "FACTORY_RUN_TOKEN",
+    "FACTORY_TASK_ID",
+    "FACTORY_RUN_ID",
+    "FACTORY_RUN_ATTEMPT",
+    "FACTORY_SCOPE",
+];
+
+/// Point a child at the rig's own herdr session and at nothing of the live
+/// instance's; an inherited `HERDR_SOCKET_PATH` would win over the session.
+fn scrub<'a>(command: &'a mut Command, session: &str) -> &'a mut Command {
+    for name in LIVE_INSTANCE_ENV {
+        command.env_remove(name);
+    }
+    command.env("HERDR_SESSION", session)
+}
+
+/// A headless herdr server on a session of the rig's own, under the real
+/// `HOME`. Stopped, and its session directory removed, on drop.
+struct Herdr {
+    bin: PathBuf,
+    session: String,
+    socket: String,
+    server: Option<Child>,
+}
+
+impl Herdr {
+    fn start(bin: PathBuf) -> Self {
+        let session = format!("e2e-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let status = scrub(&mut Command::new(&bin), &session).args(["status", "--json"]).output().unwrap();
+        assert!(status.status.success(), "herdr status: {}", String::from_utf8_lossy(&status.stderr));
+        let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+        let socket = status.pointer("/server/socket").and_then(Value::as_str).expect("herdr names a socket").to_string();
+        let server = scrub(&mut Command::new(&bin), &session)
+            .arg("server")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start herdr server");
+        let mut herdr = Self { bin, session, socket, server: Some(server) };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !Path::new(&herdr.socket).exists() {
+            if let Some(status) = herdr.server.as_mut().and_then(|s| s.try_wait().unwrap()) {
+                let log = Path::new(&herdr.socket).with_file_name("herdr-server.log");
+                panic!("herdr server exited ({status}):\n{}", std::fs::read_to_string(log).unwrap_or_default());
+            }
+            assert!(Instant::now() < deadline, "herdr server for {} never opened {}", herdr.session, herdr.socket);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        herdr
+    }
+
+    fn stop(&mut self) {
+        let Some(mut server) = self.server.take() else {
+            return;
+        };
+        let _ = scrub(&mut Command::new(&self.bin), &self.session)
+            .args(["server", "stop"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = server.kill();
+        let _ = server.wait();
+        if let Some(directory) = Path::new(&self.socket)
+            .parent()
+            .filter(|d| d.file_name() == Some(self.session.as_ref()))
+        {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+}
+
+impl Drop for Herdr {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 struct Daemon {
     child: Option<Child>,
     root: PathBuf,
     port: u16,
     factory_bin: PathBuf,
-    herdr_bin: PathBuf,
+    herdr: Herdr,
 }
 
 impl Daemon {
@@ -47,17 +140,13 @@ impl Daemon {
     fn spawn(&mut self) {
         assert!(self.child.is_none(), "a previous daemon was never stopped");
         let log = std::fs::File::create(self.root.join("daemon.log")).expect("daemon.log");
-        let child = Command::new(env!("CARGO_BIN_EXE_factory-daemon"))
+        let child = scrub(&mut Command::new(env!("CARGO_BIN_EXE_factory-daemon")), &self.herdr.session)
             .arg("--root")
             .arg(&self.root)
             .arg("run")
             .env("FACTORY_BIN", &self.factory_bin)
-            .env("FACTORY_HERDR_BIN", &self.herdr_bin)
+            .env("FACTORY_HERDR_BIN", &self.herdr.bin)
             .env("FACTORY_RENEWALS_DISCOVERY", "0")
-            .env_remove("FACTORY_SOCKET")
-            .env_remove("FACTORY_TOKEN")
-            .env_remove("FACTORY_TASK_TOKEN")
-            .env_remove("FACTORY_URL")
             .stdout(Stdio::from(log.try_clone().expect("dup log fd")))
             .stderr(Stdio::from(log))
             .spawn()
@@ -67,7 +156,7 @@ impl Daemon {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             if let Some((200, _, _)) = raw_request("GET", &url, None) {
-                return;
+                return self.assert_own_herdr();
             }
             if Instant::now() > deadline {
                 let log = std::fs::read_to_string(self.root.join("daemon.log")).unwrap_or_default();
@@ -75,6 +164,24 @@ impl Daemon {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// Fail closed before a task can open a pane: the daemon's herdr runtime
+    /// -- `herdr status --json` in the daemon's own environment -- has to be
+    /// on the rig's own session.
+    fn assert_own_herdr(&self) {
+        let runtimes = call("GET", &format!("{}/api/agent-runtime", self.base_url()), None)["runtimes"].clone();
+        let own = runtimes.as_array().into_iter().flatten().any(|runtime| {
+            runtime["runtime"] == "herdr"
+                && runtime["session"] == self.herdr.session.as_str()
+                && runtime["endpoint"] == self.herdr.socket.as_str()
+        });
+        assert!(
+            own,
+            "the daemon under test does not reach the rig's herdr session {} ({}); \
+             refusing to let it open a pane anywhere else: {runtimes}",
+            self.herdr.session, self.herdr.socket
+        );
     }
 
     /// A restart, the way `launchctl kickstart -k` does one: SIGTERM, then a
@@ -99,6 +206,7 @@ impl Drop for Daemon {
             let _ = child.kill();
             let _ = child.wait();
         }
+        self.herdr.stop();
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -187,7 +295,8 @@ fn provision() -> Daemon {
     let factory_bin = find_factory_bin().unwrap();
     let root = std::env::temp_dir().join(format!("f343-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
     std::fs::create_dir_all(&root).unwrap();
-    let init = Command::new(env!("CARGO_BIN_EXE_factory-daemon"))
+    let herdr = Herdr::start(herdr_bin);
+    let init = scrub(&mut Command::new(env!("CARGO_BIN_EXE_factory-daemon")), &herdr.session)
         .arg("--root")
         .arg(&root)
         .args(["init", "--name", "demo"])
@@ -216,7 +325,7 @@ fn provision() -> Daemon {
     .unwrap();
     std::fs::write(&config_path, serde_yaml_ng::to_string(&doc).unwrap()).unwrap();
 
-    let mut daemon = Daemon { child: None, root, port, factory_bin, herdr_bin };
+    let mut daemon = Daemon { child: None, root, port, factory_bin, herdr };
     daemon.spawn();
     daemon
 }
