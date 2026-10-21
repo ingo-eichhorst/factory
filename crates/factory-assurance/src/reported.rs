@@ -1,7 +1,8 @@
 //! `reported.<source>.<metric>` (`#278`): a scope's own domain data, read on
 //! request the same way every other L5 metric is -- never stored, never
 //! watched, never pushed. A scope declares one *source* (a JSON file its own
-//! tooling writes) and the metrics it reports through it, in its own
+//! tooling writes, or -- `#333` -- one of its own declared network dependency
+//! services, read over loopback) and the metrics it reports through it, in its own
 //! `.factory/config.yaml` (`scope.metrics`); the composition layer parses
 //! that block as plain strings and hands it here, fresh, on every read --
 //! the same "plain input supplied fresh per read" shape `quality_inputs`
@@ -13,7 +14,8 @@
 //!   source id, an unknown unit) -- never a hard error that would refuse the
 //!   whole config load;
 //! - [`read_source`]: opening one source's file, bounded and `O_NOFOLLOW`,
-//!   and parsing it into a [`Document`];
+//!   and parsing it into a [`Document`]; [`read_service`] is its `#333`
+//!   twin, one bounded HTTP GET to a loopback endpoint with no redirects;
 //! - [`value_for`]: turning one asked `(source, metric)` pair, the
 //!   [`Catalogue`], already-read [`Document`]s and a scope-coverage flag
 //!   into the [`MetricValue`] `metrics_service::compute_one` hands back --
@@ -46,7 +48,27 @@ use std::{
 pub struct RawSource {
     pub id: Option<String>,
     pub file: Option<String>,
+    /// `#333`: the name of one of this scope's own declared dependency
+    /// services to read the document from instead of a file -- exactly one
+    /// of `file` and `service` is given.
+    pub service: Option<String>,
+    /// `#333`: the request path `service` answers the document at.
+    pub path: Option<String>,
     pub declare: Vec<RawDeclared>,
+    /// `#333`: the declaring scope's own `dependencies.services`, as plain
+    /// data, so a `service` can be resolved here without L5 naming L2's own
+    /// declaration types. Empty when the scope declares none.
+    pub services: Vec<RawService>,
+}
+
+/// One declared dependency service, reduced to what a `service:` source
+/// needs: its name, whether its transport is `network`, and its endpoints
+/// exactly as written (`127.0.0.1:8793`, `https://host.ts.net:8793/x`, ...).
+#[derive(Debug, Clone, Default)]
+pub struct RawService {
+    pub name: String,
+    pub network: bool,
+    pub endpoints: Vec<String>,
 }
 
 /// See [`RawSource`]'s doc comment: every field is optional for the same
@@ -107,8 +129,22 @@ pub enum FindingKind {
     /// `declare[].better` is not `higher` or `lower`, or is missing.
     UnknownBetter,
     /// A field with no shape or spelling of its own to be "wrong" --
-    /// `source.file` or `declare[].title` -- was not given at all.
+    /// `source.file`/`source.service`, a service source's `path`, or
+    /// `declare[].title` -- was not given at all.
     MissingField,
+    /// `#333`: `source` gave both `file` and `service`.
+    FileAndService,
+    /// `#333`: `source.service` names no dependency service this scope
+    /// declares.
+    UnknownService,
+    /// `#333`: `source.service` names a `socket` or `file` service.
+    NotANetworkService,
+    /// `#333`: the service lists no loopback endpoint (`127.0.0.1`,
+    /// `localhost` or `[::1]` with a port) -- a tailnet or any other
+    /// endpoint is never used, wherever it is listed.
+    NoLoopbackEndpoint,
+    /// `#333`: a service source's `path` is not an absolute request path.
+    BadServicePath,
 }
 
 /// One authoring mistake in a `scope.metrics` declaration -- never a reason
@@ -153,15 +189,73 @@ pub struct DeclaredMetric {
 }
 
 /// One source that passed [`validate`]: a slug id, the scope that declared
-/// it, the file's resolved absolute path (already proven to stay inside the
-/// instance root, outside any `secrets` component, and -- at validation
-/// time -- not a symlink), and its declared metrics keyed by id.
+/// it, where its document is read from, and its declared metrics keyed by id.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidSource {
     pub id: String,
     pub scope: ScopeNode,
-    pub path: PathBuf,
+    pub location: Location,
     pub declared: BTreeMap<String, DeclaredMetric>,
+}
+
+/// Where a [`ValidSource`]'s document comes from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Location {
+    /// The file's resolved absolute path, already proven to stay inside the
+    /// instance root, outside any `secrets` component, and -- at validation
+    /// time -- not a symlink.
+    File(PathBuf),
+    /// `#333`: a declared network service's loopback endpoint.
+    Service(ServiceTarget),
+    /// `#333`: a `service` source [`validate`] refused -- an unknown or
+    /// non-network service, no loopback endpoint, a bad or missing `path`,
+    /// or `file` given as well. Kept, unlike a refused file path, so its
+    /// declared metrics still list and each reads `None` with `reason`
+    /// rather than as an undeclared source; the finding says the same.
+    Refused {
+        service: Option<String>,
+        reason: String,
+    },
+}
+
+/// The one loopback endpoint a `service` source is read from, chosen once by
+/// [`validate`] -- pure string work, nothing is resolved or connected there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceTarget {
+    pub service: String,
+    /// `host:port` exactly as the chosen endpoint wrote it, scheme and any
+    /// path of its own left off -- also the request's `Host` header.
+    pub endpoint: String,
+    pub host: LoopbackHost,
+    pub port: u16,
+    pub path: String,
+}
+
+/// The three loopback spellings an endpoint may use. Each is connected to as
+/// a literal address -- `localhost` included, so no resolver or hosts file
+/// can point a read anywhere but this machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopbackHost {
+    V4,
+    Localhost,
+    V6,
+}
+
+impl ServiceTarget {
+    pub fn url(&self) -> String {
+        format!("http://{}{}", self.endpoint, self.path)
+    }
+
+    fn addresses(&self) -> Vec<std::net::SocketAddr> {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+        let v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), self.port);
+        let v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), self.port);
+        match self.host {
+            LoopbackHost::V4 => vec![v4],
+            LoopbackHost::V6 => vec![v6],
+            LoopbackHost::Localhost => vec![v4, v6],
+        }
+    }
 }
 
 /// What [`validate`] found: every source that passed, keyed by id, plus
@@ -223,29 +317,55 @@ pub fn validate(root: &Path, configuration: &Configuration) -> Catalogue {
             continue;
         }
 
-        let Some(file) = raw.file.as_deref() else {
-            findings.push(finding(
-                FindingKind::MissingField,
-                &subject,
-                "no file was given for this source".to_string(),
-            ));
-            continue;
-        };
-        let path = match resolve_contained(&root_norm, &decl.scope.path, file) {
-            Ok(path) => path,
-            Err((kind, detail)) => {
-                findings.push(finding(kind, &subject, detail));
+        let location = match (raw.file.as_deref(), raw.service.as_deref()) {
+            (None, None) => {
+                findings.push(finding(
+                    FindingKind::MissingField,
+                    &subject,
+                    "no file or service was given for this source".to_string(),
+                ));
                 continue;
             }
+            // `#333`: both is refused rather than one picked -- either
+            // guess could silently read the wrong document.
+            (Some(_), Some(service)) => {
+                let reason =
+                    "both file and service are given; a source reads exactly one".to_string();
+                findings.push(finding(FindingKind::FileAndService, &subject, &reason));
+                Location::Refused {
+                    service: Some(service.to_string()),
+                    reason,
+                }
+            }
+            (None, Some(service)) => match resolve_service(service, raw) {
+                Ok(target) => Location::Service(target),
+                Err((kind, reason)) => {
+                    findings.push(finding(kind, &subject, &reason));
+                    Location::Refused {
+                        service: Some(service.to_string()),
+                        reason,
+                    }
+                }
+            },
+            (Some(file), None) => {
+                let path = match resolve_contained(&root_norm, &decl.scope.path, file) {
+                    Ok(path) => path,
+                    Err((kind, detail)) => {
+                        findings.push(finding(kind, &subject, detail));
+                        continue;
+                    }
+                };
+                if path_has_symlink(&root_norm, &path) {
+                    findings.push(finding(
+                        FindingKind::PathIsSymlink,
+                        &subject,
+                        "the declared file path is, or passes through, a symlink".to_string(),
+                    ));
+                    continue;
+                }
+                Location::File(path)
+            }
         };
-        if path_has_symlink(&root_norm, &path) {
-            findings.push(finding(
-                FindingKind::PathIsSymlink,
-                &subject,
-                "the declared file path is, or passes through, a symlink".to_string(),
-            ));
-            continue;
-        }
 
         let mut declared = BTreeMap::new();
         for d in &raw.declare {
@@ -317,7 +437,7 @@ pub fn validate(root: &Path, configuration: &Configuration) -> Catalogue {
             ValidSource {
                 id: source_id.to_string(),
                 scope: decl.scope.clone(),
-                path,
+                location,
                 declared,
             },
         );
@@ -350,6 +470,103 @@ pub fn directions(catalogue: &Catalogue) -> BTreeMap<String, Better> {
         }
     }
     out
+}
+
+/// `#333`: `service` resolved against the declaring scope's own declared
+/// dependency services -- it must exist, be a `network` service and list a
+/// loopback endpoint -- plus its `path`. The first loopback endpoint in list
+/// order is chosen, however many non-loopback ones come before it; a tailnet
+/// or any other endpoint is never a candidate at all.
+fn resolve_service(
+    service: &str,
+    raw: &RawSource,
+) -> std::result::Result<ServiceTarget, (FindingKind, String)> {
+    let Some(declared) = raw.services.iter().find(|s| s.name == service) else {
+        return Err((
+            FindingKind::UnknownService,
+            format!("this scope declares no dependency service {service:?}"),
+        ));
+    };
+    if !declared.network {
+        return Err((
+            FindingKind::NotANetworkService,
+            format!(
+                "dependency service {service:?} is not a network service; only a network \
+                 service's loopback endpoint is read"
+            ),
+        ));
+    }
+    let Some((endpoint, host, port)) = declared.endpoints.iter().find_map(|e| loopback(e)) else {
+        return Err((
+            FindingKind::NoLoopbackEndpoint,
+            format!(
+                "dependency service {service:?} lists no loopback endpoint (127.0.0.1, \
+                 localhost or [::1] with a port); no other endpoint is ever used"
+            ),
+        ));
+    };
+    let path = match raw.path.as_deref() {
+        None => {
+            return Err((
+                FindingKind::MissingField,
+                "no path was given for this service source".to_string(),
+            ))
+        }
+        Some(path) if !is_request_path(path) => {
+            return Err((
+                FindingKind::BadServicePath,
+                format!(
+                    "{path:?} is not a request path: it must start with `/` and hold no \
+                     spaces, control characters or `#`"
+                ),
+            ))
+        }
+        Some(path) => path.to_string(),
+    };
+    Ok(ServiceTarget {
+        service: service.to_string(),
+        endpoint,
+        host,
+        port,
+        path,
+    })
+}
+
+/// `endpoint` as a loopback `host:port`, or `None`. A bare `host:port` or an
+/// `http://` URL is accepted -- any other scheme is not, since the read is
+/// plain HTTP -- and whatever path the endpoint itself carries is left off:
+/// the source's own `path` names the document.
+fn loopback(endpoint: &str) -> Option<(String, LoopbackHost, u16)> {
+    let trimmed = endpoint.trim();
+    let rest = match trimmed.get(..7) {
+        Some(scheme) if scheme.eq_ignore_ascii_case("http://") => &trimmed[7..],
+        _ => trimmed,
+    };
+    if rest.contains("://") {
+        return None;
+    }
+    let hostport = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let (host, port) = if let Some(port) = hostport.strip_prefix("[::1]:") {
+        (LoopbackHost::V6, port)
+    } else {
+        let (host, port) = hostport.rsplit_once(':')?;
+        if host == "127.0.0.1" {
+            (LoopbackHost::V4, port)
+        } else if host.eq_ignore_ascii_case("localhost") {
+            (LoopbackHost::Localhost, port)
+        } else {
+            return None;
+        }
+    };
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let port: u16 = port.parse().ok().filter(|p| *p != 0)?;
+    Some((hostport.to_string(), host, port))
+}
+
+fn is_request_path(path: &str) -> bool {
+    path.starts_with('/') && path.bytes().all(|b| b.is_ascii_graphic() && b != b'#')
 }
 
 /// `file` resolved against `root_norm.join(scope_path)`, lexically
@@ -529,6 +746,234 @@ pub fn read_source(path: &Path) -> std::result::Result<Document, String> {
         .map_err(|error| format!("the declared metrics file does not parse: {error}"))
 }
 
+/// `#333`: how long one service read may take, connect to last byte. Short
+/// on purpose: the service is on this machine, and a read that blocks waits
+/// in front of whichever `metrics`/`quality`/`goals`/policy read asked.
+pub const SERVICE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A response head larger than this is refused before any body is read.
+const MAX_HEAD_BYTES: usize = 16 * 1024;
+
+/// `#333`: one GET of `target`'s document over loopback, plain HTTP/1.1 with
+/// `Connection: close` -- one attempt, no retry, no redirect followed (a
+/// `3xx` is a non-`2xx` like any other), the body bounded by
+/// [`MAX_SOURCE_BYTES`] exactly like a file, and the whole exchange bounded
+/// by `timeout` ([`SERVICE_TIMEOUT`] outside tests). Every failure comes back
+/// as a plain reason string, the same contract as [`read_source`].
+pub async fn read_service(
+    target: &ServiceTarget,
+    timeout: std::time::Duration,
+) -> std::result::Result<Document, String> {
+    let body = match tokio::time::timeout(timeout, fetch(target)).await {
+        Ok(body) => body?,
+        Err(_) => {
+            return Err(format!(
+                "the metrics service {:?} did not answer within {timeout:?} ({})",
+                target.service,
+                target.url()
+            ))
+        }
+    };
+    serde_json::from_slice(&body).map_err(|error| {
+        format!(
+            "the metrics service {:?} answered a body that does not parse: {error} ({})",
+            target.service,
+            target.url()
+        )
+    })
+}
+
+/// Every `(source id, target)` read concurrently, each on its own
+/// [`read_service`] -- one request per source, however many of its ids the
+/// caller asked for.
+pub async fn read_services(
+    targets: Vec<(String, ServiceTarget)>,
+    timeout: std::time::Duration,
+) -> BTreeMap<String, std::result::Result<Document, String>> {
+    let mut reads = tokio::task::JoinSet::new();
+    for (source_id, target) in targets {
+        reads.spawn(async move {
+            let read = read_service(&target, timeout).await;
+            (source_id, read)
+        });
+    }
+    let mut out = BTreeMap::new();
+    while let Some(joined) = reads.join_next().await {
+        if let Ok((source_id, read)) = joined {
+            out.insert(source_id, read);
+        }
+    }
+    out
+}
+
+async fn fetch(target: &ServiceTarget) -> std::result::Result<Vec<u8>, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let url = target.url();
+    let service = &target.service;
+    let failed = |what: &str, error: std::io::Error| {
+        format!("the metrics service {service:?} {what} ({url}): {error}")
+    };
+    let mut stream = None;
+    let mut last = None;
+    for address in target.addresses() {
+        match tokio::net::TcpStream::connect(address).await {
+            Ok(connected) => {
+                stream = Some(connected);
+                break;
+            }
+            Err(error) => last = Some(error),
+        }
+    }
+    let Some(mut stream) = stream else {
+        return Err(failed(
+            "could not be reached",
+            last.unwrap_or_else(|| std::io::Error::other("no address")),
+        ));
+    };
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\nUser-Agent: factory\r\n\r\n",
+        target.path, target.endpoint
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| failed("could not be sent the request", e))?;
+
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let head_end = loop {
+        if let Some(at) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            break at;
+        }
+        if raw.len() > MAX_HEAD_BYTES {
+            return Err(format!(
+                "the metrics service {service:?} answered a response head larger than \
+                 {MAX_HEAD_BYTES} bytes ({url})"
+            ));
+        }
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|e| failed("could not be read from", e))?;
+        if read == 0 {
+            return Err(format!(
+                "the metrics service {service:?} closed the connection before a complete \
+                 HTTP response ({url})"
+            ));
+        }
+        raw.extend_from_slice(&chunk[..read]);
+    };
+    let head = String::from_utf8_lossy(&raw[..head_end]).into_owned();
+    let mut body = raw[head_end + 4..].to_vec();
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().unwrap_or_default();
+    let code: u16 = status_line
+        .strip_prefix("HTTP/")
+        .and_then(|rest| rest.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+        .ok_or_else(|| {
+            format!(
+                "the metrics service {service:?} did not answer HTTP: {:?} ({url})",
+                sanitize_reason(&status_line.chars().take(80).collect::<String>())
+            )
+        })?;
+    if !(200..300).contains(&code) {
+        let redirect = if (300..400).contains(&code) {
+            "; redirects are not followed"
+        } else {
+            ""
+        };
+        return Err(format!(
+            "the metrics service {service:?} answered HTTP {code} ({url}){redirect}"
+        ));
+    }
+    let mut chunked = false;
+    let mut length: Option<u64> = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else { continue };
+        let value = value.trim();
+        if name.trim().eq_ignore_ascii_case("transfer-encoding")
+            && value.to_ascii_lowercase().contains("chunked")
+        {
+            chunked = true;
+        } else if name.trim().eq_ignore_ascii_case("content-length") {
+            length = value.parse().ok();
+        }
+    }
+    let too_large = || {
+        format!(
+            "the metrics service {service:?} answered a body larger than {MAX_SOURCE_BYTES} \
+             bytes ({url})"
+        )
+    };
+    if !chunked && length.is_some_and(|n| n > MAX_SOURCE_BYTES) {
+        return Err(too_large());
+    }
+    // Raw bytes kept before giving up: the body itself, plus generous room
+    // for chunk framing when there is any.
+    let bound = match (chunked, length) {
+        (true, _) => 2 * MAX_SOURCE_BYTES + 1,
+        (false, Some(n)) => n,
+        (false, None) => MAX_SOURCE_BYTES + 1,
+    };
+    // A chunked body is complete at its last chunk, whether or not the
+    // server then closes the connection as `Connection: close` asked.
+    let complete = |body: &[u8]| chunked && body.ends_with(b"\r\n\r\n") && dechunk(body).is_some();
+    while (body.len() as u64) < bound && !complete(&body) {
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|e| failed("could not be read from", e))?;
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    if chunked {
+        if body.len() as u64 >= bound {
+            return Err(too_large());
+        }
+        body = dechunk(&body).ok_or_else(|| {
+            format!("the metrics service {service:?} answered a malformed chunked body ({url})")
+        })?;
+    } else if let Some(n) = length {
+        if (body.len() as u64) < n {
+            return Err(format!(
+                "the metrics service {service:?} closed the connection before the whole \
+                 body ({url})"
+            ));
+        }
+        body.truncate(n as usize);
+    }
+    if body.len() as u64 > MAX_SOURCE_BYTES {
+        return Err(too_large());
+    }
+    Ok(body)
+}
+
+/// A `Transfer-Encoding: chunked` body, decoded -- the same framing
+/// `factory-cli`'s own client decodes; `None` for a body that ends mid-chunk
+/// or carries a bad size line.
+fn dechunk(mut body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    loop {
+        let line_end = body.windows(2).position(|w| w == b"\r\n")?;
+        let size_text = String::from_utf8_lossy(&body[..line_end]);
+        let size_text = size_text.split(';').next().unwrap_or_default().trim().to_string();
+        let size = usize::from_str_radix(&size_text, 16).ok()?;
+        body = &body[line_end + 2..];
+        if size == 0 {
+            return Some(out);
+        }
+        if body.len() < size {
+            return None;
+        }
+        out.extend_from_slice(&body[..size]);
+        body = &body[size..];
+        body = body.strip_prefix(b"\r\n").unwrap_or(body);
+    }
+}
+
 fn sanitize_reason(raw: &str) -> String {
     raw.chars()
         .filter(|c| !c.is_control())
@@ -581,7 +1026,7 @@ pub fn value_for(
     };
     let Some(entry) = doc.metrics.iter().find(|m| m.id == metric_id) else {
         return none(format!(
-            "{source_id:?}'s metrics file does not report {metric_id:?}"
+            "{source_id:?}'s metrics document does not report {metric_id:?}"
         ));
     };
     let as_of = entry.as_of.unwrap_or(doc.as_of);
@@ -658,6 +1103,7 @@ mod tests {
                     better: Some(better.to_string()),
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 
@@ -689,7 +1135,7 @@ mod tests {
         let catalogue = validate(&root, &config);
         assert!(catalogue.findings.is_empty(), "{:?}", catalogue.findings);
         let source = catalogue.sources.get("finance").unwrap();
-        assert_eq!(source.path, root.join("data/finance/metrics.json"));
+        assert_eq!(source.location, Location::File(root.join("data/finance/metrics.json")));
         assert_eq!(source.declared["beleg_coverage"].unit, Unit::Ratio);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -894,6 +1340,7 @@ mod tests {
                         unit: Some("count".to_string()),
                         better: None,
                     }],
+                    ..Default::default()
                 }),
             }],
         };
@@ -921,6 +1368,7 @@ mod tests {
                         unit: Some("count".to_string()),
                         better: Some("higher".to_string()),
                     }],
+                    ..Default::default()
                 }),
             }],
         };
@@ -948,6 +1396,7 @@ mod tests {
                         unit: None,
                         better: Some("higher".to_string()),
                     }],
+                    ..Default::default()
                 }),
             }],
         };
@@ -976,6 +1425,7 @@ mod tests {
                         unit: Some("count".to_string()),
                         better: Some("higher".to_string()),
                     }],
+                    ..Default::default()
                 }),
             }],
         };
@@ -998,6 +1448,7 @@ mod tests {
                     id: None,
                     file: Some("metrics.json".to_string()),
                     declare: Vec::new(),
+                    ..Default::default()
                 }),
             }],
         };
@@ -1169,7 +1620,7 @@ mod tests {
             ValidSource {
                 id: "finance".to_string(),
                 scope: scope("finance", "projects/finance"),
-                path: PathBuf::from("/does-not-matter"),
+                location: Location::File(PathBuf::from("/does-not-matter")),
                 declared,
             },
         );
@@ -1443,5 +1894,378 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(value.reason.unwrap().len(), MAX_REASON_CHARS);
+    }
+
+    // ------------------------------------------------- service sources (#333)
+
+    fn network(name: &str, endpoints: &[&str]) -> RawService {
+        RawService {
+            name: name.to_string(),
+            network: true,
+            endpoints: endpoints.iter().map(|e| e.to_string()).collect(),
+        }
+    }
+
+    fn service_source(service: &str, path: Option<&str>, services: Vec<RawService>) -> RawSource {
+        RawSource {
+            id: Some("finance".to_string()),
+            service: Some(service.to_string()),
+            path: path.map(str::to_string),
+            declare: vec![RawDeclared {
+                id: Some("x".to_string()),
+                title: Some("X".to_string()),
+                unit: Some("count".to_string()),
+                better: Some("lower".to_string()),
+            }],
+            services,
+            ..Default::default()
+        }
+    }
+
+    fn validate_one(source: RawSource) -> Catalogue {
+        validate(
+            &tmp_root(),
+            &Configuration {
+                scopes: vec![ScopeDeclaration {
+                    scope: scope("finance", "projects/finance"),
+                    source: Some(source),
+                }],
+            },
+        )
+    }
+
+    #[test]
+    fn a_service_source_takes_the_first_loopback_endpoint_even_when_a_tailnet_one_comes_first() {
+        let catalogue = validate_one(service_source(
+            "fava",
+            Some("/buchhaltung/extension/FactoryMetrics/metrics"),
+            vec![network(
+                "fava",
+                &["https://factory.tail1234.ts.net:8793/buchhaltung", "127.0.0.1:8793"],
+            )],
+        ));
+        assert!(catalogue.findings.is_empty(), "{:?}", catalogue.findings);
+        let source = &catalogue.sources["finance"];
+        let Location::Service(target) = &source.location else {
+            panic!("{:?}", source.location)
+        };
+        assert_eq!(target.endpoint, "127.0.0.1:8793");
+        assert_eq!(target.host, LoopbackHost::V4);
+        assert_eq!(
+            target.url(),
+            "http://127.0.0.1:8793/buchhaltung/extension/FactoryMetrics/metrics"
+        );
+        assert!(source.declared.contains_key("x"), "declared metrics are kept");
+    }
+
+    #[test]
+    fn every_loopback_spelling_is_accepted_and_nothing_else_is() {
+        for (endpoint, host, port) in [
+            ("127.0.0.1:8793", LoopbackHost::V4, 8793),
+            ("http://127.0.0.1:8793/ignored/path", LoopbackHost::V4, 8793),
+            ("localhost:9000", LoopbackHost::Localhost, 9000),
+            ("[::1]:1", LoopbackHost::V6, 1),
+        ] {
+            let (_, got_host, got_port) = loopback(endpoint).unwrap_or_else(|| panic!("{endpoint}"));
+            assert_eq!((got_host, got_port), (host, port), "{endpoint}");
+        }
+        for refused in [
+            "https://127.0.0.1:8793",
+            "127.0.0.1",
+            "localhost",
+            "127.0.0.2:80",
+            "10.0.0.1:80",
+            "factory.tail1234.ts.net:8793",
+            "user@127.0.0.1:80",
+            "127.0.0.1:0",
+            "127.0.0.1:99999",
+            "127.0.0.1:80x",
+            "[::2]:80",
+            "localhost.evil.test:80",
+        ] {
+            assert!(loopback(refused).is_none(), "{refused} must not read as loopback");
+        }
+    }
+
+    /// Each refused declaration keeps its source -- so its declared metrics
+    /// still list -- reads `None` with the reason, and raises the finding.
+    fn assert_refused(catalogue: &Catalogue, kind: FindingKind, reason_has: &str) {
+        assert_eq!(catalogue.findings.len(), 1, "{:?}", catalogue.findings);
+        assert_eq!(catalogue.findings[0].kind, kind);
+        let source = &catalogue.sources["finance"];
+        let Location::Refused { reason, .. } = &source.location else {
+            panic!("{:?}", source.location)
+        };
+        assert!(reason.contains(reason_has), "{reason}");
+        assert!(source.declared.contains_key("x"));
+        let mut docs = BTreeMap::new();
+        docs.insert("finance".to_string(), Err(reason.clone()));
+        let value = value_for(
+            &id("reported.finance.x"),
+            "finance",
+            "x",
+            catalogue,
+            &docs,
+            true,
+            Utc::now(),
+        );
+        assert_eq!(value.value, None);
+        assert!(value.reason.unwrap().contains(reason_has));
+    }
+
+    #[test]
+    fn a_tailnet_only_service_is_refused() {
+        let catalogue = validate_one(service_source(
+            "fava",
+            Some("/metrics"),
+            vec![network("fava", &["https://factory.tail1234.ts.net:8793/buchhaltung"])],
+        ));
+        assert_refused(&catalogue, FindingKind::NoLoopbackEndpoint, "no loopback endpoint");
+    }
+
+    #[test]
+    fn an_unknown_service_is_refused() {
+        let catalogue = validate_one(service_source(
+            "nope",
+            Some("/metrics"),
+            vec![network("fava", &["127.0.0.1:8793"])],
+        ));
+        assert_refused(&catalogue, FindingKind::UnknownService, "no dependency service \"nope\"");
+    }
+
+    #[test]
+    fn a_non_network_service_is_refused() {
+        let catalogue = validate_one(service_source(
+            "ledger",
+            Some("/metrics"),
+            vec![RawService {
+                name: "ledger".to_string(),
+                network: false,
+                endpoints: Vec::new(),
+            }],
+        ));
+        assert_refused(&catalogue, FindingKind::NotANetworkService, "not a network service");
+    }
+
+    #[test]
+    fn file_and_service_together_are_refused() {
+        let mut source = service_source(
+            "fava",
+            Some("/metrics"),
+            vec![network("fava", &["127.0.0.1:8793"])],
+        );
+        source.file = Some("metrics.json".to_string());
+        let catalogue = validate_one(source);
+        assert_refused(&catalogue, FindingKind::FileAndService, "both file and service");
+    }
+
+    #[test]
+    fn a_service_source_without_a_path_or_with_a_bad_one_is_refused() {
+        let services = || vec![network("fava", &["127.0.0.1:8793"])];
+        let catalogue = validate_one(service_source("fava", None, services()));
+        assert_refused(&catalogue, FindingKind::MissingField, "no path");
+        for bad in ["metrics", "/a b", "/a#b", "http://elsewhere/x"] {
+            let catalogue = validate_one(service_source("fava", Some(bad), services()));
+            assert_refused(&catalogue, FindingKind::BadServicePath, "not a request path");
+        }
+    }
+
+    // ------------------------------------------------------------ read_service
+
+    /// A one-shot local HTTP server: accepts connections on an ephemeral
+    /// loopback port, counts them, reads each request head and writes
+    /// `response` (or, for `None`, holds the connection open and says
+    /// nothing). Returns the target to read and the request counter.
+    async fn serve(
+        response: Option<Vec<u8>>,
+    ) -> (ServiceTarget, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { return };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let response = response.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        match stream.read(&mut byte).await {
+                            Ok(1) => head.push(byte[0]),
+                            _ => return,
+                        }
+                    }
+                    match response {
+                        Some(bytes) => {
+                            let _ = stream.write_all(&bytes).await;
+                            let _ = stream.shutdown().await;
+                        }
+                        None => tokio::time::sleep(std::time::Duration::from_secs(30)).await,
+                    }
+                });
+            }
+        });
+        let target = ServiceTarget {
+            service: "fava".to_string(),
+            endpoint: format!("127.0.0.1:{port}"),
+            host: LoopbackHost::V4,
+            port,
+            path: "/metrics".to_string(),
+        };
+        (target, hits)
+    }
+
+    fn ok(body: &str) -> Option<Vec<u8>> {
+        Some(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes(),
+        )
+    }
+
+    const DOC: &str = r#"{"as_of":"2026-10-05T09:00:00Z","metrics":[{"id":"x","value":3}]}"#;
+    const QUICK: std::time::Duration = std::time::Duration::from_millis(300);
+
+    #[tokio::test]
+    async fn read_service_parses_the_same_document_a_file_holds() {
+        let (target, hits) = serve(ok(DOC)).await;
+        let doc = read_service(&target, QUICK).await.unwrap();
+        assert_eq!(doc.metrics[0].id, "x");
+        assert_eq!(doc.metrics[0].value, Some(3.0));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn read_service_decodes_a_chunked_body_and_a_close_delimited_one() {
+        let half = DOC.len() / 2;
+        let chunked = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+            half,
+            &DOC[..half],
+            DOC.len() - half,
+            &DOC[half..]
+        );
+        let (target, _) = serve(Some(chunked.into_bytes())).await;
+        assert_eq!(read_service(&target, QUICK).await.unwrap().metrics.len(), 1);
+
+        let delimited = format!("HTTP/1.0 200 OK\r\n\r\n{DOC}");
+        let (target, _) = serve(Some(delimited.into_bytes())).await;
+        assert_eq!(read_service(&target, QUICK).await.unwrap().metrics.len(), 1);
+    }
+
+    /// A server that ignores `Connection: close` after its last chunk is
+    /// still read to completion, not into the timeout.
+    #[tokio::test]
+    async fn a_chunked_body_is_complete_at_its_last_chunk_even_on_a_connection_left_open() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = [0u8; 1024];
+            let _ = stream.read(&mut head).await;
+            let body = format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{DOC}\r\n0\r\n\r\n",
+                DOC.len()
+            );
+            stream.write_all(body.as_bytes()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        let target = ServiceTarget {
+            service: "fava".to_string(),
+            endpoint: format!("127.0.0.1:{port}"),
+            host: LoopbackHost::V4,
+            port,
+            path: "/metrics".to_string(),
+        };
+        assert_eq!(read_service(&target, QUICK).await.unwrap().metrics.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_non_2xx_answer_is_a_reason() {
+        let (target, _) = serve(Some(
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        ))
+        .await;
+        let error = read_service(&target, QUICK).await.unwrap_err();
+        assert!(error.contains("answered HTTP 500"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_never_followed() {
+        let (elsewhere, elsewhere_hits) = serve(ok(DOC)).await;
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\n\r\n",
+            elsewhere.url()
+        );
+        let (target, hits) = serve(Some(redirect.into_bytes())).await;
+        let error = read_service(&target, QUICK).await.unwrap_err();
+        assert!(error.contains("answered HTTP 302"), "{error}");
+        assert!(error.contains("redirects are not followed"), "{error}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(elsewhere_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_body_that_does_not_parse_is_a_reason() {
+        let (target, _) = serve(ok("<html>Fava</html>")).await;
+        let error = read_service(&target, QUICK).await.unwrap_err();
+        assert!(error.contains("does not parse"), "{error}");
+        // `as_of` is required here exactly as it is in a file.
+        let (target, _) = serve(ok(r#"{"metrics":[]}"#)).await;
+        assert!(read_service(&target, QUICK).await.unwrap_err().contains("does not parse"));
+    }
+
+    #[tokio::test]
+    async fn a_body_over_the_size_bound_is_a_reason_whether_declared_or_streamed() {
+        let padding = "x".repeat(MAX_SOURCE_BYTES as usize + 10);
+        let big = format!(r#"{{"as_of":"2026-10-05T09:00:00Z","pad":"{padding}","metrics":[]}}"#);
+        let (target, _) = serve(ok(&big)).await;
+        let error = read_service(&target, QUICK).await.unwrap_err();
+        assert!(error.contains("larger than"), "{error}");
+
+        let streamed = format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{big}");
+        let (target, _) = serve(Some(streamed.into_bytes())).await;
+        let error = read_service(&target, QUICK).await.unwrap_err();
+        assert!(error.contains("larger than"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_service_that_never_answers_times_out() {
+        let (target, _) = serve(None).await;
+        let started = std::time::Instant::now();
+        let error = read_service(&target, QUICK).await.unwrap_err();
+        assert!(error.contains("did not answer within"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_service_nobody_listens_on_is_a_reason() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let target = ServiceTarget {
+            service: "fava".to_string(),
+            endpoint: format!("localhost:{port}"),
+            host: LoopbackHost::Localhost,
+            port,
+            path: "/metrics".to_string(),
+        };
+        let error = read_service(&target, QUICK).await.unwrap_err();
+        assert!(error.contains("could not be reached"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn read_services_makes_one_request_per_source() {
+        let (target, hits) = serve(ok(DOC)).await;
+        let read = read_services(vec![("finance".to_string(), target)], QUICK).await;
+        assert!(read["finance"].is_ok());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

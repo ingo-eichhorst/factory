@@ -3006,6 +3006,63 @@ mod tests {
         assert_eq!(status, 404);
     }
 
+    /// `#333`: a scope with no ids is the Metrics tab's listing -- only the
+    /// metrics that scope is measured by, each row carrying its source and
+    /// its consumers. With ids, the answer carries no rows at all.
+    #[tokio::test]
+    async fn get_api_metrics_with_a_scope_and_no_ids_lists_what_the_scope_is_measured_by() {
+        let root = std::env::temp_dir().join(format!("factory-http-metrics-tab-{}", uuid::Uuid::new_v4()));
+        let dir = root.join(".factory").join("quality");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("baseline.yaml"),
+            "attributes:\n  - id: reliability\n    importance: H\n    difficulty: M\n    scenarios:\n\
+             \x20     - { id: rarely-fails, measure: { metric: fail_rate, below: 0.2, max_age: 7d } }\n",
+        )
+        .unwrap();
+        let mut company: Scope = serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
+        company.path = PathBuf::from(".");
+        let config = Config {
+            version: 1,
+            instance: Instance { id: "test".into(), name: "test".into() },
+            daemon: DaemonConfig::default(),
+            scope: Some(company.clone()),
+            scopes: vec![company],
+            roles: Default::default(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: vec!["baseline".into()],
+            infrastructure: Default::default(),
+            secrets: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        };
+        let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()));
+
+        let (status, json) = request(engine.clone(), "GET", "/api/metrics?scope=company", None).await;
+        assert_eq!(status, 200, "{json}");
+        let values = json["data"]["values"].as_array().unwrap();
+        assert_eq!(values.len(), 1, "{json}");
+        assert_eq!(values[0]["id"], "fail_rate");
+        let rows = json["data"]["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{json}");
+        assert_eq!(rows[0]["id"], "fail_rate");
+        assert_eq!(rows[0]["source"]["kind"], "built_in");
+        assert_eq!(rows[0]["freshness"], "no_data");
+        assert_eq!(rows[0]["max_age"], "1w");
+        let consumer = &rows[0]["consumers"][0];
+        assert_eq!(consumer["kind"], "quality");
+        assert_eq!(consumer["id"], "reliability/rarely-fails");
+        assert_eq!(consumer["scope"], "company");
+        assert_eq!(consumer["status"], "no_data");
+
+        let (status, json) = request(engine, "GET", "/api/metrics?scope=company&ids=fail_rate", None).await;
+        assert_eq!(status, 200, "{json}");
+        assert!(json["data"].get("rows").is_none(), "{json}");
+    }
+
     #[tokio::test]
     async fn post_api_quality_remediate_refuses_a_met_scenario_with_a_400() {
         let engine = engine_with_quality();

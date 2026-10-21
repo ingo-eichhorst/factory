@@ -116,6 +116,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("suggestions.rs", L5),
     ("quality/", Wiring), // L5 quality evaluation composed over metrics and the cross-level check service
     ("metrics.rs", Wiring), // L5 metrics composed with L6 policy inputs over L1 to L4 evidence
+    ("metrics_page.rs", Wiring), // the L5 Metrics tab: L6 policy subjects and key results, L5 quality and reported sources, one metrics read
     ("signposts.rs", Wiring), // L5 signposts composed the same way
     // L6 Direction
     ("policies/", L6),
@@ -220,6 +221,7 @@ const PAGE_BASELINE: &[(&str, &str, usize)] = &[
     ("l2_pages.rs", "services", 2),
     ("main.rs", "services", 5),
     ("metrics.rs", "services", 2),
+    ("metrics_page.rs", "services", 1),
     ("occupancy_page.rs", "reach", 3),
     ("occupancy_page.rs", "services", 1),
     ("github_deployments.rs", "reach", 5),

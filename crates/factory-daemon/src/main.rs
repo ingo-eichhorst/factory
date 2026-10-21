@@ -54,6 +54,7 @@ mod host_power;
 mod intake;
 mod interfaces;
 mod metrics;
+mod metrics_page;
 mod notify;
 mod occupancy;
 mod occupancy_page;

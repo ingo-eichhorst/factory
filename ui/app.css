@@ -502,6 +502,13 @@ a.role-origin:hover { color: var(--signal); border-color: var(--signal); }
 
 /* ----------------------------------------------------- L2 dependencies */
 .dep-heading { margin: 15px 14px 8px; font: 600 11px/1 var(--cond); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+/* A service row a link asked for (#333's Metrics tab, "service · fava"). */
+#dependencies-services tr.focus { background: var(--signal-wash); }
+/* L5 Metrics (#333): one consumer per line under "Used by". */
+.metric-consumer { margin: 2px 0; white-space: nowrap; }
+#metrics-rows .bad { color: var(--fault); }
+#metrics-rows a { color: var(--signal-ink); font-weight: 500; text-decoration: none; }
+#metrics-rows a:hover { color: var(--signal); text-decoration: underline; }
 .dep-documents { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; padding: 0 14px; }
 .dep-doc { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--signal); border-radius: 4px; padding: 11px 12px; display: grid; gap: 5px; font-size: 12px; }
 .dep-doc code, .dep-finding code { overflow-wrap: anywhere; }

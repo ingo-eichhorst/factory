@@ -1247,6 +1247,10 @@ scope:
         direction: in               # in | out | both
 ```
 
+A `network` service with a loopback endpoint can also be a scope's
+reported metrics source (`#333`) — see "A scope's own reported metrics"
+under Goals; the L5 Metrics tab links such a source back to its row here.
+
 Scanning is an ordinary workflow, not an adapter. A scan task produces two
 CycloneDX JSON documents (version 1.6 or newer) and sends their bytes through
 its authenticated callback:
@@ -2044,7 +2048,7 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `bench.resolve_rate.<dataset>` | the newest settled bench run's resolve rate | `bench::aggregate` |
 | `goal_tasks_done.<objective>.<kr>` | count of tasks labelled `goal=<objective>/<kr>` whose status is `done` | task labels, through `TaskStore` |
 | `quality.<characteristic>` | share of declared quality scenarios under an ISO 25010 characteristic that are met | the selected scope's quality subtree — see "Quality attributes" |
-| `reported.<source>.<metric>` | a scope's own domain data (Beleg coverage, unresolved transactions, booking lag, …), read from the JSON file the scope declared through `scope.metrics.source` | the declaring scope's own file, read on request — see "A scope's own reported metrics" below (#278) |
+| `reported.<source>.<metric>` | a scope's own domain data (Beleg coverage, unresolved transactions, booking lag, …), read from the JSON document the scope declared through `scope.metrics.source` | the declaring scope's own file, or its declared network dependency service over loopback (#333), read on request — see "A scope's own reported metrics" below (#278) |
 | `unit_cost` | API-equivalent USD spent per run ended `done` (failed and cancelled runs' cost included), trailing 28 days | each run's measured usage (`Run.usage`, #117) |
 | `tokens_per_run` | mean tokens of every type per finished run, trailing 28 days | each run's measured usage (`Run.usage`, #117) |
 | `cost_week` | known API-equivalent USD spent over runs *started* (not ended) in the trailing 7 days; no value if any run in the window is unknown, cost-unknown or partial | L4 `CostReport` fact port, the same read `factory cost`, Budget and `GET /api/costs` answer from (#164) |
@@ -2117,9 +2121,10 @@ as stale at all.
 what Factory itself records. A scope's own domain — the business-factory
 `finance` scope's books, for instance — has progress no built-in metric can
 see: Beleg coverage, unresolved bank transactions, booking lag. A scope
-declares one *source* (a JSON file its own tooling writes) and the metrics
-it reports through it, beside `policies`/`quality` in its own
-`.factory/config.yaml`:
+declares one *source* (a JSON file its own tooling writes, or one of its own
+declared network dependency services that answers the same document —
+see below) and the metrics it reports through it, beside
+`policies`/`quality` in its own `.factory/config.yaml`:
 
 ```yaml
 scope:
@@ -2175,17 +2180,67 @@ business-factory repository, not this one):
 }
 ```
 
+**A source read from a declared service (`#333`).** Where a scope's figures
+already live in a running system — the business-factory `finance` scope's
+books are in Fava, current on every request — `source` names that system
+instead of a file: `service`, one of the scope's own
+`dependencies.services`, and `path`, where it answers the document.
+
+```yaml
+scope:
+  name: finance
+  dependencies:
+    services:
+      - name: fava
+        transport: network
+        endpoints: [https://factory.<tailnet>.ts.net:8793/buchhaltung, 127.0.0.1:8793]
+  metrics:
+    source:
+      id: finance
+      service: fava                   # a declared network service of this scope
+      path: /buchhaltung/extension/FactoryMetrics/metrics
+    declare:
+      - { id: bookings_without_beleg, title: Bookings without Beleg, unit: count, better: lower }
+```
+
+Factory reads it over **loopback only**: the service's first endpoint that
+is `127.0.0.1`, `localhost` or `[::1]` with a port, written bare or as an
+`http://` URL (any path of the endpoint's own is ignored; `path` names the
+document). A tailnet endpoint, or any other one, is never used, wherever it
+is listed; `localhost` is connected to as the loopback address itself, never
+looked up. The read is one plain-HTTP `GET http://<endpoint><path>` with
+`Connection: close`: about 2 seconds from connect to last byte, the same
+256 KiB bound a file has, no redirect followed (a `3xx` is just a non-`2xx`),
+one attempt and no retry. It happens at most once per
+`metrics`/`quality`/`goals`/policy read, however many of the source's ids
+that read asks for — a `compliance.<framework>` rollup inside the same read
+reuses the document rather than asking again — and nothing is cached,
+stored, watched or pushed: the file semantics, transposed to HTTP. The
+response is exactly the document below. Factory stays domain-free; it
+knows nothing about Beancount or Fava.
+
+Each of these is a *finding*, the source kept so its declared metrics still
+list, and each reads `None` with the reason — never a config load failure
+and never a refused read: a `service` this scope declares no dependency
+service by, a `socket` or `file` service, a service with no loopback
+endpoint, `file` and `service` both given, and a missing or malformed
+`path` (it must start with `/` and hold no spaces, control characters or
+`#`). A timeout, a non-`2xx` status, a refused connection, a body that does
+not parse and a body over the bound are read failures: `None`, with the
+reason, exactly like a missing or unparsable file.
+
 A per-metric `as_of` overrides the document's own; a value's `as_of` is
 always one of these two, never the moment it was read — the same freshness
 rule every other metric follows. `null` with a `reason` is a first-class
 answer, never a crash and never silently `0`. Reading is **computed on
 read**: the file is opened read-only, `O_NOFOLLOW` (a symlink swapped in
 after validation is refused too), bounded in size, at most once per
-`metrics`/`quality`/`goals` request — however many of its own ids that
+`metrics`/`quality`/`goals`/policy request — however many of its own ids that
 request asks for — and never cached, copied into a table, watched or
 pushed over the observer bus. `value` is `None`, with a reason, for each of:
 a source or metric id nobody declared, a missing file, a file that does
-not parse or is too large, an id the file does not report, a `null` value
+not parse or is too large, a refused or failed service read (above), an id
+the document does not report, a `null` value
 (the file's own `reason`, if it gave one), a non-finite number, and —
 scoped reads only — a source declared by a scope outside the selected
 subtree (an unscoped read sees every declaring scope). `reason` is the one
@@ -2740,6 +2795,51 @@ once that run reports. Refused outright, never silently falling back to a
 fresh conversation, when the task has a run in progress or the harness
 cannot resume (no session recorded, the adapter declares no resume, the
 previous session is not confirmed gone).
+
+## Metrics
+
+L5 Improvement's fifth tab (`#333`): the numbers themselves. Whether a
+control holds, a key result is on track or a quality scenario is met is
+more and more often a metric; this is the one page that shows, for the
+selected scope, which metrics it is measured by, what each reads now, how
+fresh that is, where it comes from, and who reads it. The measuring is L5's;
+L6 only judges against it.
+
+For the selected scope and everything below it, the tab lists every metric
+read by an applicable policy control's `check: metric`, by a quality measure
+bound in that subtree, or — when the selection is the instance root, whose
+goals they are — by a key result of the current cycle, plus every
+`reported.*` metric a scope in it declares in `scope.metrics`. A scope
+nothing measures lists nothing; one with two such metrics lists exactly two
+rows. With every scope selected in the rail, the tab lists the scope that
+sits on the instance root. Each row shows:
+
+- the id, title, unit and `better`;
+- the value, or `None` with its reason;
+- `as_of`, and freshness against the strictest (shortest) `max_age` any of
+  its consumers holds it to — `fresh`, `stale`, `no data`, or `no max_age`
+  when no consumer gives one;
+- the **source**: built-in, or reported — the file path, or the dependency
+  service and the loopback endpoint it is read from, linked to that
+  service's row on L2 Dependencies (a refused service source names the
+  service and why);
+- **used by**: each consumer — a control (`gobd/belegprinzip @ finance`),
+  a quality scenario (`<attribute>/<scenario>`), a key result
+  (`<objective>/<kr>`) — with *met*, *not met*, *stale* or *no data*
+  against that consumer's own bounds, through the same `judge_metric` the
+  consumer's own tab uses. A quality measure with no finite threshold is
+  *draft*, as on the Quality tab; a control reads a `reported.*` value the
+  way the Policy tab does, `None` when the source is declared outside the
+  control's own scope; a key result is met once it reaches `target` from
+  `baseline`'s side.
+
+`GET /api/metrics?scope=<s>` with no `ids`, and `factory metrics --scope
+<s>` with none, answer the same listing: the usual `values`, `registry` and
+`findings`, plus `rows` — per metric its `source`, `freshness`, `max_age`
+and `consumers`. With `ids`, or with no scope, the answer is what it always
+was and carries no `rows`. Every value comes from one ordinary metrics read,
+so a service-backed source is asked once per listing. No poll: the tab
+reloads when it is shown and when the rail selection changes.
 
 ## Intake
 

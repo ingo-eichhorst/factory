@@ -38,6 +38,7 @@ import { loadPolicy, reloadPolicy, wirePolicy } from "./policy.js";
 import { loadGoals, reloadGoals, wireGoals } from "./goals.js";
 import { loadQuality, reloadQuality, wireQuality } from "./quality.js";
 import { loadSuggestions, reloadSuggestions, wireSuggestions } from "./suggestions.js";
+import { loadMetrics, wireMetrics } from "./metrics.js";
 import { loadScenarios, reloadScenarios, wireScenarios } from "./scenarios.js";
 import { loadBudget, reloadBudget, wireBudget } from "./budget.js";
 import { budgetEvent } from "./budget-model.js";
@@ -81,6 +82,9 @@ const VIEWS = {
   // every call, that changes only through an explicit action (file, task,
   // dismiss, done, ask), each of which reloads it itself.
   suggestions: { onShow: loadSuggestions },
+  // `#333`: one listing read per show, recomputed by the daemon; nothing
+  // here changes on a clock, so no poll.
+  metrics: { onShow: loadMetrics },
   // Not poll-free the same way: `loadScenarios` itself makes a second fetch
   // (`GET /api/metrics?ids=…`, for the titles a signpost strip needs) and
   // seeds the driver panel with one `POST /api/scenarios/whatif` call, so
@@ -250,8 +254,10 @@ const LEVEL_VIEWS = {
   env: ["sandboxes", "secrets", "dependencies"],
   // Quality closes the row: benchmarks and knowledge are how the work gets
   // better, quality attributes whether it has got good enough. Suggestions
-  // (`#275`) follows last: where the next round of "better" comes from.
-  imp: ["benchmarks", "knowledge", "quality", "suggestions"],
+  // (`#275`) follows: where the next round of "better" comes from. Metrics
+  // (`#333`) closes it: the numbers every control, scenario and key result
+  // above is judged against.
+  imp: ["benchmarks", "knowledge", "quality", "suggestions", "metrics"],
   infra: ["infrastructure", "doctor", "environments", "backup", "mac", "dates"],
 };
 
@@ -363,6 +369,8 @@ function rerender(route) {
   // Same reason again: `GET /api/suggestions?scope=` narrows to that
   // scope's own subtree (`#275`).
   else if (state.tab === "suggestions") void loadSuggestions();
+  // `GET /api/metrics?scope=` lists what that subtree is measured by.
+  else if (state.tab === "metrics") void loadMetrics();
   // Same reason again: `GET /api/scenarios?scope=` narrows the baseline and
   // every scenario's own policy delta to the asked subtree -- the one
   // exception is the driver panel's own `POST /api/scenarios/whatif`, which
@@ -656,6 +664,7 @@ async function boot() {
   wireBudget();
   wireQuality();
   wireSuggestions();
+  wireMetrics();
   wireScenarios();
   $("environment-refresh").onclick = () => refreshEnvironment();
   $("secrets-refresh").onclick = () => refreshEnvironment();
