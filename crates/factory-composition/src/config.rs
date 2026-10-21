@@ -2238,24 +2238,11 @@ mod tests {
         Factory {
             root: PathBuf::from(root),
             config: Config {
-                version: 1,
                 instance: Instance {
                     id: "i".into(),
                     name: "n".into(),
                 },
-                daemon: DaemonConfig::default(),
-                scope: None,
-                scopes: vec![],
-                roles: BTreeMap::new(),
-                dashboard: None,
-                policies: PolicyDeclaration::default(),
-                quality: Vec::new(),
-                infrastructure: Infrastructure::default(),
-                secrets: Vec::new(),
-                channels: Vec::new(),
-                plugins_dir: None,
-                renewals: Vec::new(),
-                renewals_notify: None,
+                ..Default::default()
             },
         }
     }

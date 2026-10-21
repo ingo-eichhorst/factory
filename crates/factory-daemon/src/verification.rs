@@ -1453,7 +1453,6 @@ mod tests {
             std::fs::set_permissions(&fake_harness, permissions).unwrap();
         }
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
             daemon: DaemonConfig {
                 power_assertion: false,
@@ -1463,16 +1462,11 @@ mod tests {
                 },
                 ..DaemonConfig::default()
             },
-            roles: Default::default(),
-            dashboard: None,
             policies: PolicyDeclaration { frameworks: vec!["house".into()], ..Default::default() },
-            quality: Default::default(),
-            scope: None,
             scopes: vec![Scope {
                 id: "demo-id".into(),
                 name: "demo".into(),
                 path: work.clone(),
-                agent: None,
                 agents: vec![factory_core::config::ScopeAgent {
                     name: Some("checker".into()),
                     harness: "shell".into(),
@@ -1487,29 +1481,9 @@ mod tests {
                     instances: None,
                 }],
                 runtime: Some("quiet".into()),
-                git: None,
-                task_store: None,
-                max_sessions: None,
-                roles: Default::default(),
-                dashboard: None,
-                policies: Default::default(),
-                quality: Default::default(),
-                intake: Default::default(),
-                dependencies: Default::default(),
-                environments: Vec::new(),
-                renewals: Vec::new(),
-                metrics: None,
-                backup: None,
-                memory: None,
-                skills: Vec::new(),
-                pages: Vec::new(),
+                ..Default::default()
             }],
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let mut registry = Registry::with_builtins();
         registry.add_runtime(Arc::new(QuietRuntime), "test");

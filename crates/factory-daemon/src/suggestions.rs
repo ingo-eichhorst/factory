@@ -434,7 +434,6 @@ mod tests {
             id: "demo-id".into(),
             name: "demo".into(),
             path: PathBuf::from("/tmp"),
-            agent: None,
             agents: vec![
                 ScopeAgent {
                     name: Some("nogrant-worker".into()),
@@ -463,29 +462,12 @@ mod tests {
                     instances: None,
                 },
             ],
-            runtime: None,
-            git: None,
-            task_store: None,
-            max_sessions: None,
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            intake: Default::default(),
-            dependencies: Default::default(),
-            environments: Vec::new(),
-            renewals: Vec::new(),
-            backup: None,
-            pages: Vec::new(),
-            metrics: None,
-            memory: None,
-            skills: Vec::new(),
+            ..Default::default()
         };
         let root = Scope {
             id: "root-id".into(),
             name: "root".into(),
             path: PathBuf::from("/tmp"),
-            agent: None,
             agents: if root_declares_improver {
                 vec![ScopeAgent {
                     name: Some("improver".into()),
@@ -503,44 +485,18 @@ mod tests {
             } else {
                 Vec::new()
             },
-            runtime: None,
-            git: None,
-            task_store: None,
-            max_sessions: None,
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            intake: Default::default(),
-            dependencies: Default::default(),
-            environments: Vec::new(),
-            renewals: Vec::new(),
-            backup: None,
-            pages: Vec::new(),
-            metrics: None,
-            memory: None,
-            skills: Vec::new(),
+            ..Default::default()
         };
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
             daemon: DaemonConfig {
                 power_assertion: false,
                 improvement_agent: improvement_agent.map(str::to_string),
                 ..DaemonConfig::default()
             },
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
             scope: Some(root.clone()),
             scopes: vec![demo, root],
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = factory_core::config::Factory {
             root: std::env::temp_dir().join(format!("factory-suggestions-test-{}", uuid::Uuid::new_v4())),

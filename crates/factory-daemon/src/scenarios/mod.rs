@@ -218,7 +218,7 @@ mod tests {
 
     use super::*;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+    use factory_core::config::{Config, Instance, PolicyDeclaration};
     use factory_plugins::{Registry, SqliteStore};
     use std::path::PathBuf;
 
@@ -314,21 +314,9 @@ mod tests {
         std::fs::write(root.join(".factory/goals/2026-q4.yaml"), GOALS_CYCLE_YAML).unwrap();
 
         let mut config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
-            scope: None,
-            scopes: Vec::new(),
-            roles: Default::default(),
-            dashboard: None,
             policies: PolicyDeclaration { frameworks: vec!["cra".to_string()], ..Default::default() },
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         config.scopes = vec![
             scope_at("company-id", "company", "."),
@@ -710,25 +698,15 @@ mod tests {
         company.path = PathBuf::from(".");
         let destination = base.join(destination);
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![company],
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
-            quality: Default::default(),
             infrastructure: serde_yaml_ng::from_str(&format!(
                 "backup:\n  destination: {}\n  keep: {{ daily: 7 }}\n",
                 destination.display()
             ))
             .unwrap(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root, config };
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
@@ -800,24 +778,13 @@ mod tests {
             serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
         company.path = PathBuf::from(".");
         let config = Config {
-            version: 1,
             instance: Instance {
                 id: "test".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![company],
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root, config };
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());

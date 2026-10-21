@@ -146,7 +146,6 @@ mod tests {
             std::env::temp_dir().join(format!("factory-workflow-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let config = Config {
-            version: 1,
             instance: Instance {
                 id: "test".into(),
                 name: "test".into(),
@@ -166,41 +165,13 @@ mod tests {
                 },
                 ..DaemonConfig::default()
             },
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            scope: None,
             scopes: vec![Scope {
                 id: "demo-id".into(),
                 name: "demo".into(),
-                path: PathBuf::new(),
-                agent: None,
-                agents: Vec::new(),
                 runtime: Some("quiet".into()),
-                git: None,
-                task_store: None,
-                max_sessions: None,
-                roles: Default::default(),
-                dashboard: None,
-                policies: Default::default(),
-                quality: Default::default(),
-                intake: Default::default(),
-                dependencies: Default::default(),
-                environments: Vec::new(),
-                renewals: Vec::new(),
-                metrics: None,
-                backup: None,
-                memory: None,
-                skills: Vec::new(),
-                pages: Vec::new(),
+                ..Default::default()
             }],
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let mut registry = Registry::with_builtins();
         registry.add_runtime(Arc::new(QuietRuntime::default()), "test");
@@ -229,7 +200,6 @@ mod tests {
     /// One `demo` scope at `repo`, on the quiet runtime.
     fn git_scope_config(repo: PathBuf) -> Config {
         Config {
-            version: 1,
             instance: Instance {
                 id: "test".into(),
                 name: "test".into(),
@@ -242,41 +212,14 @@ mod tests {
                 },
                 ..DaemonConfig::default()
             },
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            scope: None,
             scopes: vec![Scope {
                 id: "demo-id".into(),
                 name: "demo".into(),
                 path: repo,
-                agent: None,
-                agents: Vec::new(),
                 runtime: Some("quiet".into()),
-                git: None,
-                task_store: None,
-                max_sessions: None,
-                roles: Default::default(),
-                dashboard: None,
-                policies: Default::default(),
-                quality: Default::default(),
-                intake: Default::default(),
-                dependencies: Default::default(),
-                environments: Vec::new(),
-                renewals: Vec::new(),
-                metrics: None,
-                backup: None,
-                memory: None,
-                skills: Vec::new(),
-                pages: Vec::new(),
+                ..Default::default()
             }],
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         }
     }
 
@@ -375,7 +318,6 @@ mod tests {
             std::env::temp_dir().join(format!("factory-workflow-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let config = Config {
-            version: 1,
             instance: Instance {
                 id: "test".into(),
                 name: "test".into(),
@@ -392,41 +334,13 @@ mod tests {
                 },
                 ..DaemonConfig::default()
             },
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            scope: None,
             scopes: vec![Scope {
                 id: "demo-id".into(),
                 name: "demo".into(),
-                path: PathBuf::new(),
-                agent: None,
-                agents: Vec::new(),
                 runtime: Some("quiet".into()),
-                git: None,
-                task_store: None,
-                max_sessions: None,
-                roles: Default::default(),
-                dashboard: None,
-                policies: Default::default(),
-                quality: Default::default(),
-                intake: Default::default(),
-                dependencies: Default::default(),
-                environments: Vec::new(),
-                renewals: Vec::new(),
-                metrics: None,
-                backup: None,
-                memory: None,
-                skills: Vec::new(),
-                pages: Vec::new(),
+                ..Default::default()
             }],
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let recorder = Arc::new(RecordingRuntime::new());
         let mut registry = Registry::with_builtins();
@@ -1415,7 +1329,6 @@ mod tests {
 
         fn build(root: &std::path::Path, db_path: &std::path::Path) -> Arc<Engine> {
             let config = Config {
-                version: 1,
                 instance: Instance {
                     id: "test".into(),
                     name: "test".into(),
@@ -1424,41 +1337,13 @@ mod tests {
                 // through the real `Engine`, and the default would fork a
                 // real `caffeinate` on whatever machine runs the tests.
                 daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
-                roles: Default::default(),
-                dashboard: None,
-                policies: Default::default(),
-                quality: Default::default(),
-                scope: None,
                 scopes: vec![Scope {
                     id: "demo-id".into(),
                     name: "demo".into(),
-                    path: PathBuf::new(),
-                    agent: None,
-                    agents: Vec::new(),
                     runtime: Some("quiet".into()),
-                    git: None,
-                    task_store: None,
-                    max_sessions: None,
-                    roles: Default::default(),
-                    dashboard: None,
-                    policies: Default::default(),
-                    quality: Default::default(),
-                    intake: Default::default(),
-                    dependencies: Default::default(),
-                    environments: Vec::new(),
-                    renewals: Vec::new(),
-                    metrics: None,
-                    backup: None,
-                    memory: None,
-                    skills: Vec::new(),
-                    pages: Vec::new(),
+                    ..Default::default()
                 }],
-                infrastructure: Default::default(),
-                secrets: Vec::new(),
-                channels: Vec::new(),
-                plugins_dir: None,
-                renewals: Vec::new(),
-                renewals_notify: None,
+                ..Default::default()
             };
             let mut registry = Registry::with_builtins();
             registry.add_runtime(Arc::new(QuietRuntime::default()), "test");

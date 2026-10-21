@@ -260,7 +260,7 @@ mod tests {
     use crate::intake::TRIAGE_VERDICT_KIND;
     use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
+    use factory_core::config::{Config, Factory, Instance, PolicyDeclaration, Scope};
     use factory_core::run::{NewRun, Run, RunPatch, RunStatus, Trigger};
     use factory_core::task::{NewTask, TaskEntry, TaskPatch, TaskStatus};
     use factory_core::usage::{RunUsage, TokenCounts, UsageState};
@@ -283,21 +283,11 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let root_scope = scope_at("root-id", "root", ".");
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(root_scope.clone()),
             scopes: vec![root_scope],
-            roles: Default::default(),
-            dashboard: None,
             policies: PolicyDeclaration { frameworks, ..Default::default() },
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root, config };
         let registry = Registry::with_builtins();
@@ -344,21 +334,12 @@ mod tests {
         side.path = PathBuf::from("projects/side");
 
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(root_scope.clone()),
             scopes: vec![root_scope, work, nested, side],
-            roles: Default::default(),
             policies: PolicyDeclaration { frameworks: vec!["cra".into()], ..Default::default() },
             quality: vec!["baseline".into()],
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
-            dashboard: None,
+            ..Default::default()
         };
         let database = root.join(".factory/metrics.sqlite");
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&database).unwrap());
@@ -1401,27 +1382,17 @@ mod tests {
             }],
         });
         let config = Config {
-            version: 1,
             instance: Instance {
                 id: "test".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
             scope: Some(finance.clone()),
             scopes: vec![finance],
-            roles: Default::default(),
-            dashboard: None,
             policies: PolicyDeclaration {
                 frameworks: vec!["gobd".to_string()],
                 ..Default::default()
             },
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let registry = Registry::with_builtins();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1626,21 +1597,10 @@ mod tests {
         b.metrics = declare_dup("dup", "metrics-b.json");
         let root_scope = scope_at("root-id", "root", ".");
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(root_scope.clone()),
             scopes: vec![root_scope, a, b],
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         let engine = Arc::new(Engine::new(
@@ -2204,25 +2164,15 @@ mod tests {
         company.path = PathBuf::from(".");
         let destination = base.join(destination);
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![company],
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
-            quality: Default::default(),
             infrastructure: serde_yaml_ng::from_str(&format!(
                 "backup:\n  destination: {}\n  keep: {{ daily: 7 }}\n",
                 destination.display()
             ))
             .unwrap(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root, config };
         let engine = Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new())
@@ -2620,24 +2570,13 @@ mod tests {
         let mut side: Scope = serde_yaml_ng::from_str("id: side-id\nname: side\n").unwrap();
         side.path = PathBuf::from("projects/side");
         let config = Config {
-            version: 1,
             instance: Instance {
                 id: "test".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
             scope: Some(root_scope.clone()),
             scopes: vec![root_scope, work, side],
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         Arc::new(Engine::new(
