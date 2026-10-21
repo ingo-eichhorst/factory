@@ -391,6 +391,8 @@ async fn observe_loop(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Rec
     let mut tick = tokio::time::interval(Duration::from_secs(15));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last = None;
+    // Kept across runs: the Codex model list's memo lives in the tools.
+    let tools = probes::Tools::default();
     loop {
         let snapshot = engine.factory_snapshot();
         let fingerprint =
@@ -404,13 +406,12 @@ async fn observe_loop(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Rec
         {
             let observed = tokio::time::timeout(
                 Duration::from_secs(90),
-                probes::observe(&snapshot, &probes::Tools::default(), Utc::now()),
+                probes::observe(&snapshot, &tools, Utc::now()),
             )
             .await;
             let observed = observed.unwrap_or_else(|_| probes::Observed::unavailable(Utc::now()));
             if let Err(error) = engine
-                .l1.infrastructure_expiries
-                .replace(observed.infrastructure, observed.infrastructure_complete)
+                .l1.record_observations(observed.infrastructure, observed.infrastructure_complete, observed.codex)
                 .await
             {
                 tracing::warn!("infrastructure expiry cache: {error}");

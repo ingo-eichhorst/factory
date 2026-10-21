@@ -1939,7 +1939,7 @@ async fn main() -> Result<()> {
             print(&payload, cli.json, |payload| match payload {
                 Payload::ImportantDates { report } => Some(report.entries.iter().map(|entry| {
                     let item = &entry.observation;
-                    let date = item.expires_at.map(|date| date.to_rfc3339()).unwrap_or_else(|| if item.no_expiry { if item.source == factory_core::renewals::DateSource::GithubAuth { "no reported expiry".into() } else { "no expiry".into() } } else { "unknown".into() });
+                    let date = item.expires_at.map(|date| date.to_rfc3339()).unwrap_or_else(|| if item.no_expiry { match item.source { factory_core::renewals::DateSource::GithubAuth => "no reported expiry".into(), factory_core::renewals::DateSource::CodexModel => "served".into(), _ => "no expiry".into() } } else { "unknown".into() });
                     let dependencies = item.affects.iter().map(|dependency| dependency.label.as_str()).collect::<Vec<_>>().join(", ");
                     format!("{}  {date}  {:?} / {:?}{}\n  {}\n  affects: {dependencies}\n  renew: {} · owner: {}\n", item.name, entry.state, item.basis, if entry.resolved { " (resolved by native clock)" } else { "" }, item.detail, item.renew, item.owner)
                 }).collect::<Vec<_>>().join("\n")),
@@ -3030,7 +3030,7 @@ fn notified_text(payload: &Payload) -> Option<String> {
 }
 
 fn infrastructure_text(payload: &Payload) -> Option<String> {
-    let Payload::Infrastructure { host, daemon, providers, unassigned, harnesses } = payload else {
+    let Payload::Infrastructure { host, daemon, providers, unassigned, harnesses, codex_models } = payload else {
         return None;
     };
     const UNKNOWN: &str = "--";
@@ -3156,6 +3156,43 @@ fn infrastructure_text(payload: &Payload) -> Option<String> {
             if let Some(auto) = &h.auto_repair {
                 out.push_str(&format!("    automatic repair: {auto}\n"));
             }
+        }
+    }
+
+    // #340: the model each codex agent will ask for, against the backend's
+    // list for the installed client, as L1 last observed it.
+    if let Some(models) = codex_models {
+        let fetched = models.observed_at.map(|at| format!(", list fetched {}", utc(&at))).unwrap_or_default();
+        out.push_str(&format!(
+            "\nCODEX MODELS  served to codex {}{fetched}\n",
+            models.client_version.as_deref().unwrap_or(UNKNOWN)
+        ));
+        let verdict = |served: Option<bool>| match served {
+            Some(true) => "served",
+            Some(false) => "NOT SERVED",
+            None => "unknown",
+        };
+        if let Some(model) = &models.default_model {
+            out.push_str(&format!("  {:<32} {:<16} {}\n", "(config.toml default)", model, verdict(models.default_served)));
+        }
+        for agent in &models.agents {
+            let note = agent.note.as_deref().map(|note| format!(" -- {note}")).unwrap_or_default();
+            out.push_str(&format!(
+                "  {:<32} {:<16} {:<10} {}{note}\n",
+                format!("{}/{}", agent.scope, agent.agent),
+                agent.model.as_deref().unwrap_or(UNKNOWN),
+                verdict(agent.served),
+                agent.source.as_str(),
+            ));
+        }
+        if !models.served.is_empty() {
+            let shown: Vec<&str> = models.served.iter().filter(|m| !m.hidden).map(|m| m.slug.as_str()).collect();
+            let hidden = models.served.len() - shown.len();
+            let hidden = if hidden > 0 { format!(" (and {hidden} hidden)") } else { String::new() };
+            out.push_str(&format!("  served: {}{hidden}\n", shown.join(", ")));
+        }
+        if let Some(issue) = &models.issue {
+            out.push_str(&format!("  issue: {issue}\n"));
         }
     }
     Some(out.trim_end().to_string())
@@ -8560,8 +8597,43 @@ mod tests {
                 }],
                 auto_repair: None,
             }],
+            codex_models: Some(factory_core::harness::CodexModelsFact {
+                client_version: Some("0.157.0".into()),
+                served: vec![
+                    factory_core::harness::CodexServedModel { slug: "gpt-6-astra".into(), hidden: false },
+                    factory_core::harness::CodexServedModel { slug: "gpt-6-sol".into(), hidden: false },
+                    factory_core::harness::CodexServedModel { slug: "gpt-reserve".into(), hidden: true },
+                ],
+                observed_at: Some(chrono::Utc::now()),
+                issue: None,
+                default_model: Some("gpt-6.1-sol".into()),
+                default_served: Some(false),
+                agents: vec![
+                    factory_core::harness::CodexAgentModel {
+                        scope: "factory".into(),
+                        agent: "codex".into(),
+                        model: Some("gpt-6.1-sol".into()),
+                        source: factory_core::harness::CodexModelSource::ConfigDefault,
+                        served: Some(false),
+                        note: None,
+                    },
+                    factory_core::harness::CodexAgentModel {
+                        scope: "radar".into(),
+                        agent: "scout".into(),
+                        model: Some("gpt-6-sol".into()),
+                        source: factory_core::harness::CodexModelSource::Declared,
+                        served: Some(true),
+                        note: None,
+                    },
+                ],
+            }),
         };
         let text = infrastructure_text(&payload).unwrap();
+        assert!(text.contains("CODEX MODELS  served to codex 0.157.0, list fetched"), "{text}");
+        assert!(text.contains("(config.toml default)") && text.contains("factory/codex"), "{text}");
+        assert!(text.lines().any(|l| l.contains("factory/codex") && l.contains("gpt-6.1-sol") && l.contains("NOT SERVED") && l.contains("config.toml")), "{text}");
+        assert!(text.lines().any(|l| l.contains("radar/scout") && l.contains("gpt-6-sol") && l.contains("served") && l.contains("declared")), "{text}");
+        assert!(text.contains("served: gpt-6-astra, gpt-6-sol (and 1 hidden)"), "{text}");
         assert!(text.contains("HARNESSES") && text.contains("unhealthy"), "{text}");
         assert!(text.contains("repair: scripts/repair-harness codex"), "{text}");
         assert!(text.contains("held: 1 task(s) -- t1 (fix it)"), "{text}");

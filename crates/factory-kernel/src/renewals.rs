@@ -34,6 +34,10 @@ pub enum DateSource {
     CraDeadline,
     /// An entry of the instance root's declared secrets catalogue (`#244`).
     Secret,
+    /// A model a codex agent asks for, against the Codex backend's list for
+    /// the installed client (`#340`): no expiry while it is served, expired
+    /// from the first observation that it is not.
+    CodexModel,
 }
 
 /// Authored metadata vocabulary. Parsing and validation belong to L1/core,

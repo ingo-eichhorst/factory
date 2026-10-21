@@ -266,6 +266,7 @@ impl Engine {
                 verify_drill_skip: std::sync::Mutex::new(None),
                 infrastructure_expiries: crate::renewals::store::InfrastructureExpiryStore::in_memory().expect("expiry metadata store should open"),
                 renewal_declaration_cache: Default::default(),
+                codex_models: Default::default(),
                 host_power: crate::host_power::HostPower::new(),
                 power,
                 promotion_lock: tokio::sync::Mutex::new(()),
@@ -898,6 +899,8 @@ impl Engine {
             providers,
             unassigned,
             harnesses,
+            // L1's own, added by the L1 router (`#340`).
+            codex_models: None,
         }
     }
 

@@ -43,6 +43,13 @@ pub(crate) struct Tools {
     pub metadata_home: PathBuf,
     pub config_home: PathBuf,
     pub enabled: bool,
+    /// The codex binary whose model list is asked for (`#340`).
+    pub codex: String,
+    /// codex's own files: `auth.json` and `config.toml`.
+    pub codex_home: PathBuf,
+    pub curl: String,
+    /// The last Codex model list fetched, so the job asks at most hourly.
+    pub codex_memo: crate::codex_models::Memo,
 }
 impl Default for Tools {
     fn default() -> Self {
@@ -69,6 +76,10 @@ impl Default for Tools {
             }),
             github: std::env::var("FACTORY_DATES_GITHUB").unwrap_or_else(|_| "gh".into()),
             openshell: std::env::var("FACTORY_DATES_OPENSHELL").ok(),
+            codex: std::env::var("FACTORY_DATES_CODEX").unwrap_or_else(|_| "codex".into()),
+            codex_home: crate::codex_models::codex_home(&metadata_home, isolated.is_some()),
+            curl: std::env::var("FACTORY_DATES_CURL").unwrap_or_else(|_| "curl".into()),
+            codex_memo: Default::default(),
             metadata_home,
             config_home,
             enabled: std::env::var("FACTORY_RENEWALS_DISCOVERY").as_deref() != Ok("0"),
@@ -105,7 +116,7 @@ pub(crate) fn observation(
 
 /// Nothing a failed command printed is persisted. At most 2 MiB, and a
 /// deadline with kill-on-drop, including a child that keeps stdout open.
-async fn read_only(
+pub(crate) async fn read_only(
     program: &str,
     args: &[&str],
     input: Option<&[u8]>,
@@ -505,6 +516,8 @@ pub(crate) struct Observed {
     pub credentials: Vec<ExpiryObservation>,
     pub infrastructure_complete: bool,
     pub credentials_complete: bool,
+    /// The Codex model list (`#340`), when any codex agent is declared.
+    pub codex: Option<crate::codex_models::Probe>,
 }
 impl Observed {
     pub(crate) fn unavailable(now: DateTime<Utc>) -> Self {
@@ -530,16 +543,28 @@ impl Observed {
             credentials: vec![credentials],
             infrastructure_complete: false,
             credentials_complete: false,
+            codex: None,
         }
     }
 }
+/// Every observation, the Codex model list's alongside the rest rather than
+/// after it: neither waits for the other's slow endpoint.
 pub(crate) async fn observe(factory: &Factory, tools: &Tools, now: DateTime<Utc>) -> Observed {
+    let (mut observed, codex) = tokio::join!(
+        observe_expiries(factory, tools, now),
+        crate::codex_models::probe(factory, tools, now)
+    );
+    observed.codex = codex;
+    observed
+}
+async fn observe_expiries(factory: &Factory, tools: &Tools, now: DateTime<Utc>) -> Observed {
     if !tools.enabled {
         return Observed {
             infrastructure: Vec::new(),
             credentials: Vec::new(),
             infrastructure_complete: true,
             credentials_complete: true,
+            codex: None,
         };
     }
     let mut infrastructure_complete = true;
@@ -940,6 +965,7 @@ pub(crate) async fn observe(factory: &Factory, tools: &Tools, now: DateTime<Utc>
         credentials: credentials.into_values().collect(),
         infrastructure_complete,
         credentials_complete,
+        codex: None,
     }
 }
 

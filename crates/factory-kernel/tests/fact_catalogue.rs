@@ -35,6 +35,7 @@ fn every_fact_is_in_l0_and_its_catalogue_producer_matches_its_type() {
     assert_producer::<ScopeCapacityFact, L1>("ScopeCapacityFact", "L1");
     assert_producer::<EnvironmentMetricFact, L1>("EnvironmentMetricFact", "L1");
     assert_producer::<BackupFact, L1>("BackupFact", "L1");
+    assert_producer::<CodexModelsFact, L1>("CodexModelsFact", "L1");
     assert_producer::<SecretsPresence, L2>("SecretsPresence", "L2");
     assert_producer::<DependenciesFact, L2>("DependenciesFact", "L2");
     assert_producer::<SandboxServiceEvidenceFact, L2>("SandboxServiceEvidenceFact", "L2");
@@ -241,6 +242,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "ScopeCapacityFact",
         "EnvironmentMetricFact",
         "BackupFact",
+        "CodexModelsFact",
         "SecretsPresence",
         "DependenciesFact",
         "SandboxServiceEvidenceFact",

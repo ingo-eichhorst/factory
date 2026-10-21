@@ -6,6 +6,8 @@ import {
   MISSING,
   PROVIDERS_SNIPPET,
   agentHref,
+  codexModelRows,
+  codexVerdictLabel,
   daemonUptime,
   diskLevel,
   diskPercent,
@@ -316,4 +318,44 @@ test("the page draws the harness layer from the payload's harnesses", () => {
   const view = readFileSync(new URL("../js/infrastructure.js", import.meta.url), "utf8");
   assert.match(view, /data\.harnesses/);
   assert.match(view, /h\.repair/);
+});
+
+// -- codex models (#340) -----------------------------------------------------
+
+const MODELS = {
+  client_version: "0.157.0",
+  observed_at: "2026-10-21T10:00:00Z",
+  served: [{ slug: "gpt-6-astra" }, { slug: "gpt-6-sol" }, { slug: "gpt-reserve", hidden: true }],
+  default_model: "gpt-6.1-sol",
+  default_served: false,
+  agents: [
+    { scope: "radar", agent: "scout", model: "gpt-6-sol", source: "declared", served: true },
+    { scope: "factory", agent: "codex", model: "gpt-6.1-sol", source: "config_default", served: false },
+    { scope: "lab", agent: "local", model: "qwen", source: "declared", note: "model provider ollama: the ChatGPT model list does not cover it" },
+  ],
+};
+
+test("only false is a verdict: an unknown codex model is not called unserved", () => {
+  assert.equal(codexVerdictLabel(true), "served");
+  assert.equal(codexVerdictLabel(false), "not served");
+  assert.equal(codexVerdictLabel(null), "not known");
+  assert.equal(codexVerdictLabel(undefined), "not known");
+});
+
+test("the codex models card puts the default and the unserved agents first, and counts hidden models", () => {
+  const view = codexModelRows(MODELS);
+  assert.equal(view.version, "0.157.0");
+  assert.deepEqual(view.rows.map(r => r.who), ["config.toml default", "factory/codex", "radar/scout", "lab/local"]);
+  assert.equal(view.rows[1].source, "config.toml");
+  assert.equal(view.rows[3].served, null);
+  assert.match(view.rows[3].note, /ollama/);
+  assert.equal(view.served, "gpt-6-astra, gpt-6-sol (and 1 hidden)");
+  assert.equal(view.unserved, 2);
+  assert.equal(codexModelRows(undefined), null);
+  assert.equal(codexModelRows({ issue: "not observed yet since the daemon started" }).version, MISSING);
+});
+
+test("the page draws the codex models layer from the payload's codex_models", () => {
+  const view = readFileSync(new URL("../js/infrastructure.js", import.meta.url), "utf8");
+  assert.match(view, /data\.codex_models/);
 });

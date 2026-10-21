@@ -288,3 +288,28 @@ impl L3Service<'_> {
         });
     }
 }
+
+impl L3Service<'_> {
+    /// `#340`: refuse a codex agent whose model L1 knows the Codex backend does not
+    /// serve to the installed client -- before a run or a session exists, rather
+    /// than leaving a TUI at an HTTP 400 nothing reports. A non-codex adapter, an
+    /// unknown verdict and a fact that cannot be read all pass.
+    pub(crate) async fn codex_model_gate(&self, scope: &str, agent: &str, adapter: &str) -> factory_core::error::Result<()> {
+        if adapter != "codex" {
+            return Ok(());
+        }
+        let fact = match self.wiring.facts().get::<factory_kernel::CodexModelsFact>(&()).await {
+            Ok(fact) => fact,
+            Err(error) => {
+                tracing::warn!(scope, agent, "codex model list unreadable, not checked: {error}");
+                return Ok(());
+            }
+        };
+        let scope = self.wiring.snapshot().canonical_scope_name(scope);
+        let row = fact.agents.iter().find(|row| row.scope == scope && row.agent == agent);
+        match factory_agents::harness::unserved_model_reason(&fact, row) {
+            Some(reason) => Err(factory_core::error::FactoryError::adapter("codex", reason)),
+            None => Ok(()),
+        }
+    }
+}

@@ -369,6 +369,12 @@ impl L3Service<'_> {
             quality: Vec::new(),
         };
 
+        // `#340`: a standing codex agent whose model the backend does not
+        // serve to the installed client would sit at an HTTP 400 on the first
+        // thing it is asked; it fails to start instead, saying why.
+        if let Err(e) = self.codex_model_gate(scope, name, &decl.harness).await {
+            return self.mark_agent_failed(agent, e).await;
+        }
         let mut launch = match adapter.launch_spec(&ctx).await {
             Ok(l) => l,
             Err(e) => return self.mark_agent_failed(agent, e).await,

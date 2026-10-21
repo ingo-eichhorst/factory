@@ -1526,6 +1526,12 @@ pub enum Payload {
         /// the config names no harness with a probe.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         harnesses: Vec<factory_agents::harness::HarnessRow>,
+        /// Which model each codex agent will ask for, and whether the Codex
+        /// backend serves it to the installed client (`#340`). L1's last
+        /// observation: showing the page fetches nothing. Left out when no
+        /// scope declares a codex agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_models: Option<factory_kernel::CodexModelsFact>,
     },
     /// The L1 Mac tab's power mode (`#260`) -- the answer to both
     /// `Request::HostPowerMode` and `Request::HostPowerModeSet`.
@@ -3479,6 +3485,7 @@ mod tests {
                 harness: "opencode".into(),
             }],
             harnesses: vec![],
+            codex_models: None,
         }
     }
 
@@ -3540,6 +3547,7 @@ mod tests {
             }],
             unassigned: vec![],
             harnesses: vec![],
+            codex_models: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         for field in [

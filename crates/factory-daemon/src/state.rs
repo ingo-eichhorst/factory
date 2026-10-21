@@ -88,6 +88,9 @@ pub struct L1State {
     pub(crate) host_power: crate::host_power::HostPower,
     pub(crate) infrastructure_expiries: crate::renewals::store::InfrastructureExpiryStore,
     pub(crate) renewal_declaration_cache: factory_infrastructure::renewal_declarations::DeclarationCache,
+    /// The Codex backend's model list for the installed client, as the
+    /// observation job last found it (`#340`) -- see `crate::codex_models`.
+    pub(crate) codex_models: factory_infrastructure::codex_models::Cache,
     pub(crate) promotion_lock: tokio::sync::Mutex<()>,
 }
 

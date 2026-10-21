@@ -68,6 +68,10 @@ pub trait Assignments: CommandPort<Level = L3> + Send + Sync {
     async fn start(&self, session: SessionStart) -> Result<SessionRef>;
     /// Type the prompt into an opened session.
     async fn submit(&self, runtime: &str, session: &SessionRef, prompt: &str) -> Result<()>;
+    /// Whether `agent` in `scope`, on `adapter`, may be handed a task at all -- asked
+    /// before a run exists (`#340`). An error is the refusal, naming why; `Ok` is
+    /// also every answer L3 cannot be sure of.
+    async fn preflight(&self, scope: &str, agent: &str, adapter: &str) -> Result<()>;
 }
 
 /// What L4 tells L3 about a task it holds on an unhealthy harness (`#131`, D6). The

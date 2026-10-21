@@ -1182,6 +1182,51 @@ pub struct Infrastructure {
     /// the L1 Backup page says in red rather than leaving blank.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<factory_infrastructure::backup::BackupConfig>,
+    /// Whether the Codex backend serves each codex agent's model to the
+    /// installed client (`#340`). On by default; it only ever asks when some
+    /// scope declares a codex agent.
+    #[serde(default, skip_serializing_if = "CodexModelsConfig::is_default")]
+    pub codex_models: CodexModelsConfig,
+}
+
+/// The Codex model check (`#340`): L1's observation job asks the backend
+/// which models it serves to the installed codex, with the host's ChatGPT
+/// login, and a codex agent whose model is not among them is refused at
+/// dispatch.
+///
+/// ```yaml
+/// infrastructure:
+///   codex_models:
+///     enabled: true      # the default
+///     endpoint: https://chatgpt.com/backend-api/codex/models   # the default
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodexModelsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The model list's URL; `client_version=` is appended to it.
+    #[serde(default = "default_codex_models_endpoint")]
+    pub endpoint: String,
+}
+
+fn default_codex_models_endpoint() -> String {
+    factory_infrastructure::codex_models::DEFAULT_ENDPOINT.to_string()
+}
+
+impl Default for CodexModelsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            endpoint: default_codex_models_endpoint(),
+        }
+    }
+}
+
+impl CodexModelsConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// One AI account, as the root config declares it.

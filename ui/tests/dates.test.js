@@ -49,6 +49,8 @@ test("badges use exact agent/environment dependencies, not coincident names or u
 test("date presentation distinguishes no reported expiry, unknown and native resolution", () => {
   const date = entry(); date.observation.no_expiry = true; date.observation.source = "github_auth";
   assert.equal(expiryText(date), "no reported expiry");
+  date.observation.source = "codex_model";
+  assert.equal(expiryText(date), "served");
   date.observation.no_expiry = false; date.observation.expires_at = null;
   assert.equal(expiryText(date), "unknown");
   assert.equal(stateText({ ...date, resolved: true, state: "overdue" }), "resolved");
