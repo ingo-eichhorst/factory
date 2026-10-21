@@ -1713,8 +1713,16 @@ pub(crate) mod tests {
         tx: std::sync::Mutex<Option<mpsc::Sender<RuntimeEvent>>>,
         starts: std::sync::Mutex<Vec<StartRequest>>,
         stops: std::sync::Mutex<Vec<SessionRef>>,
-        /// What `status` answers per session handle; `Unknown` otherwise.
+        /// What `status` answers per session handle; `Unknown` otherwise. A
+        /// session stopped is `Gone` until one is started under it again.
         statuses: std::sync::Mutex<std::collections::HashMap<String, RuntimeStatus>>,
+        /// What `usage` answers per session handle; `None` otherwise.
+        usages: std::sync::Mutex<std::collections::HashMap<String, factory_core::usage::SessionUsage>>,
+        /// What `processes` answers per session handle; none otherwise.
+        processes: std::sync::Mutex<std::collections::HashMap<String, Vec<factory_core::adapter::runtime::SessionProcess>>>,
+        /// While set, `start` records its request and then waits here: a
+        /// start that is under way, for as long as a test needs one.
+        gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     }
 
     impl StubRuntime {
@@ -1724,7 +1732,35 @@ pub(crate) mod tests {
                 starts: std::sync::Mutex::new(Vec::new()),
                 stops: std::sync::Mutex::new(Vec::new()),
                 statuses: std::sync::Mutex::new(Default::default()),
+                usages: std::sync::Mutex::new(Default::default()),
+                processes: std::sync::Mutex::new(Default::default()),
+                gate: std::sync::Mutex::new(None),
             }
+        }
+
+        /// The usage `id`'s session reports: one harness session of
+        /// `adapter`, in conversation `conversation`.
+        fn set_usage(&self, id: &str, adapter: &str, conversation: &str) {
+            let usage = factory_core::usage::SessionUsage::parse(
+                &serde_json::json!({"schema": 1, "sessions": [{"session_id": conversation, "adapter": adapter}]}).to_string(),
+            )
+            .unwrap();
+            self.usages.lock().unwrap().insert(Self::handle(id), usage);
+        }
+
+        fn set_processes(&self, id: &str, pids: &[u32]) {
+            let processes = pids
+                .iter()
+                .map(|pid| factory_core::adapter::runtime::SessionProcess { pid: *pid, name: None, argv: Vec::new() })
+                .collect();
+            self.processes.lock().unwrap().insert(Self::handle(id), processes);
+        }
+
+        /// Hold every `start` from here on until `open` is called.
+        fn close_gate(&self) -> Arc<tokio::sync::Semaphore> {
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            *self.gate.lock().unwrap() = Some(gate.clone());
+            gate
         }
 
         /// The handle `start` gives the session it opens for `id`.
@@ -1752,6 +1788,11 @@ pub(crate) mod tests {
         }
         async fn start(&self, req: &StartRequest) -> Result<SessionRef> {
             self.starts.lock().unwrap().push(req.clone());
+            self.statuses.lock().unwrap().remove(&Self::handle(&req.id));
+            let gate = self.gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                gate.acquire().await.unwrap().forget();
+            }
             // As herdr does: a named harness becomes a named agent a person can
             // attach to; a shell pane (`shell`'s empty command) does not.
             let mut meta = std::collections::BTreeMap::new();
@@ -1784,7 +1825,14 @@ pub(crate) mod tests {
         }
         async fn stop(&self, session: &SessionRef) -> Result<()> {
             self.stops.lock().unwrap().push(session.clone());
+            self.statuses.lock().unwrap().insert(session.handle.clone(), RuntimeStatus::Gone);
             Ok(())
+        }
+        async fn usage(&self, session: &SessionRef) -> Result<Option<factory_core::usage::SessionUsage>> {
+            Ok(self.usages.lock().unwrap().get(&session.handle).cloned())
+        }
+        async fn processes(&self, session: &SessionRef) -> Result<Vec<factory_core::adapter::runtime::SessionProcess>> {
+            Ok(self.processes.lock().unwrap().get(&session.handle).cloned().unwrap_or_default())
         }
         async fn watch(&self) -> Result<Option<RuntimeEventStream>> {
             let (tx, rx) = mpsc::channel(16);
@@ -1850,6 +1898,8 @@ pub(crate) mod tests {
             ),
             "test",
         );
+        registry.add_agent(Arc::new(ByPid { name: "bypid", resumes: true }), "test");
+        registry.add_agent(Arc::new(ByPid { name: "bypid-noresume", resumes: false }), "test");
         registry.add_runtime(stub, "test");
         Arc::new(Engine::new(
             Factory {
@@ -2135,6 +2185,264 @@ pub(crate) mod tests {
         engine.l3_service().supervise_agents().await;
         assert_eq!(stub.started_ids().last().map(String::as_str), Some("demo/watcher#2"));
         assert_eq!(stub.starts.lock().unwrap().len(), 4, "only the one that went");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A harness that keeps its conversation by process id, as Claude Code
+    /// does in `~/.claude/sessions/<pid>.json`: pid 4242 is in `by-pid`.
+    struct ByPid {
+        name: &'static str,
+        resumes: bool,
+    }
+
+    #[async_trait]
+    impl factory_core::adapter::agent::Agent for ByPid {
+        fn name(&self) -> &str {
+            self.name
+        }
+        async fn launch_spec(&self, _ctx: &AgentContext) -> Result<factory_core::adapter::agent::LaunchSpec> {
+            Ok(factory_core::adapter::agent::LaunchSpec {
+                kind: factory_core::adapter::agent::LaunchKind::Named("bypid".into()),
+                args: Vec::new(),
+                env: Default::default(),
+                agent_kind: None,
+            })
+        }
+        async fn prompt(&self, _ctx: &AgentContext) -> Result<String> {
+            Ok(String::new())
+        }
+        fn resume_spec(&self, session_id: &str) -> Option<factory_core::adapter::agent::ResumeSpec> {
+            self.resumes.then(|| factory_core::adapter::agent::ResumeSpec { args: vec!["--session".into(), session_id.into()] })
+        }
+        fn live_conversation(&self, pid: u32) -> Option<String> {
+            (pid == 4242).then(|| "by-pid".to_string())
+        }
+    }
+
+    /// A standing claude-code agent, `demo/keeper`, declared with `args`.
+    fn keeper(args: &str) -> String {
+        format!(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: keeper\n    harness: claude-code\n    lifetime: permanent\n    args: {args}\n"
+        )
+    }
+
+    const CONVERSATION: &str = "59edd824-a565-46f8-a94a-b0555ddc645b";
+
+    async fn restart(engine: &Arc<Engine>, id: &str, fresh: bool) -> std::result::Result<Restarted, String> {
+        match ask(engine, Request::AgentRestart { id: id.into(), fresh }).await? {
+            Payload::Restarted { restart } => Ok(restart),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// One instance's row as it is stored, to compare byte for byte.
+    async fn row(engine: &Engine, id: &str) -> serde_json::Value {
+        serde_json::to_value(instance(engine, id).await).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_idle_claude_agent_comes_back_on_its_own_conversation_with_the_args_declared_now() {
+        let (engine, stub, root) = recording_engine(&keeper("[--model, sonnet]"));
+        engine.l3_service().reconcile_agents().await;
+        engine.l3_service().set_agent_role("demo/keeper", Some(Role::foreman())).await.unwrap();
+        let before = instance(&engine, "demo/keeper").await;
+        stub.set_status("demo/keeper", RuntimeStatus::Idle);
+        stub.set_usage("demo/keeper", "claude-code", CONVERSATION);
+        // The declaration has moved on since it started; the restart reads it
+        // as it is now.
+        engine.shared.factory.write().unwrap().config.scopes[0].agents[0].args = vec!["--model".into(), "opus".into()];
+
+        let restarted = restart(&engine, "demo/keeper", false).await.unwrap();
+        assert_eq!(restarted.conversation.as_deref(), Some(CONVERSATION));
+        assert_eq!(restarted.summary(), format!("demo/keeper resumed conversation {CONVERSATION}"));
+        assert_eq!(restarted.previous_session, StubRuntime::handle("demo/keeper"));
+        assert!(restarted.agent.token.is_none(), "the answer is redacted");
+
+        let starts = stub.starts.lock().unwrap().clone();
+        assert_eq!(starts.len(), 2, "the first start, then the restart's");
+        let args = &starts[1].launch.args;
+        assert_eq!(&args[..2], ["--resume", CONVERSATION], "the conversation first: {args:?}");
+        assert_eq!(&args[args.len() - 2..], ["--model", "opus"], "the args declared now, last: {args:?}");
+        assert!(!args.iter().any(|a| a == "sonnet"), "{args:?}");
+        assert!(!starts[0].launch.args.iter().any(|a| a == "--resume"));
+        assert_eq!((starts[1].id.as_str(), starts[1].name.as_str()), ("demo/keeper", "factory-demo-keeper"));
+        assert_eq!(stub.stopped_handles(), [StubRuntime::handle("demo/keeper")]);
+
+        // The same id and instance, the role it was given, a new identity.
+        let after = instance(&engine, "demo/keeper").await;
+        assert_eq!((after.id.as_str(), after.instance, after.state), ("demo/keeper", 1, AgentState::Ready));
+        assert_eq!((after.role.clone(), after.assigned_role.clone()), (Role::foreman(), Some(Role::foreman())));
+        assert!(after.token.is_some() && after.token != before.token, "a fresh token, as any start gives");
+        assert_eq!(after.conversation.as_deref(), Some(CONVERSATION));
+
+        // Journaled: who asked, the session it left and the one it is in,
+        // and the conversation.
+        let handle = StubRuntime::handle("demo/keeper");
+        let journal = journal(&engine).await;
+        assert!(
+            journal.iter().any(|(source, kind, message)| source == "owner"
+                && kind == "agent_restarted"
+                && *message
+                    == format!("demo/keeper restarted by the owner: session {handle} -> {handle}; resumed conversation {CONVERSATION}")),
+            "{journal:#?}"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn an_attached_working_or_blocked_instance_is_refused_and_left_exactly_as_it_was() {
+        let (engine, stub, root) = recording_engine(&keeper("[--model, opus]"));
+        engine.l3_service().reconcile_agents().await;
+        stub.set_usage("demo/keeper", "claude-code", CONVERSATION);
+        let before = row(&engine, "demo/keeper").await;
+
+        for (status, words) in [(RuntimeStatus::Working, "it is working"), (RuntimeStatus::Blocked, "it is waiting on an answer")] {
+            stub.set_status("demo/keeper", status);
+            for fresh in [false, true] {
+                let e = restart(&engine, "demo/keeper", fresh).await.unwrap_err();
+                assert!(e.contains(&format!("demo/keeper is busy: {words}. Nothing was stopped")), "{e}");
+            }
+        }
+        // Idle, but somebody has its terminal open.
+        stub.set_status("demo/keeper", RuntimeStatus::Idle);
+        engine.l3_service().agent_screen("demo/keeper").await.unwrap();
+        let e = restart(&engine, "demo/keeper", false).await.unwrap_err();
+        assert!(e.contains("demo/keeper is busy: its terminal was open in Factory"), "{e}");
+
+        assert_eq!(row(&engine, "demo/keeper").await, before, "the row, field for field");
+        assert!(stub.stopped_handles().is_empty(), "nothing stopped");
+        assert_eq!(stub.starts.lock().unwrap().len(), 1, "nothing started");
+        let journal = journal(&engine).await;
+        let refused = journal.iter().filter(|(_, kind, _)| kind == "agent_restart_refused").count();
+        assert_eq!(refused, 5, "{journal:#?}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn with_no_conversation_known_it_is_refused_and_fresh_starts_it_on_a_new_one() {
+        let (engine, stub, root) = recording_engine(&keeper("[--model, opus]"));
+        engine.l3_service().reconcile_agents().await;
+        stub.set_status("demo/keeper", RuntimeStatus::Idle);
+        let before = row(&engine, "demo/keeper").await;
+
+        let e = restart(&engine, "demo/keeper", false).await.unwrap_err();
+        assert!(e.contains("no conversation is known for demo/keeper"), "{e}");
+        assert!(e.contains("the runtime reports no usage") && e.contains("no process in its session"), "says why: {e}");
+        assert!(e.contains("factory agent restart demo/keeper --fresh"), "{e}");
+        assert!(!e.contains("busy"), "not something a later tick fixes: {e}");
+        assert_eq!(row(&engine, "demo/keeper").await, before);
+        assert!(stub.stopped_handles().is_empty());
+
+        let restarted = restart(&engine, "demo/keeper", true).await.unwrap();
+        assert_eq!((restarted.conversation.as_deref(), restarted.left.as_deref()), (None, None));
+        assert_eq!(restarted.summary(), "demo/keeper restarted fresh");
+        let starts = stub.starts.lock().unwrap().clone();
+        assert_eq!(starts.len(), 2);
+        assert!(!starts[1].launch.args.iter().any(|a| a == "--resume"), "{:?}", starts[1].launch.args);
+        assert_eq!(instance(&engine, "demo/keeper").await.conversation, None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_conversation_kept_by_process_is_found_and_written_down_before_anything_stops() {
+        let (engine, stub, root) = recording_engine(
+            "name: demo\npath: .\nruntime: stub\nagents:\n  - name: one\n    harness: bypid\n    lifetime: permanent\n  \
+             - name: two\n    harness: bypid-noresume\n    lifetime: permanent\n",
+        );
+        engine.l3_service().reconcile_agents().await;
+        for id in ["demo/one", "demo/two"] {
+            stub.set_status(id, RuntimeStatus::Idle);
+            // No usage, so the harness's own record by pid is what says.
+            stub.set_processes(id, &[17, 4242]);
+        }
+
+        // A harness that cannot resume is refused with nothing stopped, but
+        // the conversation it found is on the row for whoever comes next.
+        let e = restart(&engine, "demo/two", false).await.unwrap_err();
+        assert!(e.contains("is in conversation by-pid, but the bypid-noresume adapter declares no way to resume one"), "{e}");
+        assert_eq!(instance(&engine, "demo/two").await.conversation.as_deref(), Some("by-pid"));
+        assert!(stub.stopped_handles().is_empty());
+        // `--fresh` goes ahead, and says which conversation it left.
+        let fresh = restart(&engine, "demo/two", true).await.unwrap();
+        assert_eq!(fresh.left.as_deref(), Some("by-pid"));
+        assert_eq!(fresh.summary(), "demo/two restarted fresh, leaving conversation by-pid");
+
+        let restarted = restart(&engine, "demo/one", false).await.unwrap();
+        assert_eq!(restarted.conversation.as_deref(), Some("by-pid"));
+        let starts = stub.starts.lock().unwrap().clone();
+        let last = starts.last().unwrap();
+        assert_eq!((last.id.as_str(), &last.launch.args[..2]), ("demo/one", &["--session".to_string(), "by-pid".to_string()][..]));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn nothing_starts_an_instance_a_second_time_while_a_restart_is_in_the_middle_of_it() {
+        let (engine, stub, root) = recording_engine(&keeper("[--model, opus]"));
+        engine.l3_service().reconcile_agents().await;
+        stub.set_status("demo/keeper", RuntimeStatus::Idle);
+        stub.set_usage("demo/keeper", "claude-code", CONVERSATION);
+
+        let gate = stub.close_gate();
+        let restarting = tokio::spawn({
+            let engine = engine.clone();
+            async move { restart(&engine, "demo/keeper", false).await }
+        });
+        // The old session is stopped and gone, and the new one is being
+        // started: its row says `starting` with no session -- what a
+        // supervisor tick would otherwise take for a death.
+        assert_eq!(started(&stub, 2).await.len(), 2);
+        assert_eq!(stub.stopped_handles().len(), 1);
+        let mid = instance(&engine, "demo/keeper").await;
+        assert_eq!((mid.state, mid.session.is_none()), (AgentState::Starting, true));
+        // Bounded: a supervisor that did start it would sit in that start
+        // behind the gate, and this should fail rather than hang.
+        for _ in 0..3 {
+            let tick = tokio::time::timeout(Duration::from_secs(5), engine.l3_service().supervise_agents()).await;
+            assert!(tick.is_ok(), "a supervisor tick went into a second start: {:?}", stub.started_ids());
+        }
+        assert_eq!(stub.starts.lock().unwrap().len(), 2, "the supervisor started nothing");
+
+        // Anything else asked meanwhile waits for it, then finds it up.
+        let asked_start = tokio::spawn({
+            let engine = engine.clone();
+            async move { ask(&engine, Request::AgentStart { scope: "demo".into(), name: "keeper".into(), instance: None }).await }
+        });
+        let reconciled = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.l3_service().reconcile_agents().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(stub.starts.lock().unwrap().len(), 2);
+
+        gate.add_permits(16);
+        let within = Duration::from_secs(10);
+        let restarted = tokio::time::timeout(within, restarting).await.expect("the restart finishes").unwrap().unwrap();
+        tokio::time::timeout(within, asked_start).await.expect("the start finishes").unwrap().unwrap();
+        tokio::time::timeout(within, reconciled).await.expect("the reconcile finishes").unwrap();
+        engine.l3_service().supervise_agents().await;
+        assert_eq!(stub.starts.lock().unwrap().len(), 2, "one restart, one start");
+        assert_eq!(stub.stopped_handles().len(), 1);
+        assert_eq!(restarted.conversation.as_deref(), Some(CONVERSATION));
+        assert_eq!(instance(&engine, "demo/keeper").await.state, AgentState::Ready);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn an_instance_that_is_not_up_or_no_longer_wanted_is_not_restarted() {
+        let (engine, stub, root) = scaled_engine(THREE_WATCHERS);
+        engine.l3_service().reconcile_agents().await;
+        ask(&engine, Request::AgentStop { id: "demo/watcher#2".into() }).await.unwrap();
+        let e = restart(&engine, "demo/watcher#2", true).await.unwrap_err();
+        assert!(e.contains("demo/watcher#2 is stopped: there is no session to restart"), "{e}");
+        // #3 is busy, so a scale-down leaves it up -- no longer one of the count.
+        stub.set_status("demo/watcher#3", RuntimeStatus::Working);
+        scale(&engine, Some(2), None).await.unwrap();
+        stub.set_status("demo/watcher#3", RuntimeStatus::Idle);
+        let e = restart(&engine, "demo/watcher#3", true).await.unwrap_err();
+        assert!(e.contains("is not one of the 2 instance(s) its declaration keeps"), "{e}");
+        let e = restart(&engine, "demo/nobody", true).await.unwrap_err();
+        assert!(e.contains("demo/nobody"), "{e}");
+        assert_eq!(stub.starts.lock().unwrap().len(), 3, "nothing started");
         std::fs::remove_dir_all(root).ok();
     }
 
