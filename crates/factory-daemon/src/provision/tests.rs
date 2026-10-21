@@ -3,7 +3,7 @@
 //! real gateway.
 
 use super::*;
-use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration};
+use factory_core::config::{Config, DaemonConfig, Factory, Instance};
 use factory_plugins::{Registry, SqliteStore};
 use std::os::unix::fs::PermissionsExt;
 
@@ -123,21 +123,10 @@ fn fixture(block: &str, tools: impl FnOnce(&Path) -> Tools) -> Fixture {
     let cli = fake_openshell(&dir);
     let scope = demo_scope(&root, &cli, block);
     let config = Config {
-        version: 1,
         instance: Instance { id: format!("{SUFFIX}-0000-4000-8000-000000000000"), name: "test".into() },
         daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
-        scope: None,
         scopes: vec![scope],
-        roles: Default::default(),
-        dashboard: None,
-        policies: PolicyDeclaration::default(),
-        quality: Default::default(),
-        infrastructure: Default::default(),
-        secrets: Vec::new(),
-        channels: Vec::new(),
-        plugins_dir: None,
-        renewals: Vec::new(),
-        renewals_notify: None,
+        ..Default::default()
     };
     let factory_bin = root.join("factory");
     std::fs::write(&factory_bin, "factory cli v1").unwrap();

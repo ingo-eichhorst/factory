@@ -485,7 +485,7 @@ pub(crate) mod tests {
     /// A throwaway instance with a real database file and one scope that
     /// declares `environments`.
     pub(crate) fn engine_with(environments: &str) -> (Arc<Engine>, PathBuf) {
-        use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+        use factory_core::config::{Config, Instance};
         use factory_plugins::{Registry, SqliteStore};
         let root = std::env::temp_dir().join(format!("factory-environments-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".factory")).unwrap();
@@ -495,21 +495,10 @@ pub(crate) mod tests {
             serde_yaml_ng::from_str(&format!("id: company-id\nname: company\nenvironments:\n{environments}")).unwrap();
         company.path = PathBuf::from(".");
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![company],
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         config.validate_environments().unwrap();
         let factory = Factory { root: root.clone(), config };

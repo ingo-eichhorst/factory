@@ -99,7 +99,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use factory_core::adapter::interface::{Interface, InterfaceContext};
 use factory_core::adapter::TaskStore;
-use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
+use factory_core::config::{Config, Factory, Instance, Scope};
 use factory_core::event::Event;
 use factory_plugins::registry::Registry;
 use factory_plugins::SqliteStore;
@@ -234,46 +234,15 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
     let first_scope = Scope {
         id: uuid::Uuid::new_v4().to_string(),
         name: scope_name,
-        path: PathBuf::new(),
-        agent: None,
-        agents: Vec::new(),
-        runtime: None,
-        git: None,
-        task_store: None,
-        max_sessions: None,
-        roles: Default::default(),
-        dashboard: None,
-        policies: Default::default(),
-        quality: Default::default(),
-        intake: Default::default(),
-        dependencies: Default::default(),
-        environments: Vec::new(),
-        renewals: Vec::new(),
-        metrics: None,
-        backup: None,
-        memory: None,
-        skills: Vec::new(),
-        pages: Vec::new(),
+        ..Default::default()
     };
     let config = Config {
-        version: 1,
         instance: Instance {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.clone(),
         },
-        daemon: DaemonConfig::default(),
         scope: root_is_scope.then(|| first_scope.clone()),
-        scopes: Vec::new(),
-        roles: Default::default(),
-        dashboard: None,
-        policies: Default::default(),
-        quality: Default::default(),
-        infrastructure: Default::default(),
-        secrets: Vec::new(),
-        channels: Vec::new(),
-        plugins_dir: None,
-        renewals: Vec::new(),
-        renewals_notify: None,
+        ..Default::default()
     };
     std::fs::write(&config_path, serde_yaml_ng::to_string(&config)?)?;
     println!("wrote {}", config_path.display());
