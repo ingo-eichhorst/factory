@@ -44,6 +44,9 @@ impl Engine {
                 Ok(Payload::Ok)
             }
 
+            Request::Notify { channel, text, files } => Ok(Payload::Notified {
+                notified: Box::pin(self.l4_service().notify(caller, &channel, text, files)).await?,
+            }),
             Request::TaskCreate(new) => Ok(Payload::Task {
                 task: self.l4_service().create(new).await?,
             }),
@@ -53,11 +56,14 @@ impl Engine {
             Request::TaskList(filter) => Ok(Payload::Tasks {
                 tasks: self.l4.store.list(&filter).await?,
             }),
-            Request::TaskUpdate { id, patch, reason } => {
+            Request::TaskUpdate { id, mut patch, reason } => {
                 let asked = crate::operations::Asked::new(caller, reason);
-                Ok(Payload::Task {
-                    task: self.update(&id, patch, Some(&asked)).await?,
-                })
+                let delivery = self.l4_service().delivery_change(&id, &mut patch).await?;
+                let task = self.update(&id, patch, Some(&asked)).await?;
+                if let Some(change) = delivery {
+                    self.l4_service().record_delivery_change(&task, change, &asked).await?;
+                }
+                Ok(Payload::Task { task })
             }
             Request::TaskSkipNext { id, reason, slot } => {
                 let asked = crate::operations::Asked::new(caller, reason);

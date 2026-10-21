@@ -1915,6 +1915,7 @@ mod tests {
                 quality: Default::default(),
                 infrastructure,
                 secrets: Vec::new(),
+                channels: Vec::new(),
                 plugins_dir: None,
                 renewals: Vec::new(),
                 renewals_notify: None,

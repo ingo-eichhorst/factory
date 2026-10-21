@@ -557,6 +557,7 @@ mod tests {
             failure: None,
             closure: None,
             slot_wait: None,
+            deliver: None,
         }
     }
 
@@ -586,6 +587,7 @@ mod tests {
                 knowledge: None,
                 required_steps: Vec::new(),
                 agent_exits: Vec::new(),
+                deliver: None,
             }),
             identity_token: None,
             role: None,

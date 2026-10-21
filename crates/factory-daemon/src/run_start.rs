@@ -698,6 +698,7 @@ impl L4Service<'_> {
                 knowledge,
                 required_steps: run.required_steps.clone(),
                 agent_exits,
+                deliver: task.deliver.clone(),
             }),
             identity_token: None,
             role,

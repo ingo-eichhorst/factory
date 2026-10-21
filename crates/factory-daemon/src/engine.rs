@@ -273,6 +273,9 @@ impl Engine {
             l2: crate::state::L2State {
                 credential_expiries: crate::renewals::store::CredentialExpiryStore::in_memory().expect("expiry metadata store should open"),
                 provision: crate::provision::Provisioner::default(),
+                channels: crate::channels::ChannelState::new(
+                    factory_environment::channel_ledger::ChannelLedger::in_memory().expect("channel ledger should open"),
+                ),
             },
             l3: crate::state::L3State {
                 harness: crate::harness_health::HarnessHealth::new(),
@@ -1514,6 +1517,7 @@ mod tests {
             }],
             infrastructure: Default::default(),
             secrets: Vec::new(),
+            channels: Vec::new(),
             plugins_dir: None,
             renewals: Vec::new(),
             renewals_notify: None,
@@ -1688,6 +1692,7 @@ mod tests {
                 }],
                 infrastructure: Default::default(),
                 secrets: Vec::new(),
+                channels: Vec::new(),
                 plugins_dir: None,
                 renewals: Vec::new(),
                 renewals_notify: None,
@@ -4988,6 +4993,7 @@ mod tests {
                 }],
                 infrastructure: Default::default(),
                 secrets: Vec::new(),
+                channels: Vec::new(),
                 plugins_dir: None,
                 renewals: Vec::new(),
                 renewals_notify: None,
@@ -5045,6 +5051,7 @@ mod tests {
                 }],
                 infrastructure: Default::default(),
                 secrets: Vec::new(),
+                channels: Vec::new(),
                 plugins_dir: None,
                 renewals: Vec::new(),
                 renewals_notify: None,

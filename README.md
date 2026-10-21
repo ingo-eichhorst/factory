@@ -941,6 +941,114 @@ Below the catalogue, the tab still reports the well-known locations: for each,
 whether a file is there. No value is opened, held, logged, or returned --
 `present` is the entire result of each check.
 
+## Channels
+
+A run can hand the owner its result -- a message and files -- through a
+**channel** (`#337`): one Factory-owned send path, the same for every
+harness, through the callback binary and its `FACTORY_TOKEN`. Today the one
+kind is a Telegram bot writing to one chat. Channels are declared in the
+instance root's `.factory/config.yaml`, beside the secrets their tokens name:
+
+```yaml
+secrets:
+  - name: telegram-bot-token
+    kind: token
+    source: { from: keychain, service: factory-telegram-bot }
+    expires: never
+    renew: "BotFather /token, then store it in the keychain item"
+
+channels:
+  - name: owner-telegram
+    kind: telegram                   # the only kind today
+    token: { secret: telegram-bot-token }
+    chat: { from: env, name: FACTORY_OWNER_TELEGRAM_CHAT }
+    # api: https://api.telegram.org  # optional: a self-hosted Bot API server
+    # note: the owner's phone         # optional, one line
+```
+
+- `token:` is always `{ secret: <name> }`, an entry of `secrets:` (#244). An
+  inline token is refused at load, as is a name the catalogue does not
+  declare. Its value never appears in config, a task, the journal, a log or
+  an answer: the daemon reads it from its source the moment a send needs it
+  and hands it to `curl` on stdin (`--config -`), never on a command line.
+- `chat:` is the one recipient -- `{ secret: <name> }` or an inline source
+  (`env`, `file`, `command`, `keychain`). It is fixed here: nothing a caller
+  sends can name another chat, the way `notify-ingo` has one recipient.
+- `api:` is the Bot API's base URL, Telegram's own when left out. It must be
+  `https`, or plain `http` only to `127.0.0.1`, `localhost` or `[::1]`: the
+  token travels in the URL's path. A credential, query or fragment in it is
+  refused.
+- Only the root's file may hold `channels:`; a nested scope's is refused at
+  startup. The block is strict: an unknown key or kind is refused by name.
+
+**Sending.** `factory notify <channel> "<text>" [--file <path>]...`:
+
+```sh
+factory notify owner-telegram "Konferenz-Radar 26.10.: 2 neue CFPs, Top 5 …" \
+  --file out/ingo-conference-radar.html
+```
+
+- The text goes with `sendMessage`, as plain text. **Over 4096 characters**
+  (counted the way Telegram counts, UTF-16 units) it is **split** into
+  consecutive messages, cut at the last line break in each message's second
+  half, else the last space, else at the limit -- nothing is truncated or
+  dropped. More than ten messages' worth is refused, with the advice to send
+  it as a file instead.
+- Each `--file` (at most five) goes with `sendDocument`, after the text, under
+  its own file name. **A file over 50 MB**, the Bot API's limit, is refused
+  before anything is read or sent -- by the CLI, and again by the daemon. A
+  run's files must be inside its working directory (and not under `.git` or
+  `.factory`), opened without following a symlink; the CLI makes a relative
+  path absolute from where it was typed, and the daemon reads the file.
+- **Repeats** are skipped, as `scripts/notify-ingo` skips them: the same
+  message -- channel, text and every file's content -- sent to the same
+  channel within 12 hours is not sent again; the command says `skipped` and
+  exits 0, so a scheduled task that keeps hitting the same problem messages
+  once. A send is recorded (in the instance database's `channel_sends`,
+  digest and counts only, never the text) only once everything went, so a
+  send that failed halfway is not a repeat and the next attempt sends it
+  again -- the error says what had already gone.
+- Outbound only. Nothing calls `getUpdates`: a bot token has one poller, and
+  that belongs to the inbound gateway (#338).
+
+**Who may send: a standing approval.** A cron schedule never authorizes an
+external effect on its own. `--deliver <channel>` on `factory task create`
+(or `factory task edit --deliver <channel>`; `--no-deliver` withdraws it) is
+the owner's recorded approval for *that task's* result delivery through *that
+channel*, with no person in the loop:
+
+```sh
+factory task create "Konferenz-Radar" --scope conferenz-radar \
+  --schedule "0 9 * * 1" --timezone Europe/Berlin --no-worktree \
+  --deliver owner-telegram
+```
+
+- Only the owner gives, moves or withdraws one: a `task.create` or
+  `task.update` that carries `deliver` is `Needs::Owner` whatever role asks,
+  workflow spawns included, so an agent cannot approve its own sends. The
+  channel must be declared. It is journaled on the task -- `delivery_approved`
+  at creation or edit, `delivery_withdrawn` -- with who and why.
+- A run sends only through the channel its task's `deliver` names, and only
+  from the run its token names (the request carries no task or run id). Any
+  other channel, a task without an approval, a standing agent: refused, and
+  the refusal journaled (`notify_refused`) on the run. The owner, with no
+  token, may send through any declared channel; those sends are journaled
+  under `factory:channels`.
+- The approval covers that delivery and nothing else; every other external
+  effect from the run still needs approval as before. A run whose task has one
+  is told the exact command in its reporting contract.
+- Every send, repeat, refused approval and failure is journaled on the run
+  -- `notify_sent`, `notify_skipped`, `notify_refused`, `notify_failed` --
+  with the channel, the approval it went under, the text's character and byte
+  count and SHA-256, and each file's size and SHA-256. Never the text, a
+  file, its name, the token or the chat. A request refused for what it
+  carries (a file outside the working directory or over 50 MB, a text too
+  long) is answered with the reason and sends nothing.
+
+The daemon reads `--file` paths on the host. A run inside an OpenShell
+sandbox (`FACTORY_URL`) can send text, but its paths name nothing there, so
+its files are refused as outside its working directory.
+
 ## Dependencies
 
 The L2 Environment page's **Dependencies** tab keeps two different facts
@@ -4499,6 +4607,17 @@ infrastructure:              # optional: the AI accounts behind the agents, and 
   backup:                    # see "Backup" below
     destination: /Volumes/Backup/factory
     schedule: { cron: "0 3 * * *", timezone: Europe/Berlin }
+
+secrets:                     # optional: the declared secrets catalogue, see "Secrets"
+  - name: telegram-bot-token
+    kind: token
+    source: { from: keychain, service: factory-telegram-bot }
+
+channels:                    # optional: where a run can send the owner its result, see "Channels"
+  - name: owner-telegram
+    kind: telegram
+    token: { secret: telegram-bot-token }
+    chat: { from: env, name: FACTORY_OWNER_TELEGRAM_CHAT }
 
 scope:                       # optional: make the instance root a scope too
   id: cc23161d-82b9-4e75-8d88-e5195bc6d6e8

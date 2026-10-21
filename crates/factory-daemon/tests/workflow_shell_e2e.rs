@@ -1660,6 +1660,165 @@ fn a_shell_instruction_over_eleven_hundred_bytes_still_reaches_done() {
     );
 }
 
+/// A local stand-in for Telegram's Bot API (`#337`): it records every call
+/// and answers each with a fresh message id. No real Telegram traffic, ever.
+struct FakeBotApi {
+    port: u16,
+    calls: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+}
+
+impl FakeBotApi {
+    fn start() -> Self {
+        use std::io::BufRead;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the fake Bot API");
+        let port = listener.local_addr().unwrap().port();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        std::thread::spawn(move || {
+            for (n, stream) in listener.incoming().enumerate() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                if reader.read_line(&mut first).is_err() {
+                    continue;
+                }
+                let path = first.split_whitespace().nth(1).unwrap_or_default().to_string();
+                let (mut length, mut expect) = (0usize, false);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_err() || line.trim_end().is_empty() {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(v) = lower.strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap_or(0);
+                    }
+                    expect |= lower.starts_with("expect:");
+                }
+                if expect {
+                    let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+                }
+                let mut body = vec![0; length];
+                if reader.read_exact(&mut body).is_err() {
+                    continue;
+                }
+                seen.lock().unwrap().push((path, body));
+                let json = format!(r#"{{"ok":true,"result":{{"message_id":{}}}}}"#, n + 1);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    json.len()
+                );
+            }
+        });
+        Self { port, calls }
+    }
+
+    fn calls(&self) -> Vec<(String, Vec<u8>)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+fn entries(base: &str, id: &str) -> Vec<Value> {
+    let url = format!("{base}/api/tasks/{id}/entries");
+    expect_ok(&url, &get(&url))["entries"].as_array().cloned().unwrap_or_default()
+}
+
+/// `#337`'s acceptance, end to end: a *scheduled* shell task the owner gave
+/// `deliver: owner-telegram` sends its summary and a 1.7 MB HTML report
+/// through the real `factory notify` -- the callback binary, its
+/// `FACTORY_TOKEN`, the daemon reading the bot token from the secrets
+/// catalogue and sending with `curl` -- to a fake Bot API, with nobody in the
+/// loop. Its next scheduled run sends the same message and is skipped as a
+/// repeat. A task without the approval is refused, and every outcome is on
+/// the run's journal with the channel, sizes and hashes, never the text.
+#[test]
+fn a_scheduled_task_with_standing_approval_delivers_to_a_fake_bot_api_and_one_without_is_refused() {
+    if missing_prerequisites() {
+        return;
+    }
+    const TOKEN: &str = "123456:E2E-not-a-real-token";
+    const CHAT: &str = "777000777";
+    let bot = FakeBotApi::start();
+    let mut daemon = provision();
+    daemon.sigterm();
+    let token_file = daemon.root.join(".factory/bot-token");
+    std::fs::write(&token_file, TOKEN).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["secrets"] = serde_yaml_ng::to_value(json!([
+        {"name": "telegram-bot-token", "kind": "token", "source": {"from": "file", "path": token_file.display().to_string()}, "expires": "never"}
+    ]))
+    .unwrap();
+    config["channels"] = serde_yaml_ng::to_value(json!([{
+        "name": "owner-telegram", "kind": "telegram",
+        "token": {"secret": "telegram-bot-token"},
+        "chat": {"from": "command", "run": format!("printf {CHAT}")},
+        "api": format!("http://127.0.0.1:{}", bot.port),
+    }]))
+    .unwrap();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    daemon.spawn();
+    let base = daemon.base_url();
+
+    std::fs::create_dir_all(daemon.root.join("out")).unwrap();
+    let mut html = b"<!doctype html><title>Konferenz-Radar</title><p>E2E-MARKER".to_vec();
+    html.extend(std::iter::repeat_n(b'r', 1_700_000));
+    std::fs::write(daemon.root.join("out/radar.html"), &html).unwrap();
+    let summary = "Konferenz-Radar: 2 neue CFPs";
+    let instructions = format!("\"$FACTORY_BIN\" notify owner-telegram '{summary}' --file out/radar.html");
+
+    // Created by the owner (no token over HTTP), on a schedule.
+    let url = format!("{base}/api/tasks");
+    let approved = expect_ok(&url, &post(&url, &json!({
+        "title": "Konferenz-Radar", "scope": "demo", "agent": "shell", "worktree": false,
+        "instructions": instructions, "schedule": {"every": {"seconds": 2}}, "deliver": "owner-telegram",
+    })))["task"]["id"].as_str().unwrap().to_string();
+    assert!(entries(&base, &approved).iter().any(|e| e["kind"] == "delivery_approved"));
+
+    let sent = wait_for("the scheduled run's delivery", Duration::from_secs(60), || {
+        entries(&base, &approved).into_iter().find(|e| e["kind"] == "notify_sent")
+    });
+    assert_eq!(sent["data"]["approval"], "task");
+    assert_eq!(sent["data"]["files"][0]["bytes"], html.len());
+    let calls = bot.calls();
+    assert_eq!(calls.len(), 2, "one message, one document: {:?}", calls.iter().map(|c| &c.0).collect::<Vec<_>>());
+    assert_eq!(calls[0].0, format!("/bot{TOKEN}/sendMessage"));
+    assert_eq!(calls[1].0, format!("/bot{TOKEN}/sendDocument"));
+    let has = |body: &[u8], needle: &[u8]| body.windows(needle.len()).any(|w| w == needle);
+    assert!(has(&calls[0].1, CHAT.as_bytes()) && has(&calls[0].1, summary.as_bytes()));
+    assert!(has(&calls[1].1, &html), "the report arrives whole");
+
+    // The schedule fires again; the identical message is not sent twice.
+    wait_for("the next scheduled run's repeat", Duration::from_secs(60), || {
+        entries(&base, &approved).into_iter().find(|e| e["kind"] == "notify_skipped")
+    });
+    assert_eq!(bot.calls().len(), 2, "a repeating schedule does not spam");
+    let journal = serde_json::to_string(&entries(&base, &approved)).unwrap();
+    for secret in [summary, TOKEN, CHAT, "E2E-MARKER"] {
+        assert!(!journal.contains(secret), "the journal must not carry {secret:?}");
+    }
+    let pause = format!("{base}/api/tasks/{approved}");
+    let _ = raw_request("PATCH", &pause, Some(&json!({"patch": {"schedule_paused": true}})));
+
+    // No approval: refused, journaled on the run, nothing reaches the Bot API.
+    let refused = expect_ok(&url, &post(&url, &json!({
+        "title": "Unapproved", "scope": "demo", "agent": "shell", "worktree": false,
+        "instructions": format!("\"$FACTORY_BIN\" notify owner-telegram 'should not go'"),
+    })))["task"]["id"].as_str().unwrap().to_string();
+    let start = format!("{base}/api/tasks/{refused}/run");
+    expect_ok(&start, &post(&start, &json!({})));
+    let entry = wait_for("the unapproved send's refusal", Duration::from_secs(60), || {
+        entries(&base, &refused).into_iter().find(|e| e["kind"] == "notify_refused")
+    });
+    assert!(entry["run_id"].is_string(), "journaled on the run: {entry}");
+    assert_eq!(bot.calls().len(), 2);
+}
+
 /// Exercise the live L6 service through both public transports with actual
 /// process evidence. Shell runs have unknown usage, never guessed free cost.
 #[test]

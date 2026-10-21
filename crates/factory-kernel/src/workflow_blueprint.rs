@@ -79,6 +79,9 @@ pub struct BlueprintTaskSpec {
     /// See `Task::category`. Absent is the default category.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// See `Task::deliver`. Only the owner may give it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

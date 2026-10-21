@@ -330,6 +330,7 @@ export function renderModal() {
   if (t.timeout_seconds) meta += ` · timeout ${t.timeout_seconds}s`;
   if (t.worktree) meta += ` · own worktree`;
   if (t.knowledge_hints) meta += ` · knowledge hints`;
+  if (t.deliver) meta += ` · delivers its result to ${esc(t.deliver)} (owner-approved)`;
   meta += `</div>`;
   meta += standingHtml(t, { full: true });
   if (t.workflow_origin) {

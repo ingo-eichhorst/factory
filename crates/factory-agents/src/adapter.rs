@@ -58,6 +58,12 @@ pub struct TaskBinding {
     /// reporting contract never mentions `--send-to`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_exits: Vec<AgentExitContext>,
+    /// The channel the owner approved this task's result delivery to
+    /// (`#337`), fixed at dispatch -- the task's `deliver`. The reporting
+    /// contract names the one command that uses it. Absent on the wire when
+    /// there is none, like `upstream`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,6 +397,16 @@ impl AgentContext {
                  Use `--send-to` only when its rule holds. Otherwise report plain `done`; check exits and the default route are Factory's to choose.\n"
             )
         };
+        let delivery = match &binding.deliver {
+            Some(channel) => format!(
+                "Result delivery: the owner approved sending this task's result to the channel {channel}, with \
+                 `{bin} notify {channel} \"<text>\" [--file <path>]` (files inside this run's working directory, \
+                 at most 50 MB each), before you report done -- your token stops working then. Only that \
+                 channel, and no other external effect. The same message within 12 hours is not sent again.\n\
+                 \n"
+            ),
+            None => String::new(),
+        };
         let scope = &self.scope;
         let contract = format!(
             "Report progress by running these commands in your shell. They are how \
@@ -405,6 +421,7 @@ impl AgentContext {
              \n\
              Release outputs: add `--artifact <file>` to the done command (repeat for multiple files). Paths are relative to this run's working directory. Factory captures their bytes and publishes provenance only after required verification passes; do not change the source or outputs while it verifies.\n\
              \n\
+             {delivery}\
              Dependency scans attach CycloneDX documents with `{bin} task attach{attach_to} --kind sbom|vulnerabilities <file>`. \
              Authored VEX is available with `{bin} dependencies vex {scope}`.\n\
              \n\
@@ -1083,6 +1100,7 @@ mod tests {
             knowledge: None,
             required_steps: Vec::new(),
             agent_exits: Vec::new(),
+            deliver: None,
         });
         ctx.identity_token = None;
         ctx
@@ -1418,6 +1436,21 @@ mod tests {
         );
         assert!(
             contract.contains("Factory's to choose.\n- Gave up:"),
+            "{contract}"
+        );
+    }
+
+    #[test]
+    fn notify_appears_only_for_a_task_the_owner_approved_delivery_for_and_names_that_channel() {
+        let plain = with_task(base(Some(worker()))).reporting_contract();
+        assert!(!plain.contains(" notify "), "{plain}");
+
+        let mut approved = with_task(base(Some(worker())));
+        approved.task.as_mut().unwrap().deliver = Some("owner-telegram".into());
+        let contract = approved.reporting_contract();
+        assert!(
+            contract.contains("notify owner-telegram \"<text>\" [--file <path>]")
+                && contract.contains("Only that channel, and no other external effect."),
             "{contract}"
         );
     }

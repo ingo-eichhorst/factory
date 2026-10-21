@@ -2,6 +2,8 @@
 //!
 //! Configuration validation and planning do not reach into whole-instance
 //! configuration, adapter traits, process tasks, or the router.
+pub mod channel_ledger;
+pub mod channels;
 pub mod credential_expiry;
 pub mod credentials;
 pub mod declarations;

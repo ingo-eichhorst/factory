@@ -127,3 +127,15 @@ pub trait Environments: CommandPort<Level = L3> + Send + Sync {
     /// The run ended, however it ended: let the host sleep again.
     async fn allow_sleep(&self, run_id: &str);
 }
+
+/// What L4 asks L3 to send through an outbound channel (`#337`), which L3
+/// passes to L2 (`Commands<L3, L2Port>`): the channel, its token and its one
+/// recipient are L2's, so L4 only says what to send and on whose behalf. L4
+/// has already checked the run's standing approval; the receipt is ids only.
+#[async_trait::async_trait]
+pub trait Channels: CommandPort<Level = L3> + Send + Sync {
+    async fn deliver(
+        &self,
+        outgoing: factory_environment::channels::Outgoing,
+    ) -> Result<factory_environment::channels::Receipt>;
+}

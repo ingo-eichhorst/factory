@@ -33,6 +33,9 @@ pub struct Inputs {
     pub scopes: Vec<Scope>,
     pub default_agent: String,
     pub default_runtime: String,
+    /// The channels the instance declares (`#337`), by name: what a task's
+    /// `deliver` may name.
+    pub channels: Vec<String>,
 }
 /// Lossy outward notifications only, never a fact or command route back up.
 pub trait Observer: Send + Sync {
@@ -142,6 +145,9 @@ impl<P: Selection> Service<'_, P> {
         if let Some(category) = &new.category {
             crate::control_plan::check_category(category).map_err(FactoryError::BadRequest)?;
         }
+        if let Some(channel) = &new.deliver {
+            check_channel(&factory.channels, channel)?;
+        }
 
         let scope = match new.scope.clone() {
             Some(s) => s,
@@ -194,9 +200,37 @@ impl<P: Selection> Service<'_, P> {
             tracing::warn!(task = task.id, "could not record journal entry: {e}");
         }
         self.observer.entry(&task.id, entry);
+        if let Some(entry) = task.deliver.as_deref().map(delivery_approved) {
+            if let Err(e) = self.store.append_entry(&task.id, &entry).await {
+                tracing::warn!(task = task.id, "could not record journal entry: {e}");
+            }
+            self.observer.entry(&task.id, entry);
+        }
         self.observer.created(task.clone());
         Ok(task)
     }
+}
+
+/// A task's `deliver` names a declared channel, or is refused with the list.
+pub fn check_channel(declared: &[String], channel: &str) -> Result<()> {
+    if declared.iter().any(|c| c == channel) {
+        return Ok(());
+    }
+    Err(FactoryError::BadRequest(format!(
+        "--deliver names the channel {channel:?}, which the instance root's channels: does not declare (it declares: {})",
+        if declared.is_empty() { "nothing".to_string() } else { declared.join(", ") }
+    )))
+}
+
+/// The journal's record of a standing delivery approval (`#337`). Only the
+/// owner can give one (`access.rs`), so it says so.
+pub fn delivery_approved(channel: &str) -> TaskEntry {
+    TaskEntry::new(
+        "owner",
+        "delivery_approved",
+        format!("the owner approved delivering this task's result to the channel {channel}; no other external effect"),
+    )
+    .with_data(serde_json::json!({ "channel": channel }))
 }
 pub async fn validate_after(
     store: &dyn TaskStore,

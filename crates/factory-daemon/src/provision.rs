@@ -89,7 +89,7 @@ impl std::fmt::Debug for Secret {
 }
 
 impl Secret {
-    fn expose(&self) -> &str {
+    pub(crate) fn expose(&self) -> &str {
         &self.0
     }
 }

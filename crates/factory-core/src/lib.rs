@@ -10,6 +10,7 @@ pub mod benchmark;
 pub use factory_assurance::{bench_store, bench_timer};
 pub mod building;
 pub mod budget;
+pub mod channels;
 pub mod config;
 pub mod conformance;
 pub mod control_plan;
