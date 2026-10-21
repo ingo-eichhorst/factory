@@ -153,10 +153,7 @@ impl L3Service<'_> {
     /// back where it was. A scope disambiguates two of the same name.
     pub(crate) async fn restore_skill(&self, name: &str, scope: Option<&str>) -> Result<ArchiveRecord> {
         let (_, state, _, _) = self.learning_inputs();
-        let scope = match scope {
-            Some(scope) => Some(self.wiring.snapshot().canonical_scope_name(scope)),
-            None => None,
-        };
+        let scope = scope.map(|scope| self.wiring.snapshot().canonical_scope_name(scope));
         let name = name.to_string();
         let record = self
             .locked(move || {
@@ -254,7 +251,7 @@ impl factory_agents::dispatch::Learning for L3Port<'_> {
                 let now = Utc::now();
                 for decl in &found.skills {
                     let dir = found.dir(&root).join(decl.path.trim_end_matches('/'));
-                    if let Some(skill) = handed.iter().find(|s| PathBuf::from(&s.path) == dir) {
+                    if let Some(skill) = handed.iter().find(|s| std::path::Path::new(&s.path) == dir) {
                         usage.used(&found.name, &decl.path, &skill.name, &run_id, now);
                     }
                 }

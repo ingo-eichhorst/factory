@@ -708,8 +708,7 @@ pub fn archives(state_dir: &Path) -> Vec<ArchiveRecord> {
 pub fn latest_archive(state_dir: &Path, scope: &str, path: &str) -> Option<ArchiveRecord> {
     archives(state_dir)
         .into_iter()
-        .filter(|r| r.scope == scope && same_path(&r.path, path) && r.restored_at.is_none())
-        .next_back()
+        .rfind(|r| r.scope == scope && same_path(&r.path, path) && r.restored_at.is_none())
 }
 
 /// Every regular file under `dir`, relative, sorted; a symlink is refused,

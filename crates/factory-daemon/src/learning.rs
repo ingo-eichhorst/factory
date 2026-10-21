@@ -128,8 +128,10 @@ impl L4Service<'_> {
     }
 
     /// The memory and skills a run of `task` is handed (`#339`): read once,
-    /// now, from the scope's files, journaled whole so the prompt can still
-    /// be explained after the files move on, and each skill marked as used.
+    /// now, from the scope's files, and each skill marked as used. The
+    /// journal records what was handed by size and a SHA-256 of the entries
+    /// as handed -- enough to tell one version from another -- never the
+    /// text itself: the files are the record, not the database.
     /// `None` for a scope that keeps none. A read that fails is journaled and
     /// the run starts without -- memory is a help, never a reason not to.
     pub(crate) async fn memory_handout(&self, task: &Task, run_id: &str) -> Option<ScopeMemory> {
@@ -167,7 +169,7 @@ impl L4Service<'_> {
             &task.id,
             TaskEntry::new("daemon", "memory", format!("handed this scope's memory: {}", parts.join(", ")))
                 .in_run(run_id)
-                .with_data(serde_json::json!({ "scope": scope, "memory": memory })),
+                .with_data(handout_record(&scope, &memory)),
         )
         .await;
         let handed: Vec<_> = memory.skills.iter().filter(|s| s.present()).cloned().collect();
@@ -176,4 +178,29 @@ impl L4Service<'_> {
         }
         Some(memory)
     }
+}
+
+/// What the journal keeps of a handout: each file's path, size, entry count
+/// and SHA-256, and each skill's handle -- no memory text.
+fn handout_record(scope: &str, memory: &ScopeMemory) -> serde_json::Value {
+    use sha2::{Digest, Sha256};
+    let file = |file: &Option<factory_kernel::MemoryFile>| {
+        file.as_ref().map(|f| {
+            serde_json::json!({
+                "path": f.path,
+                "chars": f.chars,
+                "max_chars": f.max_chars,
+                "entries": f.entries.len(),
+                "sha256": format!("{:x}", Sha256::digest(factory_agents::memory::body(&f.entries).as_bytes())),
+                "shared": f.shared,
+                "error": f.error,
+            })
+        })
+    };
+    serde_json::json!({
+        "scope": scope,
+        "facts": file(&memory.facts),
+        "profile": file(&memory.profile),
+        "skills": memory.skills,
+    })
 }

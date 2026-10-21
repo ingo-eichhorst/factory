@@ -1194,9 +1194,15 @@ every entry numbered, followed by each skill's `SKILL.md` path -- for
 `claude-code`, `codex`, `pi` and `opencode` alike, on a fresh run and a
 resumed one, since the run being resumed may itself have changed them. The
 shell agent gets the same as JSON at `$FACTORY_MEMORY_FILE`. The run's
-journal records exactly what it was handed (a `memory` entry with the whole
-handout as its data), so a prompt can still be explained after the files
-move on. A file that cannot be read is said so and the run starts anyway.
+journal records what it was handed -- a `memory` entry with each file's
+path, size, entry count and a SHA-256 of its entries as handed, and each
+skill's handle -- enough to tell one version from another, but never the
+text: the files, versioned with the scope, are the record, not the database. A file that cannot be read is said so and
+the run starts anyway. A run in an OpenShell sandbox gets the memory text all
+the same; a skill's path is the host's, exactly as a knowledge hint's is.
+Memory and skills are always the scope's own copy -- its directory, never a
+run's worktree -- so what one run records the next one reads, whether or not
+anything was merged in between.
 
 **Writing them.** From inside a run, with its own token -- the same
 authority `task report` needs (`task.report`), checked the same way -- and

@@ -202,7 +202,11 @@ async fn dispatch_hands_a_run_its_scopes_memory_and_skills_journals_them_and_mar
     assert!(entry.message.contains("facts 9 of 120 chars (2 entries)"), "{}", entry.message);
     assert!(entry.message.contains("skill conference-radar-tracking (propose)"), "{}", entry.message);
     assert!(entry.message.contains("skill gone missing"), "{}", entry.message);
-    assert_eq!(entry.data.as_ref().unwrap()["memory"]["facts"]["entries"][1], "two", "the whole handout, so the prompt stays explainable");
+    let data = entry.data.as_ref().unwrap();
+    assert_eq!(data["facts"]["entries"], 2);
+    use sha2::Digest;
+    assert_eq!(data["facts"]["sha256"], format!("{:x}", sha2::Sha256::digest("one\n§\ntwo".as_bytes())), "the version handed, by hash");
+    assert!(!data.to_string().contains("two"), "the journal never copies memory text: {data}");
 
     let Response::Ok { data: Payload::Skills { skills } } = engine.handle_request(Request::Skills { scope: None }).await else { panic!() };
     assert_eq!(skills[0].last_run.as_deref(), Some(run.id.as_str()), "handing a skill to a run is using it");
