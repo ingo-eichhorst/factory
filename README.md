@@ -1147,6 +1147,157 @@ graph: the ranked answer is listed with each page's reason, and the hits stay
 lit in the graph until the answer is cleared. The filter box in the graph's
 own toolbar is unchanged -- it matches labels in the browser and asks nobody.
 
+## Memory and skills
+
+A scheduled run starts cold: whatever the last one learned is gone unless it
+happened to edit a file. `#339` gives a scope a small, reviewable memory and
+procedures its runs may improve, all of it files in the scope -- versioned
+with the project, readable by every harness -- and none of it in the
+database.
+
+```yaml
+# projects/radar/.factory/config.yaml
+version: 1
+scope:
+  id: e8297aef-da1a-4bc3-981c-843b2b7fc454
+  name: radar
+  memory:
+    facts:   { path: memory/MEMORY.md, max_chars: 2200 }
+    profile: { path: memory/USER.md,   max_chars: 1400, shared: owner }
+  skills:
+    - path: skill/                    # SKILL.md + references/ + templates/
+      learn: propose                  # propose | apply | off
+```
+
+Both blocks sit under `scope:` like every other per-scope setting; a
+top-level `memory:` or `skills:` is refused at startup by name rather than
+silently read as nothing. Both are strict: a misspelt key, a `learn:` that is
+not one of the three, a path that is absolute, climbs out with `..` or points
+into `.factory/` or `.git/`, a `max_chars` of 0 or over 20 000, and two skills
+on one path are all refused at load.
+
+**Facts and the owner profile.** `facts` is what this scope's runs record
+for the next one ("the owner was accepted at DevLand 2027"); `profile` is who
+the owner is -- language, role, topics, how they want to be asked. A path is
+relative to the scope's directory, except a `shared: owner` profile's, which
+is relative to the instance root: that is the one owner profile, stored once,
+which every scope saying `shared: owner` reads and writes, so facts like
+language and role are not copied into every `AGENTS.md`. Two scopes that
+share it but name a different path or budget stop the daemon at load. A file
+is entries separated by a line holding only `§` -- the format Hermes wrote,
+so its `MEMORY.md`/`USER.md` move across unchanged. `max_chars` counts
+characters as written, separators included, never bytes.
+
+**Every run is handed them.** At dispatch Factory reads the scope's files
+once (L3's `ScopeMemory` fact) and the run's prompt carries them in full,
+every entry numbered, followed by each skill's `SKILL.md` path -- for
+`claude-code`, `codex`, `pi` and `opencode` alike, on a fresh run and a
+resumed one, since the run being resumed may itself have changed them. The
+shell agent gets the same as JSON at `$FACTORY_MEMORY_FILE`. The run's
+journal records exactly what it was handed (a `memory` entry with the whole
+handout as its data), so a prompt can still be explained after the files
+move on. A file that cannot be read is said so and the run starts anyway.
+
+**Writing them.** From inside a run, with its own token -- the same
+authority `task report` needs (`task.report`), checked the same way -- and
+always on the run's own task's scope, never one the caller names:
+
+    factory memory add     --task <id> [--profile] "<one entry>"
+    factory memory replace --task <id> [--profile] --entry <n> "<new text>"   # or --match "<text only it holds>"
+    factory memory remove  --task <id> [--profile] --entry <n>
+    factory memory show    [--scope <scope>]                                   # read: open to everyone
+
+The reporting contract names these when the scope keeps memory. A write
+changes one entry and nothing else, by writing a sibling file and renaming it
+over the old one (a new file is created `0600`), one write at a time. **The
+budget is enforced on write and nothing is ever truncated**: a write that
+would go over is refused with what it would come to, every entry and its
+size, oldest first, and the fewest oldest entries whose removal makes room.
+A duplicate, an ambiguous `--match` and an entry holding a `§` line are
+refused the same way, by name. Every write -- and every refusal -- is
+journaled on the run (`memory`, with the entry's old and new text as data).
+
+**No secrets.** A write is checked against the shapes of every kind the
+secrets catalogue (`#244`) knows -- token, API key, certificate and SSH
+private key, password -- whether or not the catalogue declares one of that
+kind today: Anthropic, OpenAI, GitHub, GitLab, Slack, Google, AWS, Stripe,
+npm, PyPI and Hugging Face prefixes, PEM private-key blocks, JWTs, Telegram
+bot tokens, bearer tokens, a password in a URL, `password=`/`api_key:` and
+their kin written with a value. Each declared entry adds its own name and,
+for an `env` source, its variable written with a value. A match refuses the
+write naming only what it looks like ("a GitHub token (kind token)"); the
+text is never repeated, logged or journaled, and no catalogue source is ever
+resolved to compare against. The same check covers the lines a skill change
+adds.
+
+**Skills.** A skill is a directory with a `SKILL.md`, named by `name:`, else
+its frontmatter's `name:`, else its directory. A run that finds a better
+procedure copies the files it changes into a directory of its own, edits
+them there and submits them -- only files that differ change, and `--remove`
+deletes one:
+
+    factory skill submit --task <id> <skill> --from <dir> --summary "<why>" [--remove <path>]
+
+What happens next is the skill's `learn:`. **`propose`** (the default) files
+the change, with a diff Factory renders against the files as they are and a
+hash of each, as an Inbox item: Accept applies it, Reject (with a reason)
+turns it down, and the run that filed it hears either in its journal. A
+proposal is only ever applied to exactly the files it was made against --
+one changed since is refused, and a person rejects it instead. **`apply`**
+writes the change at once and journals it. **`off`** refuses: the run
+follows the procedure and does not change it. In a run's own worktree a
+change it simply edits lands in its pull request as usual; `skill submit`
+is what reaches the scope's own copy, which is what the next run reads.
+
+    factory skill list [--scope <scope>]          # every declared skill: learn, last used, waiting changes
+    factory skill proposals [--state open|accepted|rejected|applied|all]
+    factory skill show <proposal>                 # with its diff
+    factory skill accept <proposal>               # the owner's
+    factory skill reject <proposal> --reason "..."
+
+**Curation.** A skill no run has been handed for `unused_weeks` is
+archived: bundled to `skill.tar.zst` beside a `manifest.json` listing every
+file's size and SHA-256, both read back and checked against each other, and
+only then removed from the scope. `restore` checks them again and puts the
+directory back where it was; it is refused when something is there already.
+A skill with a proposal waiting is kept, and a skill Factory has never seen
+handed out counts as unused from the first pass that saw it, never from the
+epoch. A run of a scope whose skill is archived is told so, with the command
+that brings it back.
+
+```yaml
+# root .factory/config.yaml
+daemon:
+  skill_curation:
+    schedule: { cron: "0 4 * * 1", timezone: Europe/Berlin }   # weekly; UTC unless it names a timezone
+    unused_weeks: 12                                            # the default
+```
+
+Without the block nothing is archived on its own. The schedule catches up
+once after downtime, the way a backup's does.
+
+    factory skill curate [--unused-weeks <n>] [--dry-run]   # the owner's; a dry run changes nothing
+    factory skill archived
+    factory skill restore <name> [--scope <scope>]           # the owner's
+
+**Where things live.** Memory and skill files are the scope's own (the owner
+profile, the instance root's). What Factory keeps about them is daemon state
+under the instance root's `.factory/skills/`: `proposals/<id>.json` (every
+change, its diff and its decision), `usage.json` (when each skill was first
+seen and last handed to a run), `curation.json` (the last pass) and
+`archive/<scope>/<name>-<stamp>/`. The HTTP side is `GET /api/memory?scope=`,
+`GET /api/skills`, `GET /api/skills/proposals[?state=&scope=]`, `GET
+/api/skills/proposals/{id}`, `POST /api/skills/proposals/{id}/accept|reject`,
+`GET /api/skills/archived`, `POST /api/skills/curate` and `POST
+/api/skills/restore`.
+
+**Levels.** L3 owns the files: it produces the `ScopeMemory` fact, and its
+`Learning` port is the one command handler per kind of write (`write_memory`,
+`submit_skill`, `decide_skill`, `skills_handed`). L4 checks the run and its
+token, reads the fact at dispatch, commands each write down that port and
+journals what L3 says it did. The secret check is L2's (`secret_scan`), a
+pure function of the text and the catalogue's declarations.
+
 ## Benchmarks
 
 **v1 declared and displayed configurations and ran nothing. v2 adds datasets
@@ -4152,7 +4303,9 @@ release provenance remains a later phase of #158.
    is, who this agent is, and which commands its role allows. The prompt
    itself stays narrower: the task, the working directory, and the reporting
    contract — the exact commands the agent is to run. The guide never repeats
-   those; it just says where to find them. The same values are in the
+   those; it just says where to find them. A scope that keeps memory or
+   skills has them in the prompt too, read from its files at dispatch (see
+   [Memory and skills](#memory-and-skills)). The same values are in the
    session's environment as `FACTORY_TASK_ID`, `FACTORY_TASK_TOKEN`,
    `FACTORY_SOCKET`, and `FACTORY_BIN` -- or, for a run inside an OpenShell
    sandbox, `FACTORY_URL` in place of `FACTORY_SOCKET` (see
@@ -4432,6 +4585,9 @@ daemon:
   harness_health:              # check a harness starts before a dispatch (#131)
     enabled: true
     timeout_seconds: 10
+  skill_curation:              # optional: archive skills no run used (#339)
+    schedule: { cron: "0 4 * * 1", timezone: Europe/Berlin }
+    unused_weeks: 12
 
 infrastructure:              # optional: the AI accounts behind the agents, and backups
   providers:
@@ -4466,6 +4622,12 @@ scope:
       harness: claude-code
       lifetime: task
   task_store: file-store     # this scope's tasks live somewhere else
+  memory:                    # optional: handed to every run (#339)
+    facts:   { path: memory/MEMORY.md, max_chars: 2200 }
+    profile: { path: memory/USER.md, max_chars: 1400, shared: owner }
+  skills:                    # optional: procedures a run may improve (#339)
+    - path: skill/
+      learn: propose         # propose | apply | off
 ```
 
 Only directories with a valid local scope block appear in the CLI or UI. A
@@ -5805,7 +5967,7 @@ the command ladder between them are in place (#193); see Architecture.
     crates/factory-kernel    L0: pure shared vocabulary and every live fact schema (Level/Fact, nested statuses, grants and evidence); no other factory-* dependency
     crates/factory-infrastructure L1: backup, running environments, renewal behaviour and their SQLite stores
     crates/factory-environment    L2: sandbox planning, secrets, dependencies and credential expiry store
-    crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
+    crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context, session usage, scope memory and skills
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy, TaskStore and run evidence/provenance store
     crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam
     crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data, GoalsStore and policy receipt store
@@ -5825,6 +5987,7 @@ the command ladder between them are in place (#193); see Architecture.
     ui/js/{sandboxes,secrets,dependencies}.js                    L2's three tabs
     ui/js/secrets-model.js                                       the Secrets tab's declared catalogue (#244), pure
     ui/js/dependencies-model.js                                  Dependencies' pure shaping logic
+    ui/js/skills-model.js                                        the Inbox's proposed skill changes (#339), pure
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
     ui/js/{backup,backup-model}.js                               the L1 Backup tab and its pure shaping logic

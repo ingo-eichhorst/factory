@@ -7,7 +7,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     crates/factory-kernel    L0: pure shared vocabulary and every live fact schema (Level/Fact, nested statuses, grants and evidence); no other factory-* dependency
     crates/factory-infrastructure L1: backup, running environments, renewal behaviour and their SQLite stores
     crates/factory-environment    L2: sandbox planning, secrets, dependencies and credential expiry store
-    crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
+    crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context, session usage, scope memory and skills
     crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy, TaskStore and run evidence/provenance store
     crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam 
     crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data, GoalsStore and policy receipt store
@@ -33,6 +33,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/{benchmarks,knowledge}.js                              L5's two tabs
     ui/js/knowledge-graph.js                                     the knowledge graph's pure layout, filter and tail logic
     ui/js/{suggestions,suggestions-model}.js                     the L5 Improvement Suggestions tab and its pure shaping logic (#275)
+    ui/js/skills-model.js                                        the Inbox's proposed skill changes (#339), pure
     ui/js/{datasets,bench-runs}.js                               Benchmarks' Datasets and Runs segments
     ui/js/bench-model.js                                         pure helpers for the Benchmarks tab's three segments
     ui/js/{policy,policy-model}.js                               the L6 Policy tab and its pure shaping logic

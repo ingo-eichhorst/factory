@@ -21,7 +21,7 @@
 //! that would go over budget is refused with the entries and their sizes,
 //! oldest first, and which of them dropping would make room.
 use factory_environment::secrets::SecretDecl;
-use factory_kernel::{Learn, MemoryFile, MemoryTarget, ScopeMemory, SkillHandle};
+pub use factory_kernel::{Learn, MemoryFile, MemoryTarget, ScopeMemory, SkillHandle};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 

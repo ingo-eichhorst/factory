@@ -1474,6 +1474,8 @@ mod tests {
                 renewals: Vec::new(),
                 metrics: None,
                 backup: None,
+                memory: None,
+                skills: Vec::new(),
             }],
             infrastructure: Default::default(),
             secrets: Vec::new(),
