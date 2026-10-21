@@ -268,6 +268,7 @@ fn catalogue_is_complete_unique_and_has_readers() {
         "CostReport",
         "GateFact",
         "KnowledgeTags",
+        "ScopePageFact",
     ];
     let mut actual: Vec<_> = FACT_CATALOGUE.iter().map(|entry| entry.fact).collect();
     actual.sort_unstable();

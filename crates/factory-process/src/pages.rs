@@ -407,7 +407,13 @@ fn check_tag(html: &str, tag: &Tag, findings: &mut Vec<String>) {
     }
     for (attr, value) in &tag.attrs {
         match attr.as_str() {
-            "src" | "poster" | "background" if tag.name != "script" => {
+            // `<script src>` and a frame or embed are already one finding each.
+            "src" | "poster" | "background"
+                if !matches!(
+                    tag.name.as_str(),
+                    "script" | "iframe" | "frame" | "frameset" | "object" | "embed" | "applet" | "portal" | "fencedframe"
+                ) =>
+            {
                 if !value.trim().is_empty() && !is_embedded(value) {
                     found.push(format!(
                         "<{} {attr}=\"{}\"> -- the page CSP loads images and media only from data: or blob: URLs; embed it",
@@ -939,48 +945,44 @@ mod tests {
     async fn versions_are_content_addressed_kept_to_n_and_rolled_back_across_a_reopen() {
         let root = temp_dir("store");
         let store = PageStore::new(&root);
+        // A pause between publishes keeps "newest" a matter of time, not of a tie.
+        let pause = || tokio::time::sleep(std::time::Duration::from_millis(5));
         let first = store.publish(new_version("<p>one</p>", None)).await.unwrap();
         assert_eq!(first.sha256, version_address(b"<p>one</p>", None));
         let dir = root.join("pages").join("radar%2Fteam").join("conference-radar");
         assert!(dir.join(&first.sha256).join("page.html").is_file(), "under .factory/pages/<scope>/<name>/<sha>/");
 
+        pause().await;
         let data = serde_json::json!({"events": [1, 2]});
         let second = store.publish(new_version("<p>one</p>", Some(data.clone()))).await.unwrap();
         assert_ne!(second.sha256, first.sha256, "new data is a new version");
         assert_eq!(second.data_bytes, Some(serde_json::to_vec(&data).unwrap().len() as u64));
+        pause().await;
         let third = store.publish(new_version("<p>three</p>", None)).await.unwrap();
 
         let (current, versions) = store.versions("radar/team", "conference-radar").await.unwrap();
         assert_eq!(current.unwrap().sha256, third.sha256);
-        assert_eq!(versions.len(), 3);
+        assert_eq!(versions.iter().map(|v| v.sha256.clone()).collect::<Vec<_>>(), [third.sha256.clone(), second.sha256.clone(), first.sha256.clone()]);
 
-        // Roll back, then reopen the store the way a restarted daemon would.
-        store.set_current("radar/team", "conference-radar", &first.sha256[..7]).await.unwrap();
+        // Roll back by a prefix, then reopen the store the way a restarted
+        // daemon would: the rollback is a file, so it holds.
+        store.set_current("radar/team", "conference-radar", &second.sha256[..7]).await.unwrap();
         let reopened = PageStore::new(&root);
         let (current, _) = reopened.versions("radar/team", "conference-radar").await.unwrap();
-        assert_eq!(current.unwrap().sha256, first.sha256, "the rollback is a file, it survives a restart");
-
-        // A fourth version pushes the oldest past keep: 3 -- but the current
-        // one is never pruned, however old.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let fourth = store.publish(new_version("<p>four</p>", None)).await.unwrap();
-        store.set_current("radar/team", "conference-radar", &first.sha256).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        store.publish(new_version("<p>five</p>", None)).await.unwrap();
-        let (_, versions) = store.versions("radar/team", "conference-radar").await.unwrap();
-        let kept: Vec<_> = versions.iter().map(|v| v.sha256.clone()).collect();
-        assert_eq!(kept.len(), 3, "{kept:?}");
-        assert!(kept.contains(&fourth.sha256));
-        assert!(!kept.contains(&second.sha256), "pruned");
-        assert!(dir.join(&first.sha256).is_dir() || !kept.contains(&first.sha256));
-
-        let content = reopened
-            .content("radar/team", "conference-radar", Some(&second.sha256), true, true)
-            .await;
-        assert!(content.is_err(), "a pruned version is gone");
+        assert_eq!(current.unwrap().sha256, second.sha256);
         let content = reopened.content("radar/team", "conference-radar", None, true, true).await.unwrap();
-        assert_eq!(content.html.as_deref(), Some("<p>five</p>"));
-        assert_eq!(content.data, None);
+        assert_eq!(content.html.as_deref(), Some("<p>one</p>"));
+        assert_eq!(content.data, Some(data));
+
+        // A fourth publish is current again and pushes the oldest past keep: 3.
+        pause().await;
+        let fourth = store.publish(new_version("<p>four</p>", None)).await.unwrap();
+        let (current, versions) = store.versions("radar/team", "conference-radar").await.unwrap();
+        assert_eq!(current.unwrap().sha256, fourth.sha256);
+        let kept: Vec<_> = versions.iter().map(|v| v.sha256.clone()).collect();
+        assert_eq!(kept, [fourth.sha256.clone(), third.sha256.clone(), second.sha256.clone()]);
+        assert!(!dir.join(&first.sha256).exists(), "pruned from disk");
+        assert!(store.content("radar/team", "conference-radar", Some(&first.sha256), true, false).await.is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 
