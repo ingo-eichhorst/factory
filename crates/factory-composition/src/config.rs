@@ -383,6 +383,7 @@ impl Config {
             factory_infrastructure::renewals::validate(&scope.renewals, None)?;
             scope.validate_dependencies()?;
             refuse_zero_max_sessions(scope)?;
+            refuse_bad_instances(scope)?;
             let roles = self.roles_for_scope(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
@@ -482,6 +483,7 @@ impl Config {
             factory_infrastructure::renewals::validate(&scope.renewals, None)?;
             scope.validate_dependencies()?;
             refuse_zero_max_sessions(scope)?;
+            refuse_bad_instances(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
                 refuse_bad_openshell(scope, &agent)?;
@@ -716,6 +718,63 @@ fn refuse_zero_max_sessions(scope: &Scope) -> Result<()> {
                 scope.path.display(),
                 agent.name(),
             )));
+        }
+    }
+    Ok(())
+}
+
+/// An `instances:` count no daemon could keep (`#329`), refused at load and by
+/// `factory agent scale` before it writes, naming the scope's path and both
+/// numbers wherever two are involved:
+///
+/// - `0`, which would keep nothing up -- leaving it out means one;
+/// - any count on a task agent, which has no standing session to multiply;
+/// - more than the agent's own `max_sessions`, or than its scope's: each live
+///   instance holds one of those sessions, so there could never be that many;
+/// - a count that would give an instance the id another declaration already
+///   has (`watcher` with `instances: 2` next to an agent named `watcher#2`).
+pub fn refuse_bad_instances(scope: &Scope) -> Result<()> {
+    let declared = scope.declared_agents();
+    for agent in &declared {
+        let Some(n) = agent.instances else { continue };
+        let name = agent.name();
+        let at = || format!("scope {:?} at {}", scope.name, scope.path.display());
+        if !agent.lifetime.is_standing() {
+            return Err(FactoryError::BadRequest(format!(
+                "{} gives the task agent {name:?} instances: {n}; only a standing agent \
+                 (lifetime: permanent or temporary) keeps instances",
+                at()
+            )));
+        }
+        if n == 0 {
+            return Err(FactoryError::BadRequest(format!(
+                "{} gives {name:?} instances: 0, which would keep nothing up; leave it out for one",
+                at()
+            )));
+        }
+        if let Some(max) = agent.max_sessions.filter(|max| n > *max) {
+            return Err(FactoryError::BadRequest(format!(
+                "{} gives {name:?} instances: {n} but max_sessions: {max}; each standing instance \
+                 holds one of its sessions, so ask for at most {max} or raise max_sessions",
+                at()
+            )));
+        }
+        if let Some(max) = scope.max_sessions.filter(|max| n > *max) {
+            return Err(FactoryError::BadRequest(format!(
+                "{} gives {name:?} instances: {n} but the scope's max_sessions is {max}; each \
+                 standing instance holds one of the scope's sessions, so ask for at most {max}",
+                at()
+            )));
+        }
+        for k in 2..=n {
+            let taken = format!("{name}#{k}");
+            if declared.iter().any(|other| other.name() == taken) {
+                return Err(FactoryError::BadRequest(format!(
+                    "{} declares an agent named {taken:?}, which is the name {name:?}'s instance {k} \
+                     goes by; rename one of them or ask for fewer instances",
+                    at()
+                )));
+            }
         }
     }
     Ok(())
@@ -3427,6 +3486,51 @@ mod tests {
         let e = c.validate().unwrap_err().to_string();
         assert!(e.contains("projects/demo"), "{e}");
         assert!(e.contains("max_sessions: 0"), "{e}");
+    }
+
+    /// `instances` sits in the same three places `max_sessions` does, and is
+    /// proved from both spellings for the same reason (`#329`).
+    #[test]
+    fn instances_loads_from_both_agent_spellings_and_absent_means_one() {
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: a\npath: .\nagent:\n  name: lead\n  harness: pi\n  lifetime: permanent\n  instances: 2\n\
+             agents:\n  - name: claude\n    harness: claude-code\n    lifetime: permanent\n    instances: 3\n\
+             \x20 - name: bare\n    harness: shell\n    lifetime: temporary\n",
+        )
+        .unwrap();
+        let declared = s.declared_agents();
+        assert_eq!(declared[0].instances, Some(2), "the singular agent: spelling");
+        assert_eq!(declared[1].instances, Some(3), "the agents: list spelling");
+        assert_eq!((declared[2].instances, declared[2].instance_count()), (None, 1));
+    }
+
+    #[test]
+    fn an_instance_count_no_daemon_could_keep_is_refused_at_load() {
+        for (agent, words) in [
+            ("lifetime: permanent\n        instances: 0", "instances: 0"),
+            ("lifetime: task\n        instances: 2", "task agent"),
+            ("lifetime: permanent\n        max_sessions: 2\n        instances: 3", "instances: 3 but max_sessions: 2"),
+        ] {
+            let c = config_with(&format!(
+                "scopes:\n  - name: demo\n    path: projects/demo\n    agents:\n      - name: claude\n        harness: claude-code\n        {agent}\n"
+            ));
+            let e = c.validate().unwrap_err().to_string();
+            assert!(e.contains("projects/demo") && e.contains("claude") && e.contains(words), "{e}");
+        }
+        let scope_cap = config_with(
+            "scopes:\n  - name: demo\n    path: projects/demo\n    max_sessions: 2\n    agents:\n      - name: claude\n        harness: claude-code\n        lifetime: permanent\n        instances: 3\n",
+        );
+        let e = scope_cap.validate().unwrap_err().to_string();
+        assert!(e.contains("instances: 3 but the scope's max_sessions is 2"), "{e}");
+        let collides = config_with(
+            "scopes:\n  - name: demo\n    path: projects/demo\n    agents:\n      - name: claude\n        harness: claude-code\n        lifetime: permanent\n        instances: 2\n      - name: \"claude#2\"\n        harness: shell\n",
+        );
+        let e = collides.validate().unwrap_err().to_string();
+        assert!(e.contains("\"claude#2\"") && e.contains("instance 2"), "{e}");
+        let fits = config_with(
+            "scopes:\n  - name: demo\n    path: projects/demo\n    agents:\n      - name: claude\n        harness: claude-code\n        lifetime: permanent\n        max_sessions: 3\n        instances: 3\n",
+        );
+        fits.validate().unwrap();
     }
 
     #[test]

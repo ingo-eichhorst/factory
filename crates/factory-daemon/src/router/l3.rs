@@ -6,7 +6,7 @@ use super::misrouted;
 impl Engine {
     pub(super) async fn route_l3(
         self: &Arc<Self>,
-        _caller: &crate::access::Caller,
+        caller: &crate::access::Caller,
         req: Request,
     ) -> Result<Payload> {
         match req {
@@ -68,6 +68,37 @@ impl Engine {
                 self.shared.bus.publish(Event::AgentDeleted { scope, name });
                 self.l3_service().reconcile_agents().await;
                 Ok(Payload::Deleted { deleted: true })
+            }
+            // The one handler `factory agent scale`, `POST /api/agents/scale`
+            // and the roster's − / + all reach (`#329`): the count is written
+            // into the scope's own config first, so a refused edit never
+            // starts or stops anything, then the sessions are lined up with
+            // it. New instances start in the background, like a newly
+            // configured agent; the answer says which.
+            Request::AgentScale { scope, name, instances, by } => {
+                let (scope, previous, wanted) = self.set_agent_instances(&scope, &name, instances, by)?;
+                let (scale, to_start) = self.l3_service().scale_agent(&scope, &name, previous).await?;
+                let asked = caller.describe();
+                tracing::info!(scope, name, previous, wanted, by = %asked, "scaled: {}", scale.summary());
+                self.shared.bus.publish(Event::AgentScaled {
+                    scope: scope.clone(),
+                    name: name.clone(),
+                    previous,
+                    wanted,
+                    by: asked,
+                    summary: scale.summary(),
+                });
+                if !to_start.is_empty() {
+                    let engine = self.clone();
+                    tokio::spawn(async move {
+                        for instance in to_start {
+                            if let Err(error) = engine.l3_service().start_instance(&scope, &name, instance).await {
+                                tracing::warn!(scope, name, instance, "could not start a scaled-up instance: {error}");
+                            }
+                        }
+                    });
+                }
+                Ok(Payload::Scaled { scale })
             }
             Request::AgentStop { id } => Ok(Payload::Agent {
                 agent: self.l3_service().stop_agent(&id).await?.redacted(),

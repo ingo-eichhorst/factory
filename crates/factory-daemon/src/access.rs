@@ -218,7 +218,11 @@ impl Engine {
             // Starting a continuation run, like `task run --continue`.
             Request::SuggestionAsk { .. } => Grant::TaskRun,
             Request::AgentStart { .. } => Grant::AgentStart,
-            Request::AgentConfigure { .. } | Request::AgentDelete { .. } => Grant::AgentConfigure,
+            // A scale rewrites the declaration's `instances:` in its scope's
+            // config (`#329`), so it is the same write as adding one.
+            Request::AgentConfigure { .. } | Request::AgentDelete { .. } | Request::AgentScale { .. } => {
+                Grant::AgentConfigure
+            }
             // Saving or resetting a scope's own dashboard layout (`#160`).
             // An ordinary grant, unlike the role-layer writes it otherwise
             // resembles: a layout cannot widen what an agent may do.
@@ -657,7 +661,8 @@ impl Engine {
             },
 
             Request::AgentConfigure { scope: s, .. }
-            | Request::AgentDelete { scope: s, .. } => match def.reach {
+            | Request::AgentDelete { scope: s, .. }
+            | Request::AgentScale { scope: s, .. } => match def.reach {
                 Reach::Scope => in_scope(s),
                 Reach::Own => Err(deny("configure an agent declaration")),
             },
@@ -2297,6 +2302,12 @@ mod tests {
             )
             .await
         );
+        // A scale rewrites the declaration too (`#329`): the same grant, the
+        // same reach, and never an agent scaling itself.
+        let scale = |scope: &str| Request::AgentScale { scope: scope.into(), name: "w".into(), instances: Some(2), by: None };
+        assert!(allowed(&e, &wearing("scope-editor"), scale("demo")).await);
+        assert!(!allowed(&e, &wearing("scope-editor"), scale("other")).await);
+        assert!(!allowed(&e, &wearing("self-editor"), scale("demo")).await);
     }
 
     #[tokio::test]

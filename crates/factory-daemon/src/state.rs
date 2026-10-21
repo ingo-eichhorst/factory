@@ -107,6 +107,8 @@ pub struct L3State {
     pub(crate) agents: Arc<dyn factory_agents::store::AgentStore>,
     /// What L3 observed about standing agents' sessions, for L4 to read as a fact (`StandingAgentObservationsFact`).
     pub(crate) liveness: Arc<crate::l3_service::LivenessLog>,
+    /// When a person last had each standing instance in front of them (`#329`).
+    pub(crate) attention: crate::l3_service::Attention,
 }
 
 /// L4 Process: tasks, runs, workflows, dispatch admission and scheduling.

@@ -21,8 +21,10 @@ pub trait AgentStore: Send + Sync {
     async fn delete_agent(&self, id: &str) -> Result<bool>;
 }
 
-/// L3's provider for `StandingAgentLiveFact`: one standing agent's liveness, read
-/// fresh from its own row (never cached, never inferred from a screen).
+/// L3's provider for `StandingAgentLiveFact`: how many of one standing agent's
+/// instances are live, read fresh from its own rows (never cached, never inferred
+/// from a screen). Every row of the declaration counts, a surplus instance still
+/// draining after a scale-down included: it holds a session until it stops.
 pub struct LiveProvider {
     pub agents: std::sync::Arc<dyn AgentStore>,
 }
@@ -36,14 +38,12 @@ impl factory_kernel::Provide<factory_kernel::StandingAgentLiveFact> for LiveProv
     type Value = factory_kernel::StandingAgentLiveFact;
     type Error = factory_kernel::FactoryError;
     async fn get(&self, query: &(String, String)) -> Result<Self::Value> {
-        let live = self
-            .agents
-            .get_agent(&AgentSession::id_for(&query.0, &query.1))
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|agent| agent.state.is_live());
-        Ok(factory_kernel::StandingAgentLiveFact { live })
+        let rows = self.agents.agents().await.unwrap_or_default();
+        let live = rows
+            .iter()
+            .filter(|agent| agent.scope == query.0 && agent.name == query.1 && agent.state.is_live())
+            .count();
+        Ok(factory_kernel::StandingAgentLiveFact { live: u32::try_from(live).unwrap_or(u32::MAX) })
     }
 }
 
@@ -79,7 +79,7 @@ mod tests {
         }
     }
 
-    async fn live(provider: &LiveProvider, scope: &str, name: &str) -> bool {
+    async fn live(provider: &LiveProvider, scope: &str, name: &str) -> u32 {
         Facts::<L4>::new()
             .get::<StandingAgentLiveFact, _>(provider, &(scope.to_string(), name.to_string()))
             .await
@@ -91,14 +91,31 @@ mod tests {
     async fn a_standing_agent_is_live_only_while_its_row_says_so_and_an_l4_reader_may_ask() {
         let rows = Arc::new(Rows::default());
         let provider = LiveProvider { agents: rows.clone() };
-        assert!(!live(&provider, "demo", "watcher").await, "no row reads not live");
+        assert_eq!(live(&provider, "demo", "watcher").await, 0, "no row reads not live");
         let mut agent = AgentSession::new("demo", "watcher", "shell", "herdr", Lifetime::Permanent, Role::worker());
         agent.state = AgentState::Ready;
         rows.put_agent(&agent).await.unwrap();
-        assert!(live(&provider, "demo", "watcher").await);
-        assert!(!live(&provider, "demo", "other").await);
+        assert_eq!(live(&provider, "demo", "watcher").await, 1);
+        assert_eq!(live(&provider, "demo", "other").await, 0);
         agent.state = AgentState::Stopped;
         rows.put_agent(&agent).await.unwrap();
-        assert!(!live(&provider, "demo", "watcher").await, "a stopped agent is not live");
+        assert_eq!(live(&provider, "demo", "watcher").await, 0, "a stopped agent is not live");
+    }
+
+    #[tokio::test]
+    async fn every_live_instance_of_the_declaration_counts_and_nothing_else_does() {
+        let rows = Arc::new(Rows::default());
+        let provider = LiveProvider { agents: rows.clone() };
+        let base = AgentSession::new("demo", "watcher", "shell", "herdr", Lifetime::Permanent, Role::worker());
+        for (instance, state) in [(1, AgentState::Ready), (2, AgentState::Starting), (3, AgentState::Gone)] {
+            let mut row = base.clone().as_instance(instance);
+            row.state = state;
+            rows.put_agent(&row).await.unwrap();
+        }
+        // Another scope's agent of the same name is somebody else's slot.
+        let mut elsewhere = AgentSession::new("other", "watcher", "shell", "herdr", Lifetime::Permanent, Role::worker());
+        elsewhere.state = AgentState::Ready;
+        rows.put_agent(&elsewhere).await.unwrap();
+        assert_eq!(live(&provider, "demo", "watcher").await, 2, "#1 and #2 are live, #3 is gone");
     }
 }

@@ -1091,10 +1091,20 @@ enum CaseCmd {
 
 #[derive(Subcommand)]
 enum AgentCmd {
-    /// Bring a declared standing agent up.
+    /// Bring a declared standing agent up: every instance it keeps.
     Start { scope: String, name: String },
     /// Take one down and leave it down.
     Stop { id: String },
+    /// Keep N standing sessions of a standing agent up (`instances:`), or move
+    /// the count by +N / -N. Written into the scope's own config; instances
+    /// that are busy or that somebody is attached to are never stopped.
+    Scale {
+        scope: String,
+        name: String,
+        /// `3`, `+1` or `-1`.
+        #[arg(allow_hyphen_values = true)]
+        instances: String,
+    },
     /// What its terminal shows right now.
     Output {
         id: String,
@@ -1987,17 +1997,45 @@ async fn main() -> Result<()> {
                             if !a.declared {
                                 flags.push("undeclared".into());
                             }
+                            // One standing session is the row it always was;
+                            // more than one (`#329`) is a count on the row and
+                            // a line per instance, each with its own attach.
+                            let several = a.wanted.is_some_and(|n| n > 1) || a.instances.len() > 1;
+                            let state = if several {
+                                let up = a.instances.iter().filter(|i| i.state == "ready" || i.state == "starting").count();
+                                format!("{up}/{} up", a.wanted.unwrap_or(1))
+                            } else {
+                                a.state.clone()
+                            };
                             out.push_str(&format!(
                                 "  {:<20} {:<12} [{}]\n",
                                 a.name,
-                                a.state,
+                                state,
                                 flags.join(", ")
                             ));
-                            if let Some(cmd) = &a.attach {
-                                out.push_str(&format!("      attach: {cmd}\n"));
-                            }
-                            if let Some(err) = &a.error {
-                                out.push_str(&format!("      error:  {err}\n"));
+                            if several {
+                                for i in &a.instances {
+                                    out.push_str(&format!(
+                                        "      #{:<3} {:<28} {}{}\n",
+                                        i.instance,
+                                        i.id,
+                                        i.state,
+                                        if i.surplus { " (draining: stops once idle)" } else { "" }
+                                    ));
+                                    if let Some(cmd) = &i.attach {
+                                        out.push_str(&format!("           attach: {cmd}\n"));
+                                    }
+                                    if let Some(err) = &i.error {
+                                        out.push_str(&format!("           error:  {err}\n"));
+                                    }
+                                }
+                            } else {
+                                if let Some(cmd) = &a.attach {
+                                    out.push_str(&format!("      attach: {cmd}\n"));
+                                }
+                                if let Some(err) = &a.error {
+                                    out.push_str(&format!("      error:  {err}\n"));
+                                }
                             }
                             for w in &a.active {
                                 out.push_str(&format!(
@@ -5297,6 +5335,14 @@ async fn agent_cmd(json: bool, client: &Client, cmd: AgentCmd) -> Result<()> {
                 _ => None,
             })
         }
+        AgentCmd::Scale { scope, name, instances: count } => {
+            let (instances, by) = scale_count(&count)?;
+            let payload = client.send(Request::AgentScale { scope, name, instances, by }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Scaled { scale } => Some(scale.summary()),
+                _ => None,
+            })
+        }
         AgentCmd::Role { id, role } => {
             let payload = client.send(Request::AgentRole { id, role }).await?;
             print(&payload, json, |p| match p {
@@ -5338,6 +5384,19 @@ async fn agent_cmd(json: bool, client: &Client, cmd: AgentCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `3` is a count, `+1` and `-1` move it: `(instances, by)`, one of them set.
+fn scale_count(text: &str) -> Result<(Option<u32>, Option<i64>)> {
+    let text = text.trim();
+    let bad = || anyhow!("instances is a count (3) or a change to it (+1, -1), not {text:?}");
+    if let Some(delta) = text.strip_prefix('+') {
+        return Ok((None, Some(delta.parse::<i64>().map_err(|_| bad())?)));
+    }
+    if text.starts_with('-') {
+        return Ok((None, Some(text.parse::<i64>().map_err(|_| bad())?)));
+    }
+    Ok((Some(text.parse::<u32>().map_err(|_| bad())?), None))
 }
 
 fn agent_line(a: &factory_core::agent::AgentSession) -> String {
@@ -7224,6 +7283,9 @@ fn describe_event(e: &Event) -> String {
         Event::AgentDeleted { scope, name } => {
             format!("agent    {scope}/{name}  deleted")
         }
+        Event::AgentScaled { scope, name, previous, wanted, by, .. } => {
+            format!("agent    {scope}/{name}  scaled {previous} -> {wanted} by {by}")
+        }
         Event::RolesChanged { scope, name } => {
             format!("role     {name} in {scope}  changed")
         }
@@ -7298,6 +7360,19 @@ mod tests {
         assert!(matches!(cli.command, Command::RecoveryJournal(RecoveryJournalCmd::Finish { local_http: None, network_routes: None, .. })));
         assert!(Cli::try_parse_from(["factory", "recovery-journal", "finish", "uuid", "--exit-code", "999"]).is_err());
     }
+
+    #[test]
+    fn a_scale_count_is_absolute_or_a_signed_change() {
+        assert_eq!(scale_count("3").unwrap(), (Some(3), None));
+        assert_eq!(scale_count("+1").unwrap(), (None, Some(1)));
+        assert_eq!(scale_count("-2").unwrap(), (None, Some(-2)));
+        assert!(scale_count("three").unwrap_err().to_string().contains("+1"));
+        assert!(scale_count("+").is_err());
+        // `-1` is the count, not a flag.
+        let cli = Cli::try_parse_from(["factory", "agent", "scale", "root", "claude", "-1"]).unwrap();
+        assert!(matches!(cli.command, Command::Agent(AgentCmd::Scale { ref instances, .. }) if instances == "-1"));
+    }
+
 
     #[test]
     fn release_recording_accepts_an_explicit_producing_run_scope_and_comparison() {

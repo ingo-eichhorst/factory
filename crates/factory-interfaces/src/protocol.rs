@@ -3,7 +3,7 @@
 //! third interface means translating to this, not inventing a new API.
 
 use crate::event::Event;
-use factory_agents::agent::AgentSession;
+use factory_agents::agent::{AgentSession, ScaleReport};
 use factory_agents::role::{RoleOrigin, RoleSpec};
 use factory_agents::runtime::{RuntimeConnectionDiagnostic, Screen};
 use factory_assurance::benchmark::Configuration;
@@ -56,6 +56,19 @@ pub enum Request {
     /// Take one down and leave it down.
     #[serde(rename = "agent.stop")]
     AgentStop { id: String },
+    /// Keep `instances` standing sessions of one standing agent up, or move
+    /// its count `by` that many (`#329`). Written into the scope's own config,
+    /// then lined up live: missing instances start, surplus ones stop once
+    /// nobody would lose anything by it. Exactly one of the two.
+    #[serde(rename = "agent.scale")]
+    AgentScale {
+        scope: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instances: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<i64>,
+    },
     /// Every role in effect in one scope -- where each was defined, what it
     /// may do in the vocabulary the check uses, and who holds it -- plus where
     /// roles are written across the whole tree. With no scope, only the
@@ -1195,6 +1208,7 @@ impl Request {
             Request::AgentConfigure { .. } |
             Request::AgentDelete { .. } |
             Request::AgentStop { .. } |
+            Request::AgentScale { .. } |
             Request::RoleList { .. } |
             Request::RoleDefine { .. } |
             Request::RoleDelete { .. } |
@@ -1363,6 +1377,10 @@ pub enum Payload {
     },
     Agent {
         agent: AgentSession,
+    },
+    /// What a scale did (`#329`).
+    Scaled {
+        scale: ScaleReport,
     },
     Scopes {
         scopes: Vec<ScopeView>,
@@ -1899,6 +1917,39 @@ pub struct AgentView {
     /// and from an older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness: Option<factory_environment::openshell::Readiness>,
+    /// For a standing agent: how many standing sessions its declaration keeps
+    /// up (`instances:`, 1 when it says nothing) (`#329`). Absent for a task
+    /// agent and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wanted: Option<u32>,
+    /// For a standing agent: every instance on record, lowest first, each with
+    /// its own id, state and attach line. `id`, `state`, `attach` and the rest
+    /// above are instance 1's, as they always were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instances: Vec<AgentInstanceView>,
+}
+
+/// One standing instance of an agent, as the roster lists it (`#329`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentInstanceView {
+    pub id: String,
+    /// Counted from 1.
+    pub instance: u32,
+    /// `starting`, `ready`, `gone`, `stopped`.
+    pub state: String,
+    /// Above the count its declaration now wants: left up by a scale-down
+    /// because stopping it would have cost somebody something, and stopped
+    /// once it is idle.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub surplus: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One role, as the roster, the pickers and the Roles view show it.

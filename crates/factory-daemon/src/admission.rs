@@ -1,7 +1,7 @@
 //! Admission capacity (#179): how many slots a `(scope, agent)` already uses
 //! against its own cap and its scope's. L4's decision, read at dispatch under
-//! `admission_lock` and by the status page. The one L3 input, whether a live
-//! permanent agent of the same name holds a slot, is L3's `StandingAgentLiveFact`.
+//! `admission_lock` and by the status page. The one L3 input, how many live
+//! standing instances of the same name hold a slot each, is L3's `StandingAgentLiveFact`.
 
 // ============================================================== capacity
 
@@ -9,9 +9,9 @@
 /// (`#179`): how many of its own non-terminal runs already use a slot,
 /// against its own cap, and the same for its scope as a whole. Pure -- the
 /// caller does the store reads and hands over just the counted (scope,
-/// agent) pairs of every run that uses a slot, plus whether a live
-/// permanent agent of this name is itself occupying one, so a test can
-/// build the numbers directly rather than dispatching real runs.
+/// agent) pairs of every run that uses a slot, plus how many live standing
+/// instances of this name are themselves occupying one each (`#329`), so a
+/// test can build the numbers directly rather than dispatching real runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capacity {
     pub in_use: u32,
@@ -52,17 +52,17 @@ pub fn run_uses_a_slot(status: factory_core::run::RunStatus, has_session: bool) 
 
 /// Build `Capacity` from the runs already known to use a slot -- each as
 /// `(scope, agent)`, the same two strings admission is keyed on -- plus
-/// whether a live permanent agent named `agent` is itself one of them.
+/// how many live standing instances named `agent` are themselves among them.
 pub fn capacity(
     scope: &str,
     agent: &str,
     agent_max: Option<u32>,
     scope_max: Option<u32>,
     counted: impl IntoIterator<Item = (String, String)>,
-    permanent_agent_live: bool,
+    standing_live: u32,
 ) -> Capacity {
-    let mut in_use = u32::from(permanent_agent_live);
-    let mut scope_in_use = u32::from(permanent_agent_live);
+    let mut in_use = standing_live;
+    let mut scope_in_use = standing_live;
     for (s, a) in counted {
         if s != scope {
             continue;
@@ -83,14 +83,14 @@ mod tests {
 
     #[test]
     fn capacity_is_unlimited_when_neither_the_agent_nor_the_scope_declares_one() {
-        let cap = capacity("demo", "codex", None, None, [], false);
+        let cap = capacity("demo", "codex", None, None, [], 0);
         assert!(!cap.held());
     }
 
     #[test]
     fn capacity_holds_once_the_agents_own_cap_is_spent() {
         let counted = vec![("demo".to_string(), "codex".to_string()), ("demo".to_string(), "codex".to_string())];
-        let cap = capacity("demo", "codex", Some(2), None, counted, false);
+        let cap = capacity("demo", "codex", Some(2), None, counted, 0);
         assert_eq!(cap.in_use, 2);
         assert!(cap.held());
         assert_eq!(cap.holding_pair(), (2, 2));
@@ -102,16 +102,29 @@ mod tests {
             ("demo".to_string(), "other-agent".to_string()),
             ("other-scope".to_string(), "codex".to_string()),
         ];
-        let cap = capacity("demo", "codex", Some(1), None, counted, false);
+        let cap = capacity("demo", "codex", Some(1), None, counted, 0);
         assert_eq!(cap.in_use, 0, "neither run is this (scope, agent)");
         assert!(!cap.held());
     }
 
     #[test]
     fn capacity_counts_a_live_permanent_agent_of_the_same_name_as_one_slot() {
-        let cap = capacity("demo", "codex", Some(1), None, [], true);
+        let cap = capacity("demo", "codex", Some(1), None, [], 1);
         assert_eq!(cap.in_use, 1);
         assert!(cap.held(), "the standing agent itself already spends the only slot");
+    }
+
+    #[test]
+    fn capacity_counts_each_live_standing_instance_as_a_slot_of_its_own() {
+        // `#329`: three standing instances of a `max_sessions: 5` agent leave
+        // two slots for runs, and spend three of the scope's.
+        let counted = vec![("demo".to_string(), "codex".to_string())];
+        let cap = capacity("demo", "codex", Some(5), Some(10), counted.clone(), 3);
+        assert_eq!((cap.in_use, cap.scope_in_use), (4, 4));
+        assert!(!cap.held(), "one slot left");
+        let full = capacity("demo", "codex", Some(5), None, [counted[0].clone(), counted[0].clone()], 3);
+        assert!(full.held());
+        assert_eq!(full.holding_pair(), (5, 5));
     }
 
     #[test]
@@ -119,7 +132,7 @@ mod tests {
         // A task on an adapter the scope never declares has no agent cap to
         // check -- only the scope's, counted the same way (#179).
         let counted = vec![("demo".to_string(), "pi".to_string()), ("demo".to_string(), "codex".to_string())];
-        let cap = capacity("demo", "codex", None, Some(2), counted, false);
+        let cap = capacity("demo", "codex", None, Some(2), counted, 0);
         assert_eq!(cap.scope_in_use, 2);
         assert!(cap.held());
         assert_eq!(cap.holding_pair(), (2, 2), "the scope's own pair, since the agent has no cap of its own");

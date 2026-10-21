@@ -144,15 +144,29 @@ impl Engine {
                 // name -- not the harness behind it. Key both sides the same
                 // way or live runs quietly stop appearing here.
                 covered.insert(name.clone());
-                let live = decl
-                    .lifetime
-                    .is_standing()
-                    .then(|| {
-                        standing
-                            .iter()
-                            .find(|a| a.id == AgentSession::id_for(&scope.name, &name))
+                // Every standing instance on file (`#329`), lowest first; the
+                // row's own fields are instance 1's, as they always were.
+                let mut rows: Vec<&AgentSession> = if decl.lifetime.is_standing() {
+                    standing.iter().filter(|a| a.scope == scope.name && a.name == name).collect()
+                } else {
+                    Vec::new()
+                };
+                rows.sort_by_key(|a| a.instance);
+                let live = rows.iter().copied().find(|a| a.id == AgentSession::id_for(&scope.name, &name));
+                let wanted = decl.lifetime.is_standing().then(|| decl.instance_count());
+                let instances = rows
+                    .iter()
+                    .map(|a| AgentInstanceView {
+                        id: a.id.clone(),
+                        instance: a.instance,
+                        state: a.state.as_str().to_string(),
+                        surplus: a.instance > decl.instance_count(),
+                        attach: a.attach.clone(),
+                        session: a.session.as_ref().map(|s| s.handle.clone()),
+                        started_at: a.state.is_live().then_some(a.started_at),
+                        error: a.error.clone(),
                     })
-                    .flatten();
+                    .collect();
                 let (description, source) = described
                     .get(&decl.harness)
                     .cloned()
@@ -203,6 +217,8 @@ impl Engine {
                     readiness: (decl.sandbox == Sandbox::Openshell)
                         .then(|| self.l2.provision.readiness(&(scope.name.clone(), name.clone())))
                         .flatten(),
+                    wanted,
+                    instances,
                 });
             }
 
@@ -241,6 +257,8 @@ impl Engine {
                             .cloned()
                             .unwrap_or_default(),
                         readiness: None,
+                        wanted: None,
+                        instances: Vec::new(),
                     },
                 );
             }
@@ -277,6 +295,8 @@ impl Engine {
                     error: None,
                     active: jobs.clone(),
                     readiness: None,
+                    wanted: None,
+                    instances: Vec::new(),
                 });
             }
 

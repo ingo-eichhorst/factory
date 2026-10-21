@@ -351,13 +351,13 @@ impl L4Service<'_> {
                 counted.push((task.scope, run.agent.clone()));
             }
         }
-        // L3's fact, read as the level above it: whether a live permanent agent of
-        // this name occupies a slot of its own.
-        let permanent_agent_live = self.wiring.facts()
+        // L3's fact, read as the level above it: how many live standing instances
+        // of this name occupy a slot each.
+        let standing_live = self.wiring.facts()
             .get::<factory_kernel::StandingAgentLiveFact>(&(scope.to_string(), agent.to_string()))
             .await
             .map(|fact| fact.live)
-            .unwrap_or(false);
-        Ok(capacity(scope, agent, agent_max, scope_max, counted, permanent_agent_live))
+            .unwrap_or(0);
+        Ok(capacity(scope, agent, agent_max, scope_max, counted, standing_live))
     }
 }

@@ -91,6 +91,9 @@ pub enum AgentRef {
         /// already carried this key; it just had no effect.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_sessions: Option<u32>,
+        /// See `ScopeAgent::instances`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instances: Option<u32>,
     },
 }
 
@@ -123,6 +126,8 @@ impl<'de> Deserialize<'de> for AgentRef {
             // It used to have no effect; `#179` makes it live.
             #[serde(default)]
             max_sessions: Option<u32>,
+            #[serde(default)]
+            instances: Option<u32>,
         }
 
         let value = serde_yaml_ng::Value::deserialize(deserializer)?;
@@ -142,6 +147,7 @@ impl<'de> Deserialize<'de> for AgentRef {
                     openshell: declaration.openshell,
                     provider: declaration.provider,
                     max_sessions: declaration.max_sessions,
+                    instances: declaration.instances,
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -207,16 +213,28 @@ pub struct ScopeAgent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// How many sessions of this agent may be open at once -- a run
-    /// `Dispatching` or holding a session, plus one for a live permanent
-    /// agent of this name (`#179`). Absent is unlimited, today's behaviour.
-    /// `0` is refused at load: it would never run anything.
+    /// `Dispatching` or holding a session, plus one for each live standing
+    /// instance of this name (`#179`, `#329`). Absent is unlimited, today's
+    /// behaviour. `0` is refused at load: it would never run anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_sessions: Option<u32>,
+    /// For a standing agent: how many standing sessions of it are kept, side
+    /// by side (`#329`). Absent means 1, which is what every declaration
+    /// before this key meant. `0`, more than `max_sessions`, and any value on
+    /// a task agent are refused at load. `factory agent scale` rewrites it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instances: Option<u32>,
 }
 
 impl ScopeAgent {
     pub fn name(&self) -> String {
         self.name.clone().unwrap_or_else(|| self.harness.clone())
+    }
+
+    /// How many standing instances it wants: `instances`, or 1. A task agent
+    /// has none of its own, but asking is not an error.
+    pub fn instance_count(&self) -> u32 {
+        self.instances.unwrap_or(1).max(1)
     }
 
     pub fn autostart(&self) -> bool {
@@ -258,6 +276,7 @@ pub fn declared_agents(agent: Option<&AgentRef>, agents: &[ScopeAgent]) -> Vec<S
         openshell,
         provider,
         max_sessions,
+        instances,
     }) = agent
     {
         out.push(ScopeAgent {
@@ -271,6 +290,7 @@ pub fn declared_agents(agent: Option<&AgentRef>, agents: &[ScopeAgent]) -> Vec<S
             openshell: openshell.clone(),
             provider: provider.clone(),
             max_sessions: *max_sessions,
+            instances: *instances,
         });
     }
     for a in agents {
@@ -321,6 +341,8 @@ pub fn agents_with(
         provider: None,
         // And no cap of its own -- only the scope's, if it has one.
         max_sessions: None,
+        // One of it: there is no declaration to say otherwise.
+        instances: None,
     });
     out
 }

@@ -447,6 +447,7 @@ mod tests {
                     openshell: None,
                     provider: None,
                     max_sessions: None,
+                    instances: None,
                 },
                 ScopeAgent {
                     name: Some("plain-worker".into()),
@@ -459,6 +460,7 @@ mod tests {
                     openshell: None,
                     provider: None,
                     max_sessions: None,
+                    instances: None,
                 },
             ],
             runtime: None,
@@ -493,6 +495,7 @@ mod tests {
                     openshell: None,
                     provider: None,
                     max_sessions: None,
+                    instances: None,
                 }]
             } else {
                 Vec::new()

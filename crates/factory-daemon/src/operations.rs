@@ -777,6 +777,7 @@ mod tests {
             id: AgentSession::id_for("demo", name),
             name: name.into(),
             scope: "demo".into(),
+            instance: 1,
             agent: "shell".into(),
             runtime: "quiet".into(),
             lifetime,

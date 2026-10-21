@@ -75,6 +75,18 @@ pub enum Event {
         scope: String,
         name: String,
     },
+    /// A standing agent's instance count was written into its scope's own
+    /// configuration and lined up live (`#329`), with who asked for it.
+    AgentScaled {
+        scope: String,
+        name: String,
+        previous: u32,
+        wanted: u32,
+        /// `"the owner"`, or the agent that asked.
+        by: String,
+        /// The whole answer, in a line.
+        summary: String,
+    },
     /// A role definition was written into, or removed from, one scope's own
     /// configuration. Every scope below it may now resolve that name
     /// differently.
@@ -181,6 +193,7 @@ impl Event {
             | Event::AgentRemoved { .. }
             | Event::AgentConfigured { .. }
             | Event::AgentDeleted { .. }
+            | Event::AgentScaled { .. }
             | Event::RolesChanged { .. }
             | Event::DashboardChanged { .. }
             | Event::PolicyChanged { .. }

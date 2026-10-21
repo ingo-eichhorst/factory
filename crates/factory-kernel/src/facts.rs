@@ -112,12 +112,12 @@ pub struct FunctionaryRosterFact {
 }
 impl Fact for FunctionaryRosterFact { type Producer = L3; }
 
-/// Whether a standing agent's session is live right now (`state.is_live()`), for
-/// the one `(scope, agent)` asked about. Admission counts a live permanent agent as
-/// one slot of its own name. A missing row, or one that is not live, reads `false`.
+/// How many of a standing agent's instances are live right now (`state.is_live()`),
+/// for the one `(scope, agent)` asked about (`#329`). Admission counts each as one
+/// slot of its own name. No row, or none that is live, reads `0`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StandingAgentLiveFact {
-    pub live: bool,
+    pub live: u32,
 }
 impl Fact for StandingAgentLiveFact { type Producer = L3; }
 
@@ -879,7 +879,7 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
     },
     FactCatalogueEntry {
         fact: "StandingAgentLiveFact", producer: "L3", readers: &["L4 admission capacity"],
-        lives_in_kernel: true, note: "whether one standing agent's session is live, read fresh from L3's own rows; no session, token or role",
+        lives_in_kernel: true, note: "how many of one standing agent's instances are live, read fresh from L3's own rows; no session, token or role",
     },
     FactCatalogueEntry {
         fact: "MetricValuesFact", producer: "L5", readers: &["L6 Goals", "L6 Scenarios"],
