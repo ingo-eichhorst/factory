@@ -4,6 +4,19 @@ use factory_kernel::SessionRef;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// One process in the foreground of a session, as its runtime sees it --
+/// what a harness is asked about its own live conversation by
+/// (`Agent::live_conversation`). Only what the runtime says: never a guess
+/// from a process table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionProcess {
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartRequest {
     /// What this session is for -- a run id or a standing agent's id. Used in
@@ -334,6 +347,15 @@ pub trait AgentRuntime: Send + Sync {
     /// its message is kept as the reason the run's usage is unknown.
     async fn usage(&self, _session: &SessionRef) -> Result<Option<crate::usage::SessionUsage>> {
         Ok(None)
+    }
+
+    /// The processes in the foreground of this session now, harness first
+    /// when the runtime can tell. Empty, the default, is the honest answer
+    /// of a runtime that cannot see them; an error is one that could and
+    /// did not answer. Asked only by `factory agent restart`, for a
+    /// harness that keeps its live conversation id by process.
+    async fn processes(&self, _session: &SessionRef) -> Result<Vec<SessionProcess>> {
+        Ok(Vec::new())
     }
 
     async fn stop(&self, session: &SessionRef) -> Result<()>;

@@ -624,15 +624,10 @@ pub fn run_usage_with_prior(
 pub fn newest_session_id_for_adapter(snapshots: &[UsageSnapshot], adapter: &str) -> Option<String> {
     let mut ordered: Vec<&UsageSnapshot> = snapshots.iter().collect();
     ordered.sort_by_key(|s| s.at);
-    ordered.iter().rev().find_map(|snapshot| {
-        snapshot
-            .usage
-            .as_ref()?
-            .sessions
-            .iter()
-            .find(|s| s.adapter.as_deref() == Some(adapter))
-            .map(|s| s.session_id.clone())
-    })
+    ordered
+        .iter()
+        .rev()
+        .find_map(|snapshot| snapshot.usage.as_ref()?.session_for_adapter(adapter).map(str::to_string))
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

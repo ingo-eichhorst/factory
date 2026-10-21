@@ -257,6 +257,10 @@ impl Engine {
             Request::HostPowerModeSet { .. } => Grant::HostPower,
             // Asking what stopping one would cost is part of stopping it (`#330`).
             Request::AgentStop { .. } | Request::AgentStopCheck { .. } => Grant::AgentStop,
+            // Its own grant, not `agent.stop` and `agent.start` together: a
+            // restart never leaves one down and never brings up one somebody
+            // stopped, so a nightly job may hold it without holding either.
+            Request::AgentRestart { .. } => Grant::AgentRestart,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
             // Typing into a run's session, however narrowed (`#106`).
@@ -741,6 +745,23 @@ impl Engine {
                     Ok(())
                 }
                 Reach::Own => Err(deny("reach into another agent's session")),
+            },
+
+            // Read off the instance's row, like a stop -- with one more door.
+            // A harness is installed once for the whole host, so bringing
+            // every standing agent onto the one installed now is the
+            // instance's own upkeep: scope reach held in the root scope covers
+            // every scope's standing agents, the way the root scope alone
+            // holds backups. Anywhere else, scope reach is its own scope's.
+            Request::AgentRestart { id, .. } => match def.reach {
+                Reach::Scope => match self.l4.store.get_agent(&AgentSession::canonical_id(id)).await? {
+                    Some(agent) => in_scope(&agent.scope).or_else(|outside| in_root_scope().map_err(|_| outside)),
+                    None => Ok(()),
+                },
+                Reach::Own if AgentSession::declaration_id(&AgentSession::canonical_id(id)) == AgentSession::id_for(scope, name) => {
+                    Ok(())
+                }
+                Reach::Own => Err(deny("restart another agent")),
             },
 
             Request::RunInput { id, .. } | Request::RunAnswer { id, .. } => match def.reach {

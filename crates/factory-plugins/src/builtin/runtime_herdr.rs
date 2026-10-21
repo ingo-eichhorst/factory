@@ -45,8 +45,8 @@ use async_trait::async_trait;
 use factory_core::adapter::agent::LaunchKind;
 use factory_core::adapter::runtime::{
     AgentRuntime, RuntimeConnectionDiagnostic, RuntimeConnectionState, RuntimeEvent,
-    RuntimeEventKind, RuntimeEventStream, RuntimePeer, RuntimeStatus, Screen, StartRequest,
-    StatusReport, StatusSource,
+    RuntimeEventKind, RuntimeEventStream, RuntimePeer, RuntimeStatus, Screen, SessionProcess,
+    StartRequest, StatusReport, StatusSource,
 };
 use factory_core::error::{FactoryError, Result};
 use factory_core::task::SessionRef;
@@ -1361,11 +1361,43 @@ impl AgentRuntime for HerdrRuntime {
         }
     }
 
+    /// `herdr pane process-info`: the pane's foreground processes, as herdr
+    /// itself sees them.
+    async fn processes(&self, session: &SessionRef) -> Result<Vec<SessionProcess>> {
+        let got = self.run(&[s("pane"), s("process-info"), s("--pane"), s(Self::pane_of(session))]).await?;
+        Ok(foreground_processes(&got))
+    }
+
     async fn stop(&self, session: &SessionRef) -> Result<()> {
         self.forget_session(Self::pane_of(session));
         let tab = session.meta.get("tab_id").cloned().unwrap_or_default();
         self.close_tab_or_pane(&tab, Self::pane_of(session)).await
     }
+}
+
+/// The foreground processes in a `pane process-info` answer; one without a
+/// pid is not one anybody could ask about.
+fn foreground_processes(got: &Value) -> Vec<SessionProcess> {
+    let info = got.get("process_info").unwrap_or(got);
+    info.get("foreground_processes")
+        .and_then(Value::as_array)
+        .map(|processes| {
+            processes
+                .iter()
+                .filter_map(|p| {
+                    Some(SessionProcess {
+                        pid: u32::try_from(p.get("pid")?.as_u64()?).ok()?,
+                        name: p.get("name").and_then(Value::as_str).map(str::to_string),
+                        argv: p
+                            .get("argv")
+                            .and_then(Value::as_array)
+                            .map(|argv| argv.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1377,6 +1409,28 @@ mod tests {
     //! blocking for a real transition.
 
     use super::*;
+
+    #[test]
+    fn process_info_names_each_foreground_process_by_pid() {
+        // The shape `herdr pane process-info` answers with (0.8).
+        let got = json!({"process_info": {
+            "foreground_process_group_id": 51113,
+            "foreground_processes": [
+                {"argv": ["claude", "--resume", "x"], "argv0": "claude", "name": "claude", "pid": 51113},
+                {"name": "no-pid"},
+            ],
+            "pane_id": "w2:p1", "shell_pid": 51000,
+        }});
+        assert_eq!(
+            foreground_processes(&got),
+            [SessionProcess {
+                pid: 51113,
+                name: Some("claude".into()),
+                argv: vec!["claude".into(), "--resume".into(), "x".into()],
+            }]
+        );
+        assert!(foreground_processes(&json!({})).is_empty());
+    }
 
     #[test]
     fn a_wait_never_includes_the_state_it_is_built_from() {

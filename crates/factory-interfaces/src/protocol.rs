@@ -3,7 +3,7 @@
 //! third interface means translating to this, not inventing a new API.
 
 use crate::event::Event;
-use factory_agents::agent::{AgentSession, AttachTarget, ScaleReport, StopCheck};
+use factory_agents::agent::{AgentSession, AttachTarget, Restarted, ScaleReport, StopCheck};
 use factory_agents::role::{RoleOrigin, RoleSpec};
 use factory_agents::runtime::{RuntimeConnectionDiagnostic, Screen};
 use factory_assurance::benchmark::Configuration;
@@ -82,6 +82,17 @@ pub enum Request {
     /// asked; the attaching itself is the runtime's.
     #[serde(rename = "agent.attach")]
     AgentAttach { id: String },
+    /// Stop one idle standing instance and start it again from its
+    /// declaration as it reads now, on the harness conversation it had.
+    /// Refused, with nothing stopped, while it is worth something to
+    /// somebody (attached, working, waiting on an answer), and without a
+    /// conversation to resume unless `fresh`.
+    #[serde(rename = "agent.restart")]
+    AgentRestart {
+        id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fresh: bool,
+    },
     /// Keep `instances` standing sessions of one standing agent up, or move
     /// its count `by` that many (`#329`). Written into the scope's own config,
     /// then lined up live: missing instances start, surplus ones stop once
@@ -1397,6 +1408,7 @@ impl Request {
             Request::AgentStop { .. } |
             Request::AgentStopCheck { .. } |
             Request::AgentAttach { .. } |
+            Request::AgentRestart { .. } |
             Request::AgentScale { .. } |
             Request::RoleList { .. } |
             Request::RoleDefine { .. } |
@@ -1636,6 +1648,10 @@ pub enum Payload {
     /// Where `factory agent attach` takes a person (`#330`).
     Attach {
         attach: AttachTarget,
+    },
+    /// What `factory agent restart` did, and the conversation it resumed.
+    Restarted {
+        restart: Restarted,
     },
     Scopes {
         scopes: Vec<ScopeView>,
