@@ -50,7 +50,10 @@ impl RenameReport {
     /// still names the old one.
     pub fn summary(&self) -> String {
         if !self.changed {
-            return format!("{} in {} is already called that; nothing changed", self.from, self.scope);
+            return format!(
+                "{} in {} is already called that; nothing changed",
+                self.from, self.scope
+            );
         }
         let mut out = format!("{} in {} is now {}", self.from, self.scope, self.to);
         match self.tasks.len() {
@@ -59,11 +62,23 @@ impl RenameReport {
             n => out.push_str(&format!("; {n} waiting tasks moved")),
         }
         if !self.sessions.started.is_empty() {
-            out.push_str(&format!("; restarting {}", self.sessions.started.join(", ")));
+            out.push_str(&format!(
+                "; restarting {}",
+                self.sessions.started.join(", ")
+            ));
         }
-        let named: Vec<&str> = self.files.iter().chain(&self.workflows).map(String::as_str).collect();
+        let named: Vec<&str> = self
+            .files
+            .iter()
+            .chain(&self.workflows)
+            .map(String::as_str)
+            .collect();
         if !named.is_empty() {
-            out.push_str(&format!("; still naming {}: {}", self.from, named.join(", ")));
+            out.push_str(&format!(
+                "; still naming {}: {}",
+                self.from,
+                named.join(", ")
+            ));
         }
         for note in &self.notes {
             out.push_str(&format!("; {note}"));
@@ -100,7 +115,11 @@ pub fn nodes_naming(
 
 /// The same, for a workflow file as a person wrote it: `None` for a file
 /// that is not a workflow at all.
-pub fn file_nodes_naming(yaml: &str, name: &str, is_here: impl Fn(&str) -> bool) -> Option<Vec<String>> {
+pub fn file_nodes_naming(
+    yaml: &str,
+    name: &str,
+    is_here: impl Fn(&str) -> bool,
+) -> Option<Vec<String>> {
     let draft: crate::workflow::WorkflowDraft = serde_yaml_ng::from_str(yaml).ok()?;
     Some(nodes_naming(&draft.nodes, &draft.scope, name, is_here))
 }
@@ -124,25 +143,68 @@ mod tests {
     #[test]
     fn only_unfinished_tasks_naming_it_in_its_own_scope_wait_for_it() {
         let here = |scope: &str| scope == "projects/factory" || scope == "factory";
-        for status in [TaskStatus::Pending, TaskStatus::Blocked, TaskStatus::Intake, TaskStatus::Failed] {
-            assert!(waits_for(&task("projects/factory", "pi", status), "pi", here), "{status:?}");
+        for status in [
+            TaskStatus::Pending,
+            TaskStatus::Blocked,
+            TaskStatus::Intake,
+            TaskStatus::Failed,
+        ] {
+            assert!(
+                waits_for(&task("projects/factory", "pi", status), "pi", here),
+                "{status:?}"
+            );
         }
-        assert!(waits_for(&task("factory", "pi", TaskStatus::Pending), "pi", here), "a legacy bare scope name");
-        assert!(!waits_for(&task("projects/factory", "pi", TaskStatus::Done), "pi", here), "history keeps its name");
-        assert!(!waits_for(&task("projects/factory", "pi", TaskStatus::Cancelled), "pi", here));
-        assert!(!waits_for(&task("projects/other", "pi", TaskStatus::Pending), "pi", here), "another scope's pi");
-        assert!(!waits_for(&task("projects/factory", "codex", TaskStatus::Pending), "pi", here));
+        assert!(
+            waits_for(&task("factory", "pi", TaskStatus::Pending), "pi", here),
+            "a legacy bare scope name"
+        );
+        assert!(
+            !waits_for(
+                &task("projects/factory", "pi", TaskStatus::Done),
+                "pi",
+                here
+            ),
+            "history keeps its name"
+        );
+        assert!(!waits_for(
+            &task("projects/factory", "pi", TaskStatus::Cancelled),
+            "pi",
+            here
+        ));
+        assert!(
+            !waits_for(
+                &task("projects/other", "pi", TaskStatus::Pending),
+                "pi",
+                here
+            ),
+            "another scope's pi"
+        );
+        assert!(!waits_for(
+            &task("projects/factory", "codex", TaskStatus::Pending),
+            "pi",
+            here
+        ));
     }
 
     #[test]
     fn a_workflow_names_the_agent_where_a_node_asks_for_it_in_this_scope() {
         let yaml = "name: github-issue\nscope: factory\nnodes:\n  - id: triage\n    task: { title: Triage, agent: builder }\n  - id: elsewhere\n    task: { title: X, agent: builder, scope: other }\n  - id: check\n    task: { title: Check, agent: shell }\n  - id: default\n    task: { title: Default }\nedges: []\n";
         let here = |scope: &str| scope == "factory";
-        assert_eq!(file_nodes_naming(yaml, "builder", here), Some(vec!["triage".to_string()]));
+        assert_eq!(
+            file_nodes_naming(yaml, "builder", here),
+            Some(vec!["triage".to_string()])
+        );
         assert_eq!(file_nodes_naming(yaml, "reviewer", here), Some(Vec::new()));
-        assert_eq!(file_nodes_naming("just: some yaml\n", "builder", here), None, "not a workflow");
+        assert_eq!(
+            file_nodes_naming("just: some yaml\n", "builder", here),
+            None,
+            "not a workflow"
+        );
         let in_other = |scope: &str| scope == "other";
-        assert_eq!(file_nodes_naming(yaml, "builder", in_other), Some(vec!["elsewhere".to_string()]));
+        assert_eq!(
+            file_nodes_naming(yaml, "builder", in_other),
+            Some(vec!["elsewhere".to_string()])
+        );
     }
 
     #[test]
@@ -153,7 +215,10 @@ mod tests {
             to: "implementer".into(),
             changed: true,
             tasks: vec!["a".into(), "b".into()],
-            sessions: RenameSessions { moved: Vec::new(), started: vec!["factory/implementer".into()] },
+            sessions: RenameSessions {
+                moved: Vec::new(),
+                started: vec!["factory/implementer".into()],
+            },
             files: vec!["workflows/github-issue.yaml".into()],
             workflows: vec!["workflow github-issue".into()],
             notes: Vec::new(),
@@ -163,7 +228,13 @@ mod tests {
             "builder in factory is now implementer; 2 waiting tasks moved; restarting factory/implementer; \
              still naming builder: workflows/github-issue.yaml, workflow github-issue"
         );
-        let same = RenameReport { changed: false, ..report };
-        assert_eq!(same.summary(), "builder in factory is already called that; nothing changed");
+        let same = RenameReport {
+            changed: false,
+            ..report
+        };
+        assert_eq!(
+            same.summary(),
+            "builder in factory is already called that; nothing changed"
+        );
     }
 }

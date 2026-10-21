@@ -530,11 +530,12 @@ The same request is `POST /api/agents/rename` (`{scope, from, to}`); all three
 reach one handler, and none of them writes the file itself. The new name is
 checked as **New agent…** checks one -- trimmed, not empty, no `/`, `#` or
 control character, and not the name of another agent in the scope, the
-synthesized foreman included -- before anything is written. Nor may it be the
-scope's default, the agent a task naming none goes to, whether inherited from
-the instance's `default_agent` or the harness of the scope's own `agent:`: a
-declaration called that would take every such task. Only the scope's own
-`agent:` may be called after its harness again. Then the
+synthesized foreman included -- before anything is written. A rename also
+refuses, where **New agent…** does not, the name of the scope's default: the
+agent a task naming none goes to, inherited from the instance's
+`default_agent` or the harness of the scope's own `agent:`. A declaration on
+another harness called that would take every such task; one on that harness
+may take the name, as a nameless declaration of it has it. Then the
 declaration's `name:` is rewritten in the scope's own `.factory/config.yaml`
 through the edit path a scale uses: that one line changes, or a declaration
 named after its harness gains `name:` as its first key; every comment stays
@@ -5446,7 +5447,8 @@ name, `factory agent rename <scope> <from> <to>` (or the roster's
 **Rename…**) rewrites `name` in place, giving a nameless declaration one, and
 moves the tasks still waiting for the agent and its standing sessions with it;
 workflows that name it are listed, not rewritten. It refuses a name another
-agent of the scope has, the foreman's and the scope's default included.
+agent of the scope has, the foreman's included, and the scope's default unless
+the declaration runs on that harness.
 
 Only directories with a valid local scope block appear in the CLI or UI. A
 configured scope is nested below its nearest configured ancestor in the rail;

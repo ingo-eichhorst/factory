@@ -1192,14 +1192,14 @@ impl Engine {
         // A task naming no agent gets the scope's default: its own `agent:`'s
         // harness, or the instance's `default_agent` it inherits. The roster
         // shows that one as an agent of the scope even when nothing declares
-        // it, and a declaration called that would take every such task. Only
-        // the scope's own `agent:` may be called after its harness again,
-        // which makes it the default it was.
+        // it, and a declaration on another harness called that would take
+        // every such task. One on that harness may be called after it again,
+        // as a nameless declaration of it is. Stricter than `configure_agent`,
+        // which does not ask.
         let default_agent = from_file
             .agent_adapter()
             .unwrap_or(&factory.config.daemon.default_agent);
-        let restores_default = matches!(location, AgentLocation::Singular) && to == declared.harness;
-        if to == default_agent && !restores_default {
+        if to == default_agent && to != declared.harness {
             return Err(bad(format!(
                 "{to:?} is scope {:?}'s default agent, the one a task naming no agent goes to; an agent \
                  renamed to it would take those tasks",
@@ -2531,7 +2531,7 @@ mod tests {
             ("claude", "pi", "already declares an agent named \"pi\""),
             ("pi", " claude ", "already declares an agent named \"claude\""),
             ("claude", "foreman", "already declares an agent named \"foreman\""),
-            ("claude", "claude-code", "default agent"),
+            ("pi", "claude-code", "default agent"),
             ("foreman", "boss", "no local agent declaration named \"foreman\""),
             ("claude-code", "main", "no local agent declaration"),
             ("nobody", "x", "no local agent declaration"),
@@ -2544,8 +2544,8 @@ mod tests {
 
     /// The default agent a task naming no agent goes to is an agent of the
     /// scope even when nothing declares it: inherited from the instance, or
-    /// the harness of the scope's own `agent:`. No other declaration may take
-    /// its name; the scope's own `agent:` may take its harness back.
+    /// the harness of the scope's own `agent:`. A declaration on another
+    /// harness may not take its name; one on that harness may take it back.
     #[test]
     fn a_rename_never_takes_the_default_from_tasks_that_name_no_agent() {
         let inherits = "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents:\n    - name: lead\n      harness: pi\n";
@@ -2563,6 +2563,13 @@ mod tests {
         assert_eq!(file_text(&scratch), own);
         owning.rename_agent_declaration("demo", "scratch", "pi", true).unwrap();
         assert_eq!(file_text(&scratch), own.replace("name: scratch", "name: pi"));
+
+        let nameless = "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents:\n    - harness: claude-code\n";
+        let scratch = Scratch::new("rename-default-back", nameless);
+        let listed = engine(&scratch);
+        listed.rename_agent_declaration("demo", "claude-code", "lead", true).unwrap();
+        listed.rename_agent_declaration("demo", "lead", "claude-code", true).unwrap();
+        assert_eq!(file_text(&scratch), nameless.replace("    - harness", "    - name: claude-code\n      harness"));
     }
 
     #[test]
