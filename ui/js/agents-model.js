@@ -2,7 +2,8 @@
 //! how many instances a standing agent keeps, how many are up, which buttons
 //! apply, and the one request the − / + controls send. Since #330 also what
 //! each instance's own Terminal, Connect and Stop / Start do, and what the page
-//! says before it stops one somebody would lose something by.
+//! says before it stops one somebody would lose something by. Since #351 which
+//! rows offer Rename, the name it sends, and what the page says afterwards.
 
 const LIVE = new Set(["ready", "starting"]);
 
@@ -144,4 +145,45 @@ export function scalePayload(scope, name, by, wanted) {
     throw new Error("A standing agent keeps at least one instance; Stop takes it down.");
   }
   return { scope: target, name: agent, by: step };
+}
+
+/// Whether a roster row offers Rename (#351): exactly when it offers Delete --
+/// a declaration in this scope's own config, with that scope selected. An
+/// inherited or foreman agent is renamed where it is declared, or not at all.
+export function canRename(agent, selectedScope, scopeName) {
+  return Boolean(agent && agent.deletable) && selectedScope === scopeName;
+}
+
+/// The body of `POST /api/agents/rename`, checked as the daemon checks a new
+/// name -- trimmed, not empty, no `/`, `#` or control character -- so the
+/// dialog can say so before asking. `null` when the name is unchanged: there
+/// is nothing to send.
+export function renamePayload(scope, from, to) {
+  const target = String(scope ?? "").trim();
+  if (!target) throw new Error("Select one scope before renaming an agent.");
+  const current = String(from ?? "");
+  if (!current) throw new Error("Choose an agent declaration to rename.");
+  const name = String(to ?? "").trim();
+  if (!name) throw new Error("An agent needs a name.");
+  if (/[/#\u0000-\u001f\u007f-\u009f]/.test(name)) {
+    throw new Error("An agent name cannot contain /, # or control characters.");
+  }
+  if (name === current) return null;
+  return { scope: target, from: current, to: name };
+}
+
+/// What the roster says after a rename, from its answer: a title and one line
+/// per thing a person may want to act on -- above all the workflows that still
+/// name the old agent, which nothing rewrites. `null` when nothing changed.
+export function renameNotice(rename) {
+  if (!rename || !rename.changed) return null;
+  const lines = [];
+  const tasks = (rename.tasks || []).length;
+  if (tasks) lines.push(`${tasks} waiting task${tasks === 1 ? "" : "s"} moved to ${rename.to}.`);
+  const started = (rename.sessions && rename.sessions.started) || [];
+  if (started.length) lines.push(`Starting again as ${started.join(", ")}.`);
+  const named = [...(rename.files || []), ...(rename.workflows || [])];
+  for (const what of named) lines.push(`Still names ${rename.from}, not rewritten: ${what}`);
+  for (const note of rename.notes || []) lines.push(note);
+  return { title: `${rename.from} is now ${rename.to}`, lines, stale: named.length > 0 };
 }

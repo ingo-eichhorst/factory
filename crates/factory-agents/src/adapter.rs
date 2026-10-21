@@ -863,7 +863,7 @@ impl AgentContext {
                 ),
                 Grant::AgentStart => format!("agent.start -> {bin} agent start {scope} <name> [--instance <n>]"),
                 Grant::AgentConfigure => format!(
-                    "agent.configure -> {bin} agent scale {scope} <name> <n|+n|-n> keeps that many standing instances of an agent up; adding or deleting a declaration is the web UI's Roster, not this CLI"
+                    "agent.configure -> {bin} agent scale {scope} <name> <n|+n|-n> keeps that many standing instances of an agent up; {bin} agent rename {scope} <from> <to> renames one, and the tasks waiting for it move with it; adding or deleting a declaration is the web UI's Roster, not this CLI"
                 ),
                 Grant::AgentStop => format!("agent.stop -> {bin} agent stop <id> (one instance: <scope>/<name> is the first, '<scope>/<name>#2' the second)"),
                 Grant::AgentInput => {

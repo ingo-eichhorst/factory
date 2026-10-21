@@ -802,7 +802,7 @@ function onEvent(ev) {
   // `agent_activity`, which is a runtime saying an agent is busy, several
   // times a minute.
   if (ev.type === "roles_changed" || ev.type === "agent_updated" || ev.type === "agent_removed"
-      || ev.type === "agent_configured" || ev.type === "agent_deleted") {
+      || ev.type === "agent_configured" || ev.type === "agent_deleted" || ev.type === "agent_renamed") {
     if (state.tab === "roles") loadRoles();
     else if (state.tab === "roster" && ev.type === "roles_changed") loadAgents();
   }
