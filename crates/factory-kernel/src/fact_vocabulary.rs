@@ -218,10 +218,15 @@ pub enum Grant {
     /// an older kept version again (`#343`).
     #[serde(rename = "page.publish")]
     PagePublish,
+    /// Stop one standing instance and start it again from its declaration
+    /// as it reads now, on the harness conversation it had. Never leaves one
+    /// down: a restart that cannot finish says so and starts nothing twice.
+    #[serde(rename = "agent.restart")]
+    AgentRestart,
 }
 
 impl Grant {
-    pub const ALL: [Grant; 37] = [
+    pub const ALL: [Grant; 38] = [
         Grant::TaskCreate,
         Grant::TaskEdit,
         Grant::TaskDelete,
@@ -259,6 +264,7 @@ impl Grant {
         Grant::SecretsEdit,
         Grant::HostPower,
         Grant::PagePublish,
+        Grant::AgentRestart,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -300,6 +306,7 @@ impl Grant {
             Self::DeployPublish => "deploy.publish",
             Self::HostPower => "host.power",
             Self::PagePublish => "page.publish",
+            Self::AgentRestart => "agent.restart",
         }
     }
     pub fn describe(self) -> &'static str {
@@ -343,6 +350,7 @@ impl Grant {
             Self::DeployPublish => "approve publishing a deployment to GitHub",
             Self::HostPower => "change the host's power mode (Automatic, High performance, Energy saving)",
             Self::PagePublish => "publish or roll back a page its scope declares",
+            Self::AgentRestart => "restart a standing agent on its own conversation",
         }
     }
     pub fn group(self) -> &'static str {
@@ -355,9 +363,11 @@ impl Grant {
             | Self::TaskClose
             | Self::TaskReport
             | Self::TaskAttach => "Tasks",
-            Self::AgentStart | Self::AgentConfigure | Self::AgentStop | Self::AgentInput => {
-                "Agents"
-            }
+            Self::AgentStart
+            | Self::AgentConfigure
+            | Self::AgentStop
+            | Self::AgentInput
+            | Self::AgentRestart => "Agents",
             Self::RunInput | Self::RunApprove => "Runs",
             Self::WorkflowCreate
             | Self::WorkflowEdit

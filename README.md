@@ -173,6 +173,7 @@ factory agents                                  # a line per instance: id, state
 factory agent attach 'demo/claude#2'            # this terminal becomes #2's; detach returns
 factory agent attach 'demo/claude#2' --print    # just print the command
 factory agent stop   'demo/claude#2'            # #2 only; #1 and #3 keep running
+factory agent restart 'demo/claude#2'           # #2 back on the harness installed now, same conversation
 factory agent start  demo claude --instance 2   # #2 only
 factory agent start  'demo/claude#2'            # the same, by its id
 factory task log factory:agents                 # who started, stopped, attached to or scaled what
@@ -220,11 +221,67 @@ agent on the roster have sessions of their own and are not touched by
 stopping an instance. The CLI's `stop` does not ask: it is typed on purpose,
 and scripts rely on it.
 
-Starting, stopping, attaching and scaling are journaled with who asked, under
-the fixed journal id `factory:agents` (`agent_started`, `agent_stopped`,
-`agent_attached`, `agent_scaled`, and `agent_start_refused` for a start that
-did not happen, with the reason; `source` is `owner` or `agent`, `data.by`
-names which). L3 keeps what it was asked in a bounded log and L4 reads it from
+**Restarting one on its own conversation.** A task agent picks up a new
+harness or a changed declaration on its next run; a permanent one keeps the
+binary and the args it started with, and `stop` then `start` opens a fresh
+conversation. `factory agent restart <id>` brings one instance back on the
+harness installed now and the args declared now, in the conversation it was
+in:
+
+```sh
+factory agent restart demo/claude              # demo/claude resumed conversation 59edd824-…
+factory agent restart 'demo/claude#2' --json   # {"kind": "restarted", "restart": {"conversation": "59edd824-…", …}}
+factory agent restart demo/claude --fresh      # no conversation to go back to: start a new one
+```
+
+It is refused, with a non-zero exit and nothing stopped, while the instance
+is worth something to somebody -- the same three things a scale-down never
+stops one for: a person attached, a turn under way, a question waiting. The
+refusal names which and says `busy` (`demo/claude is busy: it is working.
+Nothing was stopped; restart it once it is idle`), so a scheduled job can read
+it as "try again on the next tick" rather than as a failure. An instance that
+is not up, or a surplus one a scale-down is draining, is refused as well.
+
+The conversation is the one the runtime's usage saw this instance's harness
+running as -- the same reading `factory task run --continue` resumes a run
+from -- and, when that names none, the one the harness itself keeps for the
+process in the session: Claude Code's `~/.claude/sessions/<pid>.json`
+(`CLAUDE_CONFIG_DIR` if set), with herdr naming the pane's processes. It is
+written on the instance's row before anything is stopped. With none found, or
+an adapter with no resume (`--resume <id>` for claude, `resume <id>` for
+codex, `--session <id>` for pi), the restart is refused unless `--fresh`, and
+the reason says what was asked and what answered. Before stopping anything it
+also checks that the harness starts (its `--version` probe, asked afresh), the
+codex model gate and the scope directory, so a restart that could not come
+back up leaves the running one alone.
+
+Then the old session is stopped and confirmed gone -- never two processes on
+one conversation; one that does not go within ten seconds is left stopped and
+says so -- and the instance is started again as the same id and instance,
+from its declaration as it reads now, with the resume arguments first, a new
+identity token (as every start gets) and any role it was given. Every start,
+stop, restart, reconcile and supervision of an instance holds that instance
+while it works and reads its row again once it has it, and the supervisor
+only tries: an instance in the middle of a restart is left to it, so nothing
+starts it a second time in between.
+
+`agent.restart` is its own grant, held by `foreman` and named by any other
+role that wants it; neither `agent.stop` nor `agent.start` implies it, since a
+restart never leaves one down and never brings up one somebody stopped. Like
+a stop it reaches the agent's own declaration with `reach: own` and its own
+scope with `reach: scope` -- and, held with `reach: scope` in the instance's
+root scope, every scope's standing agents: a harness is installed once for
+the whole host, so bringing every standing agent onto it is the instance's
+own upkeep, the way backups are.
+
+Starting, stopping, attaching, scaling and restarting are journaled with who
+asked, under the fixed journal id `factory:agents` (`agent_started`,
+`agent_stopped`, `agent_attached`, `agent_scaled`, `agent_restarted` with the
+session it left, the one it came back on and the conversation, and
+`agent_start_refused` / `agent_restart_refused` for one that did not happen,
+with the reason, and `agent_restart_failed` for one that stopped its session
+and did not come back up, naming the conversation to pick up by hand; `source`
+is `owner` or `agent`, `data.by` names which). L3 keeps what it was asked in a bounded log and L4 reads it from
 a cursor on its tick (`StandingAgentActionsFact`), the way it reads L3's
 liveness observations, so an entry can trail the action by a tick.
 
@@ -356,7 +413,7 @@ rather than ignored, and so is an agent given a role the instance never defined
 — the message says which agent it was. The grants are:
 
     task.create  task.edit  task.delete  task.run  task.cancel  task.report
-    agent.start  agent.configure  agent.stop  agent.input  run.input
+    agent.start  agent.configure  agent.stop  agent.input  agent.restart  run.input
     workflow.create  workflow.edit  workflow.delete  workflow.run  workflow.cancel
     knowledge.write  dataset.edit  bench.run  policy.attest  goals.checkin
     intake.add  intake.info  intake.triage  intake.assess  intake.decide
@@ -498,6 +555,7 @@ factory agent start demo watcher     # every instance it keeps
 factory agent start demo claude --instance 2   # one instance (or: start 'demo/claude#2')
 factory agent stop demo/watcher      # stays stopped until someone asks again
 factory agent stop 'demo/claude#2'   # one instance of several (quote the #)
+factory agent restart demo/watcher   # stop and start it again, on its own conversation
 factory agent attach 'demo/claude#2' # into its terminal; --print to only show the command
 factory agent scale demo claude 3    # keep three standing sessions up
 factory agent output demo/watcher

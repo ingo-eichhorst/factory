@@ -257,6 +257,10 @@ impl Engine {
             Request::HostPowerModeSet { .. } => Grant::HostPower,
             // Asking what stopping one would cost is part of stopping it (`#330`).
             Request::AgentStop { .. } | Request::AgentStopCheck { .. } => Grant::AgentStop,
+            // Its own grant, not `agent.stop` and `agent.start` together: a
+            // restart never leaves one down and never brings up one somebody
+            // stopped, so a nightly job may hold it without holding either.
+            Request::AgentRestart { .. } => Grant::AgentRestart,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
             // Typing into a run's session, however narrowed (`#106`).
@@ -732,9 +736,24 @@ impl Engine {
             // An instance id, as the L3 service will read it: `#1` is the bare
             // id (`#330`). Its own reach covers every instance of its own
             // declaration -- two instances of one declaration are one agent.
-            Request::AgentStop { id } | Request::AgentInput { id, .. } | Request::AgentStopCheck { id } => match def.reach {
+            //
+            // A restart has one more door. A harness is installed once for
+            // the whole host, so bringing every standing agent onto the one
+            // installed now is the instance's own upkeep: scope reach held in
+            // the root scope covers every scope's standing agents, the way the
+            // root scope alone holds backups. Anywhere else it is its own
+            // scope's, as for a stop.
+            Request::AgentStop { id }
+            | Request::AgentInput { id, .. }
+            | Request::AgentStopCheck { id }
+            | Request::AgentRestart { id, .. } => match def.reach {
                 Reach::Scope => match self.l4.store.get_agent(&AgentSession::canonical_id(id)).await? {
-                    Some(agent) => in_scope(&agent.scope),
+                    Some(agent) => match request {
+                        Request::AgentRestart { .. } => {
+                            in_scope(&agent.scope).or_else(|outside| in_root_scope().map_err(|_| outside))
+                        }
+                        _ => in_scope(&agent.scope),
+                    },
                     None => Ok(()),
                 },
                 Reach::Own if AgentSession::declaration_id(&AgentSession::canonical_id(id)) == AgentSession::id_for(scope, name) => {
@@ -2407,6 +2426,50 @@ mod tests {
         // Resolving an attach command needs no grant: `factory agents` prints
         // the same line to anyone.
         assert!(allowed(&e, &worker("w"), Request::AgentAttach { id: "other/x#2".into() }).await);
+    }
+
+    /// `agent.restart` is its own grant, read off the instance's row like a
+    /// stop, and scope reach held in the root scope covers every scope's
+    /// standing agents -- what a nightly harness refresh in the root needs.
+    #[tokio::test]
+    async fn restart_reaches_its_own_scope_and_every_scope_from_the_root() {
+        let e = engine_with_roles_and_root_scope(
+            "demo",
+            "roles:\n  refresher:\n    grants: [agent.restart]\n    reach: scope\n  \
+             self-refresher:\n    grants: [agent.restart]\n    reach: own\n  \
+             stop-and-start:\n    grants: [agent.stop, agent.start]\n    reach: scope\n",
+        );
+        let row = |scope: &str, name: &str, instance: u32| {
+            AgentSession::new(scope, name, "claude-code", "herdr", factory_core::agent::Lifetime::Permanent, Role::worker())
+                .as_instance(instance)
+        };
+        e.l4.store.put_agent(&row("other", "keeper", 1)).await.unwrap();
+        e.l4.store.put_agent(&row("demo", "keeper", 2)).await.unwrap();
+        e.l4.store.put_agent(&row("demo", "w", 2)).await.unwrap();
+        let restart = |id: &str| Request::AgentRestart { id: id.into(), fresh: false };
+        let caller = |scope: &str, role: &str| Caller::Agent {
+            scope: scope.into(),
+            name: "w".into(),
+            role: Role::new(role),
+            run_id: None,
+        };
+
+        // From the root scope: its own scope's, and every other scope's.
+        assert!(allowed(&e, &caller("demo", "refresher"), restart("demo/keeper#2")).await);
+        assert!(allowed(&e, &caller("demo", "refresher"), restart("other/keeper")).await);
+        // From anywhere else: its own scope's only, and the refusal says where it works.
+        assert!(allowed(&e, &caller("other", "refresher"), restart("other/keeper")).await);
+        let refused = e.authorize(&caller("other", "refresher"), &restart("demo/keeper#2")).await.unwrap_err();
+        assert!(refused.to_string().contains("works in other, not in demo"), "{refused}");
+        // Own reach: every instance of itself, nobody else.
+        assert!(allowed(&e, &caller("demo", "self-refresher"), restart("demo/w#2")).await);
+        assert!(!allowed(&e, &caller("demo", "self-refresher"), restart("demo/keeper#2")).await);
+        // Its own grant: stopping and starting do not add up to it, and a
+        // worker holds none of it.
+        assert!(!allowed(&e, &caller("demo", "stop-and-start"), restart("demo/keeper#2")).await);
+        assert!(!allowed(&e, &worker("w"), restart("demo/w#2")).await);
+        assert!(allowed(&e, &foreman(), restart("other/keeper")).await, "a root-scope foreman holds it");
+        assert!(allowed(&e, &Caller::Owner, restart("other/keeper")).await);
     }
 
     #[tokio::test]

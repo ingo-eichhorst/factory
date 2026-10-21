@@ -146,6 +146,18 @@ impl SessionUsage {
         serde_json::from_value(value)
             .map_err(|e| format!("usage does not match schema {USAGE_SCHEMA}: {e}"))
     }
+
+    /// The harness conversation this answer saw running as `adapter`, if it
+    /// saw one: the first session whose `adapter` is that one. Never "the
+    /// latest conversation in this directory" -- only what this session was
+    /// actually seen running. The one rule `factory task run --continue`
+    /// (#178) and `factory agent restart` both pick a conversation by.
+    pub fn session_for_adapter(&self, adapter: &str) -> Option<&str> {
+        self.sessions
+            .iter()
+            .find(|s| s.adapter.as_deref() == Some(adapter))
+            .map(|s| s.session_id.as_str())
+    }
 }
 
 #[cfg(test)]

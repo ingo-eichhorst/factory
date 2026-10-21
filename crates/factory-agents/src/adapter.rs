@@ -866,6 +866,9 @@ impl AgentContext {
                     "agent.configure -> {bin} agent scale {scope} <name> <n|+n|-n> keeps that many standing instances of an agent up; adding or deleting a declaration is the web UI's Roster, not this CLI"
                 ),
                 Grant::AgentStop => format!("agent.stop -> {bin} agent stop <id> (one instance: <scope>/<name> is the first, '<scope>/<name>#2' the second)"),
+                Grant::AgentRestart => format!(
+                    "agent.restart -> {bin} agent restart <id> [--fresh] stops one idle standing instance and starts it from its declaration as it reads now (the harness installed now, the declared args now), back on the conversation it had, and prints that conversation's id; refused with nothing stopped -- the reason says busy -- while someone is attached to it or it is working or waiting on an answer, and refused without a conversation to resume unless --fresh. Scope reach covers your own scope's standing agents, and every scope's from the instance root scope"
+                ),
                 Grant::AgentInput => {
                     format!("agent.input -> {bin} agent input <id> --text \"...\" --key enter")
                 }
@@ -1208,6 +1211,18 @@ pub trait Agent: Send + Sync {
     /// only for `claude-code` and `codex`.
     fn resume_spec(&self, session_id: &str) -> Option<ResumeSpec> {
         let _ = session_id;
+        None
+    }
+
+    /// The conversation a process of this harness that is running now is
+    /// in, read from where the harness itself keeps it by process id --
+    /// declared the same way as `resume_spec`, and asked only by
+    /// `factory agent restart` when the runtime's usage named none. Never
+    /// "the latest conversation in this directory": `None`, the default and
+    /// what a plugin gets, means this harness keeps no such record, and the
+    /// restart says it found no conversation rather than guessing one.
+    fn live_conversation(&self, pid: u32) -> Option<String> {
+        let _ = pid;
         None
     }
 }

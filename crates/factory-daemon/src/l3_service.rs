@@ -235,6 +235,36 @@ impl Attention {
     }
 }
 
+/// One thing at a time per standing instance: starting it, stopping it,
+/// restarting it, a reconcile's look at it and the supervisor's. Each of those
+/// reads the row, asks the runtime and writes the row back, and two of them
+/// interleaved on one instance is how a session gets started twice -- a
+/// supervisor tick that sees the old session go while a restart is between
+/// its stop and its start, say. Whoever holds an instance reads its row again
+/// once it has it. The supervisor only ever tries: an instance somebody is in
+/// the middle of is looked at again on its next tick.
+#[derive(Default)]
+pub(crate) struct Lifecycle {
+    held: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl Lifecycle {
+    fn lock_for(&self, id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut held = self.held.lock().unwrap_or_else(|p| p.into_inner());
+        held.entry(id.to_string()).or_default().clone()
+    }
+
+    /// Wait for `id` to be free, and hold it.
+    pub(crate) async fn hold(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.lock_for(id).lock_owned().await
+    }
+
+    /// Hold `id` if nobody else is in the middle of it.
+    pub(crate) fn try_hold(&self, id: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        self.lock_for(id).try_lock_owned().ok()
+    }
+}
+
 /// L3's provider for `StandingAgentObservationsFact`.
 pub(crate) struct LivenessProvider(pub(crate) std::sync::Arc<LivenessLog>);
 impl factory_kernel::FactProvider for LivenessProvider {
