@@ -647,7 +647,7 @@ mod tests {
     // ------------------------------------------------ the hall over the wire
 
     use factory_core::building::{ActivityLevel, Beacon, Tier};
-    use factory_core::config::{Config, DaemonConfig, Instance};
+    use factory_core::config::{Config, Instance};
     use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
     use factory_core::task::NewTask;
     use factory_plugins::registry::Registry;
@@ -658,25 +658,13 @@ mod tests {
     /// and the filesystem and never starts anything.
     fn site_engine(path: &Path) -> Arc<Engine> {
         let config = Config {
-            version: 1,
             instance: Instance { id: "i".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
-            scope: None,
             scopes: vec![serde_yaml_ng::from_str(&format!(
                 "name: demo\npath: {}\n",
                 path.display()
             ))
             .unwrap()],
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         Arc::new(Engine::new(
             factory_core::config::Factory { root: path.to_path_buf(), config },

@@ -2025,7 +2025,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance as InstanceInfo, Sandbox};
+    use factory_core::config::{Config, Factory, Instance as InstanceInfo, Sandbox};
     use factory_core::role::Role;
     use factory_plugins::registry::Registry;
     use factory_plugins::SqliteStore;
@@ -2078,24 +2078,13 @@ mod tests {
         let factory = Factory {
             root: scratch.0.clone(),
             config: Config {
-                version: 1,
                 instance: InstanceInfo {
                     id: "i".into(),
                     name: "test".into(),
                 },
-                daemon: DaemonConfig::default(),
-                scope: None,
                 scopes: vec![scope],
-                roles: Default::default(),
-                dashboard: None,
-                policies: Default::default(),
-                quality: Default::default(),
                 infrastructure,
-                secrets: Vec::new(),
-                channels: Vec::new(),
-                plugins_dir: None,
-                renewals: Vec::new(),
-                renewals_notify: None,
+                ..Default::default()
             },
         };
         Arc::new(Engine::new(

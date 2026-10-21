@@ -433,7 +433,7 @@ mod tests {
     use super::*;
     use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, DaemonConfig, Instance, PolicyDeclaration};
+    use factory_core::config::{Config, Instance};
     use factory_core::quality::FindingKind;
     use factory_core::run::{NewRun, RunPatch, RunStatus, Trigger};
     use factory_core::task::Task;
@@ -463,9 +463,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let company = scope_at("company-id", "company", ".", &[]);
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![
                 company,
@@ -473,16 +471,8 @@ mod tests {
                 scope_at("demo-id", "demo", "projects/demo", &[]),
                 scope_at("sibling-id", "sibling", "other", &[]),
             ],
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
             quality: vec!["baseline".into()],
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let registry = Registry::with_builtins();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
@@ -634,21 +624,11 @@ mod tests {
             }],
         });
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(demo.clone()),
             scopes: vec![demo],
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
             quality: vec!["reported-profile".into()],
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let registry = Registry::with_builtins();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());

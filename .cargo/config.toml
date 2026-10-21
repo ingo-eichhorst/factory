@@ -9,5 +9,10 @@
 # gives the main thread on this platform; it costs nothing at runtime and
 # nothing in release builds (`RUST_MIN_STACK` only ever raises a spawned
 # thread's default, never a hard requirement).
+#
+# The daemon's own runtime does not rely on this: a debug `factory-daemon`
+# sizes its tokio threads itself (`DEBUG_THREAD_STACK` in
+# `crates/factory-daemon/src/main.rs`), so one started by hand survives too.
+# That covers none of libtest's threads, so this stays.
 [env]
 RUST_MIN_STACK = "8388608"

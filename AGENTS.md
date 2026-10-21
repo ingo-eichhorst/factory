@@ -70,12 +70,37 @@ changing an adapter trait -- those five traits are the whole point of the shape.
     cargo build --workspace
     cargo test --workspace
 
+The end-to-end tests start a headless herdr of their own, on a session of
+their own, and strip the live instance's variables from everything they
+start, so the suite is safe to run from a Factory run's shell or a herdr pane.
+
 Never develop against the company's live `.factory/`: it holds a real database
 and real secrets. Make a throwaway instance instead:
 
     mkdir -p /tmp/dev/projects/demo
     target/debug/factory-daemon --root /tmp/dev init
     target/debug/factory-daemon --root /tmp/dev run
+
+Nothing protects that one the way the tests protect themselves. Inside a
+Factory run or any herdr pane the shell carries `HERDR_SOCKET_PATH` and
+`HERDR_SESSION` of the live herdr session -- unsetting only the socket still
+lands there -- and `FACTORY_SOCKET` and `FACTORY_TOKEN` of the live daemon,
+and `FACTORY_SOCKET` beats `--root`. So start a herdr server, the daemon and
+the CLI on a session of their own, and name the throwaway's socket:
+
+    dev() {
+      env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_PANE_ID \
+          -u HERDR_ENV -u FACTORY_SOCKET -u FACTORY_URL -u FACTORY_BIN \
+          -u FACTORY_TOKEN -u FACTORY_TASK_TOKEN -u FACTORY_RUN_TOKEN \
+          HERDR_SESSION=dev-demo "$@"
+    }
+    dev herdr server &
+    dev target/debug/factory-daemon --root /tmp/dev run &
+    dev target/debug/factory --socket /tmp/dev/.factory/factory.sock status
+
+Keep the root short: macOS caps a unix socket path at about 104 bytes, and a
+longer root moves the daemon's socket to the temp directory. `dev herdr server
+stop` ends the session when you are done.
 
 The `shell` agent runs the task's instructions as a shell command and reports
 the exit status and stdout, so the whole dispatch path can be exercised

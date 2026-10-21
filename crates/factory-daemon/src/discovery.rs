@@ -236,7 +236,7 @@ pub fn apply(factory: &mut Factory) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use factory_core::config::{Config, DaemonConfig, Instance};
+    use factory_core::config::{Config, Instance};
 
     struct Scratch(PathBuf);
     impl Scratch {
@@ -275,24 +275,13 @@ mod tests {
         Factory {
             root: root.to_path_buf(),
             config: Config {
-                version: 1,
                 instance: Instance {
                     id: "instance-id".into(),
                     name: "instance".into(),
                 },
-                daemon: DaemonConfig::default(),
                 scope: root_scope,
                 scopes: vec![legacy],
-                roles: Default::default(),
-                dashboard: Default::default(),
-                policies: Default::default(),
-                quality: Default::default(),
-                infrastructure: Default::default(),
-                secrets: Vec::new(),
-                channels: Vec::new(),
-                plugins_dir: None,
-                renewals: Vec::new(),
-                renewals_notify: None,
+                ..Default::default()
             },
         }
     }

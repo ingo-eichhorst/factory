@@ -80,7 +80,7 @@ mod tests {
     use super::*;
     use factory_assurance::metrics_catalogue::{ConsumerKind, ConsumerStatus, Freshness, MetricSource};
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
+    use factory_core::config::{Config, Factory, Instance, Scope};
     use factory_plugins::{Registry, SqliteStore};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -180,21 +180,10 @@ mod tests {
         );
         let ops = scope("id: ops-id\nname: ops\n", "projects/ops");
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![company, finance, ops],
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
-            quality: Vec::new(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         let engine = Arc::new(Engine::new(

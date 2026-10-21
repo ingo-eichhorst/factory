@@ -459,26 +459,9 @@ mod tests {
         Scope {
             id: format!("{name}-id"),
             name: name.into(),
-            path: PathBuf::new(),
-            agent: None,
-            agents: Vec::new(),
             runtime: Some("herdr".into()),
             git: Some(format!("https://github.com/acme/{name}.git")),
-            task_store: None,
-            max_sessions: None,
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            intake: Default::default(),
-            dependencies: Default::default(),
-            environments: Vec::new(),
-            renewals: Vec::new(),
-            metrics: None,
-            backup: None,
-            memory: None,
-            skills: Vec::new(),
-            pages: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -486,21 +469,10 @@ mod tests {
         Factory {
             root: std::env::temp_dir(),
             config: Config {
-                version: 1,
                 instance: Instance { id: "test".into(), name: "test".into() },
                 daemon: DaemonConfig { power_assertion: false, default_agent: "shell".into(), ..Default::default() },
-                roles: Default::default(),
-                dashboard: None,
-                policies: Default::default(),
-                quality: Default::default(),
-                scope: None,
                 scopes,
-                infrastructure: Default::default(),
-                secrets: Vec::new(),
-                channels: Vec::new(),
-                plugins_dir: None,
-                renewals: Vec::new(),
-                renewals_notify: None,
+                ..Default::default()
             },
         }
     }

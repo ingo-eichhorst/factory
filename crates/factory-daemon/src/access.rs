@@ -924,7 +924,7 @@ mod tests {
     use crate::engine::Engine;
     use chrono::Utc;
     use factory_core::agent::Lifetime;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance, ScopeAgent};
+    use factory_core::config::{Config, Factory, Instance, ScopeAgent};
     use factory_core::intake::{Assessment, Decision, Level, NewIntake, Routing, WontfixReason};
     use factory_core::run::{NewRun, RunStatus, Trigger};
     use factory_core::task::{CloseReason, NewTask, Task, TaskPatch, TaskReport, TaskStatus};
@@ -938,27 +938,15 @@ mod tests {
     /// rather than asserted.
     fn engine() -> Arc<Engine> {
         let config = Config {
-            version: 1,
             instance: Instance {
                 id: "i".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
-            scope: None,
             scopes: vec![
                 serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap(),
                 serde_yaml_ng::from_str("name: other\npath: .\n").unwrap(),
             ],
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory {
             root: PathBuf::from("/tmp/factory-access-test"),

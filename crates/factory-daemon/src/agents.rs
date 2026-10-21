@@ -1226,7 +1226,6 @@ pub(crate) mod tests {
 
     fn engine_with(registry: Registry) -> Arc<Engine> {
         let config = Config {
-            version: 1,
             instance: Instance {
                 id: "i".into(),
                 name: "test".into(),
@@ -1236,18 +1235,8 @@ pub(crate) mod tests {
             // `caffeinate` on whatever machine runs `cargo test` -- see the
             // same note on `engine::tests::test_engine`.
             daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
-            scope: None,
             scopes: vec![serde_yaml_ng::from_str("name: demo\npath: .\n").unwrap()],
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory {
             root: PathBuf::from("/tmp/factory-agents-test"),
@@ -1600,7 +1589,6 @@ pub(crate) mod tests {
         store: Arc<SqliteStore>,
     ) -> Arc<Engine> {
         let config = Config {
-            version: 1,
             instance: Instance {
                 id: "i".into(),
                 name: "test".into(),
@@ -1618,18 +1606,8 @@ pub(crate) mod tests {
                 },
                 ..DaemonConfig::default()
             },
-            scope: None,
             scopes: vec![serde_yaml_ng::from_str(scope_yaml).unwrap()],
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let mut registry = Registry::with_builtins();
         registry.add_agent(
