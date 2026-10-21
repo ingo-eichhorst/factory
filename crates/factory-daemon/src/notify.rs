@@ -571,21 +571,12 @@ mod tests {
         let blocks: Blocks = serde_yaml_ng::from_str(&yaml).unwrap();
         let demo: factory_core::config::Scope = serde_yaml_ng::from_str("id: demo-id\nname: demo\npath: projects/demo\n").unwrap();
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
             daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
-            scope: None,
             scopes: vec![demo],
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            infrastructure: Default::default(),
             secrets: blocks.secrets,
             channels: blocks.channels,
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         config.validate().unwrap();
         let store: Arc<dyn factory_core::adapter::TaskStore> =

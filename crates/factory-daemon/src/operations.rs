@@ -614,25 +614,14 @@ mod tests {
         std::fs::create_dir_all(root.join("projects/demo/child")).unwrap();
         std::fs::create_dir_all(root.join("projects/other")).unwrap();
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
             daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
-            scope: None,
             scopes: vec![
                 scope("demo-id", "demo", root.join("projects/demo")),
                 scope("child-id", "child", root.join("projects/demo/child")),
                 scope("other-id", "other", root.join("projects/other")),
             ],
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let runtime = Arc::new(TypingRuntime::default());
         let mut registry = Registry::with_builtins();

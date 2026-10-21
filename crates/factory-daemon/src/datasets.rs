@@ -312,7 +312,7 @@ mod tests {
 
     use super::*;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance};
+    use factory_core::config::{Config, Factory, Instance};
     use factory_plugins::{Registry, SqliteStore};
     use std::path::PathBuf;
 
@@ -320,21 +320,8 @@ mod tests {
         let root = std::env::temp_dir().join(format!("factory-datasets-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".factory")).unwrap();
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            scope: None,
-            scopes: Vec::new(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root, config };
         let registry = Registry::with_builtins();

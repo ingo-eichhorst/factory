@@ -1380,26 +1380,8 @@ mod tests {
         Scope {
             id: format!("{name}-id"),
             name: name.into(),
-            path: PathBuf::new(),
-            agent: None,
-            agents: Vec::new(),
             runtime: Some("quiet".into()),
-            git: None,
-            task_store: None,
-            max_sessions: None,
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            intake: Default::default(),
-            dependencies: Default::default(),
-            environments: Vec::new(),
-            renewals: Vec::new(),
-            metrics: None,
-            backup: None,
-            memory: None,
-            skills: Vec::new(),
-            pages: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -1413,22 +1395,11 @@ mod tests {
         let root = std::env::temp_dir().join(format!("factory-intake-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
             // No real `caffeinate` from a test that dispatches.
             daemon: DaemonConfig { power_assertion: false, default_agent: "shell".into(), ..DaemonConfig::default() },
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            scope: None,
             scopes,
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let mut registry = Registry::with_builtins();
         registry.add_runtime(Arc::new(QuietRuntime), "test");
@@ -1448,21 +1419,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("factory-intake-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
             daemon: DaemonConfig { power_assertion: false, default_agent: "shell".into(), ..DaemonConfig::default() },
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            scope: None,
             scopes,
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let mut registry = Registry::with_builtins();
         registry.add_runtime(Arc::new(QuietRuntime), "test");

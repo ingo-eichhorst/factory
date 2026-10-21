@@ -128,6 +128,32 @@ pub struct Config {
     pub renewals_notify: Option<factory_infrastructure::renewals::RenewalsNotify>,
 }
 
+/// The config that declares nothing: what serde builds from a file naming
+/// only its instance, except that the instance here is blank. Its use is
+/// `..Default::default()` in a literal, so a new root block costs one line
+/// here instead of one in every fixture.
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            version: default_version(),
+            instance: Instance { id: String::new(), name: String::new() },
+            daemon: DaemonConfig::default(),
+            scope: None,
+            scopes: Vec::new(),
+            roles: BTreeMap::new(),
+            dashboard: None,
+            policies: PolicyDeclaration::default(),
+            quality: Vec::new(),
+            infrastructure: Infrastructure::default(),
+            secrets: Vec::new(),
+            channels: Vec::new(),
+            plugins_dir: None,
+            renewals: Vec::new(),
+            renewals_notify: None,
+        }
+    }
+}
+
 impl Config {
     /// The roles every scope starts from: the two built in, plus the instance
     /// root's own. Not the whole answer for any nested scope -- see
@@ -1622,8 +1648,9 @@ impl Infrastructure {
 
 pub use factory_agents::roster::{AgentRef, ScopeAgent};
 
-/// A directory Factory can run agents in.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A directory Factory can run agents in. `Default` is exactly what serde
+/// fills in for every field but `name`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Scope {
     /// Stable identity stored with the scope rather than inferred from its
     /// location. Discovery requires this to be non-empty.
@@ -2211,24 +2238,11 @@ mod tests {
         Factory {
             root: PathBuf::from(root),
             config: Config {
-                version: 1,
                 instance: Instance {
                     id: "i".into(),
                     name: "n".into(),
                 },
-                daemon: DaemonConfig::default(),
-                scope: None,
-                scopes: vec![],
-                roles: BTreeMap::new(),
-                dashboard: None,
-                policies: PolicyDeclaration::default(),
-                quality: Vec::new(),
-                infrastructure: Infrastructure::default(),
-                secrets: Vec::new(),
-                channels: Vec::new(),
-                plugins_dir: None,
-                renewals: Vec::new(),
-                renewals_notify: None,
+                ..Default::default()
             },
         }
     }
@@ -2246,6 +2260,37 @@ mod tests {
             serde_yaml_ng::from_str(&format!("id: {name}-id\nname: {name}\n")).unwrap();
         scope.path = PathBuf::from(path);
         scope
+    }
+
+    // ===================================================== Default
+
+    /// Fixtures write `..Default::default()` and trust it to mean what an
+    /// absent block means in a file. Config has no `PartialEq`, so the two
+    /// are compared through what they serialize to; `scopes` never
+    /// serializes, so it is checked on its own.
+    #[test]
+    fn a_default_config_is_what_a_file_naming_only_its_instance_parses_to() {
+        let parsed: Config = serde_yaml_ng::from_str("instance: {id: t, name: t}\n").unwrap();
+        let built = Config { instance: Instance { id: "t".into(), name: "t".into() }, ..Default::default() };
+        assert_eq!(serde_yaml_ng::to_string(&built).unwrap(), serde_yaml_ng::to_string(&parsed).unwrap());
+        assert_eq!(Config::default().version, 1);
+        assert!(Config::default().scopes.is_empty());
+    }
+
+    #[test]
+    fn a_default_scope_is_what_a_block_naming_only_itself_parses_to() {
+        let parsed: Scope = serde_yaml_ng::from_str("name: s\n").unwrap();
+        let built = Scope { name: "s".into(), ..Default::default() };
+        assert_eq!(serde_yaml_ng::to_string(&built).unwrap(), serde_yaml_ng::to_string(&parsed).unwrap());
+        assert_eq!(built.path, parsed.path);
+    }
+
+    /// `Default` is for Rust literals only. A container-level
+    /// `#[serde(default)]` would let a file that forgot its instance load
+    /// as a blank one.
+    #[test]
+    fn a_config_without_an_instance_is_refused() {
+        assert!(serde_yaml_ng::from_str::<Config>("version: 1\n").is_err());
     }
 
     // ============================================================= #279

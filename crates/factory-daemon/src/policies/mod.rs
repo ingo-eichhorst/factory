@@ -455,27 +455,15 @@ mod tests {
         .unwrap();
 
         let mut config = Config {
-            version: 1,
             instance: Instance {
                 id: "test".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
-            scope: None,
-            scopes: Vec::new(),
-            roles: Default::default(),
-            dashboard: None,
             policies: PolicyDeclaration {
                 frameworks: vec!["cra".to_string()],
                 ..Default::default()
             },
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         config.scopes = vec![
             scope_at("company-id", "company", ".", ""),
@@ -539,27 +527,17 @@ mod tests {
             }],
         });
         let config = Config {
-            version: 1,
             instance: Instance {
                 id: "test".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
             scope: Some(finance.clone()),
             scopes: vec![finance],
-            roles: Default::default(),
-            dashboard: None,
             policies: PolicyDeclaration {
                 frameworks: vec!["gobd".to_string()],
                 ..Default::default()
             },
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let registry = Registry::with_builtins();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
@@ -675,27 +653,17 @@ mod tests {
         });
         let sibling = scope_at("sibling-id", "sibling", "sibling", "");
         let config = Config {
-            version: 1,
             instance: Instance {
                 id: "test".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
             scope: Some(company.clone()),
             scopes: vec![company, finance, sibling],
-            roles: Default::default(),
-            dashboard: None,
             policies: PolicyDeclaration {
                 frameworks: vec!["gobd".to_string()],
                 ..Default::default()
             },
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let registry = Registry::with_builtins();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
@@ -1156,24 +1124,13 @@ mod tests {
         std::fs::write(root.join(".env"), "SECRET=shh\n").unwrap();
 
         let mut config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
             daemon: DaemonConfig {
                 foreman: ForemanConfig { enabled: true, ..ForemanConfig::default() },
                 ..DaemonConfig::default()
             },
-            scope: None,
-            scopes: Vec::new(),
-            roles: Default::default(),
-            dashboard: None,
             policies: PolicyDeclaration { frameworks: vec!["house".to_string()], ..Default::default() },
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let root_scope = scope_at("root-id", "root", ".", "");
         let mut team_scope: Scope = serde_yaml_ng::from_str(
@@ -1322,21 +1279,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("factory-policies-f8-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
             daemon: DaemonConfig { interfaces, ..DaemonConfig::default() },
-            scope: None,
-            scopes: Vec::new(),
-            roles: Default::default(),
-            dashboard: None,
-            policies: PolicyDeclaration::default(),
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root, config };
         let registry = Registry::with_builtins();
@@ -1767,21 +1712,10 @@ mod tests {
     /// same pattern `intake.rs`'s own restart test uses.
     fn clock_engine(root: &std::path::Path, db: &std::path::Path) -> Arc<Engine> {
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
-            daemon: DaemonConfig::default(),
-            scope: None,
             scopes: vec![scope_at("demo-id", "demo", "demo", "")],
-            roles: Default::default(),
-            dashboard: None,
             policies: PolicyDeclaration { frameworks: vec!["cra".to_string()], ..Default::default() },
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root: root.to_path_buf(), config };
         let registry = Registry::with_builtins();
@@ -2022,27 +1956,16 @@ mod tests {
         .unwrap();
 
         let config = Config {
-            version: 1,
             instance: Instance {
                 id: "test".into(),
                 name: "test".into(),
             },
-            daemon: DaemonConfig::default(),
-            scope: None,
             scopes: vec![scope_at("demo-id", "demo", ".", "")],
-            roles: Default::default(),
-            dashboard: None,
             policies: PolicyDeclaration {
                 frameworks: vec!["house".to_string()],
                 ..Default::default()
             },
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         let factory = Factory { root, config };
         let registry = Registry::with_builtins();

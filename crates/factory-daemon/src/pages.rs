@@ -544,21 +544,10 @@ mod tests {
             serde_yaml_ng::from_str("id: other-id\nname: other\npages:\n  - { name: elsewhere }\n").unwrap();
         other.path = PathBuf::from("projects/other");
         let config = Config {
-            version: 1,
             instance: Instance { id: "test".into(), name: "test".into() },
             daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
-            scope: None,
             scopes: vec![radar, other],
-            roles: Default::default(),
-            dashboard: None,
-            policies: Default::default(),
-            quality: Default::default(),
-            infrastructure: Default::default(),
-            secrets: Vec::new(),
-            channels: Vec::new(),
-            plugins_dir: None,
-            renewals: Vec::new(),
-            renewals_notify: None,
+            ..Default::default()
         };
         config.validate().unwrap();
         let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
