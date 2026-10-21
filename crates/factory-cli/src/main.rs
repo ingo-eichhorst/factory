@@ -1200,7 +1200,7 @@ enum AgentCmd {
     /// it reads now -- the harness installed now, the args declared now --
     /// back on the harness conversation it was in (claude `--resume`, codex
     /// `resume`, pi `--session`). Prints that conversation's id; `--json`
-    /// returns it as `conversation`.
+    /// returns it as `restart.conversation`.
     ///
     /// Refused, with nothing stopped and a non-zero exit, while it is busy:
     /// somebody is attached to it, it is in the middle of a turn, or it is
