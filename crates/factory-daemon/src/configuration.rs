@@ -580,30 +580,43 @@ fn rendered_value_item(value: &Value, indent: usize) -> Result<String> {
     Ok(out)
 }
 
-/// `line` with its `instances:` value replaced by `n`, keeping whatever came
+/// `line` with its `key:` value replaced by `rendered`, keeping whatever came
 /// before the key (an indent, or a list item's `- `) and a trailing comment.
-fn with_instances(line: &str, n: u32) -> String {
-    let at = line.find("instances:").unwrap_or(0);
-    let rest = &line[at + "instances:".len()..];
+fn with_value(line: &str, key: &str, rendered: &str) -> String {
+    let key = format!("{key}:");
+    let at = line.find(&key).unwrap_or(0);
+    let rest = &line[at + key.len()..];
     let comment = rest
         .find(" #")
         .map(|hash| format!(" {}", rest[hash..].trim()))
         .unwrap_or_default();
-    format!("{}instances: {n}{comment}\n", &line[..at])
+    format!("{}{key} {rendered}{comment}\n", &line[..at])
 }
 
-/// Set `instances: n` on exactly one declaration (`#329`), leaving every other
-/// line a person wrote -- comments, the declaration's other keys, its siblings
-/// -- where it was. `expected` is the whole document once the change is made,
-/// for the shapes with no line of their own to edit (a flow-style scope, list
-/// or item), which are expanded from it the way `edit_text` and `remove_text`
-/// expand one. The caller parses the result back and refuses it unless it
-/// says exactly `expected`.
-fn set_instances_text(
+/// Where a key the declaration does not have yet goes.
+#[derive(Clone, Copy)]
+enum NewKey {
+    /// After the declaration's last line that says anything: `instances:`.
+    Last,
+    /// Before its first key, the way a person writes `name:` (`#351`).
+    First,
+}
+
+/// Set `key: rendered` on exactly one declaration (`instances:` for `#329`,
+/// `name:` for `#351`), leaving every other line a person wrote -- comments,
+/// the declaration's other keys, its siblings -- where it was. `rendered` is
+/// the value as YAML. `expected` is the whole document once the change is
+/// made, for the shapes with no line of their own to edit (a flow-style scope,
+/// list or item), which are expanded from it the way `edit_text` and
+/// `remove_text` expand one. The caller parses the result back and refuses it
+/// unless it says exactly `expected`.
+fn set_key_text(
     text: &str,
     expected: &Value,
     location: AgentLocation,
-    n: u32,
+    key_name: &str,
+    rendered: &str,
+    new_key: NewKey,
     path: &Path,
 ) -> Result<String> {
     let mut lines = Vec::new();
@@ -730,23 +743,43 @@ fn set_instances_text(
     };
 
     if let Some(item) = first {
-        if after_dash_key(lines[item].2) == Some("instances") {
-            return Ok(replace(item, item + 1, &with_instances(lines[item].2, n)));
+        if after_dash_key(lines[item].2) == Some(key_name) {
+            return Ok(replace(item, item + 1, &with_value(lines[item].2, key_name, rendered)));
         }
     }
     if let Some(index) = (from..to)
-        .find(|index| indentation(lines[*index].2) == Some(key_indent) && key_rest(lines[*index].2, "instances").is_some())
+        .find(|index| indentation(lines[*index].2) == Some(key_indent) && key_rest(lines[*index].2, key_name).is_some())
     {
-        return Ok(replace(index, index + 1, &with_instances(lines[index].2, n)));
+        return Ok(replace(index, index + 1, &with_value(lines[index].2, key_name, rendered)));
     }
-    // No `instances:` yet: a new key, after the mapping's last line that says
-    // anything, so a comment or blank line between it and the next entry stays
-    // between them.
-    let last = last_content(&lines, from, to).or(first).ok_or_else(|| {
-        bad(format!("the declaration in {} has no keys", path.display()))
-    })?;
-    let at = lines.get(last + 1).map(|line| line.0).unwrap_or(text.len());
-    Ok(insert_at(text, at, &format!("{}instances: {n}\n", " ".repeat(key_indent))))
+    let addition = format!("{}{key_name}: {rendered}\n", " ".repeat(key_indent));
+    match new_key {
+        // A list item's first key shares its `- ` line: the new key takes
+        // that place, and the key that was there moves down a line to sit
+        // under it, its comment with it.
+        NewKey::First if first.is_some() => {
+            let item = first.unwrap_or_default();
+            let line = lines[item].2;
+            let at = line.len() - line.trim_start()[1..].trim_start().len();
+            let moved = format!("{}{key_name}: {rendered}\n{}{}", &line[..at], " ".repeat(key_indent), &line[at..]);
+            Ok(replace(item, item + 1, &moved))
+        }
+        NewKey::First => {
+            let first_key = (from..to).find(|index| is_content(lines[*index].2)).ok_or_else(|| {
+                bad(format!("the declaration in {} has no keys", path.display()))
+            })?;
+            Ok(insert_at(text, lines[first_key].0, &addition))
+        }
+        // After the mapping's last line that says anything, so a comment or
+        // blank line between it and the next entry stays between them.
+        NewKey::Last => {
+            let last = last_content(&lines, from, to).or(first).ok_or_else(|| {
+                bad(format!("the declaration in {} has no keys", path.display()))
+            })?;
+            let at = lines.get(last + 1).map(|line| line.0).unwrap_or(text.len());
+            Ok(insert_at(text, at, &addition))
+        }
+    }
 }
 
 /// The key a list item's own `- key: value` line opens, if it opens one.
@@ -756,8 +789,8 @@ fn after_dash_key(line: &str) -> Option<&str> {
     Some(key.trim())
 }
 
-/// The document as it should read once one declaration says `instances: n`.
-fn expected_instances(document: &Value, location: AgentLocation, n: u32, path: &Path) -> Result<Value> {
+/// The document as it should read once one declaration says `key: value`.
+fn expected_with(document: &Value, location: AgentLocation, key: &str, value: Value, path: &Path) -> Result<Value> {
     let mut expected = document.clone();
     let root = mapping(&mut expected, "the document", path)?;
     let scope = root
@@ -772,9 +805,42 @@ fn expected_instances(document: &Value, location: AgentLocation, n: u32, path: &
             .and_then(|agents| agents.get_mut(index)),
     }
     .ok_or_else(|| bad(format!("the declaration in {} changed while it was being edited", path.display())))?;
-    mapping(declaration, "an agent declaration", path)?
-        .insert(Value::String("instances".into()), Value::Number(n.into()));
+    mapping(declaration, "an agent declaration", path)?.insert(Value::String(key.into()), value);
     Ok(expected)
+}
+
+/// One value as a YAML scalar, quoted only where YAML needs it: `reviewer`,
+/// `Codex Builder`, and `'true'` for a name YAML would otherwise read as a bool.
+fn yaml_scalar(value: &Value) -> Result<String> {
+    serde_yaml_ng::to_string(value)
+        .map(|yaml| yaml.trim_end().to_string())
+        .map_err(|error| FactoryError::Other(anyhow::anyhow!("encoding {value:?}: {error}")))
+}
+
+/// `key: value` set on one declaration in the file, checked by parsing the
+/// result back: it must say exactly what `expected_with` says or nothing is
+/// written. Answers the new text.
+fn edited_declaration(
+    text: &str,
+    document: &Value,
+    location: AgentLocation,
+    key: &str,
+    value: Value,
+    new_key: NewKey,
+    path: &Path,
+) -> Result<String> {
+    let rendered = yaml_scalar(&value)?;
+    let expected = expected_with(document, location, key, value, path)?;
+    let serialized = set_key_text(text, &expected, location, key, &rendered, new_key, path)?;
+    let reread: Value = serde_yaml_ng::from_str(&serialized)
+        .map_err(|error| bad(format!("the edit of {} would not parse: {error}", path.display())))?;
+    if reread != expected {
+        return Err(bad(format!(
+            "could not set {key} in {} without changing something else; set `{key}: {rendered}` there by hand",
+            path.display()
+        )));
+    }
+    Ok(serialized)
 }
 
 /// Replace `path` without ever exposing a truncated or half-written config.
@@ -1034,20 +1100,132 @@ impl Engine {
             return Ok((current.name, previous, wanted));
         }
 
-        let expected = expected_instances(&document, location, wanted, &path)?;
-        let serialized = set_instances_text(&text, &expected, location, wanted, &path)?;
-        let reread: Value = serde_yaml_ng::from_str(&serialized)
-            .map_err(|error| bad(format!("the edit of {} would not parse: {error}", path.display())))?;
-        if reread != expected {
-            return Err(bad(format!(
-                "could not set instances in {} without changing something else; set `instances: {wanted}` there by hand",
-                path.display()
-            )));
-        }
+        let serialized = edited_declaration(
+            &text,
+            &document,
+            location,
+            "instances",
+            Value::Number(wanted.into()),
+            NewKey::Last,
+            &path,
+        )?;
         atomic_write(&path, &serialized)?;
         self.replace_scope(&current.id, from_file);
         Ok((current.name, previous, wanted))
     }
+
+    /// Rename one declaration in its scope's own config (`#351`): its `name:`
+    /// rewritten, or given one if it had none -- a nameless declaration is
+    /// named after its harness -- and the new name made live. `factory agent
+    /// rename`, `POST /api/agents/rename` and the roster's Rename all arrive
+    /// here through `Request::AgentRename`; none of them writes the file
+    /// itself. Only a declaration of this scope's own can be renamed, the
+    /// rule the roster's Delete follows: an inherited or foreman agent is
+    /// renamed where it is declared, or not at all.
+    ///
+    /// The new name is checked as `configure_agent` checks one, under the
+    /// edit lock and before anything is written. An unchanged name writes
+    /// nothing. With `write` false nothing is written either way: the same
+    /// checks, answered, for a caller with more to check before it commits.
+    pub(crate) fn rename_agent_declaration(
+        &self,
+        scope_name: &str,
+        from: &str,
+        to: &str,
+        write: bool,
+    ) -> Result<DeclarationRename> {
+        let _edit = self
+            .shared.configuration_edit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let factory = self.factory_snapshot();
+        let current = factory.scope(scope_name)?.clone();
+        let directory = factory.scope_path(&current.name)?;
+        let path = directory.join(FACTORY_DIR).join(CONFIG_FILE);
+        let (text, document, mut from_file) = read_document(&path)?;
+        if from_file.id != current.id || from_file.name != current.name {
+            return Err(bad(format!(
+                "scope config {} changed identity since startup; restart Factory before editing it",
+                path.display()
+            )));
+        }
+        from_file.path = current.path.clone();
+
+        let (declared, location) = find_agent(&from_file, from).ok_or_else(|| {
+            bad(format!(
+                "scope {:?} has no local agent declaration named {from:?} to rename; an inherited or \
+                 foreman agent is renamed where it is declared, and a bare `agent: <harness>` names \
+                 no agent to rename",
+                current.name
+            ))
+        })?;
+        let to = to.trim().to_string();
+        if to.is_empty() {
+            return Err(bad("an agent needs a name"));
+        }
+        if to.contains('/') || to.contains('#') || to.chars().any(char::is_control) {
+            return Err(bad("an agent name cannot contain `/`, `#` or control characters"));
+        }
+        // The scope's own `agent:` resolves tasks created without one by its
+        // harness, so a rename takes it away from them when that was its name.
+        let default_harness = (matches!(location, AgentLocation::Singular) && from == declared.harness)
+            .then(|| declared.harness.clone());
+        let mut renamed = DeclarationRename {
+            scope: current.name.clone(),
+            from: from.to_string(),
+            to: to.clone(),
+            changed: false,
+            default_harness,
+        };
+        if to == from {
+            return Ok(renamed);
+        }
+        if from_file
+            .agents_with(&factory.config.daemon.foreman)
+            .iter()
+            .any(|agent| agent.name() == to)
+        {
+            return Err(bad(format!(
+                "scope {:?} already declares an agent named {to:?}",
+                current.name
+            )));
+        }
+        match location {
+            AgentLocation::Singular => {
+                if let Some(AgentRef::Declared { name, .. }) = &mut from_file.agent {
+                    *name = Some(to.clone());
+                }
+            }
+            AgentLocation::List(index) => from_file.agents[index].name = Some(to.clone()),
+        }
+        refuse_bad_instances(&from_file)?;
+        renamed.changed = true;
+        if !write {
+            return Ok(renamed);
+        }
+
+        let serialized =
+            edited_declaration(&text, &document, location, "name", Value::String(to), NewKey::First, &path)?;
+        atomic_write(&path, &serialized)?;
+        self.replace_scope(&current.id, from_file);
+        Ok(renamed)
+    }
+}
+
+/// What `rename_agent_declaration` found, and whether it changed the file.
+#[derive(Debug, Clone)]
+pub(crate) struct DeclarationRename {
+    /// The scope's canonical name.
+    pub(crate) scope: String,
+    pub(crate) from: String,
+    /// The new name, trimmed.
+    pub(crate) to: String,
+    /// False for an unchanged name, which writes nothing.
+    pub(crate) changed: bool,
+    /// The harness, when this is the scope's own `agent:` and was named
+    /// after it: tasks created there without an agent name that harness, and
+    /// stop reaching this declaration once it is called something else.
+    pub(crate) default_harness: Option<String>,
 }
 
 // -- roles ------------------------------------------------------------------
@@ -2254,6 +2432,130 @@ mod tests {
         two.instances = Some(2);
         engine.configure_agent("demo", two).unwrap();
         assert!(file_text(&scratch).contains("instances: 2"), "{}", file_text(&scratch));
+    }
+
+    /// `#351`: a rename changes the one `name:` line, comment and all, and
+    /// the running daemon resolves the new name at once.
+    #[test]
+    fn renaming_writes_one_line_and_leaves_comments_and_siblings_alone() {
+        let before = "version: 1\n# owned by a person\nscope:\n  id: scope-id\n  name: demo\n  agents:\n    # the one we talk to\n    - name: claude   # renamed often\n      harness: claude-code\n      lifetime: permanent\n\n    - name: other\n      harness: pi\n  runtime: herdr\n";
+        let scratch = Scratch::new("rename-list", before);
+        let engine = engine(&scratch);
+
+        let renamed = engine.rename_agent_declaration("demo", "claude", "  Lead Reviewer ", true).unwrap();
+        assert!(renamed.changed);
+        assert_eq!((renamed.scope.as_str(), renamed.from.as_str(), renamed.to.as_str()), ("demo", "claude", "Lead Reviewer"));
+        assert_eq!(renamed.default_harness, None);
+        assert_eq!(
+            file_text(&scratch),
+            before.replace("    - name: claude   # renamed often\n", "    - name: Lead Reviewer # renamed often\n")
+        );
+        assert_eq!(engine.resolve_agent("demo", "Lead Reviewer").unwrap().1, "claude-code", "live without a restart");
+        assert!(engine.resolve_agent("demo", "claude").is_err(), "the old name resolves to nothing now");
+
+        // A name YAML would read as something else is quoted.
+        engine.rename_agent_declaration("demo", "other", "true", true).unwrap();
+        assert!(file_text(&scratch).contains("    - name: 'true'\n      harness: pi\n"), "{}", file_text(&scratch));
+        assert_eq!(engine.resolve_agent("demo", "true").unwrap().1, "pi");
+    }
+
+    /// A declaration named after its harness gains `name:` as its first key,
+    /// the way a person would write it; nothing else moves.
+    #[test]
+    fn renaming_a_nameless_declaration_gives_it_a_name() {
+        let before = "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents:\n    - harness: codex   # the reviewer\n      lifetime: permanent\n    -\n      # no name either\n      harness: pi\n  runtime: herdr\n";
+        let scratch = Scratch::new("rename-nameless", before);
+        let engine = engine(&scratch);
+
+        engine.rename_agent_declaration("demo", "codex", "reviewer", true).unwrap();
+        engine.rename_agent_declaration("demo", "pi", "scratch", true).unwrap();
+        assert_eq!(
+            file_text(&scratch),
+            "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents:\n    - name: reviewer\n      harness: codex   # the reviewer\n      lifetime: permanent\n    -\n      # no name either\n      name: scratch\n      harness: pi\n  runtime: herdr\n"
+        );
+        let names: Vec<String> = engine.factory_snapshot().scope("demo").unwrap().declared_agents().iter().map(|a| a.name()).collect();
+        assert_eq!(names, ["reviewer", "scratch"]);
+    }
+
+    #[test]
+    fn renaming_reaches_every_spelling_of_a_declaration() {
+        for (tag, yaml, from) in [
+            ("singular", "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agent:\n    harness: claude-code\n    lifetime: permanent\n  runtime: herdr\n", "claude-code"),
+            ("first-key", "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents:\n  - name: claude\n    harness: claude-code\n", "claude"),
+            ("flow-item", "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents:\n    - { harness: claude-code, lifetime: permanent }\n    - name: other\n      harness: pi\n", "claude-code"),
+            ("inline-list", "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents: [{ name: claude, harness: claude-code }]\n  runtime: herdr\n", "claude"),
+            ("flow-scope", "version: 1\nscope: { id: scope-id, name: demo, agents: [{ name: claude, harness: claude-code }] }\n", "claude"),
+        ] {
+            let scratch = Scratch::new(&format!("rename-{tag}"), yaml);
+            let engine = engine(&scratch);
+            let renamed = engine.rename_agent_declaration("demo", from, "lead", true).unwrap_or_else(|e| panic!("{tag}: {e}"));
+            let text = file_text(&scratch);
+            let parsed: ScopeFile = serde_yaml_ng::from_str(&text).unwrap();
+            let declared = parsed.scope.declared_agents();
+            let lead = declared.iter().find(|a| a.name() == "lead").unwrap_or_else(|| panic!("{tag}: {text}"));
+            assert_eq!(lead.harness, "claude-code", "{tag}");
+            assert_eq!(declared.len(), if tag == "flow-item" { 2 } else { 1 }, "{tag}: {text}");
+            if tag == "singular" {
+                assert!(text.contains("  agent:\n    name: lead\n    harness: claude-code\n"), "{text}");
+                // The scope's own `agent:` resolves its tasks by harness: the
+                // answer says that this one no longer catches them.
+                assert_eq!(renamed.default_harness.as_deref(), Some("claude-code"));
+            } else {
+                assert_eq!(renamed.default_harness, None, "{tag}");
+            }
+            if tag == "flow-item" {
+                assert!(text.ends_with("    - name: other\n      harness: pi\n"), "the sibling is untouched: {text}");
+            }
+        }
+    }
+
+    /// The checks `configure_agent` makes of a new name, made before anything
+    /// is written: nothing is, for any of them.
+    #[test]
+    fn a_refused_rename_leaves_the_file_byte_for_byte_unchanged() {
+        let yaml = "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agent: claude-code\n  agents:\n    - name: claude\n      harness: claude-code\n      lifetime: permanent\n    - harness: pi\n";
+        let scratch = Scratch::new("rename-refused", yaml);
+        let mut daemon = DaemonConfig::default();
+        daemon.foreman.enabled = true;
+        let engine = engine(&scratch);
+        {
+            let mut factory = engine.shared.factory.write().unwrap();
+            factory.config.daemon = daemon;
+        }
+        for (from, to, words) in [
+            ("claude", "   ", "needs a name"),
+            ("claude", "a/b", "cannot contain"),
+            ("claude", "claude#2", "cannot contain"),
+            ("claude", "two\nlines", "cannot contain"),
+            ("claude", "tab\there", "cannot contain"),
+            ("claude", "pi", "already declares an agent named \"pi\""),
+            ("pi", " claude ", "already declares an agent named \"claude\""),
+            ("claude", "foreman", "already declares an agent named \"foreman\""),
+            ("foreman", "boss", "no local agent declaration named \"foreman\""),
+            ("claude-code", "main", "no local agent declaration"),
+            ("nobody", "x", "no local agent declaration"),
+        ] {
+            let e = engine.rename_agent_declaration("demo", from, to, true).unwrap_err().to_string();
+            assert!(e.contains(words), "{from} -> {to:?}: {e}");
+        }
+        assert_eq!(file_text(&scratch), yaml);
+    }
+
+    #[test]
+    fn an_unchanged_name_or_a_check_alone_writes_nothing() {
+        let yaml = "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents:\n    - name: claude\n      harness: claude-code\n";
+        let scratch = Scratch::new("rename-unchanged", yaml);
+        let engine = engine(&scratch);
+        let path = scratch.0.join(FACTORY_DIR).join(CONFIG_FILE);
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+
+        let same = engine.rename_agent_declaration("demo", "claude", " claude ", true).unwrap();
+        assert!(!same.changed);
+        let checked = engine.rename_agent_declaration("demo", "claude", "lead", false).unwrap();
+        assert!(checked.changed, "the check says it would change");
+        assert_eq!(file_text(&scratch), yaml);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        assert!(engine.resolve_agent("demo", "lead").is_err(), "a check makes nothing live");
     }
 
     #[test]
