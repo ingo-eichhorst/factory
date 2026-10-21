@@ -913,6 +913,13 @@ button.rail-row:hover { background: var(--panel-2); color: var(--ink); }
 .inbox-item .it-t b { color: var(--ink); font-weight: 500; }
 .inbox-item .it-t .sub { display: block; }
 .inbox-item .it-age { flex: 0 0 auto; color: var(--faint); font: 400 10.5px/1.4 var(--mono); }
+/* A proposed skill change's diff (#339), opened in place. */
+.inbox-item .inbox-diff { margin-top: 4px; }
+.inbox-item .inbox-diff summary { cursor: pointer; color: var(--faint); font: 400 10.5px/1.4 var(--mono); }
+.inbox-item .inbox-diff pre {
+  max-height: 320px; overflow: auto; margin: 4px 0 0; padding: 6px 8px; background: var(--sunk);
+  border: 1px solid var(--line-soft); font: 400 10.5px/1.45 var(--mono); white-space: pre; color: var(--ink-2);
+}
 /* A row of `s` tiles only (#162, `rowIsAllSmall`) goes two-up narrow rather
    than stacking one per line -- everything else still collapses to one
    column, the rule this page always had. */
