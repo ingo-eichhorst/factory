@@ -114,6 +114,10 @@ pub struct L3State {
     pub(crate) liveness: Arc<crate::l3_service::LivenessLog>,
     /// When a person last had each standing instance in front of them (`#329`).
     pub(crate) attention: crate::l3_service::Attention,
+    /// One memory or skill write at a time (`#339`): each is a read, a
+    /// decision and a write of the same files, which two runs of one scope
+    /// would otherwise interleave.
+    pub(crate) learning: Arc<std::sync::Mutex<()>>,
 }
 
 /// L4 Process: tasks, runs, workflows, dispatch admission and scheduling.

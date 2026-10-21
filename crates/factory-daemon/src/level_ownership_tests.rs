@@ -74,6 +74,8 @@ const OWNERS: &[(&str, Owner)] = &[
     ("agents.rs", L3),
     ("roles.rs", L3),
     ("harness_health.rs", L3),
+    ("memory.rs", L3), // a scope's memory and skills: the files, the Learning port, curation (#339)
+    ("memory/", L3),
     ("harness_hold.rs", L4),
     // L4 Process
     ("workflows/", L4),
@@ -99,6 +101,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("admission.rs", L4),
     ("run_settle.rs", L4),
     ("run_start.rs", L4),
+    ("learning.rs", L4), // memory and skill writes from a run, and the dispatch handout (#339)
     ("scheduling.rs", L4),
     ("supplied.rs", Wiring), // what L5/L6 supply to L4 (quality block, functionary binding) and workflow lint
     ("l2_pages.rs", Wiring), // L2 catalogues composed with L4 runs and journals: attachments, secret metadata

@@ -185,6 +185,16 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/suggestions/{id}/dismiss", post(suggestion_dismiss))
         .route("/api/suggestions/{id}/done", post(suggestion_done))
         .route("/api/suggestions/{id}/ask", post(suggestion_ask))
+        // `#339`: scope memory and skills. The Inbox reads the open proposals.
+        .route("/api/memory", get(memory_show))
+        .route("/api/skills", get(skills_list))
+        .route("/api/skills/proposals", get(skill_proposals))
+        .route("/api/skills/proposals/{id}", get(skill_proposal))
+        .route("/api/skills/proposals/{id}/accept", post(skill_accept))
+        .route("/api/skills/proposals/{id}/reject", post(skill_reject))
+        .route("/api/skills/archived", get(skill_archives))
+        .route("/api/skills/curate", post(skill_curate))
+        .route("/api/skills/restore", post(skill_restore))
         .route("/api/operations", get(operations))
         .route("/api/intake", get(intake_board).post(intake_add))
         .route("/api/intake/security-reports", get(intake_security_reports))
@@ -1512,6 +1522,95 @@ async fn suggestion_dismiss(
 
 async fn suggestion_done(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
     run(&engine, Request::SuggestionDone { id }).await
+}
+
+#[derive(serde::Deserialize)]
+struct MemoryQuery {
+    scope: String,
+}
+
+/// `GET /api/memory?scope=` -- a scope's memory and skills (`#339`), as its
+/// next run would be handed them.
+async fn memory_show(State(engine): State<Arc<Engine>>, Query(q): Query<MemoryQuery>) -> AxumResponse {
+    run(&engine, Request::MemoryShow { scope: q.scope }).await
+}
+
+#[derive(serde::Deserialize)]
+struct SkillsQuery {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+/// `GET /api/skills?scope=` -- every declared skill (`#339`).
+async fn skills_list(State(engine): State<Arc<Engine>>, Query(q): Query<SkillsQuery>) -> AxumResponse {
+    run(&engine, Request::Skills { scope: q.scope.filter(|s| !s.trim().is_empty()) }).await
+}
+
+/// `GET /api/skills/proposals?scope=&state=` -- skill changes runs filed,
+/// newest first (`#339`); the Inbox asks for `state=open`. `state=all` or
+/// none is every state.
+async fn skill_proposals(State(engine): State<Arc<Engine>>, Query(q): Query<SkillsQuery>) -> AxumResponse {
+    let state = match q.state.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != "all") {
+        Some(text) => match text.parse::<factory_core::protocol::ProposalState>() {
+            Ok(state) => Some(state),
+            Err(e) => return refused(e),
+        },
+        None => None,
+    };
+    run(&engine, Request::SkillProposals { scope: q.scope.filter(|s| !s.trim().is_empty()), state }).await
+}
+
+async fn skill_proposal(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::SkillProposal { id }).await
+}
+
+/// `POST /api/skills/proposals/{id}/accept` -- the Inbox's Accept.
+async fn skill_accept(State(engine): State<Arc<Engine>>, Path(id): Path<String>) -> AxumResponse {
+    run(&engine, Request::SkillAccept { id }).await
+}
+
+#[derive(serde::Deserialize)]
+struct SkillRejectBody {
+    reason: String,
+}
+
+/// `POST /api/skills/proposals/{id}/reject` -- the Inbox's Reject, with why.
+async fn skill_reject(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<SkillRejectBody>,
+) -> AxumResponse {
+    run(&engine, Request::SkillReject { id, reason: body.reason }).await
+}
+
+async fn skill_archives(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::SkillArchives).await
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SkillCurateBody {
+    #[serde(default)]
+    unused_weeks: Option<u32>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn skill_curate(State(engine): State<Arc<Engine>>, body: Option<Json<SkillCurateBody>>) -> AxumResponse {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    run(&engine, Request::SkillCurate { unused_weeks: body.unused_weeks, dry_run: body.dry_run }).await
+}
+
+#[derive(serde::Deserialize)]
+struct SkillRestoreBody {
+    name: String,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+async fn skill_restore(State(engine): State<Arc<Engine>>, Json(body): Json<SkillRestoreBody>) -> AxumResponse {
+    run(&engine, Request::SkillRestore { name: body.name, scope: body.scope }).await
 }
 
 #[derive(serde::Deserialize)]

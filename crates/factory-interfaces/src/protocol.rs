@@ -16,6 +16,13 @@ use factory_assurance::knowledge::{Document, Finding, Gap, Page, Refusal, Tag};
 pub use factory_assurance::suggestion::{
     self, Suggestion, SuggestionKind, SuggestionReport, SuggestionState,
 };
+// `pub use` for the same reason as the suggestion types: the CLI names them
+// through `factory_core::protocol::*` (`#339`).
+pub use factory_agents::memory::{MemoryOp, MemoryReceipt, MemoryWrite};
+pub use factory_kernel::{MemoryTarget, ScopeMemory};
+pub use factory_agents::skills::{
+    ArchiveRecord, CurationReport, Proposal, ProposalState, SkillRow, SkillSubmission, SubmittedFile,
+};
 use factory_composition::building::{Activity, Cues, RepoMetrics, Shape};
 use factory_composition::config::ScopeAgent;
 use factory_environment::dependencies::{
@@ -330,6 +337,61 @@ pub enum Request {
     ChannelRecord {
         channel: String,
         record: InboundRecord,
+    },
+    /// `#339`: add, replace or remove one entry of this task's scope's
+    /// memory -- its facts, or the owner profile -- from the task's active
+    /// run. The scope is the task's, never named. Authenticated like
+    /// `TaskReport`: the run token rides in `write.token`.
+    #[serde(rename = "memory.write")]
+    MemoryWrite { id: String, write: MemoryWrite },
+    /// `#339`: a scope's memory and skills, as a run of it would be handed
+    /// them now.
+    #[serde(rename = "memory.show")]
+    MemoryShow { scope: String },
+    /// `#339`: this task's active run's better procedure for one of its
+    /// scope's skills -- filed as a proposal, written, or refused, as the
+    /// skill's `learn:` says. The run token rides in `submission.token`.
+    #[serde(rename = "skill.submit")]
+    SkillSubmit { id: String, submission: SkillSubmission },
+    /// `#339`: every declared skill, in a scope's subtree when one is named.
+    #[serde(rename = "skill.list")]
+    Skills {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+    },
+    /// `#339`: skill proposals, newest first; the Inbox asks for `open` ones.
+    #[serde(rename = "skill.proposals")]
+    SkillProposals {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<ProposalState>,
+    },
+    #[serde(rename = "skill.proposal")]
+    SkillProposal { id: String },
+    /// `#339`: apply an open proposal to its skill. The owner's to decide.
+    #[serde(rename = "skill.accept")]
+    SkillAccept { id: String },
+    /// `#339`: turn an open proposal down, saying why. The owner's too.
+    #[serde(rename = "skill.reject")]
+    SkillReject { id: String, reason: String },
+    /// `#339`: one curation pass now: archive every skill no run has been
+    /// handed for `unused_weeks` (the configured number, else 12).
+    #[serde(rename = "skill.curate")]
+    SkillCurate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unused_weeks: Option<u32>,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    #[serde(rename = "skill.archived")]
+    SkillArchives,
+    /// `#339`: put the newest archive of a skill back where it was.
+    #[serde(rename = "skill.restore")]
+    SkillRestore {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
     },
     /// A harness's lifecycle hook saying the agent's turn ended. Its own
     /// request rather than a kind of `TaskReport`, so nothing can mistake the
@@ -1291,7 +1353,14 @@ impl Request {
             Request::AgentRole { .. } |
             Request::AgentInput { .. } |
             Request::AgentOutput { .. } |
-            Request::AgentScreen { .. } => L3,
+            Request::AgentScreen { .. } |
+            Request::MemoryShow { .. } |
+            Request::Skills { .. } |
+            Request::SkillProposals { .. } |
+            Request::SkillProposal { .. } |
+            Request::SkillCurate { .. } |
+            Request::SkillArchives |
+            Request::SkillRestore { .. } => L3,
             // L4
             Request::RunScreen { .. } |
             Request::RunInput { .. } |
@@ -1309,6 +1378,10 @@ impl Request {
             Request::TaskReport { .. } |
             Request::Notify { .. } |
             Request::ChannelRecord { .. } |
+            Request::MemoryWrite { .. } |
+            Request::SkillSubmit { .. } |
+            Request::SkillAccept { .. } |
+            Request::SkillReject { .. } |
             Request::TaskTurnEnded { .. } |
             Request::TaskEntries { .. } |
             Request::TaskOutput { .. } |
@@ -1805,6 +1878,34 @@ pub enum Payload {
     /// state change (or the recorded question) it just made.
     Suggestion {
         suggestion: Suggestion,
+    },
+    /// `#339`: a scope's memory and skills (`Request::MemoryShow`).
+    Memory {
+        scope: String,
+        memory: factory_kernel::ScopeMemory,
+    },
+    /// `#339`: what one memory write did.
+    MemoryWritten {
+        receipt: MemoryReceipt,
+    },
+    Skills {
+        skills: Vec<SkillRow>,
+    },
+    SkillProposals {
+        proposals: Vec<Proposal>,
+    },
+    /// A submitted, accepted or rejected proposal, or one asked for by id.
+    SkillProposal {
+        proposal: Proposal,
+    },
+    SkillCuration {
+        report: CurationReport,
+    },
+    SkillArchives {
+        archives: Vec<ArchiveRecord>,
+    },
+    SkillRestored {
+        archive: ArchiveRecord,
     },
     /// The answer to `Request::SuggestionTask`: the created improvement
     /// task, already linked back to every suggestion named in `ids`.

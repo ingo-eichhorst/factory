@@ -2,6 +2,7 @@
 //! agent calls to say how it is getting on.
 
 mod client;
+mod learning;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -310,6 +311,19 @@ enum Command {
     Suggestion {
         #[command(subcommand)]
         command: Option<SuggestionCmd>,
+    },
+    /// `#339`: a scope's memory -- its facts and the owner profile, handed
+    /// to every run of it -- and, from inside a run, the commands that
+    /// change one entry within its budget.
+    Memory {
+        #[command(subcommand)]
+        command: learning::MemoryCmd,
+    },
+    /// `#339`: the skills scopes' runs are handed and may improve: what is
+    /// declared, the changes runs proposed, curation and restore.
+    Skill {
+        #[command(subcommand)]
+        command: learning::SkillCmd,
     },
     /// The L4 Operations tab (`#106`, design §12.5's `factory stats`): what
     /// needs a human now, work in flight and how old it is, the process's
@@ -2461,6 +2475,8 @@ async fn main() -> Result<()> {
                 state: None,
             })).await
         }
+        Command::Memory { command } => learning::memory_cmd(cli.json, &client, command).await,
+        Command::Skill { command } => learning::skill_cmd(cli.json, &client, command).await,
     }
 }
 

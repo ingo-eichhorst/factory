@@ -153,6 +153,34 @@ impl Engine {
                     "this runtime cannot render a screen for that session".into(),
                 )),
             },
+            // `#339`: a scope's memory and skills, read and curated by L3.
+            Request::MemoryShow { scope } => {
+                let (scope, memory) = self.l3_service().scope_memory(&scope).await?;
+                Ok(Payload::Memory { scope, memory })
+            }
+            Request::Skills { scope } => Ok(Payload::Skills {
+                skills: self.l3_service().skill_rows(scope.as_deref()).await?,
+            }),
+            Request::SkillProposals { scope, state } => Ok(Payload::SkillProposals {
+                proposals: self.l3_service().skill_proposals(scope.as_deref(), state).await?,
+            }),
+            Request::SkillProposal { id } => Ok(Payload::SkillProposal {
+                proposal: self.l3_service().skill_proposal(&id).await?,
+            }),
+            Request::SkillCurate { unused_weeks, dry_run } => {
+                let weeks = unused_weeks
+                    .or_else(|| self.factory_snapshot().config.daemon.skill_curation.map(|c| c.unused_weeks))
+                    .unwrap_or(12);
+                Ok(Payload::SkillCuration {
+                    report: self.l3_service().curate_skills(weeks, dry_run, chrono::Utc::now()).await?,
+                })
+            }
+            Request::SkillArchives => Ok(Payload::SkillArchives {
+                archives: self.l3_service().skill_archives().await?,
+            }),
+            Request::SkillRestore { name, scope } => Ok(Payload::SkillRestored {
+                archive: self.l3_service().restore_skill(&name, scope.as_deref()).await?,
+            }),
             other => Err(misrouted(other.level())),
         }
     }

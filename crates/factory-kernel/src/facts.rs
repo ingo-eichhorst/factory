@@ -5,6 +5,7 @@
 use crate::fact_vocabulary::*;
 use crate::{ArtifactProvenance, CostReport, ProductionFact, ProcessMetricFact, BenchResolutionFact, MetricValuesFact, CheckEvaluationFact, CheckComparisonFact, CompiledPlanFact, WorkflowBlueprintFact, SandboxServiceEvidenceFact};
 use crate::{WorkflowPreviewFact, WorkflowTargetsFact};
+use crate::ScopeMemory;
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -209,6 +210,9 @@ impl Fact for EffectiveRoleFact { type Producer = L3; }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessVersionFact(pub Option<String>);
 impl Fact for HarnessVersionFact { type Producer = L3; }
+
+/// A scope's memory and skills (`#339`), read fresh from its own files; the schema is in `scope_memory.rs`.
+impl Fact for ScopeMemory { type Producer = L3; }
 
 impl Fact for SandboxServiceEvidenceFact {
     type Producer = L2;
@@ -999,6 +1003,11 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         fact: "HarnessVersionFact", producer: "L3", readers: &["L4 dispatch (the binary version stamped into the guide fingerprint)"],
         lives_in_kernel: true,
         note: "the last observed version; never triggers a probe",
+    },
+    FactCatalogueEntry {
+        fact: "ScopeMemory", producer: "L3", readers: &["L4 dispatch (the memory and skills a run is handed)"],
+        lives_in_kernel: true,
+        note: "a scope's facts, owner profile and skill handles read fresh from its own files; paths and text, never a budget verdict",
     },
     FactCatalogueEntry {
         fact: "HarnessHealthFact", producer: "L3", readers: &["L4 harness gate and held-task release"],
