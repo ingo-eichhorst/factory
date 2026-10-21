@@ -337,6 +337,100 @@ impl Fact for BackupFact {
     type Producer = L1;
 }
 
+// ====================================================== codex models (L1)
+
+/// One model the Codex backend lists for the installed client (`#340`):
+/// its slug, and whether the backend hides it from the picker. A hidden
+/// model is still listed, so it is still served.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexServedModel {
+    pub slug: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+}
+
+/// Where a codex agent's model name comes from, in codex's own order of
+/// precedence: the agent's declared `--model`/`-m`/`-c model=`, a profile's
+/// `model`, the top-level `model` in the host's codex `config.toml`, or none
+/// of them -- codex then picks its own default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexModelSource {
+    Declared,
+    Profile,
+    ConfigDefault,
+    CodexDefault,
+}
+
+impl CodexModelSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Profile => "profile",
+            Self::ConfigDefault => "config.toml",
+            Self::CodexDefault => "codex default",
+        }
+    }
+}
+
+/// The model one codex agent will ask for, and whether the backend serves
+/// it. `served` is `None` whenever that is not known -- no list, no model
+/// name, or a model provider the ChatGPT list does not cover (`note` says
+/// which); only `Some(false)` is a verdict anyone may act on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexAgentModel {
+    pub scope: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub source: CodexModelSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Which models the Codex backend serves to the codex client installed on
+/// this host, with this host's ChatGPT login (`#340`), and what that means
+/// for each declared codex agent. The backend's list is per client version:
+/// a model a newer client is offered can be refused to an older one with an
+/// HTTP 400 on the first turn, which is the failure this fact exists to see
+/// first. L1's observation job fetches the list in the background; reading
+/// this never touches the network. No token, header or response body is in
+/// here -- only slugs, versions and fixed explanations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexModelsFact {
+    /// The installed client's version, which the list was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_version: Option<String>,
+    /// What the backend listed for that version, in its priority order.
+    /// Empty when no list is known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served: Vec<CodexServedModel>,
+    /// When `served` was fetched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    /// Why the list is not current: never fetched yet, no ChatGPT login, the
+    /// backend refused or did not answer. A list fetched earlier for the same
+    /// client version stays beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
+    /// The top-level `model` in the host's codex `config.toml` -- what every
+    /// codex agent that names no model of its own will ask for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    /// Whether the backend serves `default_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_served: Option<bool>,
+    /// One row per declared codex agent, in configuration order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<CodexAgentModel>,
+}
+
+impl Fact for CodexModelsFact {
+    type Producer = L1;
+}
+
 // =========================================================== secrets (L2)
 
 /// Whether each of [`KNOWN_SECRETS_LOCATIONS`] a `secrets` check names is
@@ -976,6 +1070,13 @@ pub const FACT_CATALOGUE: &[FactCatalogueEntry] = &[
         ],
         lives_in_kernel: true,
         note: "moved whole in phase 2, with VerifySummary",
+    },
+    FactCatalogueEntry {
+        fact: "CodexModelsFact",
+        producer: "L1",
+        readers: &["L3 dispatch preflight (codex model served)", "People router (factory infra)"],
+        lives_in_kernel: true,
+        note: "the Codex backend's model list for the installed client, fetched by L1's observation job; slugs only, never a token (#340)",
     },
     FactCatalogueEntry {
         fact: "SecretsPresence",

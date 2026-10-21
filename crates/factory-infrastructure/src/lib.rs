@@ -6,6 +6,7 @@
 pub mod backup;
 pub mod backup_facts;
 pub mod backup_store;
+pub mod codex_models;
 pub mod environment_facts;
 pub mod environment_store;
 pub mod environments;
