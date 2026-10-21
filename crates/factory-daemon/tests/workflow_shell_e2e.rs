@@ -520,6 +520,120 @@ fn important_dates_are_live_metadata_warnings_not_a_scheduler_gate() {
     for asset in ["js/dates.js", "js/dates-model.js"] { assert_eq!(raw_request("GET", &format!("{base}/ui/{asset}"), None).unwrap().0, 200); }
 }
 
+/// `#339` end to end, through real shell runs: a run writes the scope's
+/// memory with `factory memory`, the next run is handed it (the shell agent
+/// as `$FACTORY_MEMORY_FILE`), a write over budget fails with what to drop
+/// and changes nothing, a run's skill change waits for the owner on the
+/// endpoint the Inbox reads until Accept applies it, and curation archives
+/// the skill with a backup that restore brings back, file for file.
+#[test]
+fn scope_memory_and_skills_round_trip_through_shell_runs_the_inbox_and_curation() {
+    if missing_prerequisites() { return; }
+    let mut daemon = provision();
+    let base = daemon.base_url();
+    let root = daemon.root.clone();
+    let path = root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["scope"]["memory"] = serde_yaml_ng::to_value(json!({
+        "facts": { "path": "memory/MEMORY.md", "max_chars": 200 },
+        "profile": { "path": "memory/USER.md", "max_chars": 120, "shared": "owner" },
+    })).unwrap();
+    config["scope"]["skills"] = serde_yaml_ng::to_value(json!([{ "path": "skill/", "learn": "propose" }])).unwrap();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    std::fs::create_dir_all(root.join("skill/references")).unwrap();
+    let skill = "---\nname: conference-radar-tracking\n---\n# steps\n1. Search.\n";
+    std::fs::write(root.join("skill/SKILL.md"), skill).unwrap();
+    std::fs::write(root.join("skill/references/sources.md"), "- sessionize\n").unwrap();
+    daemon.sigterm(); daemon.spawn();
+
+    let task_url = format!("{base}/api/tasks");
+    let run_shell = |title: &str, command: &str| -> (String, Value) {
+        let created = expect_ok(&task_url, &post(&task_url, &json!({
+            "title": title, "instructions": command, "scope": "demo", "agent": "shell", "worktree": false,
+        })));
+        let id = created["task"]["id"].as_str().unwrap().to_string();
+        let start = format!("{base}/api/tasks/{id}/run");
+        expect_ok(&start, &post(&start, &json!({})));
+        let task = wait_for(title, Duration::from_secs(60), || {
+            tasks(&base).into_iter().find(|t| t["id"] == id && matches!(t["status"].as_str(), Some("done") | Some("blocked") | Some("failed")))
+        });
+        (id, task)
+    };
+    // What the command printed: the shell agent reports its stdout with the
+    // result (`--result-file`), unwrapped, unlike the pane's screen.
+    let output = |id: &str| {
+        let url = format!("{base}/api/tasks/{id}/runs");
+        let runs = expect_ok(&url, &get(&url))["runs"].clone();
+        runs[0]["result"].as_str().unwrap_or_default().to_string()
+    };
+    let entries = |id: &str| {
+        let url = format!("{base}/api/tasks/{id}/entries");
+        expect_ok(&url, &get(&url))["entries"].as_array().cloned().unwrap_or_default()
+    };
+
+    // A run remembers two things: one for the scope, one for the owner.
+    let (first, task) = run_shell(
+        "remember",
+        r#""$FACTORY_BIN" memory add "Ingo was accepted at DevLand 2027." && "$FACTORY_BIN" memory add --profile "Prefers to be asked in German.""#,
+    );
+    assert_eq!(task["status"], "done", "{task} {}", output(&first));
+    assert_eq!(std::fs::read_to_string(root.join("memory/MEMORY.md")).unwrap(), "Ingo was accepted at DevLand 2027.\n");
+    assert_eq!(std::fs::read_to_string(root.join("memory/USER.md")).unwrap(), "Prefers to be asked in German.\n");
+    let journal = entries(&first);
+    assert!(journal.iter().any(|e| e["kind"] == "memory" && e["message"].as_str().unwrap().starts_with("added [1] to the facts")), "{journal:?}");
+
+    // The next run is handed both, and the skill.
+    let (second, task) = run_shell("recall", r#"cat "$FACTORY_MEMORY_FILE""#);
+    assert_eq!(task["status"], "done", "{task}");
+    let handed = output(&second);
+    for expected in ["Ingo was accepted at DevLand 2027.", "Prefers to be asked in German.", "\"name\": \"conference-radar-tracking\"", "\"learn\": \"propose\""] {
+        assert!(handed.contains(expected), "{expected:?} not in {handed}");
+    }
+    assert!(entries(&second).iter().any(|e| e["kind"] == "memory" && e["message"].as_str().unwrap().starts_with("handed this scope's memory")));
+
+    // Over budget: the run fails with what to drop, and nothing changes.
+    let (third, task) = run_shell("overflow", r#""$FACTORY_BIN" memory add "$(printf '%0180d' 0)" 2>&1"#);
+    assert_ne!(task["status"], "done", "{task}");
+    let refusal = output(&third);
+    assert!(refusal.contains("over budget, so nothing was written"), "{refusal}");
+    assert!(refusal.contains("[1] 34 chars: Ingo was accepted at DevLand 2027."), "{refusal}");
+    assert_eq!(std::fs::read_to_string(root.join("memory/MEMORY.md")).unwrap(), "Ingo was accepted at DevLand 2027.\n");
+
+    // A better procedure waits for the owner, then Accept applies it.
+    let (fourth, task) = run_shell(
+        "improve",
+        r#"d=$(mktemp -d "${TMPDIR:-/tmp}/skill-XXXXXX") && printf '%s\n' '---' 'name: conference-radar-tracking' '---' '# steps' '1. Try the JSON API first.' '2. Search.' > "$d/SKILL.md" && "$FACTORY_BIN" skill submit conference-radar-tracking --from "$d" --summary "the JSON API answers before the page renders""#,
+    );
+    assert_eq!(task["status"], "done", "{task} {}", output(&fourth));
+    assert_eq!(std::fs::read_to_string(root.join("skill/SKILL.md")).unwrap(), skill, "nothing changes until the owner accepts");
+    let open = format!("{base}/api/skills/proposals?state=open");
+    let proposals = expect_ok(&open, &get(&open))["proposals"].as_array().cloned().unwrap();
+    assert_eq!(proposals.len(), 1, "{proposals:?}");
+    assert!(proposals[0]["diff"].as_str().unwrap().contains("+1. Try the JSON API first."), "{}", proposals[0]["diff"]);
+    let id = proposals[0]["id"].as_str().unwrap();
+    let accept = format!("{base}/api/skills/proposals/{id}/accept");
+    let accepted = expect_ok(&accept, &post(&accept, &json!({})));
+    assert_eq!(accepted["proposal"]["state"], "accepted");
+    let better = "---\nname: conference-radar-tracking\n---\n# steps\n1. Try the JSON API first.\n2. Search.\n";
+    assert_eq!(std::fs::read_to_string(root.join("skill/SKILL.md")).unwrap(), better);
+    assert!(expect_ok(&open, &get(&open))["proposals"].as_array().unwrap().is_empty(), "gone from the Inbox");
+    assert!(entries(&fourth).iter().any(|e| e["kind"] == "skill" && e["message"].as_str().unwrap().starts_with("the owner accepted")));
+
+    // Curation: archived with a backup, out of the scope; restore puts it back.
+    let curate = format!("{base}/api/skills/curate");
+    let report = expect_ok(&curate, &post(&curate, &json!({ "unused_weeks": 0 })))["report"].clone();
+    let archive = report["unused"][0]["archive"].as_str().unwrap_or_else(|| panic!("{report}")).to_string();
+    assert!(!root.join("skill").exists());
+    let kept = root.join(".factory/skills/archive").join(&archive);
+    assert!(kept.join("manifest.json").is_file() && kept.join("skill.tar.zst").is_file());
+    let restore = format!("{base}/api/skills/restore");
+    let restored = expect_ok(&restore, &post(&restore, &json!({ "name": "conference-radar-tracking" })));
+    assert_eq!(restored["archive"]["id"], archive.as_str());
+    assert_eq!(std::fs::read_to_string(root.join("skill/SKILL.md")).unwrap(), better);
+    assert_eq!(std::fs::read_to_string(root.join("skill/references/sources.md")).unwrap(), "- sessionize\n");
+    for asset in ["js/skills-model.js"] { assert_eq!(raw_request("GET", &format!("{base}/ui/{asset}"), None).unwrap().0, 200); }
+}
+
 #[test]
 fn approved_github_mirror_uses_the_real_cli_api_and_persistent_receipts_without_live_outbound_writes() {
     if missing_prerequisites() { return; }
