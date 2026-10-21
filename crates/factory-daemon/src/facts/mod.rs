@@ -316,6 +316,13 @@ port!(
     l1::backup_provider
 );
 port!(
+    CodexModelsFact,
+    factory_infrastructure::codex_models::Provider<'a>,
+    (),
+    CodexModelsFact,
+    l1::codex_models_provider
+);
+port!(
     ScopeCapacityFact,
     factory_infrastructure::settings_facts::SettingsProvider,
     (),
@@ -842,6 +849,7 @@ mod tests {
         registered::<ConfirmedSecurityReport>();
         registered::<GateFact>();
         registered::<KnowledgeTags>();
+        registered::<CodexModelsFact>();
         let source = include_str!("mod.rs").split("#[cfg(test)]").next().unwrap();
         let mut wired: Vec<_> = source
             .split("port!(")

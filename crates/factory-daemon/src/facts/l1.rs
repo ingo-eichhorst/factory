@@ -25,10 +25,19 @@ pub(super) fn settings_provider(
         interfaces: daemon.interfaces.clone(),
     }
 }
+/// L1's own service builds the providers over its own state.
+fn service(engine: &Engine) -> crate::l1_service::L1Service<'_> {
+    engine.l1_service()
+}
 pub(crate) fn backup_provider(
     engine: &Engine,
 ) -> factory_infrastructure::backup_facts::Provider<'_> {
-    engine.l1_service().backup_provider()
+    service(engine).backup_provider()
+}
+pub(super) fn codex_models_provider(
+    engine: &Engine,
+) -> factory_infrastructure::codex_models::Provider<'_> {
+    service(engine).codex_models_provider()
 }
 pub(crate) fn environment_provider(
     engine: &Engine,

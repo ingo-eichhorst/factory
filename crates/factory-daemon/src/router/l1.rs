@@ -16,7 +16,13 @@ impl Engine {
             // Keep the provider/snapshot projection out of this already-large
             // request future's stack frame. Every request variant shares that
             // frame even when Infrastructure was not the one selected.
-            Request::Infrastructure => Ok(Box::pin(self.infrastructure()).await),
+            Request::Infrastructure => {
+                let mut payload = Box::pin(self.infrastructure()).await;
+                if let Payload::Infrastructure { codex_models, .. } = &mut payload {
+                    *codex_models = self.l1_service().codex_models().await;
+                }
+                Ok(payload)
+            }
             // Boxed like `Infrastructure`: a handful of awaited commands.
             Request::HostPowerMode => Ok(Payload::HostPowerMode {
                 report: Box::pin(self.host_power_report()).await,

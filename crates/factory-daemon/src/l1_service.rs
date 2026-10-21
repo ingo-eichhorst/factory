@@ -69,6 +69,26 @@ impl<'s> L1Service<'s> {
             booted_at: self.wiring.booted_at(),
         }
     }
+
+    /// L1's Codex model list (`#340`), over its own cache, with the codex agents
+    /// declared right now. `facts::l1` hands the same provider to upper readers.
+    pub(crate) fn codex_models_provider(&self) -> factory_infrastructure::codex_models::Provider<'s> {
+        factory_infrastructure::codex_models::Provider {
+            cache: &self.state.codex_models,
+            agents: crate::codex_models::codex_agents(&self.wiring.snapshot()),
+        }
+    }
+
+    /// The Codex model fact as the Infrastructure page shows it: a same-level
+    /// read of L1's own provider. Never fetches anything.
+    pub(crate) async fn codex_models(&self) -> Option<factory_kernel::CodexModelsFact> {
+        use factory_kernel::Provide;
+        let provider = self.codex_models_provider();
+        if provider.agents.is_empty() {
+            return None;
+        }
+        Provide::<factory_kernel::CodexModelsFact>::get(&provider, &()).await.ok()
+    }
 }
 
 /// Test-only forwarders so the existing tests keep calling `engine.<method>`.

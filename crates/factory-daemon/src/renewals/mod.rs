@@ -409,8 +409,7 @@ async fn observe_loop(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Rec
             .await;
             let observed = observed.unwrap_or_else(|_| probes::Observed::unavailable(Utc::now()));
             if let Err(error) = engine
-                .l1.infrastructure_expiries
-                .replace(observed.infrastructure, observed.infrastructure_complete)
+                .l1.record_observations(observed.infrastructure, observed.infrastructure_complete, observed.codex)
                 .await
             {
                 tracing::warn!("infrastructure expiry cache: {error}");

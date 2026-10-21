@@ -58,6 +58,7 @@ mod occupancy_page;
 mod openshell;
 mod provision;
 mod renewals;
+mod codex_models;
 mod operations;
 mod recovery_journal;
 mod policies;

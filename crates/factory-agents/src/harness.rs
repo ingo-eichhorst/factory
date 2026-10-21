@@ -9,6 +9,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// The Codex model fact (`#340`) is L1's; its plain schema is L0's, named here
+/// beside the harness rows it is shown with.
+pub use factory_kernel::{CodexAgentModel, CodexModelSource, CodexModelsFact, CodexServedModel};
+
 /// The command that shows a harness starts at all, `<harness> --version` for
 /// every built-in one. The first element is the program: a bare name is
 /// looked up on the daemon's `PATH` the way `execvp` would, a path containing
@@ -120,9 +124,72 @@ pub fn blocked_reason(harness: &str, problem: &str, repair: &str) -> String {
     format!("{harness} does not start: {problem}. A person can repair it with `{repair}`")
 }
 
+/// Why a codex agent is refused before dispatch (`#340`): the backend does not
+/// serve the model it would ask for to the installed client. `None` unless that
+/// is known -- an unknown list, model or verdict refuses nothing. `row` is the
+/// agent's own row; a bare `codex` adapter with no declaration has none and asks
+/// for the host default.
+pub fn unserved_model_reason(
+    fact: &CodexModelsFact,
+    row: Option<&CodexAgentModel>,
+) -> Option<String> {
+    let (model, source) = match row {
+        Some(row) if row.served == Some(false) => (row.model.as_deref()?, row.source),
+        Some(_) => return None,
+        None if fact.default_served == Some(false) => (fact.default_model.as_deref()?, CodexModelSource::ConfigDefault),
+        None => return None,
+    };
+    let from = match source {
+        CodexModelSource::Declared => "declared in the agent's args",
+        CodexModelSource::Profile => "from its codex profile",
+        CodexModelSource::ConfigDefault => "`model` in the host's codex config.toml",
+        CodexModelSource::CodexDefault => "codex's own default",
+    };
+    let version = fact.client_version.as_deref().unwrap_or("the installed client");
+    let served: Vec<&str> = fact.served.iter().filter(|m| !m.hidden).map(|m| m.slug.as_str()).collect();
+    Some(format!(
+        "model {model} ({from}) is not served to codex {version} with this host's ChatGPT login; served: {}. \
+         Declare a served model with `--model <name>` in the agent's args, set `model` in the codex config.toml, \
+         or upgrade codex. The run was not started",
+        served.join(", ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unserved_model_names_itself_where_it_came_from_and_what_is_served() {
+        let row = |served: Option<bool>| CodexAgentModel {
+            scope: "factory".into(),
+            agent: "codex".into(),
+            model: Some("gpt-6.1-sol".into()),
+            source: CodexModelSource::ConfigDefault,
+            served,
+            note: None,
+        };
+        let fact = CodexModelsFact {
+            client_version: Some("0.157.0".into()),
+            served: vec![
+                CodexServedModel { slug: "gpt-6-astra".into(), hidden: false },
+                CodexServedModel { slug: "gpt-6-sol".into(), hidden: false },
+                CodexServedModel { slug: "gpt-reserve".into(), hidden: true },
+            ],
+            default_model: Some("gpt-6.1-sol".into()),
+            default_served: Some(false),
+            ..Default::default()
+        };
+        let why = unserved_model_reason(&fact, Some(&row(Some(false)))).unwrap();
+        assert!(why.contains("gpt-6.1-sol") && why.contains("config.toml") && why.contains("0.157.0"), "{why}");
+        assert!(why.contains("served: gpt-6-astra, gpt-6-sol."), "{why}");
+        assert!(!why.contains("gpt-reserve"), "hidden models are not offered: {why}");
+        assert_eq!(unserved_model_reason(&fact, Some(&row(Some(true)))), None);
+        assert_eq!(unserved_model_reason(&fact, Some(&row(None))), None, "unknown refuses nothing");
+        assert!(unserved_model_reason(&fact, None).unwrap().contains("gpt-6.1-sol"), "the bare adapter asks for the default");
+        let unknown = CodexModelsFact { default_served: None, ..fact };
+        assert_eq!(unserved_model_reason(&unknown, None), None);
+    }
 
     #[test]
     fn the_reason_names_the_binary_and_the_repair_command() {

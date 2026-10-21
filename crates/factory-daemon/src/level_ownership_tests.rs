@@ -55,6 +55,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("doctor.rs", Wiring), // `factory doctor`: diagnostics across every level
     ("renewals/mod.rs", Wiring), // the Important Dates page: L1 and L2 caches plus L6 attestations and clock
     ("renewals/", L1),
+    ("codex_models.rs", L1),
     // L2 Environment
     ("provision.rs", L2),
     ("l1_service.rs", L1),

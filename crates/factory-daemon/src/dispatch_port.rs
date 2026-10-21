@@ -79,6 +79,13 @@ impl Assignments for L3Port<'_> {
     async fn submit(&self, runtime: &str, session: &SessionRef, prompt: &str) -> Result<()> {
         self.0.wiring.registry().runtime(runtime)?.submit(session, prompt).await
     }
+
+    /// `#340`: a codex agent is refused when L1 knows the backend does not serve
+    /// its model to the installed client. Read from L1's fact, never fetched here;
+    /// a fact that cannot be read refuses nothing.
+    async fn preflight(&self, scope: &str, agent: &str, adapter: &str) -> Result<()> {
+        self.0.codex_model_gate(scope, agent, adapter).await
+    }
 }
 
 impl HarnessCommands for L3Port<'_> {

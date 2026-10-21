@@ -236,6 +236,11 @@ impl L4Service<'_> {
         // than dispatching into a pane nobody answers and failing it as an
         // `ack_timeout` three minutes later.
         self.harness_gate(&task, agent.as_ref(), trigger).await?;
+        // `#340`: and an agent whose model the Codex backend does not serve
+        // to the installed client is refused here too, by L3, with the model
+        // and the served list -- the task blocked with no run, not a TUI
+        // sitting at an HTTP 400 on its first turn.
+        self.wiring.l3().port().preflight(&task.scope, &agent_name, &adapter_name).await?;
         let factory = self.wiring.snapshot();
         let provider_account = declaration
             .as_ref()
