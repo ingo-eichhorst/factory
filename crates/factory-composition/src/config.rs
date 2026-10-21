@@ -379,6 +379,7 @@ impl Config {
         self.infrastructure.validate()?;
         factory_environment::secrets::validate(&self.secrets)?;
         self.validate_environments()?;
+        self.validate_memory(self.scope.iter().chain(&self.scopes))?;
         for scope in self.scope.iter().chain(&self.scopes) {
             factory_infrastructure::renewals::validate(&scope.renewals, None)?;
             scope.validate_dependencies()?;
@@ -403,6 +404,40 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// Every scope's `memory:` and `skills:` (`#339`), each on its own and the
+    /// owner profile across all of them: every scope that shares it has to
+    /// name the same file and budget. A scope's name repeats as the root's
+    /// entry in `scopes:`; checking it twice is harmless.
+    pub fn validate_memory<'a>(&self, scopes: impl Iterator<Item = &'a Scope> + Clone) -> Result<()> {
+        for scope in scopes.clone() {
+            factory_agents::memory::validate(&format!("scope {:?}", scope.name), scope.memory.as_ref(), &scope.skills)
+                .map_err(FactoryError::BadRequest)?;
+        }
+        factory_agents::memory::validate_owner_profile(
+            scopes.filter_map(|scope| scope.memory.as_ref().map(|memory| (scope.name.as_str(), memory))),
+        )
+        .map_err(FactoryError::BadRequest)
+    }
+
+    /// The plain declarations L3's memory and skills code reads, one per
+    /// scope, fresh from this configuration. The root's entry in `scopes:`
+    /// is the one kept: `scope:` and it are the same scope.
+    pub fn memory_scopes(&self) -> Vec<factory_agents::memory::MemoryScope> {
+        let mut out: Vec<factory_agents::memory::MemoryScope> = Vec::new();
+        for scope in self.scopes.iter().chain(self.scope.iter()) {
+            if out.iter().any(|s| s.name == scope.name) {
+                continue;
+            }
+            out.push(factory_agents::memory::MemoryScope {
+                name: scope.name.clone(),
+                path: scope.path.clone(),
+                memory: scope.memory.clone(),
+                skills: scope.skills.clone(),
+            });
+        }
+        out
     }
 
     /// Every scope's environments together: a name is unique across the
@@ -469,6 +504,10 @@ impl Config {
     /// list -- never that it is every role a nested scope might have.
     pub fn validate_instance(&self) -> Result<()> {
         factory_infrastructure::renewals::validate(&self.renewals, self.renewals_notify.as_ref())?;
+        if let Some(curation) = &self.daemon.skill_curation {
+            curation.validate().map_err(FactoryError::BadRequest)?;
+        }
+        self.validate_memory(self.scope.iter())?;
         let roles = self.roles()?;
         self.refuse_root_scope_roles()?;
         self.refuse_root_scope_policies()?;
@@ -675,6 +714,26 @@ pub fn refuse_bad_secret_refs(
                      move the date to the secret in the instance root's secrets:"
                 ))
             }
+        }
+    }
+    Ok(())
+}
+
+/// A top-level `memory:` or `skills:` block (`#339`) in any scope's file --
+/// the instance root's included, which reads its own scope's under `scope:`
+/// like every other scope does. Only `scope:` is read, so either would
+/// quietly give the scope no memory at all.
+pub fn refuse_misplaced_memory(document: &serde_yaml_ng::Value, path: &Path) -> Result<()> {
+    for key in ["memory", "skills"] {
+        let misplaced = document
+            .as_mapping()
+            .is_some_and(|root| root.contains_key(serde_yaml_ng::Value::String(key.into())));
+        if misplaced {
+            return Err(FactoryError::BadRequest(format!(
+                "scope config {} has a top-level `{key}:` block, which nothing reads. A scope's {key} belong \
+                 under its `scope:` block, as `scope.{key}`",
+                path.display()
+            )));
         }
     }
     Ok(())
@@ -934,6 +993,13 @@ pub struct DaemonConfig {
     /// back to whichever project agent's suggestion is being acted on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub improvement_agent: Option<String>,
+    /// `#339`: when to curate the instance's skills -- archive, with a
+    /// verified backup, every declared skill no run has been handed for
+    /// `unused_weeks` -- as a cron `schedule` (UTC unless it names a
+    /// timezone). `None` (the default) never curates on its own; `factory
+    /// skill curate` still does when asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_curation: Option<factory_agents::skills::CurationConfig>,
 }
 
 /// How the daemon checks that a harness starts before dispatching to it.
@@ -1066,6 +1132,7 @@ impl Default for DaemonConfig {
             power_assertion: default_power_assertion(),
             harness_health: HarnessHealthConfig::default(),
             improvement_agent: None,
+            skill_curation: None,
         }
     }
 }
@@ -1404,6 +1471,18 @@ pub struct Scope {
     /// instead, and reports a structurally unsafe one as a finding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<factory_infrastructure::backup::ScopeBackupConfig>,
+    /// `#339`: this scope's memory -- `facts`, what its runs recorded, and
+    /// `profile`, the owner's (`shared: owner` makes it the one profile at
+    /// the instance root every sharing scope reads). Injected into every run
+    /// of the scope; changed only by `factory memory`, within each file's
+    /// `max_chars`. See `factory_agents::memory`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<factory_agents::memory::MemoryDecl>,
+    /// `#339`: the skills this scope's runs are handed and may improve, each
+    /// a directory with a `SKILL.md`, and what a run may do with it
+    /// (`learn: propose | apply | off`). See `factory_agents::skills`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<factory_agents::memory::SkillDecl>,
 }
 
 /// `scope.metrics`, exactly as written -- plain strings, no validation.
@@ -1551,6 +1630,11 @@ impl Factory {
             .map_err(|e| FactoryError::Other(anyhow::anyhow!("reading {}: {e}", path.display())))?;
         let config: Config = serde_yaml_ng::from_str(&text)
             .map_err(|e| FactoryError::Other(anyhow::anyhow!("parsing {}: {e}", path.display())))?;
+        // Parsed whole above, so its errors keep their line numbers; read
+        // again as a document only to refuse what `Config` would drop.
+        if let Ok(document) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) {
+            refuse_misplaced_memory(&document, &path)?;
+        }
         config.validate_instance()?;
         Ok(Self {
             root: root.to_path_buf(),

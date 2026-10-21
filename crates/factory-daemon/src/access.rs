@@ -199,6 +199,10 @@ impl Engine {
             // The harness saying a turn ended is a report on the run in
             // everything but who is speaking: same token, same authority.
             Request::TaskReport { .. } | Request::TaskTurnEnded { .. } => Grant::TaskReport,
+            // `#339`: changing the scope's memory or improving one of its
+            // skills is part of doing the task, from inside its run, with
+            // the run's own token -- the same authority as reporting on it.
+            Request::MemoryWrite { .. } | Request::SkillSubmit { .. } => Grant::TaskReport,
             Request::TaskAttach { .. } => Grant::TaskAttach,
             // `#275`: filing a suggestion needs no grant an agent could
             // lack -- it exists precisely for an agent that lacks one. The
@@ -373,6 +377,13 @@ impl Engine {
             | Request::RunAttestations { .. }
             | Request::RunProvenance { .. }
             | Request::RoleList { .. }
+            // `#339`: a scope's memory, its skills, their proposals and the
+            // archives are read like everything else here: open to all.
+            | Request::MemoryShow { .. }
+            | Request::Skills { .. }
+            | Request::SkillProposals { .. }
+            | Request::SkillProposal { .. }
+            | Request::SkillArchives
             | Request::Subscribe => return Needs::Nothing,
 
             // Giving an agent a role is the owner's alone. An agent that could
@@ -394,6 +405,13 @@ impl Engine {
             // it could do" (`#170`). Flagging (above) stays `intake.assess`;
             // this is the one door no grant opens.
             Request::IntakeSecurity { .. } => return Needs::Owner,
+            // `#339`: whether a run's change to a skill is accepted is a
+            // person's decision -- the point of `learn: propose` -- and so is
+            // what curation archives and brings back.
+            Request::SkillAccept { .. }
+            | Request::SkillReject { .. }
+            | Request::SkillCurate { .. }
+            | Request::SkillRestore { .. } => return Needs::Owner,
         })
     }
 
@@ -633,6 +651,8 @@ impl Engine {
 
             Request::TaskReport { id, .. }
             | Request::TaskTurnEnded { id, .. }
+            | Request::MemoryWrite { id, .. }
+            | Request::SkillSubmit { id, .. }
             | Request::TaskAttach { id, .. } => {
                 let Some(task) = self.l4.store.get(id).await? else {
                     return Ok(());

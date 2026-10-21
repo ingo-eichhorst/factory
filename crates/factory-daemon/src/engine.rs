@@ -278,6 +278,7 @@ impl Engine {
                 harness: crate::harness_health::HarnessHealth::new(),
                 agents: Arc::new(crate::agent_rows::AgentRows(store.clone())),
                 liveness: Default::default(),
+                learning: Default::default(),
             },
             l4: crate::state::L4State {
                 store,

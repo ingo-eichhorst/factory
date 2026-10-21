@@ -644,6 +644,7 @@ impl L4Service<'_> {
             upstream.iter().filter(|u| u.node_id != "resume-context").cloned().collect();
         let agent_exits = self.agent_exit_context(&task).await;
         let knowledge = self.knowledge_hints(&task, &run.id).await;
+        let memory = self.memory_handout(&task, &run.id).await;
         // Same chain the L6 tab and `policy attest` fold against
         // (`Engine::policy_chain`), reduced to just the names the guide
         // names -- see `factory_core::policy::frameworks_in_chain`.
@@ -696,6 +697,7 @@ impl L4Service<'_> {
                 resumed_session: run.resumed_session.clone(),
                 upstream,
                 knowledge,
+                memory,
                 required_steps: run.required_steps.clone(),
                 agent_exits,
             }),

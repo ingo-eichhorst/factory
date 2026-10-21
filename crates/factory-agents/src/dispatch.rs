@@ -127,3 +127,25 @@ pub trait Environments: CommandPort<Level = L3> + Send + Sync {
     /// The run ended, however it ended: let the host sleep again.
     async fn allow_sleep(&self, run_id: &str);
 }
+
+/// What L4 asks L3 to do to a scope's memory and skills (`#339`): one command per kind of
+/// write, so no write reaches a scope's files any other way. The scope is always the run's
+/// own task's, and L4 has checked the run's token before asking; L3 owns the files, the
+/// budget and the secret check, and answers with what it did -- which L4 journals on the run.
+#[async_trait::async_trait]
+pub trait Learning: CommandPort<Level = L3> + Send + Sync {
+    /// Add, replace or remove one entry of the scope's facts or the owner profile.
+    async fn write_memory(&self, scope: &str, write: &crate::memory::MemoryWrite) -> Result<crate::memory::MemoryReceipt>;
+    /// A run's improved procedure: filed for a person (`learn: propose`), written at once
+    /// (`learn: apply`) or refused (`learn: off`). The proposal is the acknowledgement.
+    async fn submit_skill(
+        &self,
+        scope: &str,
+        origin: crate::skills::Origin,
+        submission: &crate::skills::SkillSubmission,
+    ) -> Result<crate::skills::Proposal>;
+    /// A person's answer to an open proposal: applied, or turned down with a reason.
+    async fn decide_skill(&self, id: &str, accept: bool, by: &str, reason: Option<String>) -> Result<crate::skills::Proposal>;
+    /// A run was handed these skills: what curation measures "unused" by.
+    async fn skills_handed(&self, scope: &str, skills: &[factory_kernel::SkillHandle], run_id: &str);
+}

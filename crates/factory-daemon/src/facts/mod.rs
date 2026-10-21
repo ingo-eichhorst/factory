@@ -360,6 +360,7 @@ port!(
     l3::session_status_provider
 );
 port!(EffectiveRoleFact, crate::l3_service::RoleProvider<'a>, (String, String), EffectiveRoleFact, l3::role_provider);
+port!(ScopeMemory, factory_agents::memory::Provider, String, ScopeMemory, l3::memory_provider);
 port!(
     HarnessVersionFact,
     crate::harness_health::VersionProvider,
@@ -829,6 +830,7 @@ mod tests {
         registered::<StandingAgentObservationsFact>();
         registered::<SessionStatusFact>();
         registered::<HarnessVersionFact>();
+        registered::<ScopeMemory>();
         registered::<WorkflowFact>();
         registered::<EnvironmentRecoveryFact>();
         registered::<RecoveryJournalFact>();

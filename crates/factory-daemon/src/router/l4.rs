@@ -264,6 +264,20 @@ impl Engine {
                 self.sync_workflow_for_task(&id).await;
                 Ok(Payload::Run { run: run.redacted() })
             }
+            // `#339`: memory and skill writes from a run, checked and
+            // journaled by L4, written by L3.
+            Request::MemoryWrite { id, write } => Ok(Payload::MemoryWritten {
+                receipt: self.l4_service().memory_write(&id, write).await?,
+            }),
+            Request::SkillSubmit { id, submission } => Ok(Payload::SkillProposal {
+                proposal: self.l4_service().skill_submit(&id, submission).await?,
+            }),
+            Request::SkillAccept { id } => Ok(Payload::SkillProposal {
+                proposal: self.l4_service().skill_decide(&id, true, &caller.describe(), None).await?,
+            }),
+            Request::SkillReject { id, reason } => Ok(Payload::SkillProposal {
+                proposal: self.l4_service().skill_decide(&id, false, &caller.describe(), Some(reason)).await?,
+            }),
             Request::TaskTurnEnded { id, turn } => {
                 self.turn_ended(&id, turn).await?;
                 self.sync_workflow_for_task(&id).await;

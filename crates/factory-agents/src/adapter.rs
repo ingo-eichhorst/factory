@@ -47,6 +47,12 @@ pub struct TaskBinding {
     /// `upstream`. Page ids and reasons only, never page text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge: Option<factory_kernel::KnowledgeHints>,
+    /// The scope's memory and skills (`#339`), read from its files once, at
+    /// dispatch: its facts, the owner profile and the skills it may improve.
+    /// `None` for a scope declaring none -- and absent on the wire then, for
+    /// the same reason as `upstream`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<factory_kernel::ScopeMemory>,
     /// The steps this run must pass before its `done` counts (`#118`) --
     /// `Run::required_steps`, fixed at dispatch. Named in the reporting
     /// contract so the agent can run them itself before it says it is done.
@@ -147,6 +153,115 @@ pub fn upstream_output_path(guides_dir: &Path, task_id: &str) -> PathBuf {
 /// twin, for the same reader (the shell agent) and the same cleanup.
 pub fn knowledge_hints_path(guides_dir: &Path, task_id: &str) -> PathBuf {
     guides_dir.join(format!("knowledge-{task_id}.json"))
+}
+
+/// Where a task run's memory file lives -- the scope's memory and skills as
+/// JSON, for the shell agent (`FACTORY_MEMORY_FILE`), removed with the others.
+pub fn memory_path(guides_dir: &Path, task_id: &str) -> PathBuf {
+    guides_dir.join(format!("memory-{task_id}.json"))
+}
+
+/// The section a harness agent's prompt gets when its scope keeps memory or
+/// skills (`#339`): the facts and the owner profile in full, every entry
+/// numbered the way `factory memory replace|remove --entry <n>` names it,
+/// and each skill's procedure by path -- never its text, which the agent
+/// opens itself. Task content, like the knowledge hints: the commands that
+/// change any of it are in the reporting contract.
+pub fn memory_section(memory: &factory_kernel::ScopeMemory) -> String {
+    let mut out = String::from("What this scope keeps between runs -- read it before you start:\n");
+    let file = |out: &mut String, heading: &str, file: &factory_kernel::MemoryFile| {
+        out.push_str(&format!(
+            "\n{heading} ({}, {} of {} characters):\n",
+            file.path, file.chars, file.max_chars
+        ));
+        if let Some(error) = &file.error {
+            out.push_str(&format!("(could not be read: {error})\n"));
+        } else if file.entries.is_empty() {
+            out.push_str("(no entries yet)\n");
+        }
+        for (i, entry) in file.entries.iter().enumerate() {
+            out.push_str(&format!("[{}] {}\n", i + 1, entry.replace('\n', "\n    ")));
+        }
+    };
+    if let Some(facts) = &memory.facts {
+        file(&mut out, "This scope's facts", facts);
+    }
+    if let Some(profile) = &memory.profile {
+        let heading = if profile.shared {
+            "The owner's profile, shared by every scope that keeps one"
+        } else {
+            "The owner's profile"
+        };
+        file(&mut out, heading, profile);
+    }
+    if !memory.skills.is_empty() {
+        out.push_str("\nSkills -- procedures to follow. Open each one's SKILL.md before you start:\n");
+        for skill in &memory.skills {
+            let line = match (&skill.archived, &skill.error) {
+                (Some(_), _) => format!(
+                    "- {}: archived by curation, so this run does not have it (the owner restores it with `factory skill restore {}`)",
+                    skill.name, skill.name
+                ),
+                (None, Some(error)) => format!("- {}: not available ({error})", skill.name),
+                (None, None) => format!(
+                    "- {}: {} (learn: {})",
+                    skill.name,
+                    skill.skill_file(),
+                    match skill.learn {
+                        factory_kernel::Learn::Propose => "propose -- a better procedure is filed for the owner to accept",
+                        factory_kernel::Learn::Apply => "apply -- a better procedure is written at once",
+                        factory_kernel::Learn::Off => "off -- follow it, do not change it",
+                    }
+                ),
+            };
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The memory and skill commands a run's contract names (`#339`), when its
+/// scope keeps either; empty otherwise, and the contract says nothing. `id`
+/// is the contract's own: in explicit mode it carries `--run-token` too.
+fn learning_commands(memory: &factory_kernel::ScopeMemory, bin: &str, id: &str) -> String {
+    let mut out = String::new();
+    if memory.facts.is_some() || memory.profile.is_some() {
+        let (flag, which, profile_note) = match (&memory.facts, &memory.profile) {
+            (Some(_), Some(_)) => ("", "its facts", " Add `--profile` to any of these for the owner profile instead."),
+            (None, Some(_)) => (" --profile", "the owner profile", ""),
+            _ => ("", "its facts", ""),
+        };
+        out.push_str(&format!(
+            "\nMemory -- what the next run of this scope should know goes into {which}, one entry per thing worth \
+             remembering; `<n>` is an entry's number in the list above. A write that would go over a file's budget \
+             is refused with the entries to drop -- nothing is ever cut to fit -- and one that looks like a secret \
+             is refused outright: say where a credential is kept, never what it is. Each change is journaled on \
+             this run.{profile_note}\n\
+             - Remember: {bin} memory add --task {id}{flag} \"<one entry>\"\n\
+             - Correct:  {bin} memory replace --task {id}{flag} --entry <n> \"<the entry as it should read>\"\n\
+             - Forget:   {bin} memory remove --task {id}{flag} --entry <n>\n"
+        ));
+    }
+    let learnable: Vec<&str> = memory
+        .skills
+        .iter()
+        .filter(|s| s.present() && s.learn != factory_kernel::Learn::Off)
+        .map(|s| s.name.as_str())
+        .collect();
+    if !learnable.is_empty() {
+        out.push_str(&format!(
+            "\nSkills ({}) -- when this run finds a better procedure than a skill's SKILL.md says (a pitfall, an \
+             endpoint, a step that works better), change the skill: copy the files you change into a directory of \
+             your own, keeping their paths relative to the skill, edit them there, and submit them. Only the files \
+             you give change; `--remove <path>` deletes one. Edit nothing in the skill's own directory yourself.\n\
+             - Improve a skill: {bin} skill submit --task {id} <skill> --from <dir> --summary \"<why the procedure is better>\"\n\
+             `learn: propose` files it as a diff for the owner to accept in the Inbox; `learn: apply` writes it at \
+             once. Either way it is journaled on this run.\n",
+            learnable.join(", ")
+        ));
+    }
+    out
 }
 
 /// Where a run's generated shell-agent script lives, given only its run id
@@ -391,6 +506,7 @@ impl AgentContext {
                  Use `--send-to` only when its rule holds. Otherwise report plain `done`; check exits and the default route are Factory's to choose.\n"
             )
         };
+        let learning = binding.memory.as_ref().map(|m| learning_commands(m, &bin, &id)).unwrap_or_default();
         let scope = &self.scope;
         let contract = format!(
             "Report progress by running these commands in your shell. They are how \
@@ -419,6 +535,7 @@ impl AgentContext {
              not yours to act on: filing one does not fix it, and nothing here fixes it on its own \
              either -- it reaches a person, and if they act on it, a dedicated improvement agent, \
              never you.\n\
+             {learning}\
              \n\
              Report running first, then finish with exactly one of done, failed, or \
              blocked -- before your turn ends. When your harness says a turn ended \
@@ -867,6 +984,29 @@ impl AgentContext {
         Ok(Some(path))
     }
 
+    /// Write this run's memory and skills to their file, for the shell agent,
+    /// the same way and for the same reason as `write_knowledge_file`. `None`
+    /// when the scope keeps none.
+    pub fn write_memory_file(&self) -> Result<Option<PathBuf>> {
+        let Some(binding) = self.task.as_ref() else {
+            return Ok(None);
+        };
+        let Some(memory) = &binding.memory else {
+            return Ok(None);
+        };
+        let path = memory_path(&self.guides_dir, &binding.task.id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                FactoryError::Other(anyhow::anyhow!("making {}: {e}", parent.display()))
+            })?;
+        }
+        let json = serde_json::to_string_pretty(memory)
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("encoding scope memory: {e}")))?;
+        std::fs::write(&path, json)
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("writing {}: {e}", path.display())))?;
+        Ok(Some(path))
+    }
+
     /// Where this run's upstream-outputs file would live, if it has anything
     /// to write -- `None` for a root node or a task outside any workflow,
     /// same check `write_upstream_file` makes, so a caller can name the path
@@ -1081,6 +1221,7 @@ mod tests {
             resumed_session: None,
             upstream: Vec::new(),
             knowledge: None,
+            memory: None,
             required_steps: Vec::new(),
             agent_exits: Vec::new(),
         });
