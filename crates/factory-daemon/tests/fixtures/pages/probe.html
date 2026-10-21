@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>isolation probe</title></head>
+<body>
+<p>An isolation probe for scope pages (#343). Every reach outside the frame
+is made from script, so the markup passes the publish preflight and the
+browser alone decides what is refused.</p>
+<script>
+(async function () {
+  var CANARY = "__CANARY__";
+  var DAEMON = "__DAEMON__";
+  var results = {};
+  function settle(promise, ms) {
+    return Promise.race([promise, new Promise(function (ok) { setTimeout(function () { ok("timeout"); }, ms); })]);
+  }
+  async function attempt(name, fn) {
+    try {
+      results[name] = await settle(Promise.resolve().then(fn), 800);
+    } catch (e) {
+      results[name] = "blocked:" + (e && e.name ? e.name : String(e));
+    }
+  }
+  results.origin = String(self.origin);
+
+  // The UI's storage, cookies and document.
+  await attempt("storage", function () { return "read:" + localStorage.getItem("factory-theme"); });
+  await attempt("parent_storage", function () { return "read:" + window.parent.localStorage.getItem("factory-theme"); });
+  await attempt("parent_document", function () { return "read:" + window.parent.document.title; });
+  await attempt("cookie", function () { return "read:" + document.cookie; });
+
+  // The daemon's API, as the person looking at the page.
+  await attempt("api_status", async function () { var r = await fetch("/api/status"); return "status:" + r.status; });
+  await attempt("api_status_absolute", async function () { var r = await fetch(DAEMON + "/api/status"); return "status:" + r.status; });
+  await attempt("api_create_task", async function () {
+    var r = await fetch(DAEMON + "/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "probe-pwned", instructions: "true", scope: "demo", agent: "shell" })
+    });
+    return "status:" + r.status;
+  });
+  await attempt("api_create_task_simple", async function () {
+    await fetch("/api/tasks", { method: "POST", mode: "no-cors", body: JSON.stringify({ title: "probe-pwned", instructions: "true" }) });
+    return "sent";
+  });
+  await attempt("xhr", function () {
+    return new Promise(function (ok, fail) {
+      var x = new XMLHttpRequest();
+      x.open("GET", "/api/agents");
+      x.onload = function () { ok("status:" + x.status); };
+      x.onerror = function () { fail({ name: "NetworkError" }); };
+      x.send();
+    });
+  });
+
+  // Anything at all on the network.
+  await attempt("fetch_canary", async function () { await fetch(CANARY + "/fetch", { mode: "no-cors" }); return "sent"; });
+  await attempt("image_canary", function () {
+    return new Promise(function (ok) { var i = new Image(); i.onload = function () { ok("loaded"); }; i.onerror = function () { ok("error"); }; i.src = CANARY + "/image"; });
+  });
+  await attempt("beacon_canary", function () { return "queued:" + navigator.sendBeacon(CANARY + "/beacon", "x"); });
+  await attempt("websocket_canary", function () {
+    return new Promise(function (ok) { var w = new WebSocket(CANARY.replace("http", "ws") + "/ws"); w.onopen = function () { ok("open"); }; w.onerror = function () { ok("error"); }; });
+  });
+  await attempt("eventsource_canary", function () {
+    return new Promise(function (ok) { var e = new EventSource(CANARY + "/events"); e.onopen = function () { ok("open"); }; e.onerror = function () { e.close(); ok("error"); }; });
+  });
+  await attempt("css_canary", function () {
+    var s = document.createElement("style"); s.textContent = "body{background:url(" + CANARY + "/css)}"; document.head.appendChild(s); return "added";
+  });
+  await attempt("prefetch_canary", function () {
+    var l = document.createElement("link"); l.rel = "prefetch"; l.href = CANARY + "/prefetch"; document.head.appendChild(l); return "added";
+  });
+  await attempt("script_canary", function () {
+    return new Promise(function (ok) { var s = document.createElement("script"); s.src = CANARY + "/script.js"; s.onload = function () { ok("loaded"); }; s.onerror = function () { ok("error"); }; document.head.appendChild(s); });
+  });
+  await attempt("popup_canary", function () { return "opened:" + !!window.open(CANARY + "/popup"); });
+  await attempt("top_navigation", function () { window.top.location.href = CANARY + "/top"; return "navigated"; });
+
+  console.log("FACTORY-PROBE " + JSON.stringify(results));
+  // Last, after the results are out: the frame navigating itself away.
+  // The UI's own `frame-src 'self'` refuses it.
+  location.href = CANARY + "/self-navigation";
+})();
+</script>
+</body>
+</html>
