@@ -2776,7 +2776,10 @@ Discovery stats that file only, never reads its contents or evaluates any
 credential source command, environment variable or Keychain lookup. A cheap
 `gh api --hostname github.com --include user` call provides GitHub's expiry
 response header. A successful response without it says **no reported expiry**,
-not that GitHub has guaranteed the token never expires.
+not that GitHub has guaranteed the token never expires. Each model a codex
+agent asks for is an entry too (`codex-model:<model>`): **served**, or expired
+from the first observation that the Codex backend no longer serves it to the
+installed client -- see "Codex model availability (#340)".
 
 Declare only what cannot be observed, in the root `renewals:` or a nested
 scope's `scope.renewals:`:
@@ -4297,6 +4300,75 @@ sees launchd's `PATH`, not a login shell's, so a harness a pane can find but
 the daemon cannot is reported as not found -- give the service the same `PATH`
 the panes have.
 
+### Codex model availability (#340)
+
+The ChatGPT Codex backend serves its model list **per client version**. On
+2026-10-21 the codex pinned on the company host (0.157.0, see #173) was not
+offered `gpt-6.1-sol`, the default in `~/.codex/config.toml`, while 0.163.0
+was. A run then failed on its first turn with an HTTP 400 (`The 'gpt-6.1-sol'
+model is not supported when using Codex with a ChatGPT account`), the TUI sat
+at the prompt, and the run never reported. Factory now finds that out before
+a dispatch.
+
+- **L1 observes.** The important-dates observation job (every five minutes,
+  and within fifteen seconds of a configuration change) asks the backend which
+  models it serves to the installed codex, whenever some scope declares a
+  codex agent -- at most once an hour per client version, since the answer is
+  about half a megabyte and changes when a model is launched or retired. The client's version comes from the install's own package
+  manifest (a Homebrew cask's `codex-package.json`, npm's `package.json`) and
+  only otherwise from a bounded `codex --version`. The login is codex's own
+  ChatGPT login in `$CODEX_HOME/auth.json` (default `~/.codex`), read
+  in-process and handed to one `curl` as request headers **on stdin** -- never
+  an argument, which any process on the host could read, never the
+  environment, never a log line, a fact, an issue or a message. Factory never
+  refreshes the login; a refused one (HTTP 401) is reported, and codex renews
+  it the next time it starts. Only the listed slugs survive the answer.
+- **The verdict is `CodexModelsFact`.** For each declared codex agent: the
+  model it will ask for -- its own `--model`/`-m`/`-c model=`, a profile's
+  `model` (`-p`, or `profile` in `config.toml`), the top-level `model` in
+  `config.toml`, in codex's own order -- and whether the backend lists it,
+  hidden models included. `config.toml` is read fresh on every read, so pinning
+  a served model takes effect at once; a new client version or list waits for
+  the next observation. Only *not listed* is a verdict. No list yet (the daemon
+  just started), no ChatGPT login, an API-key login, a backend that did not
+  answer or listed nothing, an agent that names no model or uses another model
+  provider (`--oss`, `model_provider`): all unknown, and unknown refuses
+  nothing.
+- **L3 refuses.** Before a run exists -- after the harness probe, before
+  admission -- a codex agent whose model is not served is refused by L3's
+  preflight: the task goes to `blocked` with no run, no worktree and no
+  session, and its reason names the model, where it came from and the served
+  list, e.g. ``codex: model gpt-6.1-sol (`model` in the host's codex
+  config.toml) is not served to codex 0.157.0 with this host's ChatGPT login;
+  served: gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra,
+  gpt-5.6-luna. Declare a served model with `--model <name>` in the agent's
+  args, set `model` in the codex config.toml, or upgrade codex. The run was
+  not started``. A standing codex agent fails to start with the same reason.
+  The adapter never calls the backend itself.
+- **People see it.** `factory infra` (and the L1 Infrastructure page) has a
+  `CODEX MODELS` section: the client version, when the list was fetched, the
+  `config.toml` default and every codex agent with its model, where it came
+  from and `served` / `NOT SERVED` / `unknown`, and the served list. Showing
+  the page never fetches anything.
+- **Like an expiring credential.** Each model a codex agent asks for is an
+  entry in Important Dates (`factory dates`, source `codex_model`): *served*
+  while the backend lists it, **expired** from the first observation that it
+  does not -- a model retired by the backend included -- with the agents that
+  depend on it. That is an Inbox item and, with `renewals_notify`, a push; it
+  keeps the date it was first seen unserved, so it stays one item, and it
+  resolves when the model is served again.
+
+```yaml
+# root .factory/config.yaml
+infrastructure:
+  codex_models:
+    enabled: true            # the default; false neither asks nor refuses
+    endpoint: https://chatgpt.com/backend-api/codex/models   # the default
+```
+
+The observation honours `FACTORY_RENEWALS_DISCOVERY=0` like every other
+discovery, and finds codex on the same augmented `PATH` the other probes use.
+
 ### Continuing after an infrastructure failure (#178)
 
 `factory task run --continue <id>` (also `task.run`'s `continue` field on the
@@ -4443,6 +4515,8 @@ infrastructure:              # optional: the AI accounts behind the agents, and 
   backup:                    # see "Backup" below
     destination: /Volumes/Backup/factory
     schedule: { cron: "0 3 * * *", timezone: Europe/Berlin }
+  codex_models:              # is each codex agent's model served (#340)
+    enabled: true
 
 scope:                       # optional: make the instance root a scope too
   id: cc23161d-82b9-4e75-8d88-e5195bc6d6e8

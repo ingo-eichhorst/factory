@@ -48,6 +48,8 @@ pub(crate) struct Tools {
     /// codex's own files: `auth.json` and `config.toml`.
     pub codex_home: PathBuf,
     pub curl: String,
+    /// The last Codex model list fetched, so the job asks at most hourly.
+    pub codex_memo: crate::codex_models::Memo,
 }
 impl Default for Tools {
     fn default() -> Self {
@@ -77,6 +79,7 @@ impl Default for Tools {
             codex: std::env::var("FACTORY_DATES_CODEX").unwrap_or_else(|_| "codex".into()),
             codex_home: crate::codex_models::codex_home(&metadata_home, isolated.is_some()),
             curl: std::env::var("FACTORY_DATES_CURL").unwrap_or_else(|_| "curl".into()),
+            codex_memo: Default::default(),
             metadata_home,
             config_home,
             enabled: std::env::var("FACTORY_RENEWALS_DISCOVERY").as_deref() != Ok("0"),

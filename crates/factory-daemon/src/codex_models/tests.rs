@@ -100,6 +100,7 @@ fn tools(dir: &Path, codex: &Path, home: &Path) -> Tools {
         codex: codex.display().to_string(),
         codex_home: home.to_path_buf(),
         curl: "curl".into(),
+        codex_memo: Default::default(),
     }
 }
 
@@ -181,7 +182,8 @@ async fn the_list_is_asked_for_the_installed_client_with_the_login_as_headers_an
     let engine = engine(factory(&s.0, &url));
 
     let snapshot = engine.factory_snapshot();
-    let probe = probe(&snapshot, &tools(&s.0, &codex, &home), Utc::now()).await.unwrap();
+    let job = tools(&s.0, &codex, &home);
+    let probe = probe(&snapshot, &job, Utc::now()).await.unwrap();
     assert_eq!(probe.observation.client_version.as_deref(), Some("0.157.0"));
     assert!(!s.0.join("ran").exists(), "the version came from the package, codex never ran");
     assert_eq!(probe.agents.len(), 3, "the shell agent is not a codex agent");
@@ -195,6 +197,13 @@ async fn the_list_is_asked_for_the_installed_client_with_the_login_as_headers_an
     assert!(request.contains(&format!("authorization: bearer {}", SECRET.to_ascii_lowercase())), "{request}");
     assert!(request.contains("chatgpt-account-id: acct-test"), "{request}");
     assert!(!format!("{:?}", probe.observation).contains(SECRET));
+    // The job's next run, five minutes on, uses the list it has.
+    let again = super::probe(&snapshot, &job, Utc::now() + chrono::Duration::minutes(5)).await.unwrap();
+    assert_eq!((again.observation.observed_at, again.observation.served.len()), (probe.observation.observed_at, 3));
+    assert_eq!(seen.lock().unwrap().len(), 1, "asked at most hourly");
+    let later = super::probe(&snapshot, &job, Utc::now() + chrono::Duration::minutes(61)).await.unwrap();
+    assert!(later.observation.observed_at > probe.observation.observed_at);
+    assert_eq!(seen.lock().unwrap().len(), 2);
 
     engine.l1.record_observations(Vec::new(), true, Some(probe)).await.unwrap();
     let fact = engine.l1_service().codex_models().await.expect("codex agents are declared");

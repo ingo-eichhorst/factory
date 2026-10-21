@@ -384,6 +384,7 @@ async fn a_metadata_probe_never_resolves_the_declared_credential_source() {
         codex: "/nonexistent/codex".into(),
         codex_home: f.root.join(".codex"),
         curl: "/nonexistent/curl".into(),
+        codex_memo: Default::default(),
     };
     let observed = probes::observe(&snapshot, &tools, Utc::now()).await;
     assert!(!f.root.join("source-was-read").exists());
@@ -433,6 +434,7 @@ async fn a_provider_named_from_the_catalogue_is_dated_once_by_its_secret_and_sti
         codex: "/nonexistent/codex".into(),
         codex_home: f.root.join(".codex"),
         curl: "/nonexistent/curl".into(),
+        codex_memo: Default::default(),
     };
     let observed = probes::observe(&snapshot, &tools, Utc::now()).await;
     let ids: Vec<&str> = observed.credentials.iter().map(|o| o.id.as_str()).collect();
@@ -704,6 +706,7 @@ async fn default_discovery_reads_real_public_tls_notafter_and_only_stats_claude_
         codex: "/nonexistent/codex".into(),
         codex_home: f.root.join(".codex"),
         curl: "/nonexistent/curl".into(),
+        codex_memo: Default::default(),
     };
     // No renewal or environment config. Default Tailscale + gateway discovery
     // must find public certs and observe the actual fixture TLS certificate.

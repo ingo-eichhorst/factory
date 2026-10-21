@@ -16,9 +16,27 @@ use chrono::{DateTime, Utc};
 use factory_core::config::Factory;
 use factory_core::renewals::{DateBasis, DateDependency, DateKind, DateSource, ExpiryObservation};
 use factory_infrastructure::codex_models::{self as models, CodexAgent, Observation};
-use factory_kernel::CodexModelsFact;
+use factory_kernel::{CodexModelsFact, CodexServedModel};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+/// How long a fetched list is used before the backend is asked again. The
+/// job runs every five minutes and the answer is about half a megabyte; a
+/// list changes when a model is launched or retired, not by the minute.
+const REFETCH_AFTER: chrono::Duration = chrono::Duration::hours(1);
+
+/// The last list fetched, by endpoint and client version, kept by the job's
+/// own tools across its runs -- never shared with a read.
+#[derive(Clone, Default)]
+pub(crate) struct Memo(Arc<Mutex<Option<Fetched>>>);
+
+struct Fetched {
+    endpoint: String,
+    version: String,
+    at: DateTime<Utc>,
+    served: Vec<CodexServedModel>,
+}
 
 /// Every declared codex agent, as plain configuration, in configuration order.
 pub(crate) fn codex_agents(factory: &Factory) -> Vec<CodexAgent> {
@@ -65,6 +83,13 @@ async fn observe(endpoint: &str, tools: &Tools, now: DateTime<Utc>) -> Observati
         }
     };
     observation.client_version = Some(version.clone());
+    if let Some(fetched) = tools.codex_memo.0.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if fetched.endpoint == endpoint && fetched.version == version && now - fetched.at < REFETCH_AFTER {
+            observation.served = fetched.served.clone();
+            observation.observed_at = Some(fetched.at);
+            return observation;
+        }
+    }
     let login = match models::read_bounded(&tools.codex_home.join("auth.json")).await {
         Some(bytes) => models::login_from_auth(&bytes),
         None => Err("codex has no ChatGPT login on this host (`codex login`)"),
@@ -97,6 +122,8 @@ async fn observe(endpoint: &str, tools: &Tools, now: DateTime<Utc>) -> Observati
     };
     match listed {
         Ok(served) => {
+            *tools.codex_memo.0.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(Fetched { endpoint: endpoint.to_string(), version, at: now, served: served.clone() });
             observation.served = served;
             observation.observed_at = Some(now);
         }
