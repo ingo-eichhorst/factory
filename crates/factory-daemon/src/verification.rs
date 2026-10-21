@@ -108,7 +108,20 @@ fn directory_digest(root: &Path) -> std::io::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// HEAD plus the exact tracked diff and untracked bytes an attestation judges.
+/// What a source digest covers, as a pathspec relative to `dir` (#342):
+/// `dir` and below, never the rest of a larger repository it sits in -- a
+/// `--no-worktree` scope inside the company repository is digested as
+/// itself, so another agent's edit elsewhere is not a change to this run's
+/// source -- and never Factory's own store. For a run in the instance root
+/// that store is `dir/.factory`: artifact copies, worktrees, logs and the
+/// database are Factory's writes, and counting them would let a capture
+/// refuse itself. A worktree run's directory is its repository's root, so
+/// its digest is unchanged by the pathspec.
+const SOURCE_PATHSPEC: [&str; 2] = [".", ":(exclude).factory"];
+
+/// HEAD plus the exact tracked diff and untracked bytes an attestation
+/// judges, over `SOURCE_PATHSPEC`. Artifact capture binds to this same
+/// digest, so the verifier and provenance keep one definition of source.
 pub(crate) async fn git_state(dir: &Path) -> GitState {
     let head = tokio::process::Command::new("git").arg("-C").arg(dir).args(["rev-parse", "HEAD"]).output().await;
     let commit = match head {
@@ -121,7 +134,8 @@ pub(crate) async fn git_state(dir: &Path) -> GitState {
     let status = tokio::process::Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--"])
+        .args(SOURCE_PATHSPEC)
         .output()
         .await;
     let status = match status {
@@ -132,12 +146,14 @@ pub(crate) async fn git_state(dir: &Path) -> GitState {
         .arg("-C")
         .arg(dir)
         .args(["diff", "--binary", "--no-ext-diff", "HEAD", "--"])
+        .args(SOURCE_PATHSPEC)
         .output()
         .await;
     let untracked = tokio::process::Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
+        .args(SOURCE_PATHSPEC)
         .output()
         .await;
     let (diff, untracked) = match (diff, untracked) {
@@ -1407,8 +1423,16 @@ mod tests {
     /// requires `requires` -- YAML for one `requires:` list -- and whose
     /// only scope, `demo`, is a plain directory the gates run in.
     fn engine_with_verifier(requires: &str, spawn_verifier: bool) -> (Arc<Engine>, PathBuf) {
-        let root = std::env::temp_dir().join(format!("factory-verify-test-{}", uuid::Uuid::new_v4()));
-        let work = root.join("demo");
+        engine_at(requires, spawn_verifier, "", "demo")
+    }
+
+    /// The same instance laid out in a fresh directory: its root at
+    /// `instance` and `demo` at `scope`, both relative to that directory,
+    /// `""` for the directory itself.
+    fn engine_at(requires: &str, spawn_verifier: bool, instance: &str, scope: &str) -> (Arc<Engine>, PathBuf) {
+        let base = std::env::temp_dir().join(format!("factory-verify-test-{}", uuid::Uuid::new_v4()));
+        let at = |dir: &str| if dir.is_empty() { base.clone() } else { base.join(dir) };
+        let (root, work) = (at(instance), at(scope));
         std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
         std::fs::create_dir_all(&work).unwrap();
         std::fs::write(
@@ -2535,7 +2559,11 @@ mod tests {
     }
 
     fn provenance_engine(requires: &str, spawn: bool) -> (Arc<Engine>, PathBuf) {
-        let (mut engine, work) = engine_with_verifier(requires, false);
+        provenance_engine_at(requires, spawn, "", "demo")
+    }
+
+    fn provenance_engine_at(requires: &str, spawn: bool, instance: &str, scope: &str) -> (Arc<Engine>, PathBuf) {
+        let (mut engine, work) = engine_at(requires, false, instance, scope);
         let db = engine
             .factory_snapshot()
             .root
@@ -2992,6 +3020,257 @@ mod tests {
             RunStatus::Cancelled
         );
         assert!(engine.l4_service().run_provenance(&run.id).await.unwrap().is_empty());
+    }
+
+    // -- a scope inside the instance's own repository (#342) -----------------
+
+    /// The radar's three outputs, neither tracked nor ignored, like the
+    /// `--no-worktree` run that found #342.
+    const RADAR: [&str; 3] = ["out/radar.html", "out/radar.md", "data/events.json"];
+
+    fn write_radar(work: &Path) {
+        for asked in RADAR {
+            let path = work.join(asked);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, format!("{asked} v1")).unwrap();
+        }
+    }
+
+    /// Every file below `dir`; none for a directory that is not there.
+    fn files_under(dir: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .flat_map(|entry| match entry.path() {
+                path if path.is_dir() => files_under(&path),
+                path => vec![path],
+            })
+            .collect()
+    }
+
+    fn git_status(dir: &Path) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["status", "--porcelain=v1", "--untracked-files=all"])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// `git_state`'s digest as it was before #342, with no pathspec at all.
+    fn unscoped_digest(dir: &Path) -> String {
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap().stdout
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(b"factory-worktree-v1\0");
+        hasher.update(String::from_utf8(git(&["rev-parse", "HEAD"])).unwrap().trim().as_bytes());
+        hasher.update(b"\0status\0");
+        hasher.update(git(&["status", "--porcelain=v1", "-z", "--untracked-files=all"]));
+        hasher.update(b"\0diff\0");
+        hasher.update(git(&["diff", "--binary", "--no-ext-diff", "HEAD", "--"]));
+        hasher.update(b"\0untracked\0");
+        let untracked = git(&["ls-files", "--others", "--exclude-standard", "-z"]);
+        for raw in untracked.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
+            hasher.update(raw);
+            hasher.update(b"\0");
+            hasher.update(std::fs::read(dir.join(String::from_utf8_lossy(raw).as_ref())).unwrap());
+            hasher.update(b"\0");
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    #[tokio::test]
+    async fn git_state_digests_its_own_directory_and_never_factorys_store() {
+        let root = std::env::temp_dir().join(format!("factory-git-state-test-{}", uuid::Uuid::new_v4()));
+        let scope = root.join("projects/radar");
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::create_dir_all(&scope).unwrap();
+        std::fs::write(root.join(".factory/policies/house.yaml"), "framework: house\n").unwrap();
+        std::fs::write(scope.join("radar.py"), "print('radar')\n").unwrap();
+        provenance_git(&root);
+        let instance = git_state(&root).await;
+        let radar = git_state(&scope).await;
+        assert!(instance.digest.is_some() && radar.digest.is_some());
+        assert_eq!(radar.dirty, Some(false));
+
+        // Factory's own writes, none of them ignored: an artifact copy, a
+        // log, the database, a run's worktree and a tracked authored file.
+        for (path, bytes) in [
+            (".factory/artifacts/run/copy/radar.html", "copy"),
+            (".factory/logs/daemon.log", "a line"),
+            (".factory/factory.sqlite", "pages"),
+            (".factory/worktrees/run/README.md", "a worktree"),
+            (".factory/policies/house.yaml", "framework: house # edited\n"),
+        ] {
+            std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(path), bytes).unwrap();
+        }
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.join(".factory/worktrees/run"))
+            .status()
+            .unwrap()
+            .success());
+        assert!(git_status(&root).contains(".factory/artifacts/"), "the store is visible to git");
+        assert_eq!(git_state(&root).await, instance);
+        assert_eq!(git_state(&scope).await, radar);
+
+        // The rest of the repository is not the scope's source...
+        std::fs::write(root.join("source.txt"), "edited by another agent").unwrap();
+        std::fs::write(root.join("notes.md"), "a new file elsewhere").unwrap();
+        assert_ne!(git_state(&root).await, instance);
+        assert_eq!(git_state(&scope).await, radar);
+        // ...and the scope's own directory is.
+        std::fs::write(scope.join("out.html"), "radar output").unwrap();
+        let built = git_state(&scope).await;
+        assert_ne!(built.digest, radar.digest);
+        assert_eq!(built.dirty, Some(true));
+        std::fs::write(scope.join("radar.py"), "print('changed')\n").unwrap();
+        assert_ne!(git_state(&scope).await.digest, built.digest);
+
+        // A worktree run's directory is its repository's root: the pathspec
+        // leaves that digest byte for byte what it was, tracked edits,
+        // untracked and ignored files included.
+        let worktree = root.join(".factory/worktrees/run");
+        std::fs::remove_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::write(worktree.join("src/lib.rs"), "fn main() {}\n").unwrap();
+        provenance_git(&worktree);
+        std::fs::write(worktree.join("source.txt"), "changed").unwrap();
+        std::fs::write(worktree.join("src/new.rs"), "// new").unwrap();
+        std::fs::write(worktree.join("ignored-artifact.bin"), "built").unwrap();
+        assert_eq!(git_state(&worktree).await.digest, Some(unscoped_digest(&worktree)));
+    }
+
+    #[tokio::test]
+    async fn a_no_worktree_scope_inside_the_instance_repo_captures_its_artifacts_first_try() {
+        let (engine, work) = provenance_engine_at(
+            "      - { applies_to: [feature], step: tests, gate: \"true\" }",
+            false,
+            "",
+            "projects/radar",
+        );
+        let root = engine.factory_snapshot().root;
+        // One repository holds the instance and the scope, and it does not
+        // ignore Factory's artifact store.
+        provenance_git(&root);
+        write_radar(&work);
+        let task = task(&engine, Some("feature")).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
+        let run = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
+        assert!(run.worktree_path.is_none());
+        // Another agent edits the company repository during the capture.
+        let elsewhere = root.clone();
+        crate::artifacts::tests::during_capture(&run.id, move || {
+            std::fs::write(elsewhere.join("source.txt"), "edited by another agent").unwrap();
+            std::fs::write(elsewhere.join("notes.md"), "a new file elsewhere").unwrap();
+        });
+        let held = provenance_done(&engine, &task, &RADAR).await.unwrap();
+        assert_eq!(held.status, RunStatus::Verifying);
+        assert_eq!(held.artifacts.len(), 3);
+        assert!(git_status(&root).contains(".factory/artifacts/"), "the copies are visible to git");
+        // And again between the capture and its publication.
+        std::fs::write(root.join("notes.md"), "edited again").unwrap();
+        engine.verify_run(&held.id).await.unwrap();
+        assert_eq!(engine.l4_service().require_run(&held.id).await.unwrap().status, RunStatus::Done);
+        let records = engine.l4_service().run_provenance(&held.id).await.unwrap();
+        assert_eq!(records.len(), 3);
+        for record in &records {
+            assert_eq!(
+                std::fs::read(root.join(&record.artifact.storage_path)).unwrap(),
+                std::fs::read(&record.artifact.source_path).unwrap()
+            );
+        }
+        assert_eq!(files_under(&root.join(".factory/artifacts")).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_root_scope_in_the_instance_repo_never_counts_factorys_store_as_source() {
+        let (engine, work) = provenance_engine_at(
+            "      - { applies_to: [feature], step: tests, gate: \"true\" }",
+            false,
+            "",
+            "",
+        );
+        let root = engine.factory_snapshot().root;
+        assert_eq!(work, root);
+        // The evidence database is committed and keeps changing: only the
+        // exclusion, not the scope's directory, keeps it out of the digest.
+        provenance_git(&root);
+        write_radar(&work);
+        let task = task(&engine, Some("feature")).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
+        let held = provenance_done(&engine, &task, &RADAR).await.unwrap();
+        assert_eq!(held.artifacts.len(), 3);
+        engine.verify_run(&held.id).await.unwrap();
+        assert_eq!(engine.l4_service().require_run(&held.id).await.unwrap().status, RunStatus::Done);
+        assert_eq!(engine.l4_service().run_provenance(&held.id).await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn an_edit_to_a_reported_artifact_refuses_the_capture_and_leaves_no_copies() {
+        let (engine, work) = provenance_engine_at(
+            "      - { applies_to: [feature], step: tests, gate: \"true\" }",
+            false,
+            "",
+            "projects/radar",
+        );
+        let root = engine.factory_snapshot().root;
+        provenance_git(&root);
+        write_radar(&work);
+        let task = task(&engine, Some("feature")).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
+        let run = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
+        let artifact = work.join(RADAR[1]);
+        crate::artifacts::tests::during_capture(&run.id, move || {
+            std::fs::write(artifact, "rebuilt while it was captured").unwrap();
+        });
+        let error = provenance_done(&engine, &task, &RADAR).await.unwrap_err().to_string();
+        assert!(error.contains("source worktree changed while capturing artifacts"), "{error}");
+        assert!(files_under(&root.join(".factory/artifacts")).is_empty());
+        let run = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
+        assert!(run.artifacts.is_empty());
+        assert!(matches!(run.status, RunStatus::Dispatching | RunStatus::Running));
+        // A real change: reporting again captures what is there now.
+        let held = provenance_done(&engine, &task, &RADAR).await.unwrap();
+        assert_eq!(files_under(&root.join(".factory/artifacts")).len(), 3);
+        engine.verify_run(&held.id).await.unwrap();
+        let records = engine.l4_service().run_provenance(&held.id).await.unwrap();
+        assert_eq!(records.len(), 3);
+        let rebuilt = records.iter().find(|r| r.artifact.name == "radar.md").unwrap();
+        assert_eq!(
+            std::fs::read(root.join(&rebuilt.artifact.storage_path)).unwrap(),
+            b"rebuilt while it was captured"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_inside_the_digested_source_is_named_as_factorys_own_change() {
+        // A scope registered above the instance root: the one layout where
+        // the store is still part of what the scope is digested over.
+        let (engine, work) = provenance_engine_at(
+            "      - { applies_to: [feature], step: tests, gate: \"true\" }",
+            false,
+            "company",
+            "",
+        );
+        let root = engine.factory_snapshot().root;
+        assert_eq!(root, work.join("company"));
+        std::fs::write(root.join(".factory/.gitignore"), "*.sqlite*\n").unwrap();
+        provenance_git(&work);
+        write_radar(&work);
+        let task = task(&engine, Some("feature")).await;
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
+        for _ in 0..2 {
+            let error = provenance_done(&engine, &task, &RADAR).await.unwrap_err().to_string();
+            assert!(error.contains("a retry cannot help"), "{error}");
+            assert!(!error.contains("report them again"), "{error}");
+            assert!(files_under(&root.join(".factory/artifacts")).is_empty());
+        }
     }
 
     #[tokio::test]

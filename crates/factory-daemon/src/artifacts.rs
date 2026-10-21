@@ -112,6 +112,29 @@ fn artifact_path(dir: &Path, asked: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// The copy directories one capture may write, `run_dir/{id}` each. A
+/// refused capture takes back these and nothing else: an earlier report's
+/// recorded copies share `run_dir`, which goes only once it is empty.
+struct Copies {
+    run_dir: PathBuf,
+    ids: Vec<String>,
+}
+
+impl Copies {
+    async fn discard(&self) {
+        for id in &self.ids {
+            let dir = self.run_dir.join(id);
+            match tokio::fs::remove_dir_all(&dir).await {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    tracing::warn!("removing refused artifact copy {}: {error}", dir.display());
+                }
+                _ => {}
+            }
+        }
+        let _ = tokio::fs::remove_dir(&self.run_dir).await;
+    }
+}
+
 impl L4Service<'_> {
     fn artifact_workdir(&self, run: &Run, scope: &str) -> Result<PathBuf> {
         let dir = match &run.worktree_path {
@@ -151,13 +174,20 @@ impl L4Service<'_> {
         let run_id = run.id.clone();
         let scope = task.scope.clone();
         let category = control_plan::effective_category(task.category.as_deref()).to_string();
+        // Every copy directory is named before the first byte is written, so
+        // a refusal -- however it happens -- takes back exactly these.
+        let ids: Vec<String> = paths.iter().map(|_| uuid::Uuid::new_v4().to_string()).collect();
+        let copies = Copies {
+            run_dir: root.join(".factory/artifacts").join(&run_id),
+            ids: ids.clone(),
+        };
         let paths = paths.to_vec();
         let source_snapshot = before.clone();
         let copy_dir = dir.clone();
-        let records = tokio::task::spawn_blocking(move || {
+        let copied = tokio::task::spawn_blocking(move || {
             let mut records = Vec::new();
             let mut names = std::collections::BTreeSet::new();
-            for asked in paths {
+            for (asked, id) in paths.into_iter().zip(ids) {
                 let path = artifact_path(&copy_dir, &asked)?;
                 let name = path
                     .file_name()
@@ -168,7 +198,6 @@ impl L4Service<'_> {
                     return Err(refused("artifact filenames in a report must be unique"));
                 }
                 let (sha256, size_bytes) = hash_file(&path)?;
-                let id = uuid::Uuid::new_v4().to_string();
                 let storage_path = format!(".factory/artifacts/{run_id}/{id}/{name}");
                 let stored = root.join(&storage_path);
                 std::fs::create_dir_all(stored.parent().unwrap())
@@ -204,13 +233,37 @@ impl L4Service<'_> {
             Ok::<_, FactoryError>(records)
         })
         .await
-        .map_err(|e| refused(format!("artifact capture: {e}")))??;
-        if source(&dir).await? != before {
-            return Err(refused(
-                "source worktree changed while capturing artifacts; report them again",
-            ));
+        .map_err(|e| refused(format!("artifact capture: {e}")))
+        .and_then(|copied| copied);
+        let records = match copied {
+            Ok(records) => records,
+            Err(error) => {
+                copies.discard().await;
+                return Err(error);
+            }
+        };
+        #[cfg(test)]
+        tests::after_copy(&run.id);
+        let after = source(&dir).await;
+        if after.as_ref().is_ok_and(|after| *after == before) {
+            return Ok(records);
         }
-        Ok(records)
+        copies.discard().await;
+        after?;
+        // With its own copies gone, a source back where it started was moved
+        // by Factory, not by the run: the store is inside what this scope is
+        // digested over, and every retry would refuse itself the same way.
+        if source(&dir).await.is_ok_and(|now| now == before) {
+            return Err(refused(format!(
+                "Factory's own artifact copies under {} changed this run's source digest, \
+                 so a retry cannot help: the instance store is part of the scope's source; \
+                 a person must add .factory/artifacts/ to that repository's .gitignore",
+                copies.run_dir.display()
+            )));
+        }
+        Err(refused(
+            "source worktree changed while capturing artifacts; report them again",
+        ))
     }
 
     /// Validate before publishing. The source, original output and immutable
@@ -310,8 +363,34 @@ impl L4Service<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    type Action = Box<dyn FnOnce() + Send>;
+
+    /// Actions to run between one capture's copies and its second source
+    /// read, keyed by run so tests running at once never see each other's.
+    /// The only way an edit "during the capture" is deterministic.
+    static DURING_CAPTURE: std::sync::Mutex<Vec<(String, Action)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    pub(crate) fn during_capture(run_id: &str, action: impl FnOnce() + Send + 'static) {
+        DURING_CAPTURE
+            .lock()
+            .unwrap()
+            .push((run_id.to_string(), Box::new(action)));
+    }
+
+    pub(super) fn after_copy(run_id: &str) {
+        let action = {
+            let mut actions = DURING_CAPTURE.lock().unwrap();
+            let found = actions.iter().position(|(id, _)| id == run_id);
+            found.map(|index| actions.remove(index).1)
+        };
+        if let Some(action) = action {
+            action();
+        }
+    }
 
     #[test]
     fn provenance_file_limits_and_canonical_paths_are_checked_without_reading() {
