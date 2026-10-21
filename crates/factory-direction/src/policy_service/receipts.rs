@@ -123,17 +123,15 @@ impl Service<'_> {
 
         // Canonicalizes the name the same way every other scoped write does,
         // and refuses one that names no scope at all.
-        let scope = resolve_scope(&self.intent.config.scopes, &scope)?
-            .name
-            .clone();
+        let target = resolve_scope(&self.intent.config.scopes, &scope)?;
+        let scope = target.name.clone();
         let (catalogues, _findings, _tags) = self.intent.catalogues_with_tags(knowledge).await?;
         let chain = self.intent.config.chain(&scope);
         let (applied, _findings) = policy::applicable(&catalogues, &chain);
-        let found = applied.iter().find(|a| a.control == control).ok_or_else(|| {
-            FactoryError::BadRequest(format!(
-                "{control} does not apply at {scope:?}, or is not a control any loaded catalogue defines"
-            ))
-        })?;
+        let found = applied
+            .iter()
+            .find(|a| a.control == control)
+            .ok_or_else(|| self.intent.config.not_applying(&control, target))?;
         if let Some(na) = &found.not_applicable {
             return Err(FactoryError::BadRequest(format!(
                 "{control} is marked not applicable at {:?}: {}",

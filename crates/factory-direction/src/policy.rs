@@ -33,6 +33,13 @@
 //! control nothing applicable resolves to, is not refused -- the file (or
 //! scope) that did it keeps working, but a [`Finding`] says so.
 //!
+//! The one exception is the root's, and it happens before this module sees
+//! a chain (`#332`): the instance root may say per framework which subtrees
+//! it applies to (`scopes`/`except`), and `policy_intent::chain_for_scope`
+//! narrows the root's layer to what applies at the scope asked about. So a
+//! [`PolicyLayer`] here is always already resolved, and a nested layer still
+//! only adds or tightens -- it has no way to exclude anything.
+//!
 //! ## Evidence and evaluation
 //!
 //! [`evaluate`] takes the applicable controls, a bundle of [`Evidence`]
@@ -264,6 +271,10 @@ pub enum FindingKind {
     /// `#278`: a `metric` check names an id this build knows but cannot
     /// compute yet.
     UnavailableMetric,
+    /// `#332`: the root's `scopes` or `except` for a framework names no
+    /// configured scope. The config still loads and the framework applies
+    /// as if the name were absent -- `policy_intent::applicability_findings`.
+    UnknownScope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

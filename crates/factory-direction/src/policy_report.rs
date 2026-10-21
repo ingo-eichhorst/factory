@@ -27,6 +27,66 @@ pub struct NotApplicableEntry {
     pub rationale: String,
 }
 
+/// Where one framework applies over the subtree a report was asked about
+/// (#332) -- the Statement of Applicability's "where": the layers that bind
+/// it, every scope whose chain does, and, when the instance root restricted
+/// it with `scopes` or `except`, that restriction and every scope it leaves
+/// the framework out of. A scope a nested layer binds the framework back
+/// into after a root exclusion is in both lists: the root's word, and what
+/// applies there.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameworkApplicability {
+    pub framework: String,
+    /// Every layer naming it in a chain over the subtree, root first.
+    pub bound_by: Vec<String>,
+    pub covers: Vec<String>,
+    /// The layer that restricted where it applies -- the instance root's
+    /// own, the only one that may -- or `None` for the whole tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restricted_by: Option<String>,
+    /// The `scopes` subtrees the root limited it to, unknown names left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
+    /// The `except` subtrees the root removed, unknown names left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub except: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<String>,
+}
+
+impl FrameworkApplicability {
+    /// In words, the one wording `factory policy`, the export and the L6
+    /// tab's port share: who binds it -- or, when the instance root
+    /// restricted it, the subtrees the root decided on -- then every scope
+    /// it applies at and every scope the root excluded.
+    pub fn describe(&self) -> String {
+        let rule = match &self.restricted_by {
+            Some(layer) => {
+                let mut set = match &self.scopes {
+                    None => "the whole tree".to_owned(),
+                    Some(limited) if limited.is_empty() => "no configured scope".to_owned(),
+                    Some(limited) => format!("only the {} subtree(s)", limited.join(", ")),
+                };
+                if !self.except.is_empty() {
+                    set.push_str(&format!(" minus the {} subtree(s)", self.except.join(", ")));
+                }
+                format!("the instance root ({layer}) binds it to {set}")
+            }
+            None => format!("bound by {}", self.bound_by.join(", ")),
+        };
+        let covers = if self.covers.is_empty() {
+            "no scope here".to_owned()
+        } else {
+            self.covers.join(", ")
+        };
+        let mut line = format!("{rule} -- applies at {covers}");
+        if !self.excluded.is_empty() {
+            line.push_str(&format!("; excluded at {}", self.excluded.join(", ")));
+        }
+        line
+    }
+}
+
 /// One scope's own policy status board: every control applicable there, and
 /// this scope's own rollup (its controls alone, not the subtree's -- see
 /// `PolicyReport::rollup` for that). One of `Request::Policy`'s rows.
@@ -63,10 +123,16 @@ pub struct PolicyReport {
     /// see `policy::worst_across_scopes`, which this is built from.
     pub rollup: Vec<crate::policy::FrameworkRollup>,
     pub not_applicable: Vec<NotApplicableEntry>,
-    /// Catalogue parse findings (`policy::load_all`) and every row's own
-    /// applicability findings (`policy::applicable`), deduplicated -- the
-    /// same finding reached by walking two different scopes' chains is
-    /// reported once.
+    /// Every framework bound anywhere over the subtree, with the scopes it
+    /// covers and any root exclusion (#332) -- a framework excluded at the
+    /// asked scope has no row or rollup above, and is named here instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applicability: Vec<FrameworkApplicability>,
+    /// Catalogue parse findings (`policy::load_all`), every row's own
+    /// applicability findings (`policy::applicable`) and the root's unknown
+    /// `scopes`/`except` names (`policy_intent::applicability_findings`),
+    /// deduplicated -- the same finding reached by walking two different
+    /// scopes' chains is reported once.
     pub findings: Vec<crate::policy::Finding>,
     /// Required workflow controls as they would be injected now. This is
     /// advisory preview data; immutable run snapshots remain authoritative.

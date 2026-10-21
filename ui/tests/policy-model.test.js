@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  applicabilityRows,
+  applicabilityRule,
   attestBody,
   canRemediate,
   checkTarget,
@@ -496,4 +498,46 @@ test("attestBody refuses empty evidence or expiry with a sentence, and drops an 
     expires: "30d",
     note: "published",
   });
+});
+
+// `#332`: the shape `FrameworkApplicability` serializes to -- `restricted_by`,
+// `scopes` and `except` skipped when absent or empty, exactly as serde does.
+test("applicabilityRule ports FrameworkApplicability::describe's rule word for word", () => {
+  assert.equal(
+    applicabilityRule({ framework: "cra", bound_by: [], covers: [], restricted_by: "company", except: ["finance"], excluded: ["finance"] }),
+    "the instance root (company) binds it to the whole tree minus the finance subtree(s)",
+  );
+  assert.equal(
+    applicabilityRule({ framework: "finance", bound_by: ["company"], covers: ["finance"], restricted_by: "company", scopes: ["finance"] }),
+    "the instance root (company) binds it to only the finance subtree(s)",
+  );
+  assert.equal(
+    applicabilityRule({ framework: "x", bound_by: [], covers: [], restricted_by: "company", scopes: [] }),
+    "the instance root (company) binds it to no configured scope",
+  );
+  assert.equal(applicabilityRule({ framework: "gdpr", bound_by: ["company", "demo"], covers: ["demo"] }), "bound by company, demo");
+});
+
+test("applicabilityRows draws nothing until the root restricts a framework, then names every one", () => {
+  const unrestricted = { applicability: [{ framework: "cra", bound_by: ["company"], covers: ["company"] }] };
+  assert.deepEqual(applicabilityRows(unrestricted), []);
+  assert.deepEqual(applicabilityRows({}), []);
+  const report = {
+    catalogues: [{ framework: "cra", title: "Cyber Resilience Act", kind: "regulation", controls: 3 }],
+    applicability: [
+      { framework: "cra", bound_by: [], covers: [], restricted_by: "company", except: ["finance"], excluded: ["finance"] },
+      { framework: "dsgvo", bound_by: ["company"], covers: ["finance"] },
+    ],
+  };
+  assert.deepEqual(applicabilityRows(report), [
+    {
+      framework: "cra",
+      title: "Cyber Resilience Act",
+      rule: "the instance root (company) binds it to the whole tree minus the finance subtree(s)",
+      covers: [],
+      excluded: ["finance"],
+    },
+    { framework: "dsgvo", title: "dsgvo", rule: "bound by company", covers: ["finance"], excluded: [] },
+  ]);
+  assert.equal(findingLabel("unknown_scope"), "Restricts a framework to a scope nothing is called");
 });

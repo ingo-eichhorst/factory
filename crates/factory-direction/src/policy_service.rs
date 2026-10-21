@@ -153,9 +153,35 @@ impl<'a> Service<'a> {
         let now = chrono::Utc::now();
         let mut applied = Vec::new();
         let mut not_applicable = BTreeSet::new();
+        // Per framework: the layers binding it, the scopes whose chain does,
+        // and the scopes the root's own restriction leaves it out of (#332).
+        let mut coverage: BTreeMap<String, FrameworkApplicability> = BTreeMap::new();
+        findings.extend(self.intent.config.applicability_findings());
         for target in targets {
-            let (subjects, chain_findings) =
-                policy::applicable(&catalogues, &self.intent.config.chain(&target.name));
+            let chain = self.intent.config.chain(&target.name);
+            for layer in &chain {
+                for framework in &layer.frameworks {
+                    let entry = coverage.entry(framework.clone()).or_default();
+                    if !entry.bound_by.contains(&layer.scope) {
+                        entry.bound_by.push(layer.scope.clone());
+                    }
+                }
+            }
+            for framework in policy::frameworks_in_chain(&chain) {
+                coverage
+                    .entry(framework)
+                    .or_default()
+                    .covers
+                    .push(target.name.clone());
+            }
+            for exclusion in self.intent.config.exclusions(target) {
+                coverage
+                    .entry(exclusion.framework)
+                    .or_default()
+                    .excluded
+                    .push(target.name.clone());
+            }
+            let (subjects, chain_findings) = policy::applicable(&catalogues, &chain);
             findings.extend(chain_findings);
             for subject in &subjects {
                 if let Some(na) = &subject.not_applicable {
@@ -237,6 +263,18 @@ impl<'a> Service<'a> {
                 .then(a.detail.cmp(&b.detail))
         });
         findings.dedup();
+        let applicability = coverage
+            .into_iter()
+            .map(|(framework, mut entry)| {
+                if let Some(restriction) = self.intent.config.restriction(&framework) {
+                    entry.restricted_by = Some(self.intent.config.root_name().to_owned());
+                    entry.scopes = restriction.scopes;
+                    entry.except = restriction.except;
+                }
+                entry.framework = framework;
+                entry
+            })
+            .collect();
         Ok(PolicyReport {
             scope: asked.map(|scope| scope.name.clone()),
             rows,
@@ -249,6 +287,7 @@ impl<'a> Service<'a> {
                     rationale,
                 })
                 .collect(),
+            applicability,
             findings,
             workflow_enforcement: Vec::new(),
             workflow_findings: Vec::new(),
@@ -290,9 +329,10 @@ impl<'a> Service<'a> {
         let target = resolve_scope(&self.intent.config.scopes, scope)?;
         let (catalogues, _, tags) = self.intent.catalogues_with_tags(knowledge).await?;
         let (applied, _) = policy::applicable(&catalogues, &self.intent.config.chain(&target.name));
-        let found = applied.iter().find(|subject| subject.control == control).ok_or_else(|| {
-            FactoryError::BadRequest(format!("{control} does not apply at {:?}, or is not a control any loaded catalogue defines", target.name))
-        })?;
+        let found = applied
+            .iter()
+            .find(|subject| subject.control == control)
+            .ok_or_else(|| self.intent.config.not_applying(&control, target))?;
         let ancestors: BTreeSet<_> = scope_ancestors(&self.intent.config.scopes, target)
             .into_iter()
             .map(|scope| scope.name.as_str())
@@ -448,6 +488,9 @@ mod tests {
             std::fs::write(policy::policies_dir(&self.root).join("cra.yaml"), format!("framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {{id: a, title: {title}, evidence: [{{check: {check}}}]}}\n")).unwrap();
         }
         fn service(&self) -> Service<'_> {
+            self.service_with("frameworks: [cra, practices]")
+        }
+        fn service_with(&self, root_policies: &str) -> Service<'_> {
             let configuration = policy_intent::Configuration {
                 scopes: [
                     ("parent-id", "company", "."),
@@ -461,7 +504,7 @@ mod tests {
                     policies: Default::default(),
                 })
                 .collect(),
-                root_policies: serde_yaml_ng::from_str("frameworks: [cra, practices]").unwrap(),
+                root_policies: serde_yaml_ng::from_str(root_policies).unwrap(),
                 root_name: Some("company".into()),
                 instance_name: "instance".into(),
             };
@@ -710,6 +753,110 @@ mod tests {
             .unwrap();
         assert_eq!(next.attestations[1].withdrawn, Some(withdrawal));
         assert_eq!(*inventory.calls.lock().unwrap(), ["app", "app"]);
+    }
+
+    #[tokio::test]
+    async fn an_excluded_framework_is_absent_at_its_scope_named_on_the_board_and_refused_in_detail()
+    {
+        let fixture = Fixture::new();
+        let service = fixture.service_with(
+            "frameworks: [{name: cra, except: [app]}, practices, {name: house, scopes: [nowhere]}]",
+        );
+        let lower = Lower::default();
+        let inventory = Inventory::default();
+
+        let app = service
+            .report(Some("app"), &lower, &lower, &inventory)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.rows[0]
+                .statuses
+                .iter()
+                .map(|s| s.control.to_string())
+                .collect::<Vec<_>>(),
+            ["practices/p"],
+            "cra is absent at the scope the root excluded it from"
+        );
+        assert!(app.rollup.iter().all(|rollup| rollup.framework != "cra"));
+        let cra = app
+            .applicability
+            .iter()
+            .find(|a| a.framework == "cra")
+            .unwrap();
+        assert!(cra.covers.is_empty());
+        assert_eq!(cra.excluded, ["app"]);
+        assert_eq!(cra.restricted_by.as_deref(), Some("company"));
+        assert_eq!(cra.except, ["app"]);
+        let unknown: Vec<_> = app
+            .findings
+            .iter()
+            .filter(|f| f.kind == policy::FindingKind::UnknownScope)
+            .collect();
+        assert_eq!(unknown.len(), 1, "{:?}", app.findings);
+        assert_eq!(unknown[0].subject, "company");
+        assert!(unknown[0].detail.contains("\"nowhere\""), "{unknown:?}");
+
+        let whole = service
+            .report(None, &lower, &lower, &inventory)
+            .await
+            .unwrap();
+        let summary: Vec<_> = whole
+            .applicability
+            .iter()
+            .map(|a| (a.framework.as_str(), a.describe()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (
+                    "cra",
+                    "the instance root (company) binds it to the whole tree minus the app subtree(s) -- \
+                     applies at company; excluded at app"
+                        .to_owned()
+                ),
+                (
+                    "house",
+                    "the instance root (company) binds it to no configured scope -- applies at no scope here; \
+                     excluded at company, app"
+                        .to_owned()
+                ),
+                ("practices", "bound by company -- applies at company, app".to_owned()),
+            ]
+        );
+        assert_eq!(
+            whole
+                .rows
+                .iter()
+                .map(|row| row.scope.as_str())
+                .collect::<Vec<_>>(),
+            ["company", "app"]
+        );
+        assert!(
+            whole.rollup.iter().any(|rollup| rollup.framework == "cra"),
+            "cra still holds at the root"
+        );
+
+        let refused = service
+            .detail("cra/a".parse().unwrap(), "app", &lower, &lower, &inventory)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("cra/a does not apply at \"app\""),
+            "{refused}"
+        );
+        assert!(refused.contains("except: [app]"), "{refused}");
+        assert!(service
+            .detail(
+                "cra/a".parse().unwrap(),
+                "company",
+                &lower,
+                &lower,
+                &inventory
+            )
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
