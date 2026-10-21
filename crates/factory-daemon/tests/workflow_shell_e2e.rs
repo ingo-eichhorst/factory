@@ -16,6 +16,14 @@
 //! Never shells out to `cargo build`: that would contend on the cargo lock
 //! with whatever invoked this test. If the `factory` binary has not been
 //! built, the fix is `cargo build --workspace` (or `--bin factory`) first.
+//!
+//! Needs no herdr server of its own and is safe to run from anywhere --
+//! including a Factory run's shell or a herdr pane, whose environment points
+//! at the live herdr session and the live daemon. Every `provision()` starts a
+//! headless herdr on a session of its own (`Herdr`), strips the live
+//! instance's variables from everything it starts (`scrub`), and refuses to go
+//! on unless the daemon under test reports that session as its runtime's
+//! (`Daemon::assert_own_herdr`) -- before any task could open a pane.
 
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -25,15 +33,138 @@ use std::time::{Duration, Instant};
 
 // ------------------------------------------------------------- test rig
 
-/// Kills the daemon and removes the temp root even when an assertion panics
-/// partway through -- `Drop` runs during unwinding, plain cleanup code after
-/// the assertions would not.
+/// What a Factory run's shell, or any herdr pane, carries that points at the
+/// live instance: its herdr session and pane, its daemon and callback binary,
+/// and the run's tokens and identity. Named one by one rather than every
+/// `FACTORY_*`, so an operator's opt-ins (`FACTORY_OPENSHELL_SOURCE`,
+/// `FACTORY_DATES_*`, `FACTORY_HERDR_USAGE_PLUGIN`) still reach the daemon.
+const LIVE_INSTANCE_ENV: &[&str] = &[
+    "HERDR_SOCKET_PATH",
+    "HERDR_CLIENT_SOCKET_PATH",
+    "HERDR_PANE_ID",
+    "HERDR_TAB_ID",
+    "HERDR_WORKSPACE_ID",
+    "HERDR_ENV",
+    "FACTORY_SOCKET",
+    "FACTORY_URL",
+    "FACTORY_ROOT",
+    "FACTORY_BIN",
+    "FACTORY_TOKEN",
+    "FACTORY_TASK_TOKEN",
+    "FACTORY_RUN_TOKEN",
+    "FACTORY_TASK_ID",
+    "FACTORY_RUN_ID",
+    "FACTORY_RUN_ATTEMPT",
+    "FACTORY_SCOPE",
+];
+
+/// Point a child that can reach herdr or a daemon at the rig's own herdr
+/// session and at nothing of the live instance's. Setting `HERDR_SESSION`
+/// alone would not do: an inherited `HERDR_SOCKET_PATH` wins over it.
+fn scrub<'a>(command: &'a mut Command, session: &str) -> &'a mut Command {
+    for name in LIVE_INSTANCE_ENV {
+        command.env_remove(name);
+    }
+    command.env("HERDR_SESSION", session)
+}
+
+/// A headless herdr server of the rig's own, on a session nobody else uses,
+/// so a test daemon's panes can only ever open there. Under the real `HOME`,
+/// unlike `herdr_usage.rs`'s: a pane keeps the shell rc and git identity a
+/// task's commands expect. Stopped, and its session directory removed, on
+/// drop -- or earlier, by `Daemon`'s, once the daemon is gone.
+struct Herdr {
+    bin: PathBuf,
+    session: String,
+    /// As `herdr status --json` names it, which is also what the daemon's
+    /// own runtime diagnostic reports.
+    socket: String,
+    server: Option<Child>,
+}
+
+impl Herdr {
+    fn start(bin: PathBuf) -> Self {
+        // Short: the session's sockets live in a directory named after it,
+        // and a socket path past `sun_path`'s ~104 bytes cannot be bound.
+        let session = format!("e2e-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        // `herdr status` names the socket even while no server runs, and
+        // knows where herdr keeps it, `XDG_CONFIG_HOME` included.
+        let status = scrub(&mut Command::new(&bin), &session)
+            .args(["status", "--json"])
+            .output()
+            .expect("run herdr status");
+        assert!(status.status.success(), "herdr status: {}", String::from_utf8_lossy(&status.stderr));
+        let status: Value = serde_json::from_slice(&status.stdout).expect("herdr status --json");
+        let socket = status
+            .pointer("/server/socket")
+            .and_then(Value::as_str)
+            .expect("herdr status names the session's socket")
+            .to_string();
+        let server = scrub(&mut Command::new(&bin), &session)
+            .arg("server")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start herdr server");
+        let mut herdr = Self { bin, session, socket, server: Some(server) };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !Path::new(&herdr.socket).exists() {
+            let exited = herdr.server.as_mut().and_then(|s| s.try_wait().expect("poll herdr server"));
+            if let Some(status) = exited {
+                let log = Path::new(&herdr.socket).with_file_name("herdr-server.log");
+                panic!(
+                    "herdr server for {} exited ({status}) before opening {}; {}:\n{}",
+                    herdr.session,
+                    herdr.socket,
+                    log.display(),
+                    std::fs::read_to_string(&log).unwrap_or_default()
+                );
+            }
+            assert!(Instant::now() < deadline, "herdr server for {} never opened {}", herdr.session, herdr.socket);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        herdr
+    }
+
+    fn stop(&mut self) {
+        let Some(mut server) = self.server.take() else {
+            return;
+        };
+        let _ = scrub(&mut Command::new(&self.bin), &self.session)
+            .args(["server", "stop"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = server.kill();
+        let _ = server.wait();
+        // `server stop` takes the sockets with it but leaves the log behind.
+        // This session's own directory, recognised by its own name -- never
+        // anything above it.
+        if let Some(directory) = Path::new(&self.socket)
+            .parent()
+            .filter(|d| d.file_name() == Some(self.session.as_ref()))
+        {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+}
+
+impl Drop for Herdr {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Kills the daemon, stops its herdr and removes the temp root even when an
+/// assertion panics partway through -- `Drop` runs during unwinding, plain
+/// cleanup code after the assertions would not.
 struct Daemon {
     child: Option<Child>,
     root: PathBuf,
     port: u16,
     factory_bin: PathBuf,
-    herdr_bin: PathBuf,
+    herdr: Herdr,
     github_path: Option<PathBuf>,
 }
 
@@ -46,11 +177,12 @@ impl Daemon {
         assert!(self.child.is_none(), "a previous daemon was never stopped");
         let log = std::fs::File::create(self.root.join("daemon.log")).expect("daemon.log");
         let mut command = Command::new(env!("CARGO_BIN_EXE_factory-daemon"));
-        command.arg("--root")
+        scrub(&mut command, &self.herdr.session)
+            .arg("--root")
             .arg(&self.root)
             .arg("run")
             .env("FACTORY_BIN", &self.factory_bin)
-            .env("FACTORY_HERDR_BIN", &self.herdr_bin)
+            .env("FACTORY_HERDR_BIN", &self.herdr.bin)
             .env("FACTORY_RENEWALS_DISCOVERY", "0")
             // Without the stack cargo gives every child, as a hand-started daemon runs.
             .env_remove("RUST_MIN_STACK")
@@ -62,6 +194,30 @@ impl Daemon {
         let child = command.spawn().expect("spawn factory-daemon");
         self.child = Some(child);
         self.wait_for_http();
+        self.assert_own_herdr();
+    }
+
+    /// Fail closed before a task can open a pane: the daemon's herdr runtime
+    /// has to be talking to the rig's own session. Its diagnostic is `herdr
+    /// status --json` run in the daemon's own environment, so an inherited
+    /// `HERDR_SOCKET_PATH` -- which wins over `HERDR_SESSION` -- shows here.
+    /// It shows in `endpoint`: herdr names the session after `HERDR_SESSION`
+    /// even when the socket it reaches belongs to another one, so the
+    /// session alone would pass.
+    fn assert_own_herdr(&self) {
+        let url = format!("{}/api/agent-runtime", self.base_url());
+        let runtimes = expect_ok(&url, &get(&url))["runtimes"].clone();
+        let own = runtimes.as_array().into_iter().flatten().any(|runtime| {
+            runtime["runtime"] == "herdr"
+                && runtime["session"] == self.herdr.session.as_str()
+                && runtime["endpoint"] == self.herdr.socket.as_str()
+        });
+        assert!(
+            own,
+            "the daemon under test does not reach the rig's herdr session {} ({}); \
+             refusing to let it open a pane anywhere else: {runtimes}",
+            self.herdr.session, self.herdr.socket
+        );
     }
 
     /// Send SIGTERM without a `libc`/`nix` dependency -- `kill(1)` already
@@ -109,6 +265,7 @@ impl Drop for Daemon {
             let _ = child.kill();
             let _ = child.wait();
         }
+        self.herdr.stop();
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -272,7 +429,8 @@ fn provision() -> Daemon {
     }
     std::fs::create_dir_all(&root).expect("create temp root");
 
-    let init = Command::new(env!("CARGO_BIN_EXE_factory-daemon"))
+    let herdr = Herdr::start(herdr_bin);
+    let init = scrub(&mut Command::new(env!("CARGO_BIN_EXE_factory-daemon")), &herdr.session)
         .arg("--root")
         .arg(&root)
         .arg("init")
@@ -328,7 +486,7 @@ fn provision() -> Daemon {
         root,
         port,
         factory_bin,
-        herdr_bin,
+        herdr,
         github_path: None,
     };
     daemon.spawn();
@@ -810,10 +968,10 @@ fn ensure_restarts_a_real_dead_daemon_offline_and_records_a_failed_required_rout
     let _installed = Installed { pid_file: env_home.join("daemon.pid"), original };
     daemon.sigterm();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).unwrap().join(".claude/skills/release/scripts/ensure.sh");
-    let run = |record_cli: &Path| Command::new("bash").arg(&script).arg("qa")
+    let run = |record_cli: &Path| scrub(&mut Command::new("bash"), &daemon.herdr.session).arg(&script).arg("qa")
         .env("FACTORY_ENVS", assets.join("envs")).env("FACTORY_ENVS_CONF", &conf)
         .env("FACTORY_RELEASE_ROOT", &daemon.root).env("FACTORY_RELEASE_SCOPE", "demo")
-        .env("FACTORY_RECORD_CLI", record_cli).env("FACTORY_BIN", &daemon.factory_bin).env("FACTORY_HERDR_BIN", &daemon.herdr_bin)
+        .env("FACTORY_RECORD_CLI", record_cli).env("FACTORY_BIN", &daemon.factory_bin).env("FACTORY_HERDR_BIN", &daemon.herdr.bin)
         .env("RECOVERY_TEST_ROUTE_LOG", &route_log)
         .env("FACTORY_RENEWALS_DISCOVERY", "0")
         .env("PATH", format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap_or_default()))
@@ -826,6 +984,7 @@ fn ensure_restarts_a_real_dead_daemon_offline_and_records_a_failed_required_rout
     let output = run(&daemon.factory_bin);
     assert_eq!(output.status.code(), Some(1), "the intentionally failed route provider must not be called success: {}", String::from_utf8_lossy(&output.stderr));
     daemon.wait_for_http();
+    daemon.assert_own_herdr();
     let report_url = format!("{}/api/environments", daemon.base_url());
     let report = expect_ok(&report_url, &get(&report_url))["report"].clone();
     let action = &report["recovery_journal"]["actions"][0];
