@@ -144,6 +144,59 @@ impl Asked {
 #[path = "operations_report.rs"]
 mod report;
 
+/// What a `task.update` does to a task's schedule (`#338`): the schedule
+/// before, and the one it will have.
+pub(crate) type ScheduleChange = (Option<factory_core::task::Schedule>, Option<factory_core::task::Schedule>);
+
+/// How a schedule reads in the journal: `0 9 * * 1 (Europe/Berlin)`,
+/// `every 3600s`, or `none`.
+pub(crate) fn describe_schedule(schedule: Option<&factory_core::task::Schedule>) -> String {
+    match schedule {
+        Some(factory_core::task::Schedule::Cron(cron)) => cron.describe(),
+        Some(factory_core::task::Schedule::Every { seconds }) => format!("every {seconds}s"),
+        None => "none".into(),
+    }
+}
+
+impl L4Service<'_> {
+    /// Whether a `task.update` changes the schedule, decided before the edit
+    /// is written. Restating the schedule a task already has -- a form that
+    /// saves every field -- is no change and journals nothing.
+    pub(crate) async fn schedule_change(&self, id: &str, patch: &TaskPatch) -> Result<Option<ScheduleChange>> {
+        if patch.schedule.is_none() && !patch.clear_schedule {
+            return Ok(None);
+        }
+        let current = self.require(id).await?;
+        let after = match (&patch.schedule, patch.clear_schedule) {
+            (Some(schedule), _) => Some(schedule.clone()),
+            (None, true) => None,
+            (None, false) => current.schedule.clone(),
+        };
+        Ok((after != current.schedule).then_some((current.schedule, after)))
+    }
+
+    /// Journal a schedule change once the edit landed, as whoever asked for
+    /// it -- what the store kept, never what was asked.
+    pub(crate) async fn record_schedule_change(&self, task: &Task, (before, after): ScheduleChange, asked: &Asked) {
+        if task.schedule != after {
+            return;
+        }
+        let was = describe_schedule(before.as_ref());
+        let message = match (&after, task.next_run_at) {
+            (Some(schedule), Some(next)) => format!(
+                "schedule set to {} {} (was {was}); next firing at {}",
+                describe_schedule(Some(schedule)),
+                asked.words(),
+                next.to_rfc3339()
+            ),
+            (Some(schedule), None) => format!("schedule set to {} {} (was {was})", describe_schedule(Some(schedule)), asked.words()),
+            (None, _) => format!("schedule removed {} (was {was})", asked.words()),
+        };
+        let data = serde_json::json!({ "before": before, "after": after });
+        self.entry(&task.id, asked.entry("schedule_changed", message, data)).await;
+    }
+}
+
 impl L4Service<'_> {
 
 

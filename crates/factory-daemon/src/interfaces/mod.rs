@@ -1,8 +1,10 @@
 pub mod http;
 pub mod socket;
+pub mod telegram;
 
 pub use http::HttpInterface;
 pub use socket::SocketInterface;
+pub use telegram::TelegramInterface;
 
 pub(crate) use factory_infrastructure::interfaces::interface_facts;
 #[cfg(test)]

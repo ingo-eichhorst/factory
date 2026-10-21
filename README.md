@@ -20,7 +20,7 @@ the daemon cannot tell a built-in implementation from a plugin:
 | **Agent** | how a harness is started, what a task sounds like to it, and how to check it starts | `claude-code`, `pi`, `codex`, `opencode`, `shell` |
 | **Agent runtime** | where agents actually run | `herdr` |
 | **Task store** | where tasks live — the CRUD contract, chosen per scope | `sqlite` |
-| **Interface** | how the outside reaches the daemon | `cli` (unix socket), `http` (REST + WebSocket + UI) |
+| **Interface** | how the outside reaches the daemon | `cli` (unix socket), `http` (REST + WebSocket + UI), `telegram` (mounted for each channel with an `inbound:` block, not listed under `daemon.interfaces`) |
 | **Knowledge provider** | how the knowledge vault is searched — read side only | `keyword` |
 
 The public compatibility paths are in `crates/factory-core/src/adapter/`.
@@ -952,8 +952,8 @@ factory notify owner-telegram "Konferenz-Radar 26.10.: 2 neue CFPs, Top 5 …" \
   digest and counts only, never the text) only once everything went, so a
   send that failed halfway is not a repeat and the next attempt sends it
   again -- the error says what had already gone.
-- Outbound only. Nothing calls `getUpdates`: a bot token has one poller, and
-  that belongs to the inbound gateway (#338).
+- Sending never calls `getUpdates`: a bot token has one poller, and that is
+  the channel's own inbound gateway, below.
 
 **Who may send: a standing approval.** A cron schedule never authorizes an
 external effect on its own. `--deliver <channel>` on `factory task create`
@@ -992,6 +992,104 @@ factory task create "Konferenz-Radar" --scope conferenz-radar \
 The daemon reads `--file` paths on the host. A run inside an OpenShell
 sandbox (`FACTORY_URL`) can send text, but its paths name nothing there, so
 its files are refused as outside its working directory.
+
+### Taking messages in (#338)
+
+A channel with an `inbound:` block is also how the owner reaches Factory
+from Telegram: a chat with the assistant, files both ways, and the owner's
+schedules managed from the phone.
+
+```yaml
+channels:
+  - name: owner-telegram
+    kind: telegram
+    token: { secret: telegram-bot-token }
+    chat: { secret: owner-telegram-chat }       # the owner's chat with the bot: its numeric id
+    inbound:
+      users: { secret: telegram-owner-ids }     # or [123456789]: who may write
+      scope: assistant                          # a message becomes a task here...
+      agent: assistant                          # ...for this agent
+      # files: ~/Library/Application Support/BusinessFactory/telegram   # default .factory/channels/<name>/inbox
+      # max_file_bytes: 20971520                # default 20 MB, what Telegram's Bot API lets a bot download
+      # language: de                            # the gateway's own lines; en by default
+```
+
+- **One consumer per bot token.** The daemon mounts a `telegram` interface
+  for each such channel; it is the token's only `getUpdates` consumer. Two
+  channels taking messages in through the same token are refused at load.
+  While one holds the token, any other consumer is refused with who holds it
+  -- another request in this daemon, and another Factory instance on this
+  host, which finds an `flock` on `/tmp/factory-telegram-<uid>/<digest>.lock`
+  (named by the token's SHA-256, never the token) saying which daemon pid and
+  instance holds it. When Telegram itself answers `409` -- someone else polls
+  the token, or a webhook is set -- the gateway stops asking rather than
+  fight it, journals why, and polls again only after a restart. Factory
+  never sets or removes a webhook.
+- **The allowlist** is Telegram user ids from the config or a source
+  (`{ secret: }`, `env`, `file`, `command`, `keychain`; the value is the ids
+  separated by commas or spaces), never from a message. Only a message from
+  one of them, in the channel's own chat, is taken. Anything else -- a
+  stranger, another chat, a bot, a button pressed by someone else -- is
+  ignored and journaled on `factory:channels` (`inbound_ignored`, with the
+  sender's and chat's ids and nothing they wrote), never answered, and its
+  files are never fetched.
+- **A message is a task** for `agent` in `scope`, run at once without a
+  worktree, approved to answer on this channel (`deliver`), carrying the
+  labels `inbound.channel`, `inbound.message` and `inbound.update`. The owner
+  gets an acknowledgement within seconds, and the run's `--result` comes back
+  as the answer when the run ends -- there is no fixed timeout but the run's
+  own. A run that reports `blocked` has its question passed on; it is
+  answered in Factory as any other. The run is told in its reporting
+  contract that its result is the answer. Each message is a run of its own,
+  in a fresh session: the conversation carries no memory between messages
+  beyond what the agent keeps itself. A waiting answer survives a restart:
+  the task carries the message it answers, and `inbound.answered` once it
+  went. An answer longer than ten Telegram messages goes as a file.
+- **Files in.** A document, photo (the largest size that fits), voice note,
+  audio or video from an allowed user is downloaded into the inbox --
+  `<files>/<date>/<update>-<n>-<name>`, owner-only, the name reduced to
+  letters, digits, `.`, `-` and `_` -- and listed in the task's instructions
+  as absolute paths, in lines that start with `#` (a shell reads them as
+  comments). Over `max_file_bytes`, by what Telegram says and by what was
+  written, it is refused by name and never kept. Voice notes are not
+  transcribed.
+- **Files out** go through `factory notify` as for any run: the task is
+  approved for this channel, and a file must be inside the run's working
+  directory -- the scope's directory, since there is no worktree. A file
+  from the inbox has to be copied there first to be sent back.
+- **Commands** are the owner's, through the same handler as the CLI's, with
+  the owner's identity, so each is journaled as the owner's with "on
+  Telegram" as the reason: `/jobs` lists scheduled and running tasks;
+  `/run <task>` runs one now (`run_requested ... by the owner: asked on
+  Telegram`); `/schedule <task> <minute> <hour> <day> <month> <weekday>
+  [timezone]` asks first, with Yes/No buttons (or the words "Ja"/"Nein"), and
+  only on a yes edits the task (`schedule_changed ... by the owner: confirmed
+  on Telegram`). A timezone left out keeps the task's own rather than turning
+  the schedule into UTC. A task is named by its id, an id prefix, its title
+  or a unique part of it. `/intake <text>` hands a request to intake as a
+  relayed `chat` item from provider `telegram`, keyed on the message, as the
+  iMessage assistant does with `factory_intake`. `/help` lists them.
+- **The assistant's proposals.** The natural-language version -- "Lass den
+  Konferenz-Radar jetzt laufen", "verschieb ihn auf Freitag 8 Uhr" -- is the
+  assistant's to translate: a result whose last line is `/run <task>`,
+  `/schedule <task> ...` or `/jobs` is sent without that line, followed by
+  the confirmation question with buttons. Nothing it proposes happens
+  without the owner's yes. A question waits ten minutes, in memory only: a
+  restart forgets it, and a button pressed after that says it expired.
+- **What is journaled** on `factory:channels`: `inbound_started`,
+  `inbound_ignored`, `inbound_refused`, `inbound_proposed`,
+  `inbound_confirmed`, `inbound_declined` and `inbound_failed`, with ids and
+  counts, never a message's text. Every answer and acknowledgement is an
+  owner's `notify_sent` there too, with `reply_to`.
+- `agent: shell` turns every allowed message into a command on this host:
+  it is how the tests drive the gateway, and nothing a real instance should
+  use.
+
+`channel.poll` (one `getUpdates`, sorted, files fetched) and `channel.record`
+(a line on `factory:channels`) are the two requests the gateway adds; both
+are the owner's alone. `notify` gains `reply_to` and `buttons`, also the
+owner's alone: a run sends its result, and an answer to a particular message
+is never another answer's repeat.
 
 ## Dependencies
 
@@ -4562,6 +4660,10 @@ channels:                    # optional: where a run can send the owner its resu
     kind: telegram
     token: { secret: telegram-bot-token }
     chat: { from: env, name: FACTORY_OWNER_TELEGRAM_CHAT }
+    inbound:                   # optional: take the owner's messages in, see "Taking messages in"
+      users: [123456789]
+      scope: assistant
+      agent: assistant
 
 scope:                       # optional: make the instance root a scope too
   id: cc23161d-82b9-4e75-8d88-e5195bc6d6e8
@@ -5268,7 +5370,12 @@ start/list/cancel under `/api/workflows` and `/api/workflow-runs`, and
 is the event stream: a snapshot of every task first, then one message per event.
 
 Adding an interface — mcp, or anything else — means translating to that
-envelope, not inventing a second API.
+envelope, not inventing a second API. The `telegram` interface (#338) is
+one: mounted for each channel with an `inbound:` block (it is not a
+`daemon.interfaces` kind), it turns what the
+owner writes into `task.create`, `task.run`, `task.update`, `task.list`,
+`intake.add` and `notify` envelopes, handled as the owner's -- see "Taking
+messages in".
 
 ## The web UI
 

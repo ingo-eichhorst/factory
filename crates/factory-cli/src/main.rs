@@ -1891,7 +1891,7 @@ async fn main() -> Result<()> {
 
         Command::Notify { channel, text, files } => {
             let files = notify_files(&files)?;
-            let payload = client.send(Request::Notify { channel, text, files }).await?;
+            let payload = client.send(Request::Notify { channel, text, files, reply_to: None, buttons: Vec::new() }).await?;
             print(&payload, cli.json, notified_text)
         }
 

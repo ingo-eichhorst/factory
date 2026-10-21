@@ -699,6 +699,13 @@ impl L4Service<'_> {
                 required_steps: run.required_steps.clone(),
                 agent_exits,
                 deliver: task.deliver.clone(),
+                // `#338`: a message the owner sent through a channel, which
+                // the task is approved to answer there.
+                reply: task
+                    .labels
+                    .get(factory_environment::channels::LABEL_CHANNEL)
+                    .filter(|channel| task.deliver.as_deref() == Some(channel.as_str()))
+                    .cloned(),
             }),
             identity_token: None,
             role,

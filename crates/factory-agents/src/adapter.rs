@@ -64,6 +64,11 @@ pub struct TaskBinding {
     /// there is none, like `upstream`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliver: Option<String>,
+    /// The channel this task is a message from (`#338`): the owner wrote it
+    /// there, and the run's result goes back there as the answer. Set only
+    /// when it is also the channel `deliver` names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,6 +412,18 @@ impl AgentContext {
             ),
             None => String::new(),
         };
+        let reply = match &binding.reply {
+            Some(channel) => format!(
+                "Answering: this task is a message the owner sent through the channel {channel}, and your `--result` is \
+                 sent back to them there as the answer -- write it to them, in the language they wrote in, and keep it \
+                 short. Files that came with the message are listed in the instructions as paths on this host. To send \
+                 them a file, use the notify command above with `--file`. To run, list or reschedule one of their tasks, \
+                 do not do it yourself: end your result with one line, `/jobs`, `/run <task id>` or \
+                 `/schedule <task id> <cron> [timezone]`, and they get a button to confirm it.\n\
+                 \n"
+            ),
+            None => String::new(),
+        };
         let scope = &self.scope;
         let contract = format!(
             "Report progress by running these commands in your shell. They are how \
@@ -422,6 +439,7 @@ impl AgentContext {
              Release outputs: add `--artifact <file>` to the done command (repeat for multiple files). Paths are relative to this run's working directory. Factory captures their bytes and publishes provenance only after required verification passes; do not change the source or outputs while it verifies.\n\
              \n\
              {delivery}\
+             {reply}\
              Dependency scans attach CycloneDX documents with `{bin} task attach{attach_to} --kind sbom|vulnerabilities <file>`. \
              Authored VEX is available with `{bin} dependencies vex {scope}`.\n\
              \n\
@@ -1101,6 +1119,7 @@ mod tests {
             required_steps: Vec::new(),
             agent_exits: Vec::new(),
             deliver: None,
+            reply: None,
         });
         ctx.identity_token = None;
         ctx
@@ -1436,6 +1455,24 @@ mod tests {
         );
         assert!(
             contract.contains("Factory's to choose.\n- Gave up:"),
+            "{contract}"
+        );
+    }
+
+    #[test]
+    fn a_message_from_a_channel_is_told_its_result_is_the_answer_and_how_to_ask_for_a_confirmation() {
+        let plain = with_task(base(Some(worker()))).reporting_contract();
+        assert!(!plain.contains("Answering:"), "{plain}");
+
+        let mut message = with_task(base(Some(worker())));
+        let binding = message.task.as_mut().unwrap();
+        binding.deliver = Some("owner-telegram".into());
+        binding.reply = Some("owner-telegram".into());
+        let contract = message.reporting_contract();
+        assert!(
+            contract.contains("a message the owner sent through the channel owner-telegram")
+                && contract.contains("`/schedule <task id> <cron> [timezone]`")
+                && contract.contains("notify owner-telegram"),
             "{contract}"
         );
     }

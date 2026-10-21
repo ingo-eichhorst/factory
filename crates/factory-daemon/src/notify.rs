@@ -17,11 +17,11 @@ use crate::access::Caller;
 use crate::l4_service::L4Service;
 use factory_agents::dispatch::Channels;
 use factory_core::error::{FactoryError, Result};
-use factory_core::protocol::{Notified, NotifyOutcome};
+use factory_core::protocol::{InboundKind, InboundRecord, Notified, NotifyOutcome};
 use factory_core::run::Run;
 use crate::operations::Asked;
 use factory_core::task::{Task, TaskEntry, TaskPatch};
-use factory_environment::channels::{self as ch, Outgoing, OutgoingFile, Receipt};
+use factory_environment::channels::{self as ch, Button, Outgoing, OutgoingFile, Receipt};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -171,6 +171,37 @@ impl L4Service<'_> {
         Ok(())
     }
 
+    /// `Request::ChannelRecord` (`#338`): one line on the channels' own
+    /// journal about something that came in. The owner's gateway is the one
+    /// caller (`access.rs`); the kind is one of `InboundKind`'s, so nothing
+    /// written here can pass for a send or an approval.
+    pub(crate) async fn record_inbound(&self, channel: &str, record: InboundRecord) -> Result<()> {
+        if ch::find(&self.wiring.snapshot().config.channels, channel).is_none() {
+            return Err(refused(format!("no channel {channel:?} is declared in the instance root's channels:")));
+        }
+        let mut data = match record.data {
+            serde_json::Value::Object(map) => map,
+            serde_json::Value::Null => serde_json::Map::new(),
+            _ => return Err(refused("an inbound record's data is an object")),
+        };
+        data.insert("channel".into(), channel.into());
+        let source = match record.kind {
+            // Not the owner's doing: the gateway saw it and let it be.
+            InboundKind::Ignored | InboundKind::Refused | InboundKind::Started => "daemon",
+            _ => "owner",
+        };
+        let message = record.message.trim();
+        if message.is_empty() {
+            return Err(refused("an inbound record says what happened"));
+        }
+        self.entry(
+            CHANNELS_JOURNAL,
+            TaskEntry::new(source, record.kind.journal_kind(), format!("{channel}: {message}")).with_data(data.into()),
+        )
+        .await;
+        Ok(())
+    }
+
     /// `Request::Notify`: check the approval, read the files, hand the send
     /// down, and journal what became of it.
     pub(crate) async fn notify(
@@ -179,8 +210,19 @@ impl L4Service<'_> {
         channel: &str,
         text: String,
         files: Vec<String>,
+        reply_to: Option<i64>,
+        buttons: Vec<Button>,
     ) -> Result<Notified> {
         let snapshot = self.wiring.snapshot();
+        // `#338`: answering a particular message and putting buttons under
+        // one are the inbound gateway's -- the owner's. A run sends its
+        // result, and a reply_to would only let it dodge the repeat check.
+        if !matches!(caller, Caller::Owner) && (reply_to.is_some() || !buttons.is_empty()) {
+            return Err(FactoryError::Denied(format!(
+                "{} may not send a reply or buttons through {channel}; those are the owner's inbound gateway's",
+                caller.describe()
+            )));
+        }
         let sender = match caller {
             Caller::Owner => Sender::Owner,
             Caller::Agent { run_id: Some(run_id), .. } => {
@@ -246,12 +288,18 @@ impl L4Service<'_> {
             read.push(read_file(&file_path(dir.as_deref(), asked)?)?);
         }
 
-        let data = serde_json::json!({
+        let mut data = serde_json::json!({
             "channel": channel,
             "approval": approval,
             "text": { "chars": text.chars().count(), "bytes": text.len(), "sha256": ch::sha256_hex(text.as_bytes()) },
             "files": read.iter().map(|r| serde_json::json!({ "bytes": r.file.bytes.len(), "sha256": r.sha256 })).collect::<Vec<_>>(),
         });
+        if let Some(id) = reply_to {
+            data["reply_to"] = id.into();
+        }
+        if !buttons.is_empty() {
+            data["buttons"] = buttons.len().into();
+        }
         let bytes: usize = text.len() + read.iter().map(|r| r.file.bytes.len()).sum::<usize>();
         let (run, task) = match &sender {
             Sender::Owner => (None, None),
@@ -263,6 +311,8 @@ impl L4Service<'_> {
             files: read.into_iter().map(|r| r.file).collect(),
             run,
             task,
+            reply_to,
+            buttons,
         };
 
         let with = |mut data: serde_json::Value, extra: serde_json::Value| {
@@ -444,7 +494,7 @@ mod tests {
         async fn send(&self, token: Option<&str>, channel: &str, text: &str, files: Vec<String>) -> Response {
             self.engine
                 .handle(Envelope {
-                    request: Request::Notify { channel: channel.into(), text: text.into(), files },
+                    request: Request::Notify { channel: channel.into(), text: text.into(), files, reply_to: None, buttons: Vec::new() },
                     token: token.map(str::to_string),
                 })
                 .await

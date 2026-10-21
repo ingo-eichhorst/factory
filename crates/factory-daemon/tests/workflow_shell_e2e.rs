@@ -2771,3 +2771,291 @@ fn workflow_preview_owners_read_live_requirements_but_dispatch_freezes_its_own_p
     let final_report = expect_ok(&report_url, &get(&report_url))["report"].clone();
     assert_eq!(final_report["workflow_enforcement"].as_array().unwrap().len(), 1);
 }
+
+/// `#338`'s stand-in for Telegram: what `FakeBotApi` is, plus the inbound
+/// side -- a queue `getUpdates` answers from (waiting a little when it is
+/// empty, as a long poll does), files for `getFile` and their downloads --
+/// and one thread per connection, so a waiting poll never holds up a send.
+struct FakeTelegram {
+    port: u16,
+    calls: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+    updates: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    files: std::sync::Arc<std::sync::Mutex<Vec<(String, String, Vec<u8>)>>>,
+}
+
+fn form_field(body: &[u8], name: &str) -> Option<String> {
+    let body = String::from_utf8_lossy(body);
+    let marker = format!("name=\"{name}\"\r\n\r\n");
+    let start = body.find(&marker)? + marker.len();
+    let end = body[start..].find("\r\n--").map(|at| start + at).unwrap_or(body.len());
+    Some(body[start..end].to_string())
+}
+
+impl FakeTelegram {
+    fn start() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the fake Bot API");
+        let port = listener.local_addr().unwrap().port();
+        let fake = Self {
+            port,
+            calls: Default::default(),
+            updates: Default::default(),
+            files: Default::default(),
+        };
+        let (calls, updates, files) = (fake.calls.clone(), fake.updates.clone(), fake.files.clone());
+        let next = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(5000));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let (calls, updates, files, next) = (calls.clone(), updates.clone(), files.clone(), next.clone());
+                std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    let mut writer = stream.try_clone().unwrap();
+                    let mut reader = std::io::BufReader::new(stream);
+                    let mut first = String::new();
+                    if reader.read_line(&mut first).is_err() {
+                        return;
+                    }
+                    let path = first.split_whitespace().nth(1).unwrap_or_default().to_string();
+                    let (mut length, mut expect) = (0usize, false);
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).is_err() || line.trim_end().is_empty() {
+                            break;
+                        }
+                        let lower = line.to_ascii_lowercase();
+                        if let Some(v) = lower.strip_prefix("content-length:") {
+                            length = v.trim().parse().unwrap_or(0);
+                        }
+                        expect |= lower.starts_with("expect:");
+                    }
+                    if expect {
+                        let _ = writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+                    }
+                    let mut body = vec![0; length];
+                    if reader.read_exact(&mut body).is_err() {
+                        return;
+                    }
+                    calls.lock().unwrap().push((path.clone(), body.clone()));
+                    let method = path.rsplit('/').next().unwrap_or_default().to_string();
+                    let reply: Vec<u8> = if let Some(rest) = path.strip_prefix("/file/bot") {
+                        let wanted = rest.split_once('/').map(|(_, p)| p.to_string()).unwrap_or_default();
+                        files.lock().unwrap().iter().find(|(_, p, _)| *p == wanted).map(|(_, _, b)| b.clone()).unwrap_or_default()
+                    } else {
+                        let result = match method.as_str() {
+                            "getUpdates" => {
+                                let offset: i64 = form_field(&body, "offset").and_then(|o| o.parse().ok()).unwrap_or(0);
+                                let deadline = Instant::now() + Duration::from_secs(2);
+                                loop {
+                                    let ready: Vec<Value> = {
+                                        let mut queued = updates.lock().unwrap();
+                                        queued.retain(|u| u["update_id"].as_i64().unwrap_or(0) >= offset);
+                                        queued.clone()
+                                    };
+                                    if !ready.is_empty() || Instant::now() > deadline {
+                                        break json!(ready);
+                                    }
+                                    std::thread::sleep(Duration::from_millis(50));
+                                }
+                            }
+                            "getFile" => {
+                                let id = form_field(&body, "file_id").unwrap_or_default();
+                                let found = files.lock().unwrap().iter().find(|(i, _, _)| *i == id).map(|(_, p, b)| (p.clone(), b.len()));
+                                match found {
+                                    Some((p, size)) => json!({ "file_id": id, "file_path": p, "file_size": size }),
+                                    None => Value::Null,
+                                }
+                            }
+                            "answerCallbackQuery" => json!(true),
+                            _ => json!({ "message_id": next.fetch_add(1, std::sync::atomic::Ordering::SeqCst) }),
+                        };
+                        json!({ "ok": true, "result": result }).to_string().into_bytes()
+                    };
+                    let _ = write!(writer, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.len());
+                    let _ = writer.write_all(&reply);
+                });
+            }
+        });
+        fake
+    }
+
+    fn push(&self, update: Value) {
+        self.updates.lock().unwrap().push(update);
+    }
+
+    /// Every `sendMessage`: (the message it answers, its text, its buttons' data).
+    fn sent(&self) -> Vec<(Option<i64>, String, Vec<String>)> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/sendMessage"))
+            .map(|(_, body)| {
+                let reply = form_field(body, "reply_parameters")
+                    .and_then(|p| serde_json::from_str::<Value>(&p).ok())
+                    .and_then(|p| p["message_id"].as_i64());
+                let buttons = form_field(body, "reply_markup")
+                    .and_then(|m| serde_json::from_str::<Value>(&m).ok())
+                    .map(|m| {
+                        m["inline_keyboard"][0]
+                            .as_array()
+                            .map(|row| row.iter().filter_map(|b| b["callback_data"].as_str().map(str::to_string)).collect())
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                (reply, form_field(body, "text").unwrap_or_default(), buttons)
+            })
+            .collect()
+    }
+
+    /// Any `sendMessage` that says `containing`, whatever it answers.
+    fn said(&self, containing: &str) -> Option<Value> {
+        self.sent().into_iter().find(|(_, text, _)| text.contains(containing)).map(|(to, text, _)| json!({ "to": to, "text": text }))
+    }
+
+    fn answer_to(&self, message: i64, containing: &str) -> Option<Value> {
+        self.sent()
+            .into_iter()
+            .find(|(to, text, _)| *to == Some(message) && text.contains(containing))
+            .map(|(_, text, buttons)| json!({ "text": text, "buttons": buttons }))
+    }
+}
+
+/// Configure `daemon` (stopped) with a Telegram channel that takes messages
+/// in from `owner` as tasks for the `shell` agent in `demo`.
+fn configure_telegram(daemon: &Daemon, token: &str, chat: i64, owner: i64, api: u16) {
+    let token_file = daemon.root.join(".factory/bot-token");
+    std::fs::write(&token_file, token).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let path = daemon.root.join(".factory/config.yaml");
+    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["secrets"] = serde_yaml_ng::to_value(json!([
+        {"name": "telegram-bot-token", "kind": "token", "source": {"from": "file", "path": token_file.display().to_string()}, "expires": "never"}
+    ]))
+    .unwrap();
+    config["channels"] = serde_yaml_ng::to_value(json!([{
+        "name": "owner-telegram", "kind": "telegram",
+        "token": {"secret": "telegram-bot-token"},
+        "chat": {"from": "command", "run": format!("printf {chat}")},
+        "api": format!("http://127.0.0.1:{api}"),
+        "inbound": {"users": [owner], "scope": "demo", "agent": "shell"},
+    }]))
+    .unwrap();
+    std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+}
+
+/// `#338`'s acceptance, end to end: a real daemon polls a fake Bot API
+/// through its Telegram gateway. The owner's message becomes a run of the
+/// `shell` agent -- acknowledged within seconds, answered with what the run
+/// reported when it ends; a stranger's is journaled and never answered; a
+/// document lands as a file the run reads; a file the run makes goes back
+/// through `factory notify` as a document; `/jobs`, a confirmed
+/// `/schedule` and `/run` go through the one handler as the owner's and are
+/// journaled so. A second daemon on the same bot token is refused, with who
+/// holds it. No real Telegram traffic.
+#[test]
+fn telegram_messages_reach_the_shell_agent_files_go_both_ways_and_schedules_change_only_on_a_yes() {
+    if missing_prerequisites() {
+        return;
+    }
+    const CHAT: i64 = 777000777;
+    const OWNER: i64 = 4100001;
+    let token = format!("{}:E2E-inbound-{}", 300000 + std::process::id() % 600000, uuid::Uuid::new_v4().simple());
+    let bot = FakeTelegram::start();
+    let mut daemon = provision();
+    daemon.sigterm();
+    configure_telegram(&daemon, &token, CHAT, OWNER, bot.port);
+    daemon.spawn();
+    let base = daemon.base_url();
+    let channels = "factory:channels";
+    wait_for("the gateway started", Duration::from_secs(15), || {
+        entries(&base, channels).into_iter().find(|e| e["kind"] == "inbound_started")
+    });
+    let message = |update: i64, id: i64, from: i64, text: &str| {
+        json!({ "update_id": update, "message": { "message_id": id, "date": 1_790_000_000,
+            "from": { "id": from, "is_bot": false }, "chat": { "id": CHAT, "type": "private" }, "text": text } })
+    };
+
+    // A stranger: journaled, never answered.
+    bot.push(message(1, 10, 999, "echo intruder"));
+    let ignored = wait_for("the stranger journaled", Duration::from_secs(15), || {
+        entries(&base, channels).into_iter().find(|e| e["kind"] == "inbound_ignored")
+    });
+    assert_eq!(ignored["data"]["user"], 999);
+
+    // The owner: acknowledged within seconds, answered when the run ends.
+    let asked = Instant::now();
+    bot.push(message(2, 11, OWNER, "echo pong-from-shell"));
+    wait_for("the acknowledgement", Duration::from_secs(10), || bot.answer_to(11, "answer here"));
+    assert!(asked.elapsed() < Duration::from_secs(10), "acknowledged in {:?}", asked.elapsed());
+    wait_for("the run's answer", Duration::from_secs(90), || bot.answer_to(11, "pong-from-shell"));
+    assert!(bot.sent().iter().all(|(_, text, _)| !text.contains("intruder")), "the stranger got nothing");
+
+    // A document: saved, and the run reads it by its path.
+    bot.files.lock().unwrap().push(("DOC-1".into(), "documents/file_1.txt".into(), b"hello from the phone".to_vec()));
+    bot.push(json!({ "update_id": 3, "message": { "message_id": 12, "date": 1_790_000_000,
+        "from": { "id": OWNER }, "chat": { "id": CHAT, "type": "private" },
+        "caption": "cat .factory/channels/owner-telegram/inbox/*/3-0-note.txt",
+        "document": { "file_id": "DOC-1", "file_name": "note.txt", "mime_type": "text/plain", "file_size": 20 } } }));
+    wait_for("the document's content in the answer", Duration::from_secs(90), || bot.answer_to(12, "hello from the phone"));
+
+    // A file the run makes goes back as a document, under the task's approval.
+    bot.push(message(4, 13, OWNER, "mkdir -p out && printf 'E2E-REPORT-BODY' > out/report.md && \"$FACTORY_BIN\" notify owner-telegram 'Hier ist der Bericht' --file out/report.md && echo report-sent"));
+    wait_for("the answer after the send", Duration::from_secs(90), || bot.answer_to(13, "report-sent"));
+    let document = bot.calls.lock().unwrap().iter().find(|(p, _)| p.ends_with("/sendDocument")).cloned().expect("a document went");
+    assert!(String::from_utf8_lossy(&document.1).contains("E2E-REPORT-BODY"));
+
+    // Schedules, from the chat: list, reschedule only on a yes, run now.
+    let url = format!("{base}/api/tasks");
+    let radar = expect_ok(&url, &post(&url, &json!({
+        "title": "Konferenz-Radar", "scope": "demo", "agent": "shell", "worktree": false, "instructions": "echo radar",
+        "schedule": {"cron": {"expr": "0 9 * * 1", "timezone": "Europe/Berlin"}},
+    })))["task"]["id"].as_str().unwrap().to_string();
+    bot.push(message(5, 14, OWNER, "/jobs"));
+    wait_for("the job list", Duration::from_secs(15), || bot.answer_to(14, "Konferenz-Radar – 0 9 * * 1 (Europe/Berlin)"));
+    bot.push(message(6, 15, OWNER, "/schedule Konferenz-Radar 0 8 * * 5"));
+    let question = wait_for("the question", Duration::from_secs(15), || bot.answer_to(15, "Reschedule"));
+    let yes = question["buttons"][0].as_str().unwrap().to_string();
+    let task_url = format!("{base}/api/tasks/{radar}");
+    assert_eq!(expect_ok(&task_url, &get(&task_url))["task"]["schedule"]["cron"]["expr"], "0 9 * * 1", "not before the yes");
+    bot.push(json!({ "update_id": 7, "callback_query": { "id": "Q7", "from": { "id": OWNER }, "data": yes,
+        "message": { "message_id": 5001, "chat": { "id": CHAT } } } }));
+    // Said under the question the button was pressed on.
+    let done = wait_for("the reschedule", Duration::from_secs(15), || bot.said("Rescheduled"));
+    assert_eq!(done["to"], 5001, "{done}");
+    let schedule = expect_ok(&task_url, &get(&task_url))["task"]["schedule"].clone();
+    assert_eq!(schedule, json!({"cron": {"expr": "0 8 * * 5", "timezone": "Europe/Berlin"}}));
+    let changed = entries(&base, &radar).into_iter().find(|e| e["kind"] == "schedule_changed").expect("journaled");
+    assert_eq!(changed["source"], "owner");
+    assert!(changed["message"].as_str().unwrap().contains("by the owner: confirmed on Telegram"), "{changed}");
+    bot.push(message(8, 16, OWNER, "/run Konferenz-Radar"));
+    wait_for("the start", Duration::from_secs(15), || bot.answer_to(16, "Started: Konferenz-Radar"));
+    let requested = wait_for("the run requested", Duration::from_secs(15), || {
+        entries(&base, &radar).into_iter().find(|e| e["kind"] == "run_requested")
+    });
+    assert!(requested["message"].as_str().unwrap().contains("by the owner: asked on Telegram"), "{requested}");
+    let kinds: Vec<Value> = entries(&base, channels).into_iter().map(|e| e["kind"].clone()).collect();
+    assert!(kinds.contains(&json!("inbound_proposed")) && kinds.contains(&json!("inbound_confirmed")), "{kinds:?}");
+
+    // A second daemon on the same bot token: refused, with who holds it.
+    let mut second = provision();
+    second.sigterm();
+    configure_telegram(&second, &token, CHAT, OWNER, bot.port);
+    second.spawn();
+    let refused = wait_for("the second consumer refused", Duration::from_secs(15), || {
+        entries(&second.base_url(), channels).into_iter().find(|e| e["kind"] == "inbound_refused")
+    });
+    let why = refused["message"].as_str().unwrap();
+    assert!(why.contains("already has its one getUpdates consumer on this host") && why.contains(&daemon.root.display().to_string()), "{why}");
+    assert!(!why.contains(&token));
+    // The first keeps taking messages in.
+    bot.push(message(9, 17, OWNER, "echo still-here"));
+    wait_for("the first daemon still answers", Duration::from_secs(90), || bot.answer_to(17, "still-here"));
+
+    let journal = serde_json::to_string(&entries(&base, channels)).unwrap();
+    for secret in [token.as_str(), "intruder", "hello from the phone"] {
+        assert!(!journal.contains(secret), "the channels' journal must not carry {secret:?}");
+    }
+}

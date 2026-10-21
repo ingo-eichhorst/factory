@@ -411,6 +411,11 @@ impl Engine {
             // it could do" (`#170`). Flagging (above) stays `intake.assess`;
             // this is the one door no grant opens.
             Request::IntakeSecurity { .. } => return Needs::Owner,
+            // `#338`: polling a channel's bot token reads what the owner was
+            // sent, and there is one consumer per token; journaling what came
+            // in speaks for the owner's gateway. Both are the owner's alone
+            // -- the daemon's own Telegram gateway calls them as the owner.
+            Request::ChannelPoll { .. } | Request::ChannelRecord { .. } => return Needs::Owner,
         })
     }
 

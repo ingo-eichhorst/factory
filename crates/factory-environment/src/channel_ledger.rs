@@ -2,6 +2,11 @@
 //! before it goes, and writes once it went. One row per send, append-only --
 //! the channel, the message's digest, the run, the time and the counts.
 //! Never the text, never a file.
+//!
+//! Beside it, what each inbound channel has handled (`#338`): one row per
+//! channel, the offset its next `getUpdates` passes -- everything before it
+//! was handled -- so a restarted daemon picks up where it stopped instead of
+//! taking the last batch in a second time. Never a message.
 
 use chrono::{DateTime, Utc};
 use factory_kernel::{FactoryError, Result};
@@ -13,6 +18,7 @@ use std::{
 };
 
 const TABLE: &str = "channel_sends";
+const OFFSETS: &str = "channel_inbound_offsets";
 
 fn error(error: impl std::fmt::Display) -> FactoryError {
     FactoryError::adapter("channel ledger sqlite", error.to_string())
@@ -51,7 +57,8 @@ impl ChannelLedger {
         conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(error)?;
         conn.execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS {TABLE} (id TEXT PRIMARY KEY, channel TEXT NOT NULL, digest TEXT NOT NULL, sent_at TEXT NOT NULL, data TEXT NOT NULL);
-             CREATE INDEX IF NOT EXISTS {TABLE}_digest ON {TABLE} (channel, digest, sent_at)"
+             CREATE INDEX IF NOT EXISTS {TABLE}_digest ON {TABLE} (channel, digest, sent_at);
+             CREATE TABLE IF NOT EXISTS {OFFSETS} (channel TEXT PRIMARY KEY, next_offset INTEGER NOT NULL, at TEXT NOT NULL)"
         ))
         .map_err(error)?;
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
@@ -100,6 +107,40 @@ impl ChannelLedger {
         .await
         .map_err(error)?
     }
+
+    /// The offset `channel`'s next poll starts from, if it ever polled.
+    pub async fn offset(&self, channel: &str) -> Result<Option<i64>> {
+        let conn = self.conn.clone();
+        let channel = channel.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(error)?;
+            conn.query_row(&format!("SELECT next_offset FROM {OFFSETS} WHERE channel = ?1"), params![channel], |row| row.get(0))
+                .optional()
+                .map_err(error)
+        })
+        .await
+        .map_err(error)?
+    }
+
+    /// Everything before `offset` was handled. Never moves backwards.
+    pub async fn handled_before(&self, channel: &str, offset: i64) -> Result<()> {
+        let conn = self.conn.clone();
+        let channel = channel.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(error)?;
+            conn.execute(
+                &format!(
+                    "INSERT INTO {OFFSETS} (channel, next_offset, at) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(channel) DO UPDATE SET next_offset = MAX(next_offset, excluded.next_offset), at = excluded.at"
+                ),
+                params![channel, offset, Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)],
+            )
+            .map_err(error)?;
+            Ok(())
+        })
+        .await
+        .map_err(error)?
+    }
 }
 
 #[cfg(test)]
@@ -131,5 +172,17 @@ mod tests {
         let found = ledger.last_since("owner-telegram", "d1", now - chrono::Duration::hours(12)).await.unwrap().unwrap();
         assert_eq!(found.id, "b");
         assert_eq!(ledger.last_since("other", "d1", now - chrono::Duration::hours(12)).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn an_inbound_offset_is_kept_per_channel_and_never_moves_backwards() {
+        let ledger = ChannelLedger::in_memory().unwrap();
+        assert_eq!(ledger.offset("owner-telegram").await.unwrap(), None);
+        ledger.handled_before("owner-telegram", 41).await.unwrap();
+        ledger.handled_before("owner-telegram", 40).await.unwrap();
+        assert_eq!(ledger.offset("owner-telegram").await.unwrap(), Some(41));
+        ledger.handled_before("owner-telegram", 45).await.unwrap();
+        assert_eq!(ledger.offset("owner-telegram").await.unwrap(), Some(45));
+        assert_eq!(ledger.offset("other").await.unwrap(), None);
     }
 }
