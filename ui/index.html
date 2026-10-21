@@ -10,15 +10,9 @@
      in app.css and the page is still readable, just not condensed. -->
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="/ui/app.css">
-<script>
-  // Before the first paint, and not in a module: a module is deferred, and a
-  // page that renders dark then flips to light has already been seen doing it.
-  try {
-    var saved = localStorage.getItem("factory-theme");
-  } catch (e) { }
-  document.documentElement.dataset.theme =
-    saved === "foundry-light" ? "foundry-light" : "foundry-dark";
-</script>
+<!-- Classic, not a module, so it runs before the first paint; its own file so
+     the UI's CSP needs no 'unsafe-inline' for scripts (#343). -->
+<script src="/ui/js/theme-boot.js"></script>
 </head>
 <body>
 <!-- The title bar, the primary-menu row and the view-tab row stick together as one

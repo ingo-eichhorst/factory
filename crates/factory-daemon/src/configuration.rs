@@ -2515,7 +2515,7 @@ mod tests {
             })
             .await;
         match response {
-            Response::Ok { data: Payload::Dashboard { tiles, source } } => {
+            Response::Ok { data: Payload::Dashboard { tiles, source, .. } } => {
                 assert_eq!(source, Some("projects".into()));
                 assert_eq!(tiles.unwrap()[0].metric.as_ref().unwrap().as_str(), "throughput_week");
             }
@@ -2530,7 +2530,7 @@ mod tests {
             .handle_request(Request::DashboardReset { scope: "projects".into() })
             .await;
         match response {
-            Response::Ok { data: Payload::Dashboard { tiles, source } } => {
+            Response::Ok { data: Payload::Dashboard { tiles, source, .. } } => {
                 assert!(tiles.is_none(), "nothing overrides it any more");
                 assert_eq!(source, None);
             }

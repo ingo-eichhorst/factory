@@ -361,6 +361,30 @@ impl Engine {
             Request::RunProvenance { id } => Ok(Payload::RunProvenance {
                 records: crate::facts::Facts::<factory_kernel::People>::new(self).get::<factory_kernel::ArtifactProvenance>(&id).await?,
             }),
+            // `#343`: one command handler for the CLI, `POST /api/rpc` and
+            // `POST /api/pages/publish` alike.
+            Request::PagePublish { scope, name, title, html, data } => {
+                let publish = crate::pages::PublishPage { scope, name: name.clone(), title, html, data };
+                let (scope, version) = self.l4_service().publish_page(caller, publish).await?;
+                Ok(Payload::PageVersion { scope, name, version })
+            }
+            // The pages and their versions are the `ScopePageFact`, read
+            // live over the People side like any page composition.
+            Request::Pages { scope } => Ok(Payload::Pages {
+                pages: crate::facts::Facts::<factory_kernel::People>::new(self)
+                    .get::<factory_kernel::ScopePageFact>(&factory_process::pages::ScopePagesQuery { scope, name: None })
+                    .await?,
+            }),
+            Request::PageGet { scope, name } => Ok(Payload::Page {
+                page: self.scope_page(&scope, &name).await?,
+            }),
+            Request::PageContent { scope, name, version, part } => Ok(Payload::PageContent {
+                content: self.l4_service().page_content(&scope, &name, version.as_deref(), part).await?,
+            }),
+            Request::PageRollback { scope, name, version } => {
+                let scope = self.l4_service().rollback_page(caller, &scope, &name, &version).await?;
+                Ok(Payload::Page { page: self.scope_page(&scope, &name).await? })
+            }
             Request::RunApprove { id, reason } => Ok(Payload::Run {
                 run: Box::pin(self.decide_approval(
                         caller,
@@ -422,5 +446,20 @@ impl Engine {
             }
             other => Err(misrouted(other.level())),
         }
+    }
+
+    /// One declared page as the `ScopePageFact` reads it, exactly that
+    /// scope's (`#343`).
+    async fn scope_page(&self, scope: &str, name: &str) -> Result<factory_kernel::ScopePageFact> {
+        let canonical = self.factory_snapshot().scope(scope)?.name.clone();
+        crate::facts::Facts::<factory_kernel::People>::new(self)
+            .get::<factory_kernel::ScopePageFact>(&factory_process::pages::ScopePagesQuery {
+                scope: Some(canonical.clone()),
+                name: Some(name.to_string()),
+            })
+            .await?
+            .into_iter()
+            .find(|page| page.scope == canonical)
+            .ok_or_else(|| FactoryError::BadRequest(format!("scope {canonical:?} declares no page {name:?}")))
     }
 }

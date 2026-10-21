@@ -223,7 +223,25 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/agents/role", post(agent_role))
         .route("/api/agents/input", post(agent_input))
         .route("/api/agents/output", post(agent_output))
-        .route("/api/rpc", post(rpc))
+        // The raw envelope is how a sandboxed run reaches the daemon at all,
+        // `page publish` included (`#343`), so its body may be as large as a
+        // page and its data together can be, JSON-escaped.
+        .merge(
+            Router::new()
+                .route("/api/rpc", post(rpc))
+                .route("/api/pages/publish", post(page_publish))
+                .layer(DefaultBodyLimit::max(PUBLISH_BODY_LIMIT))
+                .with_state(engine.clone()),
+        )
+        // `#343`: scope pages. The list and a page's versions are the
+        // `ScopePageFact`; the content is served on its own path below.
+        .route("/api/pages", get(pages_list))
+        .route("/api/pages/page", get(page_get))
+        .route("/api/pages/data", get(page_data))
+        .route("/api/pages/rollback", post(page_rollback))
+        // A page itself: agent-authored HTML, served under its own strict
+        // CSP and never as part of the UI's own documents.
+        .route("/pages/{*path}", get(page_html))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}", get(get_task))
         .route("/api/tasks/{id}", patch(update_task))
@@ -265,9 +283,40 @@ fn router(engine: Arc<Engine>) -> Router {
         .with_state(engine)
 }
 
-async fn index() -> impl IntoResponse {
+/// The largest request body `POST /api/rpc` and `POST /api/pages/publish`
+/// take: the largest page any declaration may allow (`MAX_BYTES_CEILING`),
+/// with room for JSON escaping and its envelope.
+const PUBLISH_BODY_LIMIT: usize = 3 * factory_process::pages::MAX_BYTES_CEILING as usize;
+
+/// The UI's own baseline Content-Security-Policy (`#343`): its scripts and
+/// styles from itself (styles inline too -- the views write `style=`), the
+/// IBM Plex stylesheet and fonts from Google, its sockets back to the host
+/// it was loaded from, and frames only from itself -- which is where a scope
+/// page is shown, sandboxed, under a policy of its own. A frame that tries to
+/// navigate anywhere else is refused by `frame-src`.
+fn ui_csp(host: Option<&str>) -> String {
+    let sockets = match host.filter(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))) {
+        Some(host) => format!(" ws://{host} wss://{host}"),
+        None => String::new(),
+    };
+    format!(
+        "default-src 'self'; script-src 'self'; \
+         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+         font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; \
+         connect-src 'self'{sockets}; frame-src 'self'; worker-src 'self'; object-src 'none'; \
+         base-uri 'none'; form-action 'self'; frame-ancestors 'self'"
+    )
+}
+
+async fn index(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
     (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+            (header::CONTENT_SECURITY_POLICY, ui_csp(host)),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (header::REFERRER_POLICY, "same-origin".to_string()),
+        ],
         crate::ui::INDEX_HTML,
     )
 }
@@ -1536,6 +1585,142 @@ async fn suggest_task(
     Json(suggestion): Json<SuggestionReport>,
 ) -> AxumResponse {
     run(&engine, Request::TaskSuggest { id, suggestion }).await
+}
+
+// ------------------------------------------------------------ pages (#343)
+
+#[derive(serde::Deserialize)]
+struct PagesQuery {
+    scope: Option<String>,
+}
+
+/// `GET /api/pages?scope=` -- the pages a scope and the scopes below it
+/// declare, each with its current and kept versions.
+async fn pages_list(State(engine): State<Arc<Engine>>, Query(q): Query<PagesQuery>) -> AxumResponse {
+    let scope = q.scope.filter(|s| !s.trim().is_empty());
+    run(&engine, Request::Pages { scope }).await
+}
+
+#[derive(serde::Deserialize)]
+struct PageQuery {
+    scope: String,
+    name: String,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+/// `GET /api/pages/page?scope=&name=` -- one page and its versions.
+async fn page_get(State(engine): State<Arc<Engine>>, Query(q): Query<PageQuery>) -> AxumResponse {
+    run(&engine, Request::PageGet { scope: q.scope, name: q.name }).await
+}
+
+/// `GET /api/pages/data?scope=&name=&version=` -- a version's `--data`, which
+/// the UI hands to the page with `postMessage`. The page never fetches it.
+async fn page_data(State(engine): State<Arc<Engine>>, Query(q): Query<PageQuery>) -> AxumResponse {
+    run(
+        &engine,
+        Request::PageContent {
+            scope: q.scope,
+            name: q.name,
+            version: q.version,
+            part: factory_core::protocol::PagePart::Data,
+        },
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct PageRollbackBody {
+    scope: String,
+    name: String,
+    version: String,
+}
+
+/// `POST /api/pages/rollback` -- show an older kept version again.
+async fn page_rollback(State(engine): State<Arc<Engine>>, Json(body): Json<PageRollbackBody>) -> AxumResponse {
+    run(&engine, Request::PageRollback { scope: body.scope, name: body.name, version: body.version }).await
+}
+
+#[derive(serde::Deserialize)]
+struct PagePublishBody {
+    #[serde(default)]
+    scope: Option<String>,
+    name: String,
+    #[serde(default)]
+    title: Option<String>,
+    html: String,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+    /// A run's token, when a run publishes this way rather than through
+    /// `factory page publish`: it says which run and scope this is, exactly
+    /// as the envelope's token does. Absent is the owner.
+    #[serde(default)]
+    token: Option<String>,
+}
+
+/// `POST /api/pages/publish` -- `Request::PagePublish` over REST, the same
+/// handler `factory page publish` reaches through the socket or `/api/rpc`.
+async fn page_publish(State(engine): State<Arc<Engine>>, Json(body): Json<PagePublishBody>) -> AxumResponse {
+    let request = Request::PagePublish {
+        scope: body.scope,
+        name: body.name,
+        title: body.title,
+        html: body.html,
+        data: body.data,
+    };
+    run_as(&engine, request, body.token).await
+}
+
+#[derive(serde::Deserialize)]
+struct PageVersionQuery {
+    #[serde(default)]
+    v: Option<String>,
+}
+
+/// The headers every response on `/pages/` carries, a refusal included:
+/// the page's own strict CSP (sandboxed even when opened on its own, never
+/// on the UI's origin), no sniffing, no referrer, no DNS prefetching, and no
+/// caching -- the current version changes under the same URL.
+fn page_headers(content_type: &'static str) -> [(header::HeaderName, &'static str); 6] {
+    [
+        (header::CONTENT_TYPE, content_type),
+        (header::CONTENT_SECURITY_POLICY, factory_process::pages::PAGE_CSP),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::REFERRER_POLICY, "no-referrer"),
+        (header::X_DNS_PREFETCH_CONTROL, "off"),
+        (header::CACHE_CONTROL, "no-store"),
+    ]
+}
+
+/// `GET /pages/<scope>/<name>[?v=<sha256>]` -- one version of a page, as the
+/// raw HTML the UI frames with `sandbox="allow-scripts"`. A scope name may
+/// itself contain `/`; a page name never does, so the last segment is the
+/// page. Read through `Engine::handle` like every other route.
+async fn page_html(
+    State(engine): State<Arc<Engine>>,
+    Path(path): Path<String>,
+    Query(q): Query<PageVersionQuery>,
+) -> AxumResponse {
+    let Some((scope, name)) = path.rsplit_once('/') else {
+        return (StatusCode::NOT_FOUND, page_headers("text/plain; charset=utf-8"), "no such page").into_response();
+    };
+    let request = Request::PageContent {
+        scope: scope.to_string(),
+        name: name.to_string(),
+        version: q.v.filter(|v| !v.trim().is_empty()),
+        part: factory_core::protocol::PagePart::Html,
+    };
+    let response = Box::pin(engine.handle(Envelope { request, token: None })).await;
+    let code = status_for(&response);
+    let text = page_headers("text/plain; charset=utf-8");
+    match response {
+        Response::Ok { data: Payload::PageContent { content } } => match content.html {
+            Some(html) => (page_headers("text/html; charset=utf-8"), html).into_response(),
+            None => (StatusCode::NOT_FOUND, text, "no such page").into_response(),
+        },
+        Response::Ok { .. } => (StatusCode::INTERNAL_SERVER_ERROR, text, "unexpected answer").into_response(),
+        Response::Error { message, .. } => (code, text, message).into_response(),
+    }
 }
 
 async fn benchmarks(State(engine): State<Arc<Engine>>) -> AxumResponse {

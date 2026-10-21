@@ -803,6 +803,12 @@ impl AgentContext {
                      cannot change the shared host's power mode, even with this grant. Reading is allowed."
                         .to_string()
                 }
+                Grant::PagePublish => format!(
+                    "page.publish -> {bin} page publish <name> --file <page.html> [--title \"...\"] [--data <data.json>]; \
+                     only a page {scope} declares under scope.pages. The page is shown sandboxed under a strict CSP: \
+                     inline scripts and styles, images and fonts only as data: URIs, no network at all -- the --data \
+                     JSON reaches it by postMessage. {bin} page list shows what is declared and published"
+                ),
                 Grant::DashboardEdit => {
                     "dashboard.edit -> save or reset the dashboard layout for a scope; today that is the \
                      web UI's Dashboard > Customise, or PUT/DELETE /api/dashboard?scope=, not this CLI"

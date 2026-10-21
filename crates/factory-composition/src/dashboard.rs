@@ -111,7 +111,8 @@ impl std::fmt::Display for TileSize {
     }
 }
 
-/// One tile: exactly one of a registry metric or a catalogue view, sized.
+/// One tile: exactly one of a registry metric, a catalogue view or a scope
+/// page (`#343`), sized.
 /// `deny_unknown_fields` so a typoed key (`vew:`) is refused rather than
 /// silently read as neither `metric` nor `view` -- the same reasoning
 /// `PolicyDeclaration` and `MetricMeasure` already give this attribute.
@@ -133,6 +134,13 @@ pub struct Tile {
     pub metric: Option<MetricId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<ViewId>,
+    /// `#343`: a page a scope declares under `scope.pages` -- a bare name,
+    /// looked up from the scope whose `dashboard:` block names it upward,
+    /// or `<scope>/<name>` for exactly that scope's. Which scope declares it
+    /// is the config's to answer (`Config::page_tile_scope`), checked at
+    /// load the way an unknown metric is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
     pub size: TileSize,
 }
 
@@ -146,18 +154,27 @@ impl Tile {
     /// tile, the same way an unavailable metric renders its own reason
     /// rather than refusing the whole dashboard.
     pub fn validate(&self, path: &str) -> Result<(), String> {
-        match (&self.metric, &self.view) {
-            (Some(_), Some(_)) => {
+        let named = [self.metric.is_some(), self.view.is_some(), self.page.is_some()]
+            .into_iter()
+            .filter(|n| *n)
+            .count();
+        if named > 1 {
+            return Err(format!(
+                "{path} declares more than one of `metric`, `view` and `page`; a tile is exactly one of them"
+            ));
+        }
+        if named == 0 {
+            return Err(format!(
+                "{path} declares none of `metric`, `view` and `page`; a tile is exactly one of them"
+            ));
+        }
+        if let Some(page) = &self.page {
+            let (_, name) = factory_process::pages::split_page_reference(page);
+            if !factory_kernel::is_slug(name) {
                 return Err(format!(
-                    "{path} declares both `metric` and `view`; a tile is exactly one of the two"
-                ))
+                    "{path}.page {page:?} does not name a page; write a page name, or <scope>/<name>"
+                ));
             }
-            (None, None) => {
-                return Err(format!(
-                    "{path} declares neither `metric` nor `view`; a tile is exactly one of the two"
-                ))
-            }
-            _ => {}
         }
         if let Some(id) = &self.metric {
             match resolve_metric(id) {
@@ -221,6 +238,7 @@ mod tests {
         Tile {
             metric: metric.map(|m| MetricId::new(m).unwrap()),
             view,
+            page: None,
             size,
         }
     }
@@ -235,10 +253,30 @@ mod tests {
         let neither = Tile {
             metric: None,
             view: None,
+            page: None,
             size: TileSize::S,
         };
         let e = neither.validate("dashboard.tiles[1]").unwrap_err();
         assert!(e.contains("exactly one"), "{e}");
+
+        let page_and_view = Tile { page: Some("radar".into()), ..tile(None, Some(ViewId::Kpis), TileSize::Xl) };
+        let e = page_and_view.validate("dashboard.tiles[2]").unwrap_err();
+        assert!(e.contains("exactly one"), "{e}");
+    }
+
+    #[test]
+    fn a_page_tile_names_a_page_or_a_scope_and_a_page() {
+        let page = |p: &str| Tile { metric: None, view: None, page: Some(p.into()), size: TileSize::Xl };
+        page("conference-radar").validate("dashboard.tiles[0]").unwrap();
+        page("ingo/conferenz-radar/conference-radar").validate("dashboard.tiles[0]").unwrap();
+        let e = page("Not A Page").validate("dashboard.tiles[0]").unwrap_err();
+        assert!(e.contains("dashboard.tiles[0].page"), "{e}");
+        assert_eq!(
+            serde_json::to_string(&page("radar")).unwrap(),
+            r#"{"page":"radar","size":"xl"}"#
+        );
+        let parsed: Tile = serde_yaml_ng::from_str("{ page: conference-radar, size: xl }").unwrap();
+        assert_eq!(parsed.page.as_deref(), Some("conference-radar"));
     }
 
     #[test]

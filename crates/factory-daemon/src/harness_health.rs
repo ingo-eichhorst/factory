@@ -818,6 +818,7 @@ pub(crate) mod tests {
                     renewals: Vec::new(),
                     metrics: None,
                     backup: None,
+                    pages: Vec::new(),
                 }],
                 infrastructure: Default::default(),
                 secrets: Vec::new(),

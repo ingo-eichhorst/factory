@@ -119,6 +119,9 @@ pub struct L4State {
     /// L4 owns run-step evidence and immutable artifact provenance separately
     /// from L6's policy receipts. Both stores use the existing instance database.
     pub(crate) run_evidence: factory_process::evidence_store::RunEvidenceStore,
+    /// `#343`: published scope pages, content-addressed under the instance's
+    /// `.factory/pages/` -- see `factory_process::pages`.
+    pub(crate) pages: factory_process::pages::PageStore,
     /// Serializes a run's usage read-modify-write -- append a snapshot, read
     /// them all back, write the derived `usage` -- so two snapshots landing
     /// together never leave the older sum on the run (`costs.rs`).

@@ -450,6 +450,13 @@ port!(
     l4::measurement_provider
 );
 port!(
+    ScopePageFact,
+    factory_process::pages::Provider,
+    factory_process::pages::ScopePagesQuery,
+    Vec<ScopePageFact>,
+    l4::pages_provider
+);
+port!(
     ArtifactProvenance,
     factory_process::facts::ProvenanceProvider<'a>,
     String,
@@ -798,6 +805,7 @@ mod tests {
     #[test]
     fn every_catalogued_fact_has_a_typed_producer_owned_port() {
         registered::<ProductionFact>();
+        registered::<ScopePageFact>();
         registered::<ProcessMetricFact>();
         registered::<BenchResolutionFact>();
         registered::<SignpostFact>();

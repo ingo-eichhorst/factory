@@ -108,6 +108,7 @@ pub use facts::{
 };
 pub use facts::{AgentReportedFact, RunSnapshotFact, RunSnapshotQuery, TaskSnapshotFact};
 pub use facts::{SignpostFact, SignpostObservation};
+pub use facts::{PageVersionFact, ScopePageFact};
 pub use facts::{
     BackupFact, DaemonConfigFact, Fact, FactCatalogueEntry, Level, SecretsPresence, VerifySummary,
     FACT_CATALOGUE, KNOWN_DAEMON_FACTS, KNOWN_SECRETS_LOCATIONS, L1, L2, L3, L4, L5, L6,

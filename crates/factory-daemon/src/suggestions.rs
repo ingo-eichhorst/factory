@@ -474,6 +474,7 @@ mod tests {
             environments: Vec::new(),
             renewals: Vec::new(),
             backup: None,
+            pages: Vec::new(),
             metrics: None,
         };
         let root = Scope {
@@ -510,6 +511,7 @@ mod tests {
             environments: Vec::new(),
             renewals: Vec::new(),
             backup: None,
+            pages: Vec::new(),
             metrics: None,
         };
         let config = Config {

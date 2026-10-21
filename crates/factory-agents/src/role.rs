@@ -251,6 +251,8 @@ impl Roles {
             // `Grant::TaskEdit` used to give it for intake, before `#172`
             // gave intake its own vocabulary -- worker's behaviour is
             // otherwise unchanged.
+            // `#343`: `page.publish`, so a run can publish the page its own
+            // scope declares -- the handler refuses any other scope's.
             grants: [
                 Grant::TaskEdit,
                 Grant::TaskReport,
@@ -258,6 +260,7 @@ impl Roles {
                 Grant::RunInput,
                 Grant::IntakeAssess,
                 Grant::IntakeDecide,
+                Grant::PagePublish,
             ]
             .into_iter()
             .collect(),
@@ -402,6 +405,7 @@ mod tests {
         assert!(worker.allows(Grant::TaskEdit));
         assert!(worker.allows(Grant::TaskReport));
         assert!(worker.allows(Grant::TaskAttach));
+        assert!(worker.allows(Grant::PagePublish), "a run publishes its own scope's page (#343)");
         assert!(!worker.allows(Grant::TaskCreate));
         assert!(!worker.allows(Grant::AgentStart));
         // What `task.edit` used to give it for intake, before `#172`.
@@ -619,7 +623,8 @@ mod tests {
                     "Dashboard",
                     "Deployments",
                     "Secrets",
-                    "Host"
+                    "Host",
+                    "Pages"
                 ]
                 .contains(&grant.group()),
                 "{} has no group",
@@ -637,6 +642,7 @@ mod tests {
         assert_eq!(Grant::DeployRecord.group(), "Deployments");
         assert_eq!(Grant::DashboardEdit.group(), "Dashboard");
         assert_eq!(Grant::HostPower.group(), "Host");
+        assert_eq!(Grant::PagePublish.group(), "Pages");
         for grant in [
             Grant::IntakeAdd,
             Grant::IntakeInfo,
@@ -656,27 +662,29 @@ mod tests {
         // and of `Grant::ALL`, in the order each was added, so a parallel
         // track appending its own grant there too merges without a real
         // conflict.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 16], Grant::DatasetEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 15], Grant::BenchRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 14], Grant::PolicyAttest);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 13], Grant::GoalsCheckIn);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 12], Grant::BackupRun);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::IntakeAdd);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::IntakeInfo);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::IntakeTriage);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::IntakeAssess);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::IntakeDecide);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::IntakePublish);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 17], Grant::DatasetEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 16], Grant::BenchRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 15], Grant::PolicyAttest);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 14], Grant::GoalsCheckIn);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 13], Grant::BackupRun);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 12], Grant::IntakeAdd);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 11], Grant::IntakeInfo);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 10], Grant::IntakeTriage);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 9], Grant::IntakeAssess);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 8], Grant::IntakeDecide);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 7], Grant::IntakePublish);
         // `#160`: the same seam, one grant later -- `dashboard.edit` lands at
         // the end too, so a parallel track adding its own grant after this
         // one merges without a real conflict either.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::DashboardEdit);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::DeployRecord);
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::DeployPublish);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 6], Grant::DashboardEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 5], Grant::DeployRecord);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 4], Grant::DeployPublish);
         // `#244`: `secrets.edit`, appended the same way.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::SecretsEdit);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 3], Grant::SecretsEdit);
         // `#260`: `host.power`, appended the same way.
-        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::HostPower);
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 2], Grant::HostPower);
+        // `#343`: `page.publish`, appended the same way.
+        assert_eq!(Grant::ALL[Grant::ALL.len() - 1], Grant::PagePublish);
         let all = Grant::expand("*").unwrap();
         assert!(all.contains(&Grant::DatasetEdit));
         assert!(all.contains(&Grant::BenchRun));

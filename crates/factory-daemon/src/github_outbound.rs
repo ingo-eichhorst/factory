@@ -476,6 +476,7 @@ mod tests {
             renewals: Vec::new(),
             metrics: None,
             backup: None,
+            pages: Vec::new(),
         }
     }
 

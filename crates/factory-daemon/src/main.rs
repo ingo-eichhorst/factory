@@ -56,6 +56,7 @@ mod metrics;
 mod occupancy;
 mod occupancy_page;
 mod openshell;
+mod pages;
 mod provision;
 mod renewals;
 mod operations;
@@ -221,6 +222,7 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
         renewals: Vec::new(),
         metrics: None,
         backup: None,
+        pages: Vec::new(),
     };
     let config = Config {
         version: 1,
