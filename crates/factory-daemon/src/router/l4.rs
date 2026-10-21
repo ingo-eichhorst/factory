@@ -51,6 +51,41 @@ impl Engine {
                 self.l4_service().record_inbound(&channel, record).await?;
                 Ok(Payload::Ok)
             }
+            // The one handler `factory agent rename`, `POST /api/agents/rename`
+            // and the roster's Rename reach (`#351`). L4's, not L3's: the runs on
+            // the agent and the tasks waiting for it decide whether it is safe and
+            // move with it; L4 asks L3 for the declaration and the sessions. The
+            // instances that were up start again in the background, as a scale's do.
+            Request::AgentRename { scope, from, to } => {
+                let by = caller.describe();
+                let source = match caller {
+                    crate::access::Caller::Owner => "owner",
+                    crate::access::Caller::Agent { .. } => "agent",
+                };
+                let (rename, to_start) = self.l4_service().rename_agent(&scope, &from, &to, &by, source).await?;
+                if rename.changed {
+                    tracing::info!(scope = %rename.scope, from = %rename.from, to = %rename.to, by = %by, "renamed: {}", rename.summary());
+                    self.shared.bus.publish(Event::AgentRenamed {
+                        scope: rename.scope.clone(),
+                        from: rename.from.clone(),
+                        to: rename.to.clone(),
+                    });
+                }
+                if !to_start.is_empty() {
+                    let engine = self.clone();
+                    let (scope, name) = (rename.scope.clone(), rename.to.clone());
+                    tokio::spawn(async move {
+                        for instance in to_start {
+                            let l3 = engine.l4_service().wiring.l3();
+                            let started = factory_agents::dispatch::Roster::start_instance(l3.port(), &scope, &name, instance).await;
+                            if let Err(error) = started {
+                                tracing::warn!(scope, name, instance, "could not start a renamed instance: {error}");
+                            }
+                        }
+                    });
+                }
+                Ok(Payload::Renamed { rename })
+            }
             Request::TaskCreate(new) => Ok(Payload::Task {
                 task: self.l4_service().create(new).await?,
             }),

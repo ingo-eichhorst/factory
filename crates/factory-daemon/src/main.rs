@@ -17,6 +17,7 @@ mod l5_service;
 mod l5_spawner;
 mod l4_spawner;
 mod admission;
+mod agent_rename;
 mod agent_rows;
 mod state;
 mod l6_service;

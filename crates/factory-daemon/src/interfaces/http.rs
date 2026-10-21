@@ -233,6 +233,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/agents/stop-check", post(agent_stop_check))
         .route("/api/agents/attach", post(agent_attach))
         .route("/api/agents/scale", post(agent_scale))
+        .route("/api/agents/rename", post(agent_rename))
         .route("/api/agents/role", post(agent_role))
         .route("/api/agents/input", post(agent_input))
         .route("/api/agents/output", post(agent_output))
@@ -2525,6 +2526,18 @@ async fn agent_scale(State(engine): State<Arc<Engine>>, Json(body): Json<ScaleAg
         },
     )
     .await
+}
+
+/// `{scope, from, to}`: rename one declared agent (`#351`).
+#[derive(serde::Deserialize)]
+struct RenameAgent {
+    scope: String,
+    from: String,
+    to: String,
+}
+
+async fn agent_rename(State(engine): State<Arc<Engine>>, Json(body): Json<RenameAgent>) -> AxumResponse {
+    run(&engine, Request::AgentRename { scope: body.scope, from: body.from, to: body.to }).await
 }
 
 async fn agent_stop(State(engine): State<Arc<Engine>>, Json(body): Json<AgentId>) -> AxumResponse {

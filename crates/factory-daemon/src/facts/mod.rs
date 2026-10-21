@@ -145,6 +145,18 @@ impl<'a> Wiring<'a, L3> {
     pub(crate) fn provision(&self) -> factory_kernel::Commands<L3, crate::dispatch_port::L2Port<'a>> {
         factory_kernel::Commands::new(crate::dispatch_port::L2Port(self.engine.l2_service()))
     }
+    /// One declaration renamed in its scope's own config and made live, or with `write` false only checked
+    /// (`#351`). The roster's declarations are L3's; the file edit is the configuration owner's, as a configure,
+    /// delete or scale is.
+    pub(crate) fn rename_declaration(
+        &self,
+        scope: &str,
+        from: &str,
+        to: &str,
+        write: bool,
+    ) -> factory_core::error::Result<crate::configuration::DeclarationRename> {
+        self.engine.rename_agent_declaration(scope, from, to, write)
+    }
 }
 impl<'a> Wiring<'a, factory_kernel::L4> {
     /// The command edge L4 holds to the level below it: `Commands<L4, L3Port>`.
