@@ -1189,6 +1189,23 @@ impl Engine {
                 current.name
             )));
         }
+        // A task naming no agent gets the scope's default: its own `agent:`'s
+        // harness, or the instance's `default_agent` it inherits. The roster
+        // shows that one as an agent of the scope even when nothing declares
+        // it, and a declaration called that would take every such task. Only
+        // the scope's own `agent:` may be called after its harness again,
+        // which makes it the default it was.
+        let default_agent = from_file
+            .agent_adapter()
+            .unwrap_or(&factory.config.daemon.default_agent);
+        let restores_default = matches!(location, AgentLocation::Singular) && to == declared.harness;
+        if to == default_agent && !restores_default {
+            return Err(bad(format!(
+                "{to:?} is scope {:?}'s default agent, the one a task naming no agent goes to; an agent \
+                 renamed to it would take those tasks",
+                current.name
+            )));
+        }
         match location {
             AgentLocation::Singular => {
                 if let Some(AgentRef::Declared { name, .. }) = &mut from_file.agent {
@@ -2503,13 +2520,8 @@ mod tests {
     fn a_refused_rename_leaves_the_file_byte_for_byte_unchanged() {
         let yaml = "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agent: claude-code\n  agents:\n    - name: claude\n      harness: claude-code\n      lifetime: permanent\n    - harness: pi\n";
         let scratch = Scratch::new("rename-refused", yaml);
-        let mut daemon = DaemonConfig::default();
-        daemon.foreman.enabled = true;
         let engine = engine(&scratch);
-        {
-            let mut factory = engine.shared.factory.write().unwrap();
-            factory.config.daemon = daemon;
-        }
+        engine.shared.factory.write().unwrap().config.daemon.foreman.enabled = true;
         for (from, to, words) in [
             ("claude", "   ", "needs a name"),
             ("claude", "a/b", "cannot contain"),
@@ -2519,6 +2531,7 @@ mod tests {
             ("claude", "pi", "already declares an agent named \"pi\""),
             ("pi", " claude ", "already declares an agent named \"claude\""),
             ("claude", "foreman", "already declares an agent named \"foreman\""),
+            ("claude", "claude-code", "default agent"),
             ("foreman", "boss", "no local agent declaration named \"foreman\""),
             ("claude-code", "main", "no local agent declaration"),
             ("nobody", "x", "no local agent declaration"),
@@ -2527,6 +2540,29 @@ mod tests {
             assert!(e.contains(words), "{from} -> {to:?}: {e}");
         }
         assert_eq!(file_text(&scratch), yaml);
+    }
+
+    /// The default agent a task naming no agent goes to is an agent of the
+    /// scope even when nothing declares it: inherited from the instance, or
+    /// the harness of the scope's own `agent:`. No other declaration may take
+    /// its name; the scope's own `agent:` may take its harness back.
+    #[test]
+    fn a_rename_never_takes_the_default_from_tasks_that_name_no_agent() {
+        let inherits = "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agents:\n    - name: lead\n      harness: pi\n";
+        let scratch = Scratch::new("rename-inherited-default", inherits);
+        let inheriting = engine(&scratch);
+        let e = inheriting.rename_agent_declaration("demo", "lead", "claude-code", true).unwrap_err().to_string();
+        assert!(e.contains("default agent"), "{e}");
+        assert_eq!(file_text(&scratch), inherits);
+
+        let own = "version: 1\nscope:\n  id: scope-id\n  name: demo\n  agent:\n    name: scratch\n    harness: pi\n  agents:\n    - name: helper\n      harness: shell\n";
+        let scratch = Scratch::new("rename-own-default", own);
+        let owning = engine(&scratch);
+        let e = owning.rename_agent_declaration("demo", "helper", "pi", true).unwrap_err().to_string();
+        assert!(e.contains("default agent"), "{e}");
+        assert_eq!(file_text(&scratch), own);
+        owning.rename_agent_declaration("demo", "scratch", "pi", true).unwrap();
+        assert_eq!(file_text(&scratch), own.replace("name: scratch", "name: pi"));
     }
 
     #[test]
