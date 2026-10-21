@@ -119,13 +119,16 @@ test("the data message and ready handshake keep their own shapes", () => {
 
 test("the conference choice bridge accepts only a bounded known decision", () => {
   const choice = { type: "conference-radar:choice", conference: "DemoConf", edition_year: "2027", status: "waitlisted" };
-  assert.deepEqual(conferenceChoice(choice), { conference: "DemoConf", edition_year: "2027", status: "waitlisted" });
+  assert.deepEqual(conferenceChoice(choice), { conference: "DemoConf", edition_year: "2027", kind: "conference", status: "waitlisted" });
   assert.equal(conferenceChoice({ ...choice, status: "not_this_time" })?.status, "not_this_time");
+  assert.equal(conferenceChoice({ ...choice, kind: "rfp", status: "applied" })?.kind, "rfp");
   for (const bad of [
     { ...choice, type: "navigate" },
     { ...choice, conference: "x".repeat(251) },
     { ...choice, edition_year: "../../etc" },
     { ...choice, status: "submitted<script>" },
+    { ...choice, kind: "malicious" },
+    { ...choice, kind: "rfp", status: "attending" },
   ]) assert.equal(conferenceChoice(bad), null);
 });
 

@@ -36,6 +36,8 @@ pub(crate) struct ConferenceChoice {
     pub name: String,
     pub conference: String,
     pub edition_year: String,
+    #[serde(default)]
+    pub kind: Option<String>,
     pub status: String,
 }
 
@@ -44,6 +46,8 @@ pub(crate) struct ConferenceChoiceRow {
     pub conference: String,
     pub edition_year: String,
     pub status: String,
+    pub rfp_status: String,
+    pub conference_status: String,
 }
 
 fn choice_lock() -> &'static Mutex<()> {
@@ -62,6 +66,7 @@ fn choice_status(value: &str) -> Option<&'static str> {
         "waitlisted" => Some("waitlisted"),
         "rejected" => Some("rejected"),
         "withdrawn" => Some("withdrawn"),
+        "attending" => Some("accepted/participating"),
         _ => None,
     }
 }
@@ -78,6 +83,68 @@ fn display_status(value: &str) -> &'static str {
         "withdrawn" => "withdrawn",
         _ => "unreviewed",
     }
+}
+
+fn rfp_status(entry: &Value) -> &'static str {
+    if let Some(value) = entry.get("rfp_decision").and_then(Value::as_str) {
+        if value != "attending" && choice_status(value).is_some() {
+            return match value {
+                "not_interested" => "not_interested",
+                "not_this_time" => "not_this_time",
+                "interested" => "interested",
+                "applied" => "applied",
+                "accepted" => "accepted",
+                "waitlisted" => "waitlisted",
+                "rejected" => "rejected",
+                "withdrawn" => "withdrawn",
+                _ => "unreviewed",
+            };
+        }
+    }
+    if entry.get("conference_status").and_then(Value::as_str).is_some() {
+        return "unreviewed";
+    }
+    // The old single status is only an RFP decision when it clearly refers to
+    // applying or declining. An old "accepted/participating" may mean attendance.
+    match display_status(entry.get("application_status").and_then(Value::as_str).unwrap_or("watchlist")) {
+        "interested" => "interested",
+        "applied" => "applied",
+        "not_interested" => "not_interested",
+        "not_this_time" => "not_this_time",
+        "waitlisted" => "waitlisted",
+        "rejected" => "rejected",
+        "withdrawn" => "withdrawn",
+        _ => "unreviewed",
+    }
+}
+
+fn conference_status(entry: &Value, today: chrono::NaiveDate) -> &'static str {
+    if let Some(value) = entry.get("conference_status").and_then(Value::as_str) {
+        if choice_status(value).is_some() {
+            return match value {
+                "not_interested" => "not_interested",
+                "not_this_time" => "not_this_time",
+                "interested" => "interested",
+                "applied" => "applied",
+                "accepted" => "accepted",
+                "waitlisted" => "waitlisted",
+                "rejected" => "rejected",
+                "withdrawn" => "withdrawn",
+                "attending" => "attending",
+                _ => "unreviewed",
+            };
+        }
+    }
+    let legacy = display_status(entry.get("application_status").and_then(Value::as_str).unwrap_or("watchlist"));
+    if rfp_status(entry) == "applied" {
+        let deadline = entry.get("cfp_deadline").and_then(Value::as_str).filter(|value| !value.is_empty())
+            .or_else(|| entry.get("rfp_deadline").and_then(Value::as_str)).unwrap_or_default();
+        if matches!(legacy, "unreviewed" | "interested" | "applied")
+            && chrono::NaiveDate::parse_from_str(deadline, "%Y-%m-%d").is_ok_and(|date| date < today) {
+            return "applied";
+        }
+    }
+    legacy
 }
 
 fn edition_year(entry: &Value) -> String {
@@ -99,6 +166,7 @@ fn edition_year(entry: &Value) -> String {
 }
 
 fn tracker_rows(tracker: &Value) -> Result<Vec<ConferenceChoiceRow>> {
+    let today = chrono::Local::now().date_naive();
     let entries = tracker
         .get("conferences")
         .and_then(Value::as_array)
@@ -119,6 +187,8 @@ fn tracker_rows(tracker: &Value) -> Result<Vec<ConferenceChoiceRow>> {
                         .unwrap_or("watchlist"),
                 )
                 .into(),
+                rfp_status: rfp_status(entry).into(),
+                conference_status: conference_status(entry, today).into(),
             })
         })
         .collect())
@@ -144,13 +214,45 @@ fn apply_choice(tracker: &mut Value, choice: &ConferenceChoice, status: &str) ->
         ));
     }
     let entry = &mut *matching.into_iter().next().unwrap();
-    if entry.get("application_status").and_then(Value::as_str) == Some(status) {
-        return Ok(false);
+    let before = entry.clone();
+    let kind = choice.kind.as_deref().unwrap_or("conference");
+    if kind == "rfp" {
+        entry["rfp_decision"] = Value::String(choice.status.clone());
+        entry["rfp_status_source"] = Value::String("dashboard user".into());
+        if before.get("rfp_decision").and_then(Value::as_str) != Some(choice.status.as_str()) {
+            entry["rfp_status_updated_at"] = Value::String(chrono::Utc::now().to_rfc3339());
+        }
+        let manually_attending = entry.get("conference_status").and_then(Value::as_str) == Some("attending");
+        if matches!(choice.status.as_str(), "accepted" | "rejected") && !manually_attending {
+            entry["conference_status"] = Value::String(choice.status.clone());
+            entry["conference_status_source"] = Value::String("rfp".into());
+            if before.get("conference_status").and_then(Value::as_str) != Some(choice.status.as_str()) {
+                entry["conference_status_updated_at"] = Value::String(chrono::Utc::now().to_rfc3339());
+            }
+        } else if entry.get("conference_status_source").and_then(Value::as_str) == Some("rfp") {
+            let object = entry.as_object_mut().unwrap();
+            object.remove("conference_status");
+            object.remove("conference_status_source");
+            object.remove("conference_status_updated_at");
+        }
+    } else {
+        if before.get("rfp_decision").is_none() && before.get("conference_status").is_none() {
+            let legacy_rfp = rfp_status(&before);
+            if legacy_rfp != "unreviewed" {
+                entry["rfp_decision"] = Value::String(legacy_rfp.into());
+                entry["rfp_status_source"] = Value::String("legacy application_status".into());
+            }
+        }
+        entry["conference_status"] = Value::String(choice.status.clone());
+        entry["conference_status_source"] = Value::String("dashboard user".into());
+        entry["application_status"] = Value::String(status.into());
+        entry["status_source"] = Value::String("dashboard user".into());
+        if before.get("conference_status").and_then(Value::as_str) != Some(choice.status.as_str()) {
+            entry["status_updated_at"] = Value::String(chrono::Utc::now().to_rfc3339());
+            entry["conference_status_updated_at"] = entry["status_updated_at"].clone();
+        }
     }
-    entry["application_status"] = Value::String(status.into());
-    entry["status_source"] = Value::String("dashboard user".into());
-    entry["status_updated_at"] = Value::String(chrono::Utc::now().to_rfc3339());
-    Ok(true)
+    Ok(*entry != before)
 }
 
 async fn read_tracker(path: &Path) -> Result<Value> {
@@ -198,8 +300,15 @@ impl Engine {
               choice.edition_year.starts_with("20") && choice.edition_year.bytes().all(|b| b.is_ascii_digit())) {
             return Err(FactoryError::BadRequest("invalid conference edition".into()));
         }
+        let kind = choice.kind.as_deref().unwrap_or("conference");
+        if kind != "conference" && kind != "rfp" {
+            return Err(FactoryError::BadRequest("invalid conference choice kind".into()));
+        }
         let status = choice_status(&choice.status)
             .ok_or_else(|| FactoryError::BadRequest("invalid conference choice".into()))?;
+        if kind == "rfp" && choice.status == "attending" {
+            return Err(FactoryError::BadRequest("attending is a conference status".into()));
+        }
         let _guard = choice_lock().lock().await;
         let mut tracker = read_tracker(&path).await?;
         if !apply_choice(&mut tracker, &choice, status)? {
@@ -430,7 +539,7 @@ mod tests {
     //! Publishing through `Engine::handle`, the way the CLI, `/api/rpc` and
     //! `/api/pages/publish` all arrive: envelope, caller, authorize, handler.
     use crate::engine::Engine;
-    use super::{apply_choice, choice_status, edition_year, tracker_rows, ConferenceChoice};
+    use super::{apply_choice, choice_status, conference_status, edition_year, tracker_rows, ConferenceChoice};
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
     use factory_core::protocol::{Envelope, PagePart, Payload, Request, Response};
     use factory_core::run::{NewRun, Run, Trigger};
@@ -452,6 +561,7 @@ mod tests {
             name: "conference-radar".into(),
             conference: "DemoConf".into(),
             edition_year: "2026".into(),
+            kind: None,
             status: "interested".into(),
         };
         assert_eq!(choice_status("interested"), Some("interested"));
@@ -471,13 +581,67 @@ mod tests {
         );
         assert_eq!(tracker["notes"][0], "keep");
         assert_eq!(tracker_rows(&tracker).unwrap()[0].status, "interested");
-        assert!(apply_choice(&mut tracker, &choice, "not this time").unwrap());
+        assert_eq!(tracker_rows(&tracker).unwrap()[0].rfp_status, "unreviewed");
+        let declined = ConferenceChoice { status: "not_this_time".into(), ..choice.clone() };
+        assert!(apply_choice(&mut tracker, &declined, "not this time").unwrap());
         assert_eq!(tracker_rows(&tracker).unwrap()[0].status, "not_this_time");
+        assert_eq!(tracker_rows(&tracker).unwrap()[0].conference_status, "not_this_time");
         let missing = ConferenceChoice {
             edition_year: "2028".into(),
             ..choice
         };
         assert!(apply_choice(&mut tracker, &missing, "rejected").is_err());
+    }
+
+    #[test]
+    fn rfp_result_links_to_conference_but_manual_attendance_wins() {
+        let mut tracker = serde_json::json!({"conferences": [{
+            "name":"DemoConf", "event_start_date":"2027-02-12", "cfp_deadline":"2026-10-20",
+            "application_status":"watchlist"
+        }]});
+        let mut choice = ConferenceChoice {
+            scope: "conference-radar".into(), name: "conference-radar".into(),
+            conference: "DemoConf".into(), edition_year: "2027".into(),
+            kind: Some("rfp".into()), status: "applied".into(),
+        };
+        let after_deadline = chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
+        assert_eq!(conference_status(&tracker["conferences"][0], after_deadline), "unreviewed");
+        let interested = ConferenceChoice { status: "interested".into(), ..choice.clone() };
+        assert!(apply_choice(&mut tracker, &interested, "interested").unwrap());
+        assert_eq!(conference_status(&tracker["conferences"][0], after_deadline), "unreviewed");
+        assert!(apply_choice(&mut tracker, &choice, "submitted/applied").unwrap());
+        assert_eq!(tracker_rows(&tracker).unwrap()[0].rfp_status, "applied");
+        assert_eq!(conference_status(&tracker["conferences"][0], after_deadline), "applied");
+        assert!(tracker["conferences"][0].get("conference_status").is_none());
+        choice.status = "rejected".into();
+        assert!(apply_choice(&mut tracker, &choice, "rejected").unwrap());
+        assert_eq!(tracker["conferences"][0]["conference_status"], "rejected");
+        assert_eq!(tracker["conferences"][0]["conference_status_source"], "rfp");
+        choice.status = "accepted".into();
+        assert!(apply_choice(&mut tracker, &choice, "accepted/participating").unwrap());
+        assert_eq!(tracker["conferences"][0]["conference_status"], "accepted");
+        let attendance = ConferenceChoice { kind: Some("conference".into()), status: "attending".into(), ..choice.clone() };
+        assert!(apply_choice(&mut tracker, &attendance, "accepted/participating").unwrap());
+        choice.status = "rejected".into();
+        assert!(apply_choice(&mut tracker, &choice, "rejected").unwrap());
+        assert_eq!(tracker["conferences"][0]["conference_status"], "attending");
+    }
+
+    #[test]
+    fn a_legacy_application_survives_a_new_conference_decision() {
+        let mut tracker = serde_json::json!({"conferences": [{
+            "name":"DemoConf", "event_start_date":"2027-02-12",
+            "application_status":"submitted/applied"
+        }]});
+        let choice = ConferenceChoice {
+            scope: "conference-radar".into(), name: "conference-radar".into(),
+            conference: "DemoConf".into(), edition_year: "2027".into(),
+            kind: Some("conference".into()), status: "attending".into(),
+        };
+        assert!(apply_choice(&mut tracker, &choice, "accepted/participating").unwrap());
+        let row = &tracker_rows(&tracker).unwrap()[0];
+        assert_eq!(row.rfp_status, "applied");
+        assert_eq!(row.conference_status, "attending");
     }
 
     #[tokio::test]
@@ -502,6 +666,7 @@ mod tests {
             name: "conference-radar".into(),
             conference: "DemoConf".into(),
             edition_year: "2026".into(),
+            kind: None,
             status: "interested".into(),
         };
         assert_eq!(
