@@ -2582,3 +2582,5 @@ td.mono, .ops-sched td.mono { font: 400 11px/1.5 var(--mono); white-space: nowra
 .page-frame-tall { height: 640px; }
 .page-frame-full { height: calc(100vh - 220px); min-height: 480px; }
 .page-tile .page-frame { margin-top: 2px; }
+.dcard h3 .r a { color: var(--signal-ink); text-decoration: none; }
+.dcard h3 .r a:hover { text-decoration: underline; }

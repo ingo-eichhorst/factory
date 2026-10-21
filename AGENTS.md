@@ -8,7 +8,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     crates/factory-infrastructure L1: backup, running environments, renewal behaviour and their SQLite stores
     crates/factory-environment    L2: sandbox planning, secrets, dependencies and credential expiry store
     crates/factory-agents         L3: standing agents, roles, harness health, agent/runtime seams, dispatch context and session usage
-    crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy, TaskStore and run evidence/provenance store
+    crates/factory-process        L4: tasks, runs, workflows, intake/ready, generic gates, usage, occupancy, TaskStore, run evidence/provenance store and the scope page store (#343)
     crates/factory-assurance      L5: plan/check/Quality, metrics, benchmarks/datasets, benchmark store/timer and knowledge/provider seam 
     crates/factory-direction      L6: authored policy, goals/scenarios/budgets, reporting clock, policy export/report data, GoalsStore and policy receipt store
     crates/factory-composition    outside stack: instance config/scope loading and dashboard/site/Line page projections
@@ -26,6 +26,8 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/schedule.js          a task's schedule between the wire and the form, pure
     ui/js/occupancy-model.js   the occupancy chart's window: live or fixed, zoom, pan, ticks, pure
     ui/js/{dashboard,activity,site,site-render}.js               the new views
+    ui/js/{pages,pages-model}.js                                 the Pages view and page tiles' sandboxed frame, data hand-over and shaping (#343)
+    ui/js/theme-boot.js                                          the theme, applied before the first paint; a file so the UI's CSP needs no inline script
     ui/js/{sandboxes,secrets,dependencies}.js                    L2's three tabs
     ui/js/secrets-model.js                                       the Secrets tab's declared catalogue (#244), pure
     ui/js/dependencies-model.js                                  Dependencies' pure shaping logic
@@ -54,6 +56,7 @@ A daemon that gives tasks to coding agents and watches what happens.
     ui/js/clock-model.js                                          the CRA Art. 14 reporting clock's pure shaping, shared by Intake, the Inbox and L6 Policy (#157/#170 phase 2)
     ui/vendor/three.min.js     vendored so the site's lit render works offline
     examples/plugins         a worked example of an out-of-process adapter
+    examples/pages           the reference scope page (#343): calendar/roadmap, map and table over invented data
     examples/openshell       `sandbox: openshell` (#218): the image recipe, provider profiles, the awesome-herdr block
 
 `README.md` explains the architecture and the plugin protocol. Read it before
