@@ -31,6 +31,8 @@ pub const PRESERVE_CAP_BYTES: u64 = 64 * 1024 * 1024;
 const QUICK: Duration = Duration::from_secs(30);
 const CREATE: Duration = Duration::from_secs(30 * 60);
 const TRANSFER: Duration = Duration::from_secs(10 * 60);
+/// The longest `settle` holds a harness back.
+const SETTLE: Duration = Duration::from_secs(15);
 
 /// What `close_session` needs to finish a run's sandbox, kept on the
 /// session itself so it survives a daemon restart between dispatch and the
@@ -562,7 +564,38 @@ pub async fn prepare(plan: &Plan, providers: &[String], restore: Option<&Restore
     // The env file carries the run token. It is inside the sandbox now; the
     // host copy has done its job.
     let _ = std::fs::remove_file(plan.stage_dir.join("env"));
+    settle(plan).await;
     Ok(outcome)
+}
+
+/// Hold the harness back until the sandbox's supervisor has made its first
+/// settings poll. OpenShell 0.1.2 polls every 10 seconds, and the first poll
+/// always reports the provider environment changed (same revision,
+/// `provider_env_changed:true`): the proxy moves to a new policy generation
+/// and closes every connection opened before it on its next request. A
+/// harness started at once has its first API calls on those connections --
+/// on 2026-10-21 that was `API Error: The socket connection was closed
+/// unexpectedly` five seconds in, or Claude Code's settings fetch cut short
+/// and a permission prompt nobody answers. Done once the log shows the poll,
+/// at once when it shows no supervisor to wait for, and after `SETTLE` at the
+/// latest, so an OpenShell that stops reporting the change costs only that.
+async fn settle(plan: &Plan) {
+    let mut logs = plan.base.clone();
+    logs.extend(["logs", &plan.sandbox, "--source", "sandbox", "-n", "1000"].map(String::from));
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    loop {
+        let Ok(log) = run(&logs, QUICK, "reading the sandbox's log").await else {
+            return;
+        };
+        if log.contains("Settings poll") || !log.contains("Acknowledged initial policy") {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::info!(sandbox = %plan.sandbox, "no settings poll in the sandbox's log within {}s; starting the harness anyway", SETTLE.as_secs());
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// Overwrite the plan's own (fresh) `launch.sh`/`prompt.md` with the
@@ -1225,8 +1258,12 @@ mod tests {
              'sandbox get') echo '{{\"labels\":{{\"factory.instance\":\"inst\",\"factory.run\":\"aaaabbbb-run\"}}}}' ;;\n\
              'sandbox download') if [ \"$4\" = '/sandbox/.claude/projects' ]; then mkdir -p \"$5/cwd-dir\" && echo '{{}}' > \"$5/cwd-dir/session-abc.jsonl\"; else mkdir -p \"$5\" && echo downloaded > \"$5/result.txt\" && mkdir -p \"$5/.git\" && echo x > \"$5/.git/HEAD\"; fi ;;\n\
              'sandbox list') echo '{{\"sandboxes\":[{{\"name\":\"factory-aaaa\",\"labels\":{{\"factory.instance\":\"inst-1\",\"factory.run\":\"run-a\"}}}},{{\"name\":\"factory-bbbb\",\"labels\":{{\"factory.instance\":\"inst-1\",\"factory.run\":\"run-b\"}}}}]}}' ;;\n\
+             logs\\ *) n=$(($(cat '{dir}/logs-read' 2>/dev/null || echo 0) + 1)); echo $n > '{dir}/logs-read'; \
+               echo 'CONFIG:LOADED [INFO] Acknowledged initial policy revision as loaded [version:2]'; \
+               if [ $n -ge $(cat '{dir}/polls-before-settle' 2>/dev/null || echo 1) ]; then echo 'CONFIG:DETECTED [INFO] Settings poll: config change detected'; fi ;;\n\
              esac\n",
             calls = calls.display(),
+            dir = dir.display(),
             missing = missing_provider.unwrap_or("-"),
             create_fails = if create_fails { 1 } else { 0 },
         );
@@ -1535,6 +1572,28 @@ mod tests {
             mode, 0o700,
             "the run's state directory is the owner's alone"
         );
+    }
+
+    /// The harness is not started on connections the supervisor's first
+    /// settings poll is about to close: `prepare` returns only once the
+    /// sandbox's log shows that poll.
+    #[tokio::test]
+    async fn the_harness_waits_for_the_sandboxs_first_settings_poll() {
+        let dir = tempdir();
+        let cli = fake_cli(&dir.0, "connected", None, false);
+        std::fs::write(dir.0.join("polls-before-settle"), "3").unwrap();
+        let (plan, _) = a_plan(&dir.0, &cli, false);
+        prepare(&plan, &["factory-claude".into()], None).await.unwrap();
+        let log = calls(&dir.0);
+        let reads: Vec<usize> = log
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.starts_with("logs factory-aaaabbbb --source sandbox"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(reads.len(), 3, "read until the poll showed: {log:?}");
+        let last_upload = log.iter().rposition(|c| c.starts_with("sandbox upload")).unwrap();
+        assert!(reads[0] > last_upload, "after everything is in place: {log:?}");
     }
 
     #[tokio::test]

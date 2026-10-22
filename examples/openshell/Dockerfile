@@ -15,6 +15,10 @@
 #                            each stop for an answer nobody is there to give
 #   /etc/gitconfig           gh as git's GitHub credential helper, and the
 #                            commit identity
+#   /sandbox/.claude/settings.json   the same rules as the sandbox user's
+#                            own settings: server-managed settings, when the
+#                            account has any, replace the managed-settings
+#                            file but are merged with these
 #   /sandbox/.claude.json    onboarding done, /sandbox/work trusted
 #   /sandbox/.config/gh/config.yml   gh's own telemetry off (#274), so it's
 #                            off for every invocation of gh, including as
@@ -31,5 +35,6 @@ RUN rm -f /etc/openshell/policy.yaml
 COPY --chmod=0755 usr/local/bin/ /usr/local/bin/
 COPY etc/ /etc/
 COPY --chown=sandbox:sandbox sandbox/.claude.json /sandbox/.claude.json
+COPY --chown=sandbox:sandbox sandbox/.claude/ /sandbox/.claude/
 COPY --chown=sandbox:sandbox sandbox/.config/ /sandbox/.config/
 USER sandbox
