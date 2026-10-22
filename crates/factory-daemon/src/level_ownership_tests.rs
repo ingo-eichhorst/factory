@@ -191,7 +191,7 @@ const ARC_ENGINE_BASELINE: &[(&str, usize)] = &[
 /// (`services`), reads `Facts::<People>` outside the routers (`people`) or calls `::provider(` directly (`providers`).
 /// May only shrink; what each page composes is named in its entry in `OWNERS`.
 const PAGE_BASELINE: &[(&str, &str, usize)] = &[
-    ("access.rs", "reach", 22),
+    ("access.rs", "reach", 21),
     ("access.rs", "services", 6),
     ("commands.rs", "people", 1),
     ("commands.rs", "providers", 2),

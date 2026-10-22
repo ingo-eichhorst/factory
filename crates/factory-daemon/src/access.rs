@@ -550,6 +550,7 @@ impl Engine {
                 Reach::Own => Err(deny("touch a suggestion that is not its own")),
             }
         };
+        let suggestions = &self.l5.suggestions;
 
         match request {
             Request::TaskCreate(new) => in_scope(new.scope.as_deref().unwrap_or(scope)),
@@ -569,14 +570,14 @@ impl Engine {
             // never the caller's to hold a grant over.
             Request::SuggestionTask { ids } => {
                 for id in ids {
-                    if let Ok(Some(suggestion)) = self.l5.suggestions.get(id).await {
+                    if let Ok(Some(suggestion)) = suggestions.get(id).await {
                         in_scope(&suggestion.scope)?;
                     }
                 }
                 Ok(())
             }
             Request::SuggestionDismiss { id, .. } | Request::SuggestionDone { id, .. } | Request::SuggestionAsk { id, .. } => {
-                match self.l5.suggestions.get(id).await {
+                match suggestions.get(id).await {
                     Ok(Some(suggestion)) => suggestion_in_reach(def, &suggestion),
                     _ => Ok(()), // let the engine report "no such suggestion"
                 }
@@ -682,9 +683,36 @@ impl Engine {
             | Request::TaskClose { id, .. }
             | Request::TaskReopen { id, .. }
             | Request::TaskSkipNext { id, .. } => {
-                match self.l4.store.get(id).await? {
-                    Some(task) => task_in_reach(def, &task),
-                    None => Ok(()), // let the engine report "no such task"
+                let Some(task) = self.l4.store.get(id).await? else {
+                    return Ok(()); // let the engine report "no such task"
+                };
+                match task_in_reach(def, &task) {
+                    Ok(()) => Ok(()),
+                    // `#365`: an improvement task lives in the root scope,
+                    // past the reach of the agent that answers its
+                    // suggestions. Closing and reopening it -- nothing else
+                    // -- follows those suggestions instead: allowed when the
+                    // daemon tied at least one to it and every one is in
+                    // the caller's reach, so a group spanning a scope the
+                    // caller cannot touch stays a person's. The same kind
+                    // of fallback as `IntakeInfo`'s requester: a link Factory
+                    // recorded itself, never a label anybody can edit.
+                    Err(denied)
+                        if matches!(
+                            request,
+                            Request::TaskClose { .. } | Request::TaskReopen { .. }
+                        ) =>
+                    {
+                        let answered = suggestions.tasked_into(&task.id).await?;
+                        if !answered.is_empty()
+                            && answered.iter().all(|s| suggestion_in_reach(def, s).is_ok())
+                        {
+                            Ok(())
+                        } else {
+                            Err(denied)
+                        }
+                    }
+                    Err(denied) => Err(denied),
                 }
             }
 
@@ -1702,6 +1730,126 @@ mod tests {
             !allowed(&e, &worker("w"), Request::SuggestionDismiss { id: "s-own".into(), reason: "r".into() }).await,
             "a role without task.close is refused"
         );
+    }
+
+    /// `#365`: an improvement task lands in the root scope, past the reach of
+    /// the agent answering its suggestions. Closing and reopening it -- and
+    /// only that -- follows the suggestions the daemon tied to it: at least
+    /// one, and every one in the caller's reach.
+    #[tokio::test]
+    async fn closing_an_improvement_task_follows_the_suggestions_tied_to_it() {
+        let e = engine_with_roles_and_root_scope(
+            "root",
+            "roles:\n  closer:\n    grants: [task.close, task.delete, task.run]\n    reach: scope\n  own-closer:\n    grants: [task.close]\n    reach: own\n",
+        );
+        for task in ["fix", "mine", "mixed", "plain", "old", "new"] {
+            task_in(&e, task, "root", "improver").await;
+        }
+        seed_suggestion(&e, "s1", "demo", "w").await;
+        seed_suggestion(&e, "s2", "demo", "x").await;
+        seed_suggestion(&e, "s3", "demo", "w").await;
+        seed_suggestion(&e, "s4", "demo", "w").await;
+        seed_suggestion(&e, "s5", "other", "w").await;
+        seed_suggestion(&e, "s6", "demo", "w").await;
+        // What `suggestion task` does; s6 is tasked a second time, elsewhere.
+        for (id, task) in [
+            ("s1", "fix"),
+            ("s2", "fix"),
+            ("s3", "mine"),
+            ("s4", "mixed"),
+            ("s5", "mixed"),
+            ("s6", "old"),
+            ("s6", "new"),
+        ] {
+            let mut s = e.l5.suggestions.get(id).await.unwrap().unwrap();
+            s.task(task, "owner", Utc::now()).unwrap();
+            e.l5.suggestions.put(&s).await.unwrap();
+        }
+
+        let close = |id: &str| Request::TaskClose {
+            id: id.into(),
+            reason: CloseReason::Completed,
+            duplicate_of: None,
+            note: None,
+        };
+        let reopen = |id: &str| Request::TaskReopen {
+            id: id.into(),
+            reason: None,
+        };
+        let agent = |scope: &str, name: &str, role: &str| Caller::Agent {
+            scope: scope.into(),
+            name: name.into(),
+            role: Role::new(role),
+            run_id: None,
+        };
+        let improver = agent("demo", "improver", "closer");
+
+        assert!(
+            allowed(&e, &improver, close("fix")).await,
+            "every suggestion tied to the task is in this caller's scope"
+        );
+        assert!(
+            allowed(&e, &improver, reopen("fix")).await,
+            "reopening undoes a wrong close"
+        );
+        assert!(
+            !allowed(&e, &agent("other", "improver", "closer"), close("fix")).await,
+            "the same role in another scope reaches none of them"
+        );
+        assert!(
+            !allowed(&e, &improver, close("plain")).await,
+            "no suggestion tied to it, no fallback"
+        );
+        assert!(
+            !allowed(&e, &improver, close("mixed")).await,
+            "one tied suggestion out of reach keeps the task a person's"
+        );
+        assert!(
+            !allowed(&e, &improver, close("old")).await,
+            "a suggestion tasked again elsewhere no longer ties the old task"
+        );
+        assert!(allowed(&e, &improver, close("new")).await);
+        assert!(
+            !allowed(&e, &improver, Request::TaskDelete { id: "fix".into() }).await,
+            "deleting is not closing: plain task reach"
+        );
+        assert!(
+            !allowed(
+                &e,
+                &improver,
+                Request::TaskRun {
+                    override_wait: false,
+                    id: "fix".into(),
+                    reason: None,
+                    continue_run: false
+                }
+            )
+            .await,
+            "nor is running it"
+        );
+        assert!(
+            !allowed(&e, &worker("w"), close("fix")).await,
+            "a role without task.close is refused"
+        );
+
+        // `suggestion done` runs before `task close`, and leaves the tie.
+        for id in ["s1", "s2"] {
+            let mut s = e.l5.suggestions.get(id).await.unwrap().unwrap();
+            s.done("improver", Utc::now()).unwrap();
+            e.l5.suggestions.put(&s).await.unwrap();
+        }
+        assert!(
+            allowed(&e, &improver, close("fix")).await,
+            "done suggestions still answer to their task"
+        );
+
+        // `reach: own` follows the suggestions this agent filed itself.
+        assert!(allowed(&e, &agent("demo", "w", "own-closer"), close("mine")).await);
+        assert!(
+            !allowed(&e, &agent("demo", "w", "own-closer"), close("fix")).await,
+            "s2 was filed by somebody else"
+        );
+        assert!(!allowed(&e, &agent("demo", "x", "own-closer"), close("mine")).await);
     }
 
     async fn task_in(engine: &Engine, id: &str, scope: &str, agent: &str) -> Task {

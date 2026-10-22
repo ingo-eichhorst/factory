@@ -235,7 +235,9 @@ pub enum Request {
     /// an optional note, journaled with who closed it. Works with no run at
     /// all, and on a task blocked by a failure; refused while a run is
     /// active (cancel it first) and on a task already closed (reopen it
-    /// first).
+    /// first). Needs `task.close` and reach over the task -- or, for an
+    /// improvement task (`#365`), over every suggestion tasked into it.
+    /// Reopening needs the same.
     #[serde(rename = "task.close")]
     TaskClose {
         id: String,
