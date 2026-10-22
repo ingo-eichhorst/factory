@@ -447,7 +447,11 @@ is somewhere else is not below `projects`.
   cannot touch a task in `projects/demo`, and a `reach: scope` role inherited
   from `projects` cannot touch a task in `projects`, in a sibling, or in a
   scope below the agent's own. Inheritance decides which roles exist where,
-  never how far one reaches.
+  never how far one reaches. One narrow exception follows a link Factory
+  recorded itself: a role holding `task.close` may close and reopen an
+  improvement task in the root scope when every suggestion tasked into it is
+  in the role's reach (see [Dismiss and done](#suggestions)) -- closing and
+  reopening only, never editing, running or deleting it.
 
 The instance root writes its roles only in its top-level `roles:`; a
 `scope.roles` block in the root's config is refused at startup, because one
@@ -2939,7 +2943,14 @@ field -- it never silently falls back to the complaining agent's own scope.
 **Dismiss and done.** `factory suggestion dismiss <id> --reason "..."` and
 `factory suggestion done <id>` (`POST /api/suggestions/{id}/dismiss` and
 `.../done`) move a suggestion to a terminal state; both are refused, saying
-so, once it has already reached one.
+so, once it has already reached one. Closing the improvement task itself
+(`factory task close`/`reopen`) takes `task.close` too, and although the
+task lives in the root scope, an agent outside it may do so when every
+suggestion tasked into that task is in its reach (`#365`) -- so the agent
+that answered the suggestions can also close the task. A group that
+includes a suggestion from a scope the agent cannot reach, or a task no
+suggestion is tied to any more (one tasked again elsewhere moves its tie),
+stays a person's to close.
 
 **Ask the agent.** Because a suggestion records the agent and its harness
 session, `factory suggestion ask <id> "<question>"`
