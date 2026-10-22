@@ -418,6 +418,14 @@ mod tests {
         scope
     }
 
+    /// A fake `tmutil` is a brand-new executable, and macOS XProtect scans
+    /// every new executable on its first exec: 0.5-2s on an idle host, past
+    /// the production 5s once `cargo test --workspace` loads it (#361). A
+    /// test that needs the script's output waits this long instead; a passing
+    /// test still returns as soon as the script exits. `PROBE_TIMEOUT` stays
+    /// 5s because production runs the system's signed `tmutil`.
+    const FAKE_TMUTIL_TIMEOUT: Duration = Duration::from_secs(60);
+
     fn fake_script(name: &str, body: &str) -> PathBuf {
         let path = temp_dir(name);
         let mut file = std::fs::File::create(&path).unwrap();
@@ -451,7 +459,7 @@ mod tests {
     #[tokio::test]
     async fn a_tmutil_that_says_nothing_is_configured_is_read_as_such() {
         let script = fake_script("off-tmutil", "#!/bin/sh\necho 'tmutil: No destinations configured.'\nexit 0\n");
-        let fact = probe_time_machine(&script, PROBE_TIMEOUT).await;
+        let fact = probe_time_machine(&script, FAKE_TMUTIL_TIMEOUT).await;
         assert_eq!(fact, TimeMachineFact::NotConfigured);
         std::fs::remove_file(&script).ok();
     }
@@ -460,7 +468,7 @@ mod tests {
     #[tokio::test]
     async fn a_tmutil_that_exits_non_zero_is_unavailable_with_its_own_reason() {
         let script = fake_script("failing-tmutil", "#!/bin/sh\necho 'permission denied' >&2\nexit 1\n");
-        let fact = probe_time_machine(&script, PROBE_TIMEOUT).await;
+        let fact = probe_time_machine(&script, FAKE_TMUTIL_TIMEOUT).await;
         let TimeMachineFact::Unavailable { reason } = fact else { panic!("expected Unavailable") };
         assert!(reason.contains("permission denied"), "{reason}");
         std::fs::remove_file(&script).ok();
