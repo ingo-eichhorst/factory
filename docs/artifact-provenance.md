@@ -48,10 +48,14 @@ The snapshot resides under the instance's
 overwrites a previous file. Records are append-only in the existing policy
 SQLite store, alongside run attestations; identical inserts are idempotent,
 and conflicting evidence for the same id is refused. Only records matching
-the completed run's captured artifacts and finish time are returned. Failed
-captures can leave unreferenced instance-owned snapshots; they are not
-published evidence. These are runtime artifacts, not authored scope content,
-and have no automatic retention/deletion or separate backup promise.
+the completed run's captured artifacts and finish time are returned. A
+refused capture removes the copies it wrote. Copies can still outlive their
+report -- a capture interrupted by a daemon stop, a removal that failed
+(logged as a warning), a report that failed after its capture, or an
+earlier report's copies after a later done report on the same run replaced
+them -- and are unreferenced, never published evidence. These are runtime
+artifacts, not authored scope content, and have no automatic
+retention/deletion or separate backup promise.
 
 ## Build type v1
 
@@ -71,9 +75,22 @@ copy of all build inputs. Rebuilding from this record alone is not promised.
 These are caller-controlled input references; consumers must check that they
 identify the expected release workflow. No internal parameters are emitted.
 `resolvedDependencies` describes the source with `gitCommit` and
-`factoryWorktreeSha256` digests. The latter uses the verifier's existing
-`factory-worktree-v1` algorithm: HEAD, porcelain status, binary tracked diff,
-and untracked names/bytes. Ignored files are not source dependencies, but an
+`factoryWorktreeSha256` digests, both taken in the run's working directory
+`<dir>`: the run's worktree or, for a `--no-worktree` scope, the scope's own
+directory. `gitCommit` is the repository's HEAD,
+`git -C <dir> rev-parse HEAD`. `factoryWorktreeSha256` uses the verifier's
+existing `factory-worktree-v1` algorithm: that HEAD, the output of
+`git status --porcelain=v1 -z --untracked-files=all` and
+`git diff --binary --no-ext-diff HEAD`, and each name
+`git ls-files --others --exclude-standard -z` lists with its bytes, read
+relative to `<dir>`. Those three commands run as
+`git -C <dir> ... -- . ':(exclude).factory'`, so the digest covers `<dir>`
+and below less `<dir>/.factory`: edits elsewhere in a larger repository and
+Factory's own state are not part of the source. A worktree run's directory
+is its repository's root, so there it is the whole repository less its root
+`.factory/`. `git_state` in `crates/factory-daemon/src/verification.rs` is
+the reference implementation, including how the parts are framed for
+hashing. Ignored files are not source dependencies, but an
 explicitly selected ignored output is independently hashed and validated.
 This is not an inventory of downloaded dependencies; build SBOM attachments
 remain separate.
