@@ -3,19 +3,27 @@
 //! repository's other tests cannot stand in for, because they all talk to an
 //! in-process `Engine` with a fake runtime.
 //!
-//! Skips (prints why, does not fail) rather than asserting anything when
-//! `herdr` is not on PATH or the `factory` binary is not built next to
-//! `factory-daemon`. The second check is not incidental: `ShellAgent::prompt`
-//! (see `crates/factory-plugins/src/builtin/agents.rs`) writes the literal
-//! shell command `{factory_bin} task report {id} --status done ...` into the
-//! session -- a task's terminal status comes from that binary actually
-//! running, not from herdr's own idea of whether the pane looks busy. Without
-//! it, no task here could ever reach `done` and the test would prove nothing
-//! by passing.
+//! Fails, saying why, when `herdr` is not on PATH or the `factory` binary is
+//! not built next to `factory-daemon`. The second check is not incidental:
+//! `ShellAgent::prompt` (see `crates/factory-plugins/src/builtin/agents.rs`)
+//! writes the literal shell command `{factory_bin} task report {id} --status
+//! done ...` into the session -- a task's terminal status comes from that
+//! binary actually running, not from herdr's own idea of whether the pane
+//! looks busy. Without it, no task here could ever reach `done`.
 //!
-//! Never shells out to `cargo build`: that would contend on the cargo lock
-//! with whatever invoked this test. If the `factory` binary has not been
-//! built, the fix is `cargo build --workspace` (or `--bin factory`) first.
+//! It used to skip instead, and a skip is a pass: the test harness keeps a
+//! passing test's stderr to itself, so every test here reported `ok` in 0.00s
+//! and the reason was never shown. On a machine that cannot run them, set
+//! `FACTORY_QA_SKIP_E2E=1` to skip on purpose; it only turns a missing
+//! prerequisite into a skip, and changes nothing where both are there.
+//!
+//! `cargo test --workspace` builds a current `factory` itself, because
+//! `factory-cli` has an integration test (`crates/factory-cli/tests/smoke.rs`).
+//! `cargo test -p factory-daemon` builds only this package's targets, so the
+//! fix there is `cargo build --workspace` (or `--bin factory`) first. Never
+//! shells out to `cargo build` itself: it would have to work out the profile,
+//! target triple and target directory from where `factory-daemon` lives, and
+//! every test in this file would race to start it.
 //!
 //! Needs no herdr server of its own and is safe to run from anywhere --
 //! including a Factory run's shell or a herdr pane, whose environment points
@@ -1205,24 +1213,26 @@ fn a_no_worktree_scope_in_the_instance_repo_reports_artifacts_through_the_shell_
         "the store is visible to the instance repository");
 }
 
-/// `true` (and prints why) when this binary and the environment cannot run
-/// any test in this file -- shared so a second test does not have to repeat
-/// (or drift from) the same two checks.
+/// Fails, saying why, when this binary and the environment cannot run any
+/// test in this file -- or, with `FACTORY_QA_SKIP_E2E=1`, prints why and
+/// returns `true` so the test skips. Shared so a second test does not have to
+/// repeat (or drift from) the same two checks.
 fn missing_prerequisites() -> bool {
-    if find_on_path("herdr").is_none() {
-        eprintln!("skipping: herdr is not on PATH");
+    let missing = if find_on_path("herdr").is_none() {
+        "herdr is not on PATH"
+    } else if find_factory_bin().is_none() {
+        "the `factory` binary is not built next to factory-daemon \
+         (run `cargo build --workspace` or `cargo build --bin factory` first) -- \
+         the shell agent's own prompt calls back into it to report status, so \
+         without it no task here could ever reach `done`"
+    } else {
+        return false;
+    };
+    if std::env::var_os("FACTORY_QA_SKIP_E2E").is_some_and(|value| value == "1") {
+        eprintln!("skipping (FACTORY_QA_SKIP_E2E=1): {missing}");
         return true;
     }
-    if find_factory_bin().is_none() {
-        eprintln!(
-            "skipping: the `factory` binary is not built next to factory-daemon \
-             (run `cargo build --workspace` or `cargo build --bin factory` first) -- \
-             the shell agent's own prompt calls back into it to report status, so \
-             without it no task here could ever reach `done`"
-        );
-        return true;
-    }
-    false
+    panic!("{missing}; set FACTORY_QA_SKIP_E2E=1 to skip the end-to-end tests instead");
 }
 
 /// `#330` against a real daemon, a real herdr and the real `factory` CLI: two

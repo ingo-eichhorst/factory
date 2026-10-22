@@ -73,6 +73,8 @@ changing an adapter trait -- those five traits are the whole point of the shape.
 The end-to-end tests start a headless herdr of their own, on a session of
 their own, and strip the live instance's variables from everything they
 start, so the suite is safe to run from a Factory run's shell or a herdr pane.
+They need `herdr` on PATH and fail without it; set `FACTORY_QA_SKIP_E2E=1`
+to skip them on a machine that has none.
 
 Never develop against the company's live `.factory/`: it holds a real database
 and real secrets. Make a throwaway instance instead:
