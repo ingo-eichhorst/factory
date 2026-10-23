@@ -446,6 +446,9 @@ impl Engine {
             // in speaks for the owner's gateway. Both are the owner's alone
             // -- the daemon's own Telegram gateway calls them as the owner.
             Request::ChannelPoll { .. } | Request::ChannelRecord { .. } => return Needs::Owner,
+            // A reply on the owner's channel answers in the owner's name;
+            // only the owner's gateway relays one.
+            Request::EscalationReply { .. } | Request::EscalationChoose { .. } => return Needs::Owner,
             // `#339`: whether a run's change to a skill is accepted is a
             // person's decision -- the point of `learn: propose` -- and so is
             // what curation archives and brings back.

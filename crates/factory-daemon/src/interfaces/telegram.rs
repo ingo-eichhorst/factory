@@ -87,8 +87,13 @@ impl Interface<Engine> for TelegramInterface {
         // whoever started the daemon, rather than on the first message.
         snapshot.scope(&inbound.scope)?;
         engine.resolve_agent(&inbound.scope, &inbound.agent)?;
+        // The daemon sends blocked runs' questions to this channel itself
+        // (`daemon.escalation`), each one answerable by a reply: the
+        // gateway's own "waiting for you" would only say it twice.
+        let escalates = snapshot.config.daemon.escalation.channel.as_deref() == Some(self.channel.as_str());
         let gateway = Arc::new(Gateway {
             engine,
+            escalates,
             channel: self.channel.clone(),
             consumer: format!("telegram-gateway-{}", uuid::Uuid::new_v4()),
             words: Words(inbound.language.unwrap_or_default()),
@@ -449,6 +454,8 @@ impl Words {
 
 struct Gateway {
     engine: Arc<Engine>,
+    /// The daemon sends this channel the questions blocked runs ask.
+    escalates: bool,
     channel: String,
     consumer: String,
     inbound: InboundDecl,
@@ -604,10 +611,18 @@ impl Gateway {
                 match verdict {
                     "ok" => self.decide(id, true, message).await,
                     "no" => self.decide(id, false, message).await,
+                    crate::escalation::ANSWER_BUTTON => self.choose(id, message).await,
                     _ => self.say(message, self.words.expired(), Vec::new()).await,
                 }
             }
-            ch::Inbound::Message { update, message, from, at, text, files, refused } => {
+            ch::Inbound::Message { update, message, from, at, text, files, refused, reply_to } => {
+                // A reply to a question Factory sent answers it; a reply to
+                // anything else is a message like any other.
+                if let Some(to) = reply_to.filter(|_| !text.trim().is_empty()) {
+                    if self.answer_reply(to, &text, message).await {
+                        return;
+                    }
+                }
                 if files.is_empty() {
                     if let Some(yes) = yes_or_no(&text) {
                         let newest = self.state.lock().unwrap().proposals.last().map(|p| p.id.clone());
@@ -873,6 +888,34 @@ impl Gateway {
         }
     }
 
+    /// Answer the question `to` carried with `text`; whether it carried one.
+    /// What the daemon did, or why it would not, goes back as a reply.
+    async fn answer_reply(&self, to: i64, text: &str, message: i64) -> bool {
+        let request = Request::EscalationReply { channel: self.channel.clone(), message: to, text: text.to_string() };
+        let said = match self.ask(request).await {
+            Ok(Payload::Text { text }) => format!("✓ {text}"),
+            Err((code, _)) if code == "not_found" => return false,
+            Err((_, why)) => why,
+            Ok(other) => format!("{other:?}"),
+        };
+        self.say(Some(message), said, Vec::new()).await;
+        true
+    }
+
+    /// A question's button: `<run id>:<option>`.
+    async fn choose(&self, pressed: &str, message: Option<i64>) {
+        let Some((run, option)) = pressed.rsplit_once(':').and_then(|(run, n)| Some((run, n.parse().ok()?))) else {
+            return self.say(message, self.words.expired(), Vec::new()).await;
+        };
+        let request = Request::EscalationChoose { channel: self.channel.clone(), run: run.to_string(), option };
+        let said = match self.ask(request).await {
+            Ok(Payload::Text { text }) => format!("✓ {text}"),
+            Err((_, why)) => why,
+            Ok(other) => format!("{other:?}"),
+        };
+        self.say(message, said, Vec::new()).await;
+    }
+
     /// Look at every waiting answer once.
     async fn watch(&self) {
         let waiting: Vec<(String, i64, Option<DateTime<Utc>>)> =
@@ -887,6 +930,8 @@ impl Gateway {
                 _ => continue,
             };
             match task.status {
+                // The daemon sent the question itself, as a reply here.
+                TaskStatus::Blocked if self.escalates => {}
                 TaskStatus::Blocked => {
                     let (at, why) = self.blocked_reason(&task.id).await;
                     if told_blocked.is_some() && told_blocked >= at {
