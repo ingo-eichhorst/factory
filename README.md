@@ -5029,6 +5029,22 @@ Three timeouts catch the rest:
   instead, counted from when the block began rather than when the run did, so
   a person has a real chance to see it and answer before the daemon gives up.
 
+A run whose session is no longer there fails `session_gone`, `Blocked` or not,
+because it can never report again. Failing a run closes its session, so the
+daemon makes sure first:
+
+- **Only herdr itself saying `pane_not_found` reads as gone.** herdr must be
+  running and asked. Its server not running, `herdr` failing to start, or an
+  answer that is not herdr's JSON is `unknown`, which fails nothing.
+- **The pane must read gone on three ticks in a row**, which is ten to fifteen
+  seconds at the default tick.
+
+On 2026-10-22 a single failed probe did this to a live, blocked session that
+was waiting on its owner's answer. The daemon was out of file descriptors, so
+`herdr` never started, and that was read as gone. The daemon now raises its
+soft open-file limit at startup from launchd's 256 towards the hard limit,
+capped at 10240, and logs the change.
+
 None of the three above notice a host that cannot execute at all. A run's
 `task_timeout_seconds` is spent by wall clock, and wall clock keeps moving
 while a sleeping host has nothing running -- so `power_assertion` (on by

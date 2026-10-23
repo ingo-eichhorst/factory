@@ -267,7 +267,37 @@ fn init(root: Option<PathBuf>, name: Option<String>, scope: PathBuf) -> anyhow::
     Ok(())
 }
 
+/// The open-file limit the daemon asks for: macOS's `OPEN_MAX`, the most
+/// `setrlimit` accepts there for a soft limit.
+const OPEN_FILES_WANTED: libc::rlim_t = 10240;
+
+/// Raise the soft open-file limit towards the hard one. launchd starts the
+/// daemon with a soft limit of 256, and the daemon -- a subprocess with three
+/// pipes for every runtime question it asks, every tick, of every session,
+/// beside its own sockets and database -- has run out of it: `herdr` could
+/// not be started, and a session that could not be asked about was taken for
+/// gone. Lowered never; a failure only says so.
+fn raise_open_file_limit() {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        tracing::warn!("could not read the open-file limit: {}", std::io::Error::last_os_error());
+        return;
+    }
+    let wanted = OPEN_FILES_WANTED.min(limit.rlim_max);
+    if limit.rlim_cur >= wanted {
+        return;
+    }
+    let was = limit.rlim_cur;
+    limit.rlim_cur = wanted;
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        tracing::warn!(was, wanted, "could not raise the open-file limit: {}", std::io::Error::last_os_error());
+        return;
+    }
+    tracing::info!(was, now = wanted, "raised the open-file limit");
+}
+
 async fn run(root: Option<PathBuf>) -> anyhow::Result<()> {
+    raise_open_file_limit();
     let root = match root {
         Some(r) => r,
         None => Factory::discover(&std::env::current_dir()?)?.ok_or_else(|| {
