@@ -270,6 +270,16 @@ fn private_file(path: &Path, text: &str) {
 /// `token` is the bot token: a second rig with the same one is a second
 /// consumer of the same bot.
 pub(crate) fn rig_with(token: &str, bot: FakeBotApi, inbound_extra: &str) -> Rig {
+    rig_on(token, bot, inbound_extra, false)
+}
+
+/// [`rig`], with blocked runs' questions sent to the channel
+/// (`daemon.escalation.channel: owner-telegram`).
+fn rig_escalating() -> Rig {
+    rig_on(&fresh_token(), FakeBotApi::start(), "", true)
+}
+
+fn rig_on(token: &str, bot: FakeBotApi, inbound_extra: &str, escalate: bool) -> Rig {
     use factory_core::config::{Config, DaemonConfig, Factory, Instance};
     use factory_plugins::{Registry, SqliteStore};
     let root = std::env::temp_dir().join(format!("factory-telegram-{}", uuid::Uuid::new_v4()));
@@ -296,7 +306,11 @@ pub(crate) fn rig_with(token: &str, bot: FakeBotApi, inbound_extra: &str) -> Rig
         serde_yaml_ng::from_str("id: demo-id\nname: demo\npath: projects/demo\nruntime: quiet\n").unwrap();
     let config = Config {
         instance: Instance { id: "test".into(), name: "test".into() },
-        daemon: DaemonConfig { power_assertion: false, ..DaemonConfig::default() },
+        daemon: DaemonConfig {
+            power_assertion: false,
+            escalation: factory_core::config::EscalationConfig { channel: escalate.then(|| "owner-telegram".to_string()) },
+            ..DaemonConfig::default()
+        },
         scopes: vec![demo],
         secrets: blocks.secrets,
         channels: blocks.channels,
@@ -322,6 +336,13 @@ pub(crate) fn rig() -> Rig {
 fn message(update: i64, id: i64, from: i64, text: &str) -> serde_json::Value {
     serde_json::json!({ "update_id": update, "message": {
         "message_id": id, "date": 1_790_000_000, "from": { "id": from, "is_bot": false }, "chat": { "id": CHAT, "type": "private" }, "text": text } })
+}
+
+/// The owner's reply, with Telegram's reply, to the channel's message `to`.
+fn reply(update: i64, id: i64, to: i64, text: &str) -> serde_json::Value {
+    let mut update = message(update, id, OWNER, text);
+    update["message"]["reply_to_message"] = serde_json::json!({ "message_id": to, "date": 0, "chat": { "id": CHAT } });
+    update
 }
 
 fn press(update: i64, from: i64, data: &str, under: i64) -> serde_json::Value {
@@ -833,4 +854,120 @@ async fn a_run_that_blocks_is_passed_on_once_and_answered_when_it_ends() {
     rig.report(&task, &run_token, RunStatus::Running, Some("weiter"), None).await;
     rig.report_done(&task, &run_token, "Tisch für 19 Uhr reserviert.").await;
     wait_for("the answer", || rig.bot.sent().into_iter().find(|c| c.text() == "Tisch für 19 Uhr reserviert.")).await;
+}
+
+// ------------------------------------------------------------- escalation
+
+impl Rig {
+    /// A task of the rig's own in `demo` -- not one a message became --
+    /// running, and its run's token.
+    async fn running_task(&self, title: &str) -> (Task, String) {
+        let task = self
+            .engine
+            .l4_service()
+            .create(NewTask {
+                title: title.into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                worktree: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let run = Request::TaskRun { id: task.id.clone(), reason: None, continue_run: false, override_wait: false };
+        assert!(matches!(self.ask(run, None).await, Response::Ok { .. }));
+        for _ in 0..300 {
+            if let Some(run) = self.engine.l4.store.active_run(&task.id).await.unwrap() {
+                if let Some(token) = run.token.clone() {
+                    return (task, token);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("{title} never started");
+    }
+
+    /// The message ids the question of `task` went out as.
+    async fn question_ids(&self, task: &Task) -> Vec<i64> {
+        let sent = self.entry(&task.id, crate::escalation::ESCALATION_SENT_KIND).await;
+        sent.data.unwrap()["message_ids"].as_array().unwrap().iter().map(|id| id.as_i64().unwrap()).collect()
+    }
+}
+
+#[tokio::test]
+async fn a_blocked_runs_question_goes_to_the_owner_and_a_reply_answers_it_once() {
+    let mut rig = rig_escalating();
+    rig.serve();
+    let (task, run_token) = rig.running_task("Deploy").await;
+    rig.report(&task, &run_token, RunStatus::Blocked, Some("Which region?"), None).await;
+
+    let asked = wait_for("the question", || rig.bot.sent().into_iter().find(|c| c.text().contains("Which region?"))).await;
+    assert!(asked.text().contains("Deploy (demo) is waiting for your answer"), "{}", asked.text());
+    assert!(asked.text().contains("Reply to this message"), "{}", asked.text());
+    let ids = rig.question_ids(&task).await;
+
+    rig.bot.push(reply(1, 500, ids[0], "eu-central"));
+    let done = wait_for("the confirmation", || rig.bot.sent().into_iter().find(|c| c.replies_to() == Some(500))).await;
+    assert!(done.text().contains("typed into attempt 1"), "{}", done.text());
+    let answered = rig.entry(&task.id, "answer").await;
+    assert_eq!(answered.data.as_ref().unwrap()["reason"], "replied on owner-telegram");
+    assert!(!answered.message.contains("eu-central"), "the owner's text is not journaled");
+
+    rig.bot.push(reply(2, 501, ids[0], "us-east"));
+    let again = wait_for("the second reply's answer", || rig.bot.sent().into_iter().find(|c| c.replies_to() == Some(501))).await;
+    assert!(again.text().contains("answered already"), "{}", again.text());
+    assert!(rig.tasks().await.iter().all(|t| !t.labels.contains_key(ch::LABEL_MESSAGE)), "neither reply became a task");
+}
+
+#[tokio::test]
+async fn a_questions_button_answers_it_with_that_option() {
+    let mut rig = rig_escalating();
+    rig.serve();
+    let (task, run_token) = rig.running_task("PR 2097").await;
+    rig.report(&task, &run_token, RunStatus::Blocked, Some("merge as-is or suppress?"), None).await;
+    let first = wait_for("the question", || rig.bot.sent().into_iter().find(|c| c.text().contains("merge as-is or suppress?"))).await;
+    assert!(first.button("Merge as-is").is_none(), "an agent's own question has no options");
+
+    // With options -- what an escalation from the orchestrator carries.
+    let run = rig.engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
+    let options = vec!["Merge as-is".to_string(), "Suppress, then merge".to_string()];
+    rig.engine
+        .l4_service()
+        .escalate_to_owner(&run, "merge while CodeScene is red?", Some("Merging outside the task's rule is yours to decide."), &options)
+        .await
+        .unwrap();
+    let asked = wait_for("the options", || rig.bot.sent().into_iter().find(|c| c.button("Suppress, then merge").is_some())).await;
+    let data = asked.button("Merge as-is").unwrap();
+    assert_eq!(data, format!("ans:{}:0", run.id));
+
+    rig.bot.push(press(3, OWNER, &data, 900));
+    let done = wait_for("the confirmation", || rig.bot.sent().into_iter().find(|c| c.text().starts_with("✓"))).await;
+    assert!(done.text().contains("typed into attempt 1"), "{}", done.text());
+    assert_eq!(rig.entry(&task.id, "answer").await.data.unwrap()["reason"], "chose on owner-telegram");
+}
+
+#[tokio::test]
+async fn a_chat_tasks_question_goes_into_its_own_thread_once() {
+    let mut rig = rig_escalating();
+    rig.serve();
+    rig.bot.push(message(1, 95, OWNER, "Buch mir einen Tisch"));
+    let (task, run_token) = rig.message_task(95).await;
+    wait_for("the acknowledgement", || rig.bot.sent().into_iter().find(|c| c.replies_to() == Some(95))).await;
+    rig.report(&task, &run_token, RunStatus::Blocked, Some("Welches Restaurant?"), None).await;
+    let asked = wait_for("the question", || rig.bot.sent().into_iter().find(|c| c.text().contains("Welches Restaurant?"))).await;
+    assert_eq!(asked.replies_to(), Some(95), "in the conversation it came from");
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(rig.bot.sent().iter().filter(|c| c.text().contains("Welches Restaurant?")).count(), 1, "said once, by the daemon");
+}
+
+#[test]
+fn escalating_to_a_channel_that_takes_nothing_in_is_refused_at_load() {
+    use factory_core::config::{Config, DaemonConfig, EscalationConfig};
+    let config = Config {
+        daemon: DaemonConfig { escalation: EscalationConfig { channel: Some("nowhere".into()) }, ..DaemonConfig::default() },
+        ..Default::default()
+    };
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("daemon.escalation.channel"), "{err}");
 }

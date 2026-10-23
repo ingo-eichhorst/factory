@@ -337,6 +337,7 @@ impl L4Service<'_> {
                     messages: messages.len(),
                     documents: documents.len(),
                     sent_at: None,
+                    message_ids: messages,
                 })
             }
             Ok(Receipt::Repeat { id, sent_at }) => {
@@ -354,6 +355,7 @@ impl L4Service<'_> {
                     messages: 0,
                     documents: 0,
                     sent_at: Some(sent_at),
+                    message_ids: Vec::new(),
                 })
             }
             Err(e) => {

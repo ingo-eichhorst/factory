@@ -1165,8 +1165,9 @@ channels:
   labels `inbound.channel`, `inbound.message` and `inbound.update`. The owner
   gets an acknowledgement within seconds, and the run's `--result` comes back
   as the answer when the run ends -- there is no fixed timeout but the run's
-  own. A run that reports `blocked` has its question passed on; it is
-  answered in Factory as any other. The run is told in its reporting
+  own. A run that reports `blocked` has its question passed on, and a
+  reply to it answers it when the channel is also the escalation channel
+  (below); otherwise it is answered in Factory. The run is told in its reporting
   contract that its result is the answer. Each message is a run of its own,
   in a fresh session: the conversation carries no memory between messages
   beyond what the agent keeps itself. A waiting answer survives a restart:
@@ -1217,6 +1218,38 @@ channels:
 are the owner's alone. `notify` gains `reply_to` and `buttons`, also the
 owner's alone: a run sends its result, and an answer to a particular message
 is never another answer's repeat.
+
+### Questions to the owner, answered by a reply
+
+```yaml
+daemon:
+  escalation:
+    channel: owner-telegram   # must declare inbound:, or no reply could come back
+```
+
+With an escalation channel, every question an agent asks with `factory task
+report --status blocked` also goes to the owner there, as well as into the
+Inbox. The message names the task, its scope, the question, and which task
+and attempt asked. **A Telegram reply to it answers it**, the same way the
+Inbox's Answer does (`task.answer`): typed into the session while it is
+open, or resumed into a new attempt once the session is gone. A question
+sent with options -- what an escalation from the orchestrator carries --
+has one button per option, and pressing one answers with that option's
+text. The gateway confirms what happened ("typed into attempt 1's
+session") or says why not; a reply to a question already answered, from
+anywhere, is told so.
+
+- **Sent once per question.** An agent repeating its block sends nothing
+  new, a different question is sent.
+- **Kept in the journal:** an `escalation_sent` entry on the run holds the
+  channel, the question, its options and the message ids. A reply finds its
+  question there for 14 days.
+- **Chat tasks:** a question from a task that came in on the same channel
+  goes into that message's thread, and the gateway's own "Waiting for you"
+  notice steps aside.
+- **The owner's alone:** `escalation.reply` and `escalation.choose` are
+  requests only the owner's gateway makes. A reply that answers nothing is
+  an ordinary message, as before.
 
 ## Dependencies
 

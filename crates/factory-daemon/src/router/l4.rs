@@ -45,22 +45,22 @@ impl Engine {
             }
             Request::TaskAnswer { id, text, reason } => {
                 let asked = crate::operations::Asked::new(caller, reason);
-                let text = match self.l4_service().answer_task(&id, &text, &asked).await? {
-                    crate::operations::Answered::Typed { attempt } => {
-                        format!("typed into attempt {attempt}'s session")
-                    }
-                    crate::operations::Answered::Resume { prev, note } => {
-                        let attempt = prev.attempt;
-                        let engine = self.clone();
-                        let due = Due::now();
-                        // Dispatch can take a minute, as for `task.run`.
-                        tokio::spawn(async move {
-                            engine.l4_service().start_run_due_answered(&id, due, *prev, note).await;
-                        });
-                        format!("attempt {attempt}'s session is gone; a new attempt resumes its conversation with the answer")
-                    }
-                };
-                Ok(Payload::Text { text })
+                Ok(Payload::Text { text: self.answer_task(id, &text, &asked).await? })
+            }
+            // A reply on the owner's channel, or a press of one of a
+            // question's buttons (`escalation.rs`): the same answer, once
+            // the message is known to carry a question still waiting.
+            Request::EscalationReply { channel, message, text } => {
+                let (task, run) = self.l4_service().escalation_for_reply(&channel, message).await?;
+                self.l4_service().still_asking(&task, &run).await?;
+                let asked = crate::operations::Asked::new(caller, Some(format!("replied on {channel}")));
+                Ok(Payload::Text { text: self.answer_task(task, &text, &asked).await? })
+            }
+            Request::EscalationChoose { channel, run, option } => {
+                let (task, text) = self.l4_service().escalation_option(&channel, &run, option).await?;
+                self.l4_service().still_asking(&task, &run).await?;
+                let asked = crate::operations::Asked::new(caller, Some(format!("chose on {channel}")));
+                Ok(Payload::Text { text: self.answer_task(task, &text, &asked).await? })
             }
 
             Request::Notify { channel, text, files, reply_to, buttons } => Ok(Payload::Notified {
@@ -295,6 +295,13 @@ impl Engine {
                 // including small reads on axum's default worker stack.
                 let run = Box::pin(self.l4_service().report(&id, report)).await?;
                 self.sync_workflow_for_task(&id).await;
+                // A question goes on to the owner off the report's own
+                // path: a channel send must never hold up the agent.
+                if run.status == factory_core::run::RunStatus::Blocked {
+                    let engine = self.clone();
+                    let blocked = run.id.clone();
+                    tokio::spawn(async move { engine.l4_service().escalate_block(&blocked).await });
+                }
                 Ok(Payload::Run { run: run.redacted() })
             }
             // `#339`: memory and skill writes from a run, checked and
@@ -512,5 +519,26 @@ impl Engine {
             .into_iter()
             .find(|page| page.scope == canonical)
             .ok_or_else(|| FactoryError::BadRequest(format!("scope {canonical:?} declares no page {name:?}")))
+    }
+}
+
+impl Engine {
+    /// `task.answer`, and every way of reaching it (`escalation.*`): typed
+    /// into the session while it is open, otherwise the new attempt that
+    /// resumes the conversation is started here, off the request's path --
+    /// dispatch can take a minute, as for `task.run`. The line says which.
+    async fn answer_task(self: &Arc<Self>, id: String, text: &str, asked: &crate::operations::Asked) -> Result<String> {
+        Ok(match self.l4_service().answer_task(&id, text, asked).await? {
+            crate::operations::Answered::Typed { attempt } => format!("typed into attempt {attempt}'s session"),
+            crate::operations::Answered::Resume { prev, note } => {
+                let attempt = prev.attempt;
+                let engine = self.clone();
+                let due = Due::now();
+                tokio::spawn(async move {
+                    engine.l4_service().start_run_due_answered(&id, due, *prev, note).await;
+                });
+                format!("attempt {attempt}'s session is gone; a new attempt resumes its conversation with the answer")
+            }
+        })
     }
 }

@@ -668,6 +668,10 @@ pub enum Inbound {
         /// failed. Never their content.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         refused: Vec<String>,
+        /// The channel's message this one replies to, when the owner used
+        /// Telegram's reply -- how an answer finds the question it answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<i64>,
     },
     /// An allowed user pressed a button under one of the channel's
     /// messages. The press has already been answered, so the button stops
@@ -725,7 +729,7 @@ pub struct FileRef {
 /// One update as the gateway sorts it, before any file is fetched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sorted {
-    Message { update: i64, message: i64, from: i64, at: DateTime<Utc>, text: String, files: Vec<FileRef> },
+    Message { update: i64, message: i64, from: i64, at: DateTime<Utc>, text: String, files: Vec<FileRef>, reply_to: Option<i64> },
     Button { update: i64, query: String, message: Option<i64>, from: i64, data: String },
     Ignored { update: i64, from: Option<i64>, chat: Option<i64>, what: String },
 }
@@ -777,6 +781,14 @@ struct TgMessage {
     video: Option<TgFile>,
     #[serde(default)]
     video_note: Option<TgFile>,
+    /// The message this one replies to; only its id is read.
+    #[serde(default)]
+    reply_to_message: Option<TgReplied>,
+}
+
+#[derive(Deserialize)]
+struct TgReplied {
+    message_id: i64,
 }
 
 #[derive(Deserialize)]
@@ -898,6 +910,7 @@ pub fn sort_updates(result: &serde_json::Value, chat: i64, users: &[i64], limit:
                     at: DateTime::from_timestamp(message.date, 0).unwrap_or_else(Utc::now),
                     text,
                     files,
+                    reply_to: message.reply_to_message.as_ref().map(|replied| replied.message_id),
                 }
             });
         } else if let Some(query) = update.callback_query {
@@ -1147,6 +1160,19 @@ mod tests {
         assert!(matches!(&sorted[7], Sorted::Ignored { what, .. } if what.contains("does not take")));
         assert!(matches!(&sorted[8], Sorted::Ignored { from: Some(7), .. }), "a bot is never taken");
         assert!(sort_updates(&serde_json::json!({}), chat, &[7], 1).is_err());
+    }
+
+    #[test]
+    fn a_reply_names_the_message_it_answers() {
+        let chat = 4242;
+        let result = serde_json::json!([
+            update(1, serde_json::json!({ "message": { "message_id": 30, "date": 0, "from": { "id": 7 }, "chat": { "id": chat }, "text": "eu-central",
+                "reply_to_message": { "message_id": 12, "date": 0, "chat": { "id": chat }, "text": "Which region?" } } })),
+            update(2, serde_json::json!({ "message": { "message_id": 31, "date": 0, "from": { "id": 7 }, "chat": { "id": chat }, "text": "hallo" } })),
+        ]);
+        let sorted = sort_updates(&result, chat, &[7], 10_000).unwrap();
+        assert!(matches!(&sorted[0], Sorted::Message { reply_to: Some(12), text, .. } if text == "eu-central"));
+        assert!(matches!(&sorted[1], Sorted::Message { reply_to: None, .. }));
     }
 
     #[test]
