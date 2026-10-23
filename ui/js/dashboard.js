@@ -1193,6 +1193,7 @@ function inboxItemRow(it) {
         <span class="sub">${esc(it.reason)}${it.scope ? ` · ${esc(it.scope)}` : ""}</span>${diff}
       </span>
       <span class="it-age">${esc(fmtAge(it.age))}</span>
+      ${(it.options || []).map((o, i) => `<button type="button" class="btn inbox-action" data-option="${i}" title="Answer with this">${esc(o)}</button>`).join("")}
       ${(it.actions || []).filter(a => INBOX_ACTIONS.includes(a) || isSkillAction(a)).map(a => `<button type="button" class="btn inbox-action" data-action="${esc(a)}">${esc(labels[a] || a)}</button>`).join("")}
     </div>`;
 }
@@ -1216,7 +1217,15 @@ function wireInboxRows(host) {
       const row = button.closest(".inbox-item");
       const action = button.dataset.action;
       let req;
-      if (isSkillAction(action)) {
+      if (button.dataset.option !== undefined) {
+        // One of the options an orchestrator escalated a question with: the
+        // owner's answer, in one press.
+        const items = inboxItems(inboxReport, (Date.now() - inboxReceivedAt) / 1000);
+        const item = items.find(it => it.run_id === row?.dataset.run);
+        const text = item?.options?.[Number(button.dataset.option)];
+        if (!item || !text) return;
+        req = actionRequest("answer", item, { text });
+      } else if (isSkillAction(action)) {
         // A skill change (`#339`) is named by its proposal, not a run.
         if (!row?.dataset.proposal) return;
         const reason = action === "reject_skill" ? window.prompt("Reject reason:") : "";

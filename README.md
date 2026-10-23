@@ -1251,6 +1251,69 @@ anywhere, is told so.
   requests only the owner's gateway makes. A reply that answers nothing is
   an ordinary message, as before.
 
+### An orchestrator decides first
+
+```yaml
+daemon:
+  orchestrator:
+    agent: orchestrator              # declared in the instance root's own scope:
+    policy: .factory/orchestrator.md # what it may decide; handed to every decision
+    max_decisions_per_task: 3        # then every further question is the owner's
+    exclude: [assistant]             # scopes whose questions go straight to the owner
+```
+
+With an orchestrator, a question an agent asks with `report --status
+blocked` goes to it **at once**, before the owner. The daemon makes a
+**decision task** in the root scope for that agent. It is labelled
+`decides.task`/`decides.run`, has no worktree, and starts immediately. Its
+prompt holds:
+
+- the question;
+- the blocked task's instructions, which are its mandate;
+- the run's last 40 journal entries and the end of its screen;
+- its working directory, to read;
+- the policy file's path.
+
+The orchestrator then does exactly one of:
+
+```sh
+factory decision answer "<the answer>" --reason "<why, with evidence>"
+factory decision escalate --reason "<why the owner must decide>" --option "<choice>" --option "<choice>"
+```
+
+- **An answer** goes to the blocked agent through `task.answer`: typed into
+  its session, or resumed into a new attempt. It is recorded as
+  `orchestrator_decided`, with the text *and* the reason. A person's answer
+  text is never recorded; a decision made on the owner's behalf is.
+- **An escalation** is recorded as `orchestrator_escalated` and becomes the
+  owner's question: in the Inbox with the orchestrator's reason and its
+  options as one-press answers, and on the escalation channel with the
+  options as buttons.
+- **A decision run that ends without deciding** (failed, timed out, done
+  with neither) leaves the question with the owner (`orchestrator_silent`).
+  A decision that arrives after the question was answered some other way is
+  dropped (`decision_stale`).
+
+**What never reaches it:**
+
+- a hook-reported block, which may be a permission prompt nobody read;
+- an approval hold or a failed required step;
+- the orchestrator's own question;
+- a chat task's question, where the owner is already in the conversation;
+- an excluded scope;
+- a task past `max_decisions_per_task`.
+
+**Deciding within the mandate is the policy's job.** The prompt and the
+policy file tell it to escalate anything that widens what the task may do
+(merging outside its stated rule, releasing, publishing, sending, spending,
+deleting) and anything reasonable owners could decide differently at real
+cost. As with roles, this bounds what the orchestrator does by accident.
+It does not stop an agent that ignores its instructions.
+
+`decision.resolve` takes the decision task's id (`FACTORY_TASK_ID` in its
+session) and needs `task.report`, with the same reach as a report: the
+orchestrator answers only the question its own task was made for.
+
 ## Dependencies
 
 The L2 Environment page's **Dependencies** tab keeps two different facts
