@@ -207,6 +207,18 @@ test("the Inbox offers an answer where the question is seen, blocked or failed w
   assert.doesNotMatch(el.inbox.innerHTML, /data-action="cancel"/, "the rest stay on the Operations tab");
 });
 
+test("an escalated question's options answer it in one press", async () => {
+  const el = stubPage(["inbox"]);
+  const escalated = {
+    ...REPORT,
+    attention: [{ ...REPORT.attention[0], actions: ["answer", "cancel"], options: ["Merge as-is", "Suppress, then merge"] }],
+  };
+  globalThis.fetch = answering(escalated, []);
+  await loadInbox();
+  assert.match(el.inbox.innerHTML, /data-option="0"[^>]*>Merge as-is/);
+  assert.match(el.inbox.innerHTML, /data-option="1"[^>]*>Suppress, then merge/);
+});
+
 test("the Inbox says when there is nothing, and when it could not ask", async () => {
   const el = stubPage(["inbox"]);
   globalThis.fetch = answering({ ...REPORT, attention: [] }, []);

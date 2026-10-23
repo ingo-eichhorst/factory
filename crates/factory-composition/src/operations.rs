@@ -176,6 +176,9 @@ pub struct OperationsInput<'a> {
     /// ended (`pending_question`), by run id -- its task can be answered,
     /// which resumes the conversation, rather than only run again.
     pub questions: BTreeMap<String, String>,
+    /// A question the orchestrator escalated to the owner, by run id: why,
+    /// and the options it offers.
+    pub escalated: BTreeMap<String, (String, Vec<String>)>,
     /// When each open run last said anything, by run id: its newest
     /// journal entry. Silence past the p95 of its pace basis is a suspicion.
     pub last_progress: BTreeMap<String, DateTime<Utc>>,
@@ -379,6 +382,10 @@ pub struct Exception {
     /// Other kinds the same run also matched -- a run appears once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<ExceptionKind>,
+    /// The answers an escalated question offers the owner, each a
+    /// one-press answer (`task.answer` with that text).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
 }
 
 /// Work in flight by state, for one scope.
@@ -597,6 +604,15 @@ pub fn pending_question(entries: &[TaskEntry]) -> Option<&str> {
     None
 }
 
+/// A question's reason with the orchestrator's word on why it is the
+/// owner's, and the options it offered -- when it escalated one.
+fn with_escalation(reason: String, escalated: Option<&(String, Vec<String>)>) -> (String, Vec<String>) {
+    match escalated {
+        Some((why, options)) => (format!("{reason} -- the orchestrator escalated it: {why}"), options.clone()),
+        None => (reason, Vec::new()),
+    }
+}
+
 pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
     let now = input.now;
     let late_after = Duration::seconds(
@@ -737,6 +753,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 suspicion: false,
                 observation: false,
                 also: Vec::new(),
+                options: Vec::new(),
             }
         };
         if run.status == RunStatus::Blocked {
@@ -762,13 +779,10 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 }
                 _ => vec![Action::Answer, Action::Cancel],
             };
-            found.push(base(
-                ExceptionKind::Blocked,
-                Severity::High,
-                since,
-                reason,
-                actions,
-            ));
+            let (reason, options) = with_escalation(reason, input.escalated.get(&run.id));
+            let mut blocked = base(ExceptionKind::Blocked, Severity::High, since, reason, actions);
+            blocked.options = options;
+            found.push(blocked);
         } else {
             if let Some(since) = run.block_suspected_since {
                 let mut e = base(
@@ -947,6 +961,10 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                     }
                     None => format!("attempt {} failed: {why}", run.attempt),
                 };
+                let (reason, options) = match question {
+                    Some(_) => with_escalation(reason, input.escalated.get(&run.id)),
+                    None => (reason, Vec::new()),
+                };
                 attention.push(Exception {
                     kind: ExceptionKind::FailedExhausted,
                     severity: Severity::High,
@@ -962,6 +980,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                     suspicion: false,
                     observation: false,
                     also: Vec::new(),
+                    options,
                 });
             }
         }
@@ -1042,6 +1061,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 suspicion: false,
                 observation: false,
                 also: Vec::new(),
+                options: Vec::new(),
             });
         }
         if let Some(entries) = skipped.filter(|_| skipped_count > 0) {
@@ -1089,6 +1109,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 suspicion: false,
                 observation: false,
                 also: Vec::new(),
+                options: Vec::new(),
             });
         }
     }
@@ -1126,6 +1147,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             suspicion: false,
             observation: false,
             also: Vec::new(),
+            options: Vec::new(),
         });
     }
 
@@ -1174,6 +1196,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             suspicion: false,
             observation: false,
             also: Vec::new(),
+            options: Vec::new(),
         });
     }
 
@@ -1209,6 +1232,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 suspicion: false,
                 observation: false,
                 also: Vec::new(),
+                options: Vec::new(),
             });
         }
         if let Some(failure) = &sb.readiness.image_build_failure {
@@ -1234,6 +1258,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 suspicion: false,
                 observation: false,
                 also: Vec::new(),
+                options: Vec::new(),
             });
         }
         for expiring in &sb.readiness.expiring {
@@ -1275,6 +1300,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 suspicion: false,
                 observation: false,
                 also: Vec::new(),
+                options: Vec::new(),
             });
         }
     }
@@ -1296,6 +1322,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             suspicion: false,
             observation: true,
             also: Vec::new(),
+            options: Vec::new(),
         });
     }
 
@@ -2602,6 +2629,7 @@ mod tests {
             suspicion: false,
             observation: false,
             also: Vec::new(),
+            options: Vec::new(),
         };
         let mut q = vec![
             mk(

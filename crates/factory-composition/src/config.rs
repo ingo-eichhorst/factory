@@ -517,6 +517,17 @@ impl Config {
                 Some(_) => {}
             }
         }
+        if let Some(orchestrator) = self.daemon.orchestrator.as_ref().filter(|o| o.enabled) {
+            let root = self.scope.as_ref().ok_or_else(|| {
+                FactoryError::BadRequest("daemon.orchestrator needs the instance root's own scope:, where its agent is declared".into())
+            })?;
+            if !root.agents_with(&self.daemon.foreman).iter().any(|a| a.name() == orchestrator.agent) {
+                return Err(FactoryError::BadRequest(format!(
+                    "daemon.orchestrator.agent names {:?}, which the root scope {:?} does not declare",
+                    orchestrator.agent, root.name
+                )));
+            }
+        }
         self.validate_environments()?;
         self.validate_memory(self.scope.iter().chain(&self.scopes))?;
         for scope in self.scope.iter().chain(&self.scopes) {
@@ -1254,6 +1265,43 @@ pub struct DaemonConfig {
     /// Where a question a run is blocked on goes, beyond the Inbox.
     #[serde(default)]
     pub escalation: EscalationConfig,
+    /// Who decides a blocked run's question before the owner is asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<OrchestratorConfig>,
+}
+
+/// An agent that decides a blocked run's question on the owner's behalf,
+/// within the run's own mandate, or escalates it to the owner:
+///
+/// ```yaml
+/// daemon:
+///   orchestrator:
+///     agent: orchestrator              # declared in the instance root's scope
+///     policy: .factory/orchestrator.md # what it may decide, relative to the root
+///     max_decisions_per_task: 3        # then every further question goes to the owner
+///     exclude: [assistant]             # scopes whose questions go straight to the owner
+///     # enabled: false                 # every question to the owner, as without this block
+/// ```
+///
+/// Only a question an agent asked with `report --status blocked` reaches it:
+/// never a hook-reported block (often a permission prompt nobody read) and
+/// never an approval or a failed gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrchestratorConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
+    #[serde(default = "default_max_decisions")]
+    pub max_decisions_per_task: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+}
+
+fn default_max_decisions() -> u32 {
+    3
 }
 
 /// Where a run's question goes when it needs the owner:
@@ -1407,6 +1455,7 @@ impl Default for DaemonConfig {
             improvement_agent: None,
             skill_curation: None,
             escalation: EscalationConfig::default(),
+            orchestrator: None,
         }
     }
 }

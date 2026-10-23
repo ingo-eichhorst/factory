@@ -56,6 +56,25 @@ impl Engine {
                 let asked = crate::operations::Asked::new(caller, Some(format!("replied on {channel}")));
                 Ok(Payload::Text { text: self.answer_task(task, &text, &asked).await? })
             }
+            // The orchestrator's decision (`escalation.rs`): an answer is
+            // carried out as the orchestrator's `task.answer`.
+            Request::DecisionResolve { id, decision } => {
+                let reason = match &decision {
+                    factory_core::protocol::Decision::Answer { reason, .. } => Some(format!("the orchestrator decided: {reason}")),
+                    factory_core::protocol::Decision::Escalate { .. } => None,
+                };
+                let text = match self.l4_service().resolve_decision(&id, decision).await? {
+                    crate::escalation::Decided::Answer { task, text } => {
+                        let asked = crate::operations::Asked::new(caller, reason);
+                        self.answer_task(task, &text, &asked).await?
+                    }
+                    crate::escalation::Decided::Escalated => "escalated to the owner".to_string(),
+                    crate::escalation::Decided::Stale => {
+                        "the question was answered in the meantime; your decision was recorded and dropped".to_string()
+                    }
+                };
+                Ok(Payload::Text { text })
+            }
             Request::EscalationChoose { channel, run, option } => {
                 let (task, text) = self.l4_service().escalation_option(&channel, &run, option).await?;
                 self.l4_service().still_asking(&task, &run).await?;
@@ -295,12 +314,17 @@ impl Engine {
                 // including small reads on axum's default worker stack.
                 let run = Box::pin(self.l4_service().report(&id, report)).await?;
                 self.sync_workflow_for_task(&id).await;
-                // A question goes on to the owner off the report's own
-                // path: a channel send must never hold up the agent.
+                // A question goes on -- to the orchestrator, whose decision
+                // run starts here, or to the owner -- off the report's own
+                // path: neither may hold up the agent.
                 if run.status == factory_core::run::RunStatus::Blocked {
                     let engine = self.clone();
                     let blocked = run.id.clone();
-                    tokio::spawn(async move { engine.l4_service().escalate_block(&blocked).await });
+                    tokio::spawn(async move {
+                        if let Some(decision) = engine.l4_service().on_blocked(&blocked).await {
+                            engine.l4_service().start_run_due(&decision, Trigger::Manual, Due::now()).await;
+                        }
+                    });
                 }
                 Ok(Payload::Run { run: run.redacted() })
             }

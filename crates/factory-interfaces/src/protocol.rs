@@ -207,6 +207,14 @@ pub enum Request {
         run: String,
         option: usize,
     },
+    /// The orchestrator's decision on the question its decision task `id`
+    /// was made for (`daemon.orchestrator`): answer it on the owner's
+    /// behalf, or escalate it to the owner. Once per decision task.
+    #[serde(rename = "decision.resolve")]
+    DecisionResolve {
+        id: String,
+        decision: Decision,
+    },
     #[serde(rename = "task.create")]
     TaskCreate(NewTask),
     #[serde(rename = "task.get")]
@@ -1453,6 +1461,7 @@ impl Request {
             Request::TaskAnswer { .. } |
             Request::EscalationReply { .. } |
             Request::EscalationChoose { .. } |
+            Request::DecisionResolve { .. } |
             Request::TaskCreate(..) |
             Request::TaskGet { .. } |
             Request::TaskList(..) |
@@ -2672,6 +2681,22 @@ pub struct Notified {
     /// one of them names. Empty for a repeat, which sent nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub message_ids: Vec<i64>,
+}
+
+/// What an orchestrator decided about a blocked run's question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Decision {
+    /// Answer it: `text` goes to the blocked agent as the answer, and
+    /// `reason` -- why, with the evidence -- into the record beside it.
+    Answer { text: String, reason: String },
+    /// The owner must decide: `reason` says why, and `options`, at most
+    /// four, become the owner's one-press answers.
+    Escalate {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<String>,
+    },
 }
 
 /// One journal line about something that came in on a channel (`#338`).
