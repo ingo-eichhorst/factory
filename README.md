@@ -3740,7 +3740,7 @@ to process attention.
 |---|---|---|
 | `blocked` | the run is `Blocked`, said by its agent or a lifecycle hook; the reason is its own words | high |
 | `suspected_stuck` | the runtime suspects the run is waiting, or it has said nothing past the p95 of its history -- always marked a **suspicion**, never a status | medium |
-| `failed_exhausted` | the newest run failed and no retry is left; a failing run that will be retried is a `retrying` count in Flow instead | high |
+| `failed_exhausted` | the newest run failed and no retry is left; a failing run that will be retried is a `retrying` count in Flow instead. If its agent's last word was a `blocked` question nobody answered, the reason leads with that question and **Answer** is offered first | high |
 | `aging` | running past the p85 (medium) or p95 (high) of its history | medium/high |
 | `schedule_late` | a slot passed two ticks ago and nothing was dispatched | medium |
 | `schedule_missed` | slots the scheduler passed over (`schedule_skipped`) in the last day | medium |
@@ -3759,8 +3759,31 @@ factory task cancel <id> --reason "..."       # journals cancel_requested; count
 factory task close <id> --reason not_planned --note "..."   # task.close; journals closed
 factory task edit <id> --pause-schedule --reason "stop the line"
 factory task skip-next <id> --reason "..."    # task.skip_next; journals slot_skipped
+factory task answer <id> "text" [--reason "..."]   # task.answer: typed, or resumed
 factory run answer <run-id> "text" --reason "..."   # run.answer
 ```
+
+**Answering a question** (`task.answer`). An agent that needs a person
+reports `blocked` with the question, and the Inbox shows it with an
+**Answer** button -- as it shows the question of a run that *failed* while
+it waited (the blocked timeout closed its session, or the session was lost).
+One answer reaches the agent either way:
+
+- **The session is still open:** the text is typed into it and enter is
+  pressed, as `run.answer` does.
+- **It is gone, or the run already failed:** a new attempt resumes the same
+  conversation, as `--continue` does, with the question and the answer in
+  its prompt. If the harness cannot resume, it falls back to a fresh session
+  (journaled `continue_fallback`) that still carries both.
+
+The reason is optional, the text is never journaled, and a run held for an
+approval or a failed gate is answered by approve, reject or accept-rework
+instead. A run's `task_timeout_seconds` counts only time *not* spent
+blocked (`Run::blocked_secs`), so a run answered in the morning is not
+failed for the night it waited. A Claude Code task run is denied
+`AskUserQuestion` and `EnterPlanMode` in its per-run settings: both stop at
+the terminal for a person nobody is watching for, so its questions go
+through `report --status blocked` instead.
 
 `task.cancel` takes an optional `run` (`run_id` over HTTP): the attempt the
 caller was shown. If another run is the task's active one by then -- a
@@ -3786,9 +3809,10 @@ otherwise; an agent that unblocks itself in the moment between the check
 and the typing gets the answer in whatever it is doing next. Over HTTP: `POST /api/tasks/{id}/run`, `.../cancel` and
 `.../skip-next` take an optional `{"reason": ...}` body (skip-next also
 `slot`), `PATCH
-/api/tasks/{id}` a `reason` beside the patch's fields, and `POST
-/api/runs/{id}/answer` `{text, reason}`. Skipping is `task.edit`, like
-pausing; answering is `run.input`, with the same reach -- no new grants.
+/api/tasks/{id}` a `reason` beside the patch's fields, `POST
+/api/tasks/{id}/answer` `{text, reason?}`, and `POST /api/runs/{id}/answer`
+`{text, reason}`. Skipping is `task.edit`, like pausing; answering, either
+way, is `run.input`, with the same reach -- no new grants.
 
 **Interventions** are what the record shows the owner doing: a manual run
 of a task whose previous attempt failed or was cancelled, a cancel by the
@@ -5022,8 +5046,9 @@ Three timeouts catch the rest:
   the probe below; an acknowledgement timeout also makes the next dispatch to
   that harness probe it again rather than trust an earlier answer.
 - `task_timeout_seconds` (3600 by default) — a cap on the whole run, counted
-  from `started_at`: the run has not finished within this many seconds,
-  however often it has reported in between.
+  from `started_at` less the time it spent blocked: the run has not finished
+  within this many seconds of work, however often it has reported in
+  between.
 - `blocked_timeout_seconds` (86400 by default) — a run a hook reported
   `Blocked` is exempt from the two above and given this much longer clock
   instead, counted from when the block began rather than when the run did, so
@@ -5240,8 +5265,10 @@ journal entry naming the one reason it fell back.
 - **Falls back to fresh, journaled with the reason, when:** the task's agent
   or adapter changed since the previous run; no session id was recorded; the
   adapter declares no resume; the worktree is gone or on another branch;
-  the guide, role, declaration or observed harness version changed (legacy
-  runs with no compatibility checkpoint also fall back); eight consecutive
+  the guide, role, declaration or the harness's release series changed --
+  `2.1` for Claude Code `2.1.306`, so the nightly patch upgrade does not cut
+  off a run blocked overnight, while a minor release does (legacy runs with
+  no compatibility checkpoint also fall back); eight consecutive
   resumes have been used; or the runtime does not
   confirm the previous session is gone (`AgentRuntime::status`, asked at
   `--continue` time) -- Factory never runs two processes on one conversation,

@@ -78,6 +78,7 @@
 import { $, esc, api, state } from "./core.js";
 import { inScope, routeHref, scopeLabel } from "./scopes.js";
 import { ACTION_LABELS, actionRequest, fmtAge, inboxItems } from "./operations-model.js";
+import { openActionDialog } from "./operations.js";
 import { inboxClockRows } from "./clock-model.js";
 import { signpostObservations } from "./signposts-model.js";
 import { fetchDates } from "./dates.js";
@@ -1165,6 +1166,11 @@ export async function loadInbox() {
   renderInbox();
 }
 
+/// The actions an Inbox row offers as buttons of its own. `answer` opens the
+/// same dialog the Operations tab does: a blocked run's question, or one a
+/// failed run was still waiting on, is answered where it is seen.
+const INBOX_ACTIONS = ["answer", "approve", "reject", "accept_rework"];
+
 /// One attention item's row -- shared by the Inbox nav view (`renderInbox`,
 /// the whole list) and the dashboard's own `inbox` tile (`inboxTile`, top
 /// few), so there is one markup for it, not two that could drift apart.
@@ -1187,7 +1193,7 @@ function inboxItemRow(it) {
         <span class="sub">${esc(it.reason)}${it.scope ? ` · ${esc(it.scope)}` : ""}</span>${diff}
       </span>
       <span class="it-age">${esc(fmtAge(it.age))}</span>
-      ${(it.actions || []).filter(a => ["approve", "reject", "accept_rework"].includes(a) || isSkillAction(a)).map(a => `<button type="button" class="btn inbox-action" data-action="${esc(a)}">${esc(labels[a] || a)}</button>`).join("")}
+      ${(it.actions || []).filter(a => INBOX_ACTIONS.includes(a) || isSkillAction(a)).map(a => `<button type="button" class="btn inbox-action" data-action="${esc(a)}">${esc(labels[a] || a)}</button>`).join("")}
     </div>`;
 }
 
@@ -1220,6 +1226,13 @@ function wireInboxRows(host) {
         const items = inboxItems(inboxReport, (Date.now() - inboxReceivedAt) / 1000);
         const item = items.find(it => it.run_id === row?.dataset.run);
         if (!item) return;
+        if (action === "answer") {
+          openActionDialog("answer", item, async () => {
+            await loadInbox();
+            if (state.tab === "dashboard") renderDashboard();
+          });
+          return;
+        }
         const reason = ["approve", "reject"].includes(action)
           ? window.prompt(`${ACTION_LABELS[action]} reason:`)
           : "";

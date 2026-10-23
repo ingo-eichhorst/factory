@@ -15,6 +15,10 @@ fn is_zero_round(round: &u32) -> bool {
     *round == 0
 }
 
+fn is_zero(secs: &u64) -> bool {
+    *secs == 0
+}
+
 /// L4 maps the shared run status to its own task model.
 pub trait RunTaskStatus {
     fn as_task_status(self) -> crate::task::TaskStatus;
@@ -272,6 +276,13 @@ pub struct Run {
     /// -- see `BlockSource`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_source: Option<BlockSource>,
+    /// Seconds this run spent `Blocked` in every block that has ended; the
+    /// current one, if any, counts from `blocked_since` instead. Added to by
+    /// the store whenever a block is cleared. `task_timeout_seconds` caps the
+    /// run's time *not* spent waiting on a person, so a run answered after a
+    /// night's wait is not failed the moment it unblocks for having waited.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub blocked_secs: u64,
     /// Not a status, and never treated as one: a timestamp the runtime's own
     /// screen-guess put here, so the UI can show "the runtime thinks this may
     /// be waiting, since T" without Factory ever having asserted it. Cleared

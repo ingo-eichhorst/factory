@@ -43,6 +43,25 @@ impl Engine {
                 self.l4_service().answer_run(&id, &text, &asked).await?;
                 Ok(Payload::Ok)
             }
+            Request::TaskAnswer { id, text, reason } => {
+                let asked = crate::operations::Asked::new(caller, reason);
+                let text = match self.l4_service().answer_task(&id, &text, &asked).await? {
+                    crate::operations::Answered::Typed { attempt } => {
+                        format!("typed into attempt {attempt}'s session")
+                    }
+                    crate::operations::Answered::Resume { prev, note } => {
+                        let attempt = prev.attempt;
+                        let engine = self.clone();
+                        let due = Due::now();
+                        // Dispatch can take a minute, as for `task.run`.
+                        tokio::spawn(async move {
+                            engine.l4_service().start_run_due_answered(&id, due, *prev, note).await;
+                        });
+                        format!("attempt {attempt}'s session is gone; a new attempt resumes its conversation with the answer")
+                    }
+                };
+                Ok(Payload::Text { text })
+            }
 
             Request::Notify { channel, text, files, reply_to, buttons } => Ok(Payload::Notified {
                 notified: Box::pin(self.l4_service().notify(caller, &channel, text, files, reply_to, buttons)).await?,
