@@ -104,6 +104,33 @@ fn until_args(current: RuntimeStatus) -> &'static [&'static str] {
     }
 }
 
+/// The one answer from herdr that means a session is gone: herdr itself,
+/// running and asked, saying it has no such pane. Verified against herdr
+/// 0.8's `pane get` for a pane, a tab and a workspace that do not exist --
+/// all three say this.
+const PANE_NOT_FOUND: &str = "pane_not_found";
+
+/// A herdr command that did not answer: the error every caller reports, and
+/// herdr's own code for it when herdr said one.
+struct Refusal {
+    /// `pane_not_found`, `server_not_running`, ... -- `None` when herdr could
+    /// not be run at all (the daemon out of file descriptors, say) or said
+    /// something that is not its error JSON.
+    code: Option<String>,
+    error: FactoryError,
+}
+
+impl Refusal {
+    fn unanswered(error: FactoryError) -> Self {
+        Self { code: None, error }
+    }
+}
+
+/// `{"code": "...", "message": "..."}`'s code.
+fn error_code(error: &Value) -> Option<String> {
+    error.get("code").and_then(Value::as_str).map(str::to_string)
+}
+
 #[derive(Clone)]
 pub struct HerdrRuntime {
     bin: String,
@@ -422,6 +449,14 @@ impl HerdrRuntime {
     }
 
     async fn run(&self, args: &[String]) -> Result<Value> {
+        self.call(args).await.map_err(|refusal| refusal.error)
+    }
+
+    /// `run`, keeping herdr's own error code apart from the prose. A caller
+    /// that must tell herdr saying "no such pane" from herdr not answering
+    /// at all -- `status`, above all -- needs the difference; every other
+    /// caller only wants the error, and goes through `run`.
+    async fn call(&self, args: &[String]) -> std::result::Result<Value, Refusal> {
         let output = Command::new(&self.bin)
             .args(args)
             // `agent wait` can block for up to `WAIT_TIMEOUT`; if the future
@@ -433,39 +468,46 @@ impl HerdrRuntime {
             .output()
             .await
             .map_err(|e| {
-                FactoryError::adapter(ADAPTER, format!("running `{} {}`: {e}", self.bin, args.join(" ")))
+                Refusal::unanswered(FactoryError::adapter(
+                    ADAPTER,
+                    format!("running `{} {}`: {e}", self.bin, args.join(" ")),
+                ))
             })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if !output.status.success() {
-            // herdr reports failures as JSON when it can; fall back to stderr.
-            let detail = serde_json::from_str::<Value>(stdout.trim())
-                .ok()
-                .and_then(|v| v.get("error").cloned())
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| {
-                    let text = if stderr.trim().is_empty() { stdout } else { stderr };
-                    text.trim().to_string()
-                });
-            return Err(FactoryError::adapter(
-                ADAPTER,
-                format!("`herdr {}` failed: {detail}", args.join(" ")),
-            ));
+            // herdr reports failures as JSON when it can -- on stderr, as of
+            // 0.8 -- and on stdout before that; fall back to the text.
+            let error = [stdout.trim(), stderr.trim()]
+                .into_iter()
+                .find_map(|text| serde_json::from_str::<Value>(text).ok()?.get("error").cloned());
+            let code = error.as_ref().and_then(error_code);
+            let detail = error.map(|e| e.to_string()).unwrap_or_else(|| {
+                let text = if stderr.trim().is_empty() { stdout } else { stderr };
+                text.trim().to_string()
+            });
+            return Err(Refusal {
+                code,
+                error: FactoryError::adapter(ADAPTER, format!("`herdr {}` failed: {detail}", args.join(" "))),
+            });
         }
 
         if stdout.trim().is_empty() {
             return Ok(Value::Null);
         }
         let parsed: Value = serde_json::from_str(stdout.trim()).map_err(|e| {
-            FactoryError::adapter(ADAPTER, format!("unreadable output from `herdr {}`: {e}", args.join(" ")))
+            Refusal::unanswered(FactoryError::adapter(
+                ADAPTER,
+                format!("unreadable output from `herdr {}`: {e}", args.join(" ")),
+            ))
         })?;
         if let Some(err) = parsed.get("error") {
-            return Err(FactoryError::adapter(
-                ADAPTER,
-                format!("`herdr {}`: {err}", args.join(" ")),
-            ));
+            return Err(Refusal {
+                code: error_code(err),
+                error: FactoryError::adapter(ADAPTER, format!("`herdr {}`: {err}", args.join(" "))),
+            });
         }
         Ok(parsed.get("result").cloned().unwrap_or(parsed))
     }
@@ -1129,10 +1171,19 @@ impl AgentRuntime for HerdrRuntime {
     async fn status(&self, session: &SessionRef) -> Result<RuntimeStatus> {
         self.note_session(session);
         let pane = Self::pane_of(session);
-        let got = match self.run(&[s("pane"), s("get"), s(pane)]).await {
+        let got = match self.call(&[s("pane"), s("get"), s(pane)]).await {
             Ok(v) => v,
             // A pane that is not there any more is a state, not a failure.
-            Err(_) => return Ok(RuntimeStatus::Gone),
+            Err(refusal) if refusal.code.as_deref() == Some(PANE_NOT_FOUND) => return Ok(RuntimeStatus::Gone),
+            // Anything else says nothing about the pane: herdr's server not
+            // running, or herdr not even starting because the daemon is out
+            // of file descriptors. Reading that as `Gone` once had the
+            // watchdog fail a blocked run and close the live session that
+            // was waiting on its answer.
+            Err(refusal) => {
+                tracing::warn!(pane, "could not ask herdr about a session: {}", refusal.error);
+                return Ok(RuntimeStatus::Unknown);
+            }
         };
         let raw = got
             .get("pane")
@@ -1547,6 +1598,72 @@ fi
             handle: "pane1".into(),
             meta: BTreeMap::from([("mode".to_string(), "agent".to_string())]),
         }
+    }
+
+    /// A fake `herdr` whose `pane get` runs `pane_get` (a shell snippet) and
+    /// answers `status` the way `with_bin`'s session probe expects.
+    #[cfg(unix)]
+    fn fake_herdr_pane_get(pane_get: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("factory-herdr-pane-get-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("fake-herdr");
+        std::fs::write(
+            &bin,
+            format!(
+                r#"#!/bin/sh
+if [ "$1" = "status" ] && [ "$2" != "--json" ]; then
+  printf 'socket: /tmp/factory-herdr-pane-get-test/herdr.sock\n'
+elif [ "$1" = "pane" ] && [ "$2" = "get" ]; then
+  {pane_get}
+else
+  exit 9
+fi
+"#
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&bin).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&bin, permissions).unwrap();
+        (bin, dir)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_herdrs_own_pane_not_found_makes_a_session_gone() {
+        // Byte for byte what herdr 0.8 prints, on stderr with exit 1, for a
+        // pane that does not exist.
+        let (bin, dir) = fake_herdr_pane_get(
+            r#"printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane pane1 not found"},"id":"cli:pane:get"}' >&2; exit 1"#,
+        );
+        let runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+        assert_eq!(runtime.status(&agent_mode_session()).await.unwrap(), RuntimeStatus::Gone);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn herdr_not_answering_says_nothing_about_the_session() {
+        // The server down: herdr's own error, but not about the pane.
+        let (bin, dir) = fake_herdr_pane_get(
+            r#"printf '%s\n' '{"id":"cli:pane:get","error":{"code":"server_not_running","message":"no herdr server is running"}}' >&2; exit 1"#,
+        );
+        let runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+        assert_eq!(runtime.status(&agent_mode_session()).await.unwrap(), RuntimeStatus::Unknown);
+        std::fs::remove_dir_all(dir).ok();
+
+        // Something that is not herdr's JSON at all.
+        let (bin, dir) = fake_herdr_pane_get(r#"printf 'segfault\n'; exit 0"#);
+        let runtime = HerdrRuntime::with_bin(bin.to_string_lossy());
+        assert_eq!(runtime.status(&agent_mode_session()).await.unwrap(), RuntimeStatus::Unknown);
+        std::fs::remove_dir_all(dir).ok();
+
+        // herdr never ran -- what `Too many open files` looks like from
+        // here: the spawn itself fails.
+        let runtime = HerdrRuntime::with_bin("/nonexistent/herdr");
+        assert_eq!(runtime.status(&agent_mode_session()).await.unwrap(), RuntimeStatus::Unknown);
     }
 
     #[cfg(unix)]
