@@ -215,6 +215,17 @@ impl L4Service<'_> {
         if self.state.store.entries(id, 200).await?.iter().any(|e| e.kind == DECISION_KIND) {
             return Err(FactoryError::BadRequest(format!("task {id} has decided already")));
         }
+        // Checked before anything is recorded: a malformed decision must not
+        // use up the one a decision task gets.
+        match &decision {
+            Decision::Answer { text, reason } if text.trim().is_empty() || reason.trim().is_empty() => {
+                return Err(FactoryError::BadRequest("a decision needs its answer and its reason".into()));
+            }
+            Decision::Escalate { reason, .. } if reason.trim().is_empty() => {
+                return Err(FactoryError::BadRequest("an escalation needs its reason".into()));
+            }
+            _ => {}
+        }
         let (kind, said) = match &decision {
             Decision::Answer { text, reason } => ("answer", format!("answered: {text} -- {reason}")),
             Decision::Escalate { reason, .. } => ("escalate", format!("escalated: {reason}")),
@@ -232,9 +243,6 @@ impl L4Service<'_> {
         }
         match decision {
             Decision::Answer { text, reason } => {
-                if text.trim().is_empty() || reason.trim().is_empty() {
-                    return Err(FactoryError::BadRequest("a decision needs its answer and its reason".into()));
-                }
                 // The text is recorded: unlike a person's answer, it is a
                 // decision made on the owner's behalf, and the owner reads
                 // what was decided and why.
@@ -680,6 +688,14 @@ mod orchestrator_tests {
 
         let again = engine.l4_service().resolve_decision(&decision, answer).await.err().unwrap();
         assert!(again.to_string().contains("decided already"), "{again}");
+
+        // A malformed decision is refused without using up the one it gets.
+        let (_, other) = blocked(&engine, "demo", "which port?", BlockSource::Agent).await;
+        let second = engine.l4_service().on_blocked(&other.id).await.unwrap();
+        let empty = factory_core::protocol::Decision::Answer { text: "8080".into(), reason: " ".into() };
+        assert!(engine.l4_service().resolve_decision(&second, empty).await.is_err());
+        let proper = factory_core::protocol::Decision::Answer { text: "8080".into(), reason: "the service's default".into() };
+        assert!(matches!(engine.l4_service().resolve_decision(&second, proper).await.unwrap(), Decided::Answer { .. }));
         std::fs::remove_dir_all(root).ok();
     }
 
