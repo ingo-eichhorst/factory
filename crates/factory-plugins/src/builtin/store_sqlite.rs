@@ -639,6 +639,7 @@ impl TaskStore for SqliteStore {
                 fail_kind: None,
                 blocked_since: None,
                 blocked_source: None,
+                blocked_secs: 0,
                 block_suspected_since: None,
                 turn_ended_at: None,
                 turn_end_reason: None,
@@ -765,6 +766,11 @@ impl TaskStore for SqliteStore {
                 run.ended_at = Some(v);
             }
             if patch.clear_blocked {
+                // The block that ends here is added to the run's total
+                // waiting time, so the run timeout does not count it.
+                if let Some(since) = run.blocked_since {
+                    run.blocked_secs += (Utc::now() - since).num_seconds().max(0) as u64;
+                }
                 run.blocked_since = None;
                 run.blocked_source = None;
             }
@@ -1331,6 +1337,43 @@ mod tests {
     /// the three new fields, so nothing here needed a schema change -- this
     /// pins down that the round trip actually holds, not just that it ought
     /// to.
+    #[tokio::test]
+    async fn a_cleared_block_is_added_to_the_runs_waiting_time() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.create(&sample_task("t1")).await.unwrap();
+        let run = store
+            .create_run(&NewRun {
+                task_id: "t1".into(),
+                trigger: Trigger::Manual,
+                agent: "shell".into(),
+                adapter: "shell".into(),
+                runtime: "herdr".into(),
+                token: "tok".into(),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(run.blocked_secs, 0);
+        let block = |since| RunPatch {
+            status: Some(RunStatus::Blocked),
+            blocked_since: Some(since),
+            blocked_source: Some(BlockSource::Agent),
+            ..Default::default()
+        };
+        let unblock = RunPatch { status: Some(RunStatus::Running), clear_blocked: true, ..Default::default() };
+
+        store.update_run(&run.id, &block(Utc::now() - chrono::Duration::hours(2))).await.unwrap();
+        let first = store.update_run(&run.id, &unblock).await.unwrap();
+        assert!((7200..7260).contains(&first.blocked_secs), "{}", first.blocked_secs);
+
+        // A second block adds to the first; clearing with no block open adds nothing.
+        store.update_run(&run.id, &block(Utc::now() - chrono::Duration::minutes(10))).await.unwrap();
+        store.update_run(&run.id, &unblock).await.unwrap();
+        let second = store.update_run(&run.id, &unblock).await.unwrap();
+        assert!((7800..7860).contains(&second.blocked_secs), "{}", second.blocked_secs);
+    }
+
     #[tokio::test]
     async fn a_runs_block_state_round_trips_through_sqlite() {
         let store = SqliteStore::in_memory().unwrap();

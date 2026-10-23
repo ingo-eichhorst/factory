@@ -38,7 +38,7 @@ impl L4Service<'_> {
     /// the dispatch got going. Failures here end the run rather than
     /// escaping, because nobody is waiting on the answer.
     pub async fn start_run_due(&self, task_id: &str, trigger: Trigger, due: Due) {
-        self.start_run_due_inner(task_id, trigger, due, None).await
+        self.start_run_due_inner(task_id, trigger, due, None, Vec::new()).await
     }
     /// `factory task run --continue` (`#178`): the same dispatch path, with
     /// the run being resumed carried through to `Engine::dispatch`, which
@@ -47,9 +47,22 @@ impl L4Service<'_> {
     /// callers -- the scheduler, retries, waiting-slot releases -- need no
     /// change at all.
     pub async fn start_run_due_continue(&self, task_id: &str, due: Due, continue_from: Run) {
-        self.start_run_due_inner(task_id, Trigger::Manual, due, Some(continue_from)).await
+        self.start_run_due_inner(task_id, Trigger::Manual, due, Some(continue_from), Vec::new()).await
     }
-    async fn start_run_due_inner(&self, task_id: &str, trigger: Trigger, due: Due, continue_from: Option<Run>) {
+    /// `task answer` on a task whose session is gone: `--continue`, with the
+    /// question and its answer carried into the resumed prompt as `note`
+    /// (`operations::answer_task`).
+    pub async fn start_run_due_answered(&self, task_id: &str, due: Due, continue_from: Run, note: UpstreamOutput) {
+        self.start_run_due_inner(task_id, Trigger::Manual, due, Some(continue_from), vec![note]).await
+    }
+    async fn start_run_due_inner(
+        &self,
+        task_id: &str,
+        trigger: Trigger,
+        due: Due,
+        continue_from: Option<Run>,
+        extra_upstream: Vec<UpstreamOutput>,
+    ) {
         // However it was asked for, an item still in intake is not started --
         // and not failed either, which is what a dispatch error below would
         // do to it (`#119`).
@@ -82,7 +95,7 @@ impl L4Service<'_> {
                 _ => {}
             }
         }
-        let run = match Box::pin(self.dispatch(task_id, trigger, due, continue_from)).await {
+        let run = match Box::pin(self.dispatch_with(task_id, trigger, due, continue_from, extra_upstream)).await {
             Ok(run) => run,
             Err(FactoryError::DispatchSuperseded(reason)) => {
                 tracing::debug!(task = task_id, "dispatch superseded: {reason}");
@@ -274,14 +287,17 @@ impl L4Service<'_> {
             Some(probe) => self.harness_version_of(&adapter_name, probe).await,
             None => None,
         };
-        // Hash guide inputs, code and the observed binary version, never tokens.
-        let binary_stamp = probe.as_ref().and_then(|probe| crate::harness_health::resolve(probe.program()))
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| (metadata.len(), metadata.modified().ok()));
+        // Hash guide inputs, code and the harness's release series, never
+        // tokens. The series, not the exact version or the binary: the
+        // nightly refresh moves harnesses on a patch release most nights, and
+        // a run blocked overnight must still resume into the conversation
+        // that asked the question -- each harness reads its own session
+        // files across patch releases.
+        let series = version.as_deref().map(harness_series);
         let guide_inputs = format!("{:?}", (
             &role, &policy_frameworks, &goal, &quality, &declaration,
             &task.runtime, &task.instructions, &task.title, (&task.scope, &scope_path),
-            &task.worktree, (&version, &binary_stamp),
+            &task.worktree, &series,
             include_str!("../../factory-core/src/adapter/agent.rs"),
         ));
         let fingerprint = factory_core::run::token_digest(&guide_inputs);
@@ -296,7 +312,7 @@ impl L4Service<'_> {
                 reason: "the harness version is not known, so resume compatibility cannot be verified".into(),
             }),
             Some(previous) if previous.resume_context.as_ref().is_none_or(|context| context.fingerprint != fingerprint) => Some(ContinueOutcome::Fresh {
-                reason: "the guide, role, agent declaration or harness version changed (or no compatibility checkpoint was recorded)".into(),
+                reason: "the guide, role, agent declaration or harness release series changed (or no compatibility checkpoint was recorded)".into(),
             }),
             // `#274`: the conversation lived in the previous run's sandbox,
             // deleted when that run ended -- except a sandboxed claude-code
@@ -1179,5 +1195,35 @@ impl L4Service<'_> {
             vault: factory_core::knowledge::vault_root(&root).display().to_string(),
             hits,
         })
+    }
+}
+
+/// A harness's release series from its `--version` line: `2.1` from
+/// `2.1.306 (Claude Code)`, `0.157` from `codex-cli 0.157.0`. What a resume
+/// is checked against, so a patch release leaves a conversation resumable.
+/// A line with no dotted number in it is its own series.
+fn harness_series(version: &str) -> String {
+    version
+        .split_whitespace()
+        .find_map(|word| {
+            let mut parts = word.trim_start_matches('v').split('.');
+            let (major, minor) = (parts.next()?, parts.next()?);
+            let numeric = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+            (numeric(major) && numeric(minor)).then(|| format!("{major}.{minor}"))
+        })
+        .unwrap_or_else(|| version.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::harness_series;
+
+    #[test]
+    fn a_patch_release_keeps_the_series_and_a_minor_one_does_not() {
+        assert_eq!(harness_series("2.1.306 (Claude Code)"), harness_series("2.1.309 (Claude Code)"));
+        assert_ne!(harness_series("2.1.309 (Claude Code)"), harness_series("2.2.0 (Claude Code)"));
+        assert_eq!(harness_series("codex-cli 0.157.0"), "0.157");
+        assert_eq!(harness_series("v0.62.1"), "0.62");
+        assert_eq!(harness_series("nightly"), "nightly");
     }
 }

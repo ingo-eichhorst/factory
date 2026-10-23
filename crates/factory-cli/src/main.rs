@@ -1630,6 +1630,17 @@ enum TaskCmd {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Answer the question a task is waiting on. Typed into its run's
+    /// session while that is still open; once the session is gone -- the
+    /// blocked timeout closed it, or it was lost -- a new attempt resumes
+    /// the same conversation with your answer. Journaled with who answered,
+    /// and why if you say; your text is not.
+    Answer {
+        id: String,
+        text: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Put a closed task back to pending. Journaled with who asked, and
     /// why if you say.
     Reopen {
@@ -6330,6 +6341,14 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             })
         }
 
+        TaskCmd::Answer { id, text, reason } => {
+            let payload = client.send(Request::TaskAnswer { id, text, reason }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+        }
+
         TaskCmd::Reopen { id, reason } => {
             let payload = client.send(Request::TaskReopen { id: need_id(id)?, reason }).await?;
             print(&payload, json, |p| match p {
@@ -9244,6 +9263,12 @@ mod tests {
         match parse(&["task", "edit", "t1", "--pause-schedule", "--reason", "stop the line"]).command {
             Command::Task(TaskCmd::Edit { pause_schedule: true, reason: Some(_), .. }) => {}
             _ => panic!("edit"),
+        }
+        match parse(&["task", "answer", "t1", "merge as-is"]).command {
+            Command::Task(TaskCmd::Answer { id, text, reason }) => {
+                assert_eq!((id.as_str(), text.as_str(), reason), ("t1", "merge as-is", None));
+            }
+            _ => panic!("task answer"),
         }
         match parse(&["run", "answer", "r1", "use staging", "--reason", "it asked"]).command {
             Command::Run(RunCmd::Answer { id, text, reason }) => {

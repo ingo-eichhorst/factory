@@ -255,8 +255,10 @@ export function sinceLastLooked(seen, rows, finishedRuns, windowFrom) {
 /// What one action sends, to which route -- the slice-2 routes, each with
 /// the reason in the body so the journal can say who asked and why. Pure,
 /// so the mapping is tested without a daemon. `answer` carries its text in
-/// the body and nowhere else: it is typed into the run's own session and
-/// never journaled. `skip_next` names the slot it means (`row.next_run_at`).
+/// the body and nowhere else, and goes to the task, not the run: the daemon
+/// types it into the run's session while that is open, or resumes the
+/// conversation in a new attempt once it is gone -- either way never
+/// journaled. `skip_next` names the slot it means (`row.next_run_at`).
 export function actionRequest(action, row, { reason, text } = {}) {
   const why = (reason || "").trim();
   const withReason = why ? { reason: why } : {};
@@ -278,7 +280,7 @@ export function actionRequest(action, row, { reason, text } = {}) {
     case "resume_schedule":
       return { path: `/api/tasks/${task}`, method: "PATCH", body: { schedule_paused: false, ...withReason } };
     case "answer":
-      return { path: `/api/runs/${encodeURIComponent(row.run_id || "")}/answer`, method: "POST", body: { text: text || "", reason: why } };
+      return { path: `/api/tasks/${task}/answer`, method: "POST", body: { text: text || "", ...withReason } };
     case "approve":
       return { path: `/api/runs/${encodeURIComponent(row.run_id || "")}/approve`, method: "POST", body: { reason: why } };
     case "reject":
@@ -290,12 +292,12 @@ export function actionRequest(action, row, { reason, text } = {}) {
   }
 }
 
-/// Whether the dialog's confirm button may be pressed: an answer needs
-/// both its text and a reason (the daemon refuses either missing, and
-/// saying so before the round trip is kinder); everything else may go
-/// without a reason.
+/// Whether the dialog's confirm button may be pressed: an answer needs its
+/// text, an approval or a rejection its reason (the daemon refuses either
+/// missing, and saying so before the round trip is kinder); everything else
+/// may go without a reason.
 export function actionReady(action, { reason, text } = {}) {
-  if (action === "answer") return !!(text && text.trim()) && !!(reason && reason.trim());
+  if (action === "answer") return !!(text && text.trim());
   if (["approve", "reject"].includes(action)) return !!(reason && reason.trim());
   return true;
 }
@@ -319,7 +321,7 @@ export function actionConsequence(action, row) {
     case "resume_schedule":
       return `Resumes the schedule of ${what}. The next slot is worked out from now -- slots passed while paused are not caught up.`;
     case "answer":
-      return `Types your answer into the blocked run's own session and presses enter. The run stays blocked until its agent says otherwise.`;
+      return `Types your answer into the waiting run's own session and presses enter. If that session is gone -- the blocked timeout closed it, or it was lost -- a new attempt resumes the same conversation with your answer instead.`;
     case "approve":
       return `Records an attributed approval and dispatches ${what}. The executing agent cannot approve its own work.`;
     case "reject":

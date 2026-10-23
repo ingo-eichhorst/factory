@@ -577,11 +577,11 @@ function wire(host, rows) {
 /// blocked, a skip while a retry is pending, a task already running --
 /// comes back as the daemon's own sentence and stays in the dialog, so the
 /// person sees why rather than a dialog that simply closed.
-export function openActionDialog(action, row) {
+export function openActionDialog(action, row, onDone = loadOperations) {
   dropModal();
   const needsText = action === "answer";
   const reasonNote = needsText
-    ? "required -- journaled as an intervention, with who answered"
+    ? "optional -- journaled as an intervention, with who answered"
     : "optional -- journaled with who asked";
   scrim(`
     <header><div><h2>${esc(actionLabel(action))}</h2><code class="id">${esc(row.title || row.task_id || "")}</code></div>
@@ -589,7 +589,7 @@ export function openActionDialog(action, row) {
     <div class="body">
       <p class="env-note">${esc(actionConsequence(action, row))}</p>
       ${row.reason && needsText ? `<label>What it said</label><pre>${esc(row.reason)}</pre>` : ""}
-      ${needsText ? `<label for="oa-text">Answer <span class="sub" style="text-transform:none">typed into the run's session and never recorded</span></label>
+      ${needsText ? `<label for="oa-text">Answer <span class="sub" style="text-transform:none">goes to the agent, never into the record</span></label>
         <textarea id="oa-text" rows="3"></textarea>` : ""}
       <label for="oa-reason">Reason <span class="sub" style="text-transform:none">${esc(reasonNote)}</span></label>
       <textarea id="oa-reason" rows="2"></textarea>
@@ -620,7 +620,7 @@ export function openActionDialog(action, row) {
     try {
       await api(req.path, { method: req.method, body: JSON.stringify(req.body) });
       closeModal();
-      loadOperations();
+      onDone();
     } catch (e) {
       $("oa-err").textContent = e.message;
       inFlight = false;

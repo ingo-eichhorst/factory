@@ -259,8 +259,10 @@ impl Engine {
             Request::AgentStop { .. } | Request::AgentStopCheck { .. } => Grant::AgentStop,
             Request::AgentInput { .. } => Grant::AgentInput,
             Request::RunInput { .. } => Grant::RunInput,
-            // Typing into a run's session, however narrowed (`#106`).
-            Request::RunAnswer { .. } => Grant::RunInput,
+            // Typing into a run's session, however narrowed (`#106`) -- or
+            // resuming its conversation with the answer, which reaches the
+            // same agent the same way.
+            Request::RunAnswer { .. } | Request::TaskAnswer { .. } => Grant::RunInput,
             Request::RunApprove { .. } | Request::RunReject { .. } | Request::RunRework { .. } => Grant::RunApprove,
             Request::WorkflowCreate(_) => Grant::WorkflowCreate,
             Request::WorkflowUpdate { .. } => Grant::WorkflowEdit,
@@ -679,6 +681,7 @@ impl Engine {
 
             Request::TaskDelete { id }
             | Request::TaskRun { id, .. }
+            | Request::TaskAnswer { id, .. }
             | Request::TaskCancel { id, .. }
             | Request::TaskClose { id, .. }
             | Request::TaskReopen { id, .. }
