@@ -61,6 +61,9 @@ export function reachText(reach, scope) {
   if (reach === "scope") {
     return `everything in ${scope || "its own scope"}, never past it`;
   }
+  if (reach === "subtree") {
+    return `everything in ${scope || "its own scope"} and every scope below it, never above or beside it`;
+  }
   return "only its own work: tasks assigned to it, the run it holds, itself. " +
     "It may change what its task says, never whose it is";
 }
@@ -95,7 +98,7 @@ export function roleDefinePayload(scope, values, replace) {
     throw new Error(`${name} is built in and cannot be redefined.`);
   }
   const reach = String(values.reach ?? "own");
-  if (!["own", "scope"].includes(reach)) throw new Error("Choose own or scope reach.");
+  if (!["own", "scope", "subtree"].includes(reach)) throw new Error("Choose own, scope or subtree reach.");
   const describe = String(values.describe ?? "").trim();
   const role = { grants: [...new Set(values.grants || [])], reach };
   if (describe) role.describe = describe;
@@ -347,6 +350,8 @@ export function openRoleForm(mode, role) {
         <span>own — ${esc(reachText("own"))}</span></label>
       <label class="checkrow"><input type="radio" name="rf-reach" value="scope" ${reach === "scope" ? "checked" : ""}>
         <span>scope — ${esc(reachText("scope", scope))}</span></label>
+      <label class="checkrow"><input type="radio" name="rf-reach" value="subtree" ${reach === "subtree" ? "checked" : ""}>
+        <span>subtree — ${esc(reachText("subtree", scope))}</span></label>
       <p class="sub role-form-note">A change holds from each agent's next request. A guide already in a running session is not rewritten.</p>
       <div class="err" id="rf-err"></div>
       <div class="row-btns" style="margin-top:16px">

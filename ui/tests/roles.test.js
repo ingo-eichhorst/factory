@@ -92,6 +92,11 @@ test("reach is said in words, with the rule grants cannot express", () => {
   assert.match(reachText("own"), /only its own work/);
   assert.match(reachText("own"), /never whose it is/);
   assert.equal(reachText("scope", "projects/demo"), "everything in projects/demo, never past it");
+  assert.equal(
+    reachText("subtree", "projects"),
+    "everything in projects and every scope below it, never above or beside it",
+  );
+  assert.match(reachText("subtree"), /^everything in its own scope and every scope below it/);
 });
 
 test("a card shows what a role may not do as well as what it may", () => {
@@ -149,6 +154,14 @@ test("the define payload refuses what the daemon would refuse, with a sentence",
   assert.deepEqual(
     roleDefinePayload("demo", { name: " reviewer ", describe: "", grants: ["task.edit", "task.edit"], reach: "scope" }, true),
     { scope: "demo", name: "reviewer", role: { grants: ["task.edit"], reach: "scope" }, replace: true },
+  );
+  assert.deepEqual(
+    roleDefinePayload("demo", { name: "supervisor", grants: ["task.run"], reach: "subtree" }, false).role,
+    { grants: ["task.run"], reach: "subtree" },
+  );
+  assert.throws(
+    () => roleDefinePayload("demo", { name: "x", reach: "everywhere" }),
+    /Choose own, scope or subtree reach/,
   );
 });
 
