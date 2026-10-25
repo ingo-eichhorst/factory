@@ -233,6 +233,44 @@ async fn declared_providers_are_made_from_their_sources_and_the_values_go_only_t
     assert_eq!(f.file("given-CLAUDE_CODE_OAUTH_TOKEN").as_deref(), Some("rotated-secret-789"));
 }
 
+/// The same instance under a new daemon process: everything in memory is gone.
+fn restart(f: &mut Fixture) {
+    let tools = Tools { launchctl: f.dir.join("launchctl"), ..no_build(&f.dir) };
+    Arc::get_mut(&mut f.engine).expect("nothing else holds the engine").l2.provision = Provisioner::new(tools);
+}
+
+/// Every `provider update` or `profile update` makes each live sandbox's
+/// proxy drop the connections it holds. On 2026-10-21 the weekly audit died
+/// mid-turn two seconds after a restarted daemon gave an unchanged token
+/// again.
+#[tokio::test]
+async fn a_restarted_daemon_gives_nothing_again_that_did_not_change() {
+    let mut f = managed();
+    assert_eq!(f.pass().await.state, ReadinessState::Ready, "{:?}", f.readiness());
+    let kept = f.root.join(".factory/openshell-provision/given.json");
+    assert_eq!(std::fs::metadata(&kept).unwrap().permissions().mode() & 0o777, 0o600);
+    let text = std::fs::read_to_string(&kept).unwrap();
+    for secret in ["file-secret-123", "cmd-secret-456"] {
+        assert!(!text.contains(secret), "{secret} written down: {text}");
+    }
+
+    restart(&mut f);
+    std::fs::write(f.dir.join("calls"), "").unwrap();
+    assert_eq!(f.pass().await.state, ReadinessState::Ready, "{:?}", f.readiness());
+    let calls = f.calls();
+    for given in ["provider update", "provider create", "profile update", "profile import"] {
+        assert!(!calls.contains(given), "{given} after a restart: {calls}");
+    }
+
+    // A rotation while it was down is still given, and only that one.
+    private_file(&f.root.join("secrets/claude"), "rotated-secret-789", 0o600);
+    restart(&mut f);
+    assert_eq!(f.pass().await.state, ReadinessState::Ready, "{:?}", f.readiness());
+    let calls = f.calls();
+    assert!(calls.contains(&format!("provider update factory-claude-{SUFFIX} --credential CLAUDE_CODE_OAUTH_TOKEN")), "{calls}");
+    assert!(!calls.contains("provider update factory-github"), "{calls}");
+}
+
 #[tokio::test]
 async fn a_profile_left_by_an_earlier_daemon_is_updated_by_its_id() {
     let f = managed();

@@ -2473,6 +2473,26 @@ policy: {}
         }
     }
 
+    /// An account with server-managed settings makes Claude Code ignore the
+    /// managed-settings file once it has fetched them. The 2026-10-21 audit
+    /// retries started in acceptEdits, lost the allow list seconds later and
+    /// sat on a prompt for `factory task report` until `ack_timeout`. The
+    /// sandbox user's own settings are merged instead of replaced.
+    #[test]
+    fn the_image_installs_the_rules_as_the_sandbox_users_own_settings_too() {
+        let (_, script) = RECIPE.iter().find(|(name, _)| *name == "build-image.sh").unwrap();
+        assert!(
+            script.contains("cp \"$here/managed-settings.json\" \"$stage/sandbox/.claude/settings.json\""),
+            "build-image.sh stages the user settings"
+        );
+        assert!(
+            script.contains("./sandbox/.claude/settings.json type=file uid=1000 gid=1000"),
+            "the rootfs overlay carries them, owned by the sandbox user"
+        );
+        let (_, dockerfile) = RECIPE.iter().find(|(name, _)| *name == "Dockerfile").unwrap();
+        assert!(dockerfile.contains("COPY --chown=sandbox:sandbox sandbox/.claude/ /sandbox/.claude/"));
+    }
+
     #[test]
     fn the_smoke_probes_each_provider_and_never_holds_a_value() {
         let providers = vec![
