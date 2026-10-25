@@ -1413,7 +1413,10 @@ mod tests {
             "{guide}"
         );
         let scope_guide = base(Some(custom(&[Grant::TaskRun], Reach::Scope))).factory_guide();
-        assert!(!scope_guide.contains("every scope below it"), "{scope_guide}");
+        assert!(
+            !scope_guide.contains("every scope below it"),
+            "{scope_guide}"
+        );
     }
 
     #[test]

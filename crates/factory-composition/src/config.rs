@@ -2587,9 +2587,8 @@ mod tests {
     fn a_subtree_reach_is_written_like_any_other_and_an_unknown_one_is_refused() {
         use factory_agents::role::Reach;
         // `#376`: in the instance's own `roles:` and in a scope's.
-        let mut c = config_with(
-            "roles:\n  supervisor:\n    grants: [task.run]\n    reach: subtree\n",
-        );
+        let mut c =
+            config_with("roles:\n  supervisor:\n    grants: [task.run]\n    reach: subtree\n");
         c.scopes = vec![
             scope_with_roles("company", ".", "", None),
             scope_with_roles(

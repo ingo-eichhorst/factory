@@ -541,7 +541,10 @@ mod tests {
             assert_eq!(spec.reach, reach, "{name}");
             assert_eq!(serde_json::to_value(reach).unwrap(), name);
         }
-        assert!(serde_json::from_value::<RoleSpec>(serde_json::json!({ "reach": "everywhere" })).is_err());
+        assert!(
+            serde_json::from_value::<RoleSpec>(serde_json::json!({ "reach": "everywhere" }))
+                .is_err()
+        );
     }
 
     #[test]
