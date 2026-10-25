@@ -375,6 +375,43 @@ impl ScaleReport {
     }
 }
 
+/// What L3 says of a rename before anything is written (`#351`): the new
+/// name checked as a new declaration's is, and every standing instance idle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameCheck {
+    /// The scope's canonical name.
+    pub scope: String,
+    pub from: String,
+    /// The new name, trimmed.
+    pub to: String,
+    /// False when the agent is already called `to`: a rename to it writes nothing.
+    pub changed: bool,
+    /// The harness, when this is the scope's own `agent:` and was named after
+    /// it. Tasks created there without an agent name that harness, so they
+    /// stop reaching this declaration once it is called something else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_harness: Option<String>,
+}
+
+/// One standing instance a rename moved onto the new name: its id before and after.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MovedInstance {
+    pub from: String,
+    pub to: String,
+}
+
+/// What a rename did to the agent's standing sessions (`#351`). Each instance
+/// keeps its number, its given role and, if a person stopped it, its stop;
+/// the ones that were up are stopped and brought up again under the new name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameSessions {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub moved: Vec<MovedInstance>,
+    /// Instances being brought up under the new name, by their new id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub started: Vec<String>,
+}
+
 /// One thing stopping an instance now would cost somebody, in words that name
 /// it: `"its terminal was open in Factory 4s ago"`, `"it is in the middle of a
 /// turn"`.

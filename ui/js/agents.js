@@ -13,8 +13,8 @@ import { openTask } from "./tasks.js";
 import { openCreate } from "./task-form.js";
 import { agentConfigurePayload, agentDeletePayload } from "./agent-config.js";
 import {
-  canStart, connectLines, findInstance, instanceActions, instanceDetail, instanceSummary, instancesOf,
-  isLive, liveIds, scalePayload, startInstancePayload, stopPrompt,
+  canRename, canStart, connectLines, findInstance, instanceActions, instanceDetail, instanceSummary, instancesOf,
+  isLive, liveIds, renameNotice, renamePayload, scalePayload, startInstancePayload, stopPrompt,
 } from "./agents-model.js";
 // The roster and the wiring open each other: the wiring builds the rail at
 // boot, and this is the other place /api/agents is refetched, which is the
@@ -28,6 +28,10 @@ const connectOpen = new Set();
 /// A stop waiting on the person's word (#330): `{ key, ids, prompt }`, shown
 /// in place where its Stop button was. One at a time.
 let confirming = null;
+/// What the last rename in each scope said (#351), by scope: shown at the top
+/// of that scope until dismissed, so a workflow still naming the old agent is
+/// not lost the moment the dialog closes.
+const renamed = new Map();
 
 export async function loadAgents() {
   try {
@@ -120,9 +124,13 @@ export function renderAgents() {
                <button class="btn" data-act="scale" data-by="1" data-scope="${esc(s.name)}" data-name="${esc(a.name)}" data-wanted="${summary.wanted}" title="One more">+</button>` : ""}
            </span>`
         : "";
-      buttons.push(`<button class="btn" data-act="task" data-scope="${esc(s.name)}" data-agent="${esc(a.adapter)}">Start task…</button>`);
-      if (a.deletable && state.scope === s.name)
+      // The agent's own name, which is what a task resolves: its harness would
+      // be a different agent, or the bare adapter, once the two differ.
+      buttons.push(`<button class="btn" data-act="task" data-scope="${esc(s.name)}" data-agent="${esc(a.name)}">Start task…</button>`);
+      if (canRename(a, state.scope, s.name)) {
+        buttons.push(`<button class="btn" data-act="rename" data-scope="${esc(s.name)}" data-name="${esc(a.name)}">Rename…</button>`);
         buttons.push(`<button class="btn danger" data-act="delete" data-scope="${esc(s.name)}" data-name="${esc(a.name)}">Delete</button>`);
+      }
 
       const rolePicker = standing && a.id
         ? `<select class="rolepick" data-act="role" data-id="${esc(a.id)}" title="What this agent is allowed to do">
@@ -207,6 +215,7 @@ export function renderAgents() {
         <span class="sub">tasks default to ${esc(s.default_agent)} on ${esc(s.runtime)}, kept in ${esc(s.task_store)}</span>
         ${state.scope === s.name ? `<button class="btn primary" data-act="configure" data-scope="${esc(s.name)}">New agent…</button>` : ""}
       </div>
+      ${renamedBlock(s.name)}
       ${rows || `<div class="empty">No agents declared.</div>`}
     </div>`;
   }).join("") || `<div class="empty">${nothing}</div>`;
@@ -282,6 +291,12 @@ export async function agentAction(el) {
       return openCreate({ scope: el.dataset.scope, agent: el.dataset.agent });
     } else if (act === "configure") {
       return openAgentCreate(el.dataset.scope);
+    } else if (act === "rename") {
+      return openRename(el.dataset.scope, el.dataset.name);
+    } else if (act === "rename-dismiss") {
+      renamed.delete(el.dataset.scope);
+      renderAgents();
+      return;
     } else if (act === "delete") {
       const payload = agentDeletePayload(el.dataset.scope, el.dataset.name);
       if (!confirm(`Delete ${payload.name} from ${payload.scope}? Any standing session will be stopped.`)) return;
@@ -365,6 +380,63 @@ async function stopCost(ids) {
 async function stopAll(ids) {
   for (const id of ids) {
     await api("/api/agents/stop", { method: "POST", body: JSON.stringify({ id }) });
+  }
+}
+
+/// The last rename's answer in one scope, until it is dismissed.
+function renamedBlock(scope) {
+  const notice = renamed.get(scope);
+  if (!notice) return "";
+  return `<div class="renamed${notice.stale ? " stale" : ""}">
+    <b>${esc(notice.title)}</b>
+    ${notice.lines.map(l => `<div>${esc(l)}</div>`).join("")}
+    <div class="row-btns"><button class="btn" data-act="rename-dismiss" data-scope="${esc(scope)}">Dismiss</button></div>
+  </div>`;
+}
+
+/// Rename one declaration (#351): the current name, the new one, and the
+/// daemon's answer in place if it refuses -- a duplicate, a run in flight.
+export function openRename(scope, name) {
+  if (!scope || state.scope !== scope) return;
+  dropModal();
+  scrim(`
+    <header><div><h2>Rename agent</h2><code class="id">${esc(scope)}</code></div>
+      <button class="x" id="rn-close">&times;</button></header>
+    <div class="body">
+      <label>Current name</label>
+      <div><code>${esc(name)}</code></div>
+      <label for="rn-name">New name</label>
+      <input id="rn-name" value="${esc(name)}">
+      <div class="sub">Its config's <code>name:</code> is rewritten, tasks still waiting for it move to the new
+        name and its idle standing sessions start again under it. Workflows that name it are listed, not rewritten.</div>
+      <div class="err" id="rn-err"></div>
+      <div class="row-btns" style="margin-top:16px">
+        <button class="btn primary" id="rn-save">Rename</button>
+        <button class="btn" id="rn-cancel">Cancel</button>
+      </div>
+    </div>`);
+  $("rn-close").onclick = closeModal;
+  $("rn-cancel").onclick = closeModal;
+  $("rn-save").onclick = () => renameAgent(scope, name);
+  $("rn-name").onkeydown = (e) => { if (e.key === "Enter") renameAgent(scope, name); };
+  $("rn-name").select();
+}
+
+async function renameAgent(scope, name) {
+  const button = $("rn-save");
+  $("rn-err").textContent = "";
+  try {
+    const payload = renamePayload(scope, name, $("rn-name").value);
+    if (!payload) return closeModal();
+    button.disabled = true;
+    const answer = await api("/api/agents/rename", { method: "POST", body: JSON.stringify(payload) });
+    const notice = renameNotice(answer && answer.rename);
+    if (notice) renamed.set(scope, notice);
+    closeModal();
+    await loadAgents();
+  } catch (e) {
+    button.disabled = false;
+    $("rn-err").textContent = e.message;
   }
 }
 

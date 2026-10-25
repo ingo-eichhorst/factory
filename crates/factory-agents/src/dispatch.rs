@@ -144,6 +144,34 @@ pub trait Channels: CommandPort<Level = L3> + Send + Sync {
     ) -> Result<factory_environment::channels::Receipt>;
 }
 
+/// What L4 asks of the roster when an agent is renamed (`#351`). L4 holds the
+/// work waiting for the agent and the runs on it, so the rename is L4's to
+/// carry out; the declaration and its standing sessions are L3's, and change
+/// only through here. `by` and `source` are who asked, journaled as every
+/// other thing asked of a standing agent is.
+#[async_trait::async_trait]
+pub trait Roster: CommandPort<Level = L3> + Send + Sync {
+    /// Whether `from` in `scope` can be renamed to `to` now, with nothing
+    /// written: a declaration of the scope's own, a name `configure` would
+    /// accept, and no standing instance starting, working, waiting on an
+    /// answer or with a person at it.
+    async fn rename_check(&self, scope: &str, from: &str, to: &str) -> Result<crate::agent::RenameCheck>;
+    /// Rename it: the declaration in the scope's own config, made live, then
+    /// its standing instances moved onto the new name. Refused, with nothing
+    /// written, on anything `rename_check` refuses. Answers what moved and
+    /// which instance numbers to bring up again under the new name.
+    async fn rename(
+        &self,
+        scope: &str,
+        from: &str,
+        to: &str,
+        by: &str,
+        source: &str,
+    ) -> Result<(crate::agent::RenameSessions, Vec<u32>)>;
+    /// Bring one instance of a declared standing agent up, as a start does.
+    async fn start_instance(&self, scope: &str, name: &str, instance: u32) -> Result<()>;
+}
+
 /// What L4 asks L3 to do to a scope's memory and skills (`#339`): one command per kind of
 /// write, so no write reaches a scope's files any other way. The scope is always the run's
 /// own task's, and L4 has checked the run's token before asking; L3 owns the files, the

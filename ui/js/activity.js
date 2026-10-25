@@ -135,6 +135,8 @@ function scopeOf(ev) {
       return ev.scope;
     case "agent_deleted":
       return ev.scope;
+    case "agent_renamed":
+      return ev.scope;
     case "roles_changed":
       return ev.scope;
     default:
@@ -182,6 +184,8 @@ function describe(ev) {
       return { at, kind: "agent_", label: "agent configured", detail: `${ev.scope}/${ev.name}` };
     case "agent_deleted":
       return { at, kind: "agent_", label: "agent deleted", detail: `${ev.scope}/${ev.name}` };
+    case "agent_renamed":
+      return { at, kind: "agent_", label: "agent renamed", detail: `${ev.scope}/${ev.from} → ${ev.to}` };
     case "roles_changed":
       return { at, kind: "agent_", label: "role changed", detail: `${ev.name} in ${ev.scope}` };
     case "agent_activity":

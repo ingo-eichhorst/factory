@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
-  ago, canStart, connectLines, findInstance, instanceActions, instanceDetail, instanceSummary, instancesOf,
-  isLive, liveIds, scalePayload, startInstancePayload, stopPrompt,
+  ago, canRename, canStart, connectLines, findInstance, instanceActions, instanceDetail, instanceSummary, instancesOf,
+  isLive, liveIds, renameNotice, renamePayload, scalePayload, startInstancePayload, stopPrompt,
 } from "../js/agents-model.js";
 
 const view = readFileSync(new URL("../js/agents.js", import.meta.url), "utf8");
@@ -150,4 +150,63 @@ test("the roster asks the daemon before it stops one, in the page, and acts on o
   const stopping = code.slice(code.indexOf('act === "stop"'), code.indexOf('act === "scale"'));
   assert.doesNotMatch(stopping, /(?<![.\w])(alert|confirm|prompt)\(/);
   assert.match(served, /"js\/agents-model\.js"/);
+});
+
+// ------------------------------------------------------------- rename (#351)
+
+test("Rename is offered exactly where Delete is: a local declaration, its scope selected", () => {
+  const local = { name: "pi", deletable: true };
+  assert.equal(canRename(local, "projects/factory", "projects/factory"), true);
+  assert.equal(canRename(local, "", "projects/factory"), false, "no scope selected");
+  assert.equal(canRename(local, "projects/other", "projects/factory"), false);
+  assert.equal(canRename({ name: "foreman", deletable: false }, "projects/factory", "projects/factory"), false, "a foreman");
+  assert.equal(canRename({ name: "claude-code", declared: false }, "projects/factory", "projects/factory"), false, "undeclared");
+  assert.equal(canRename(null, "a", "a"), false);
+});
+
+test("a new name is checked as the daemon checks it, and an unchanged one sends nothing", () => {
+  assert.deepEqual(renamePayload(" projects/factory ", "Codex Builder", "  reviewer "), {
+    scope: "projects/factory", from: "Codex Builder", to: "reviewer",
+  });
+  assert.deepEqual(renamePayload("demo", "pi", "Lead Reviewer").to, "Lead Reviewer", "spaces inside are fine");
+  assert.equal(renamePayload("demo", "pi", " pi "), null, "unchanged");
+  assert.throws(() => renamePayload("demo", "pi", "   "), /needs a name/);
+  for (const bad of ["a/b", "pi#2", "two\nlines", "tab\there", "bell\u0007"]) {
+    assert.throws(() => renamePayload("demo", "pi", bad), /cannot contain/, JSON.stringify(bad));
+  }
+  assert.throws(() => renamePayload("", "pi", "x"), /Select one scope/);
+  assert.throws(() => renamePayload("demo", "", "x"), /Choose an agent/);
+});
+
+test("after a rename the roster says what moved and what still names the old agent", () => {
+  const notice = renameNotice({
+    scope: "factory", from: "builder", to: "implementer", changed: true,
+    tasks: ["t1", "t2"],
+    sessions: { moved: [], started: ["factory/implementer"] },
+    files: ["workflows/github-issue.yaml"],
+    workflows: ["workflow github-issue (w1: triage, implement)"],
+  });
+  assert.deepEqual(notice, {
+    title: "builder is now implementer",
+    lines: [
+      "2 waiting tasks moved to implementer.",
+      "Starting again as factory/implementer.",
+      "Still names builder, not rewritten: workflows/github-issue.yaml",
+      "Still names builder, not rewritten: workflow github-issue (w1: triage, implement)",
+    ],
+    stale: true,
+  });
+  assert.deepEqual(renameNotice({ from: "pi", to: "scratch", changed: true, tasks: ["t"] }).lines, ["1 waiting task moved to scratch."]);
+  assert.equal(renameNotice({ from: "pi", to: "pi", changed: false }), null);
+  assert.equal(renameNotice(null), null);
+});
+
+test("the roster offers Rename beside Delete, opens its dialog and keeps the answer on the page", () => {
+  assert.match(view, /canRename\(a, state\.scope, s\.name\)/);
+  assert.match(view, /data-act="rename"/);
+  assert.match(view, /\/api\/agents\/rename/);
+  assert.match(view, /renameNotice\(/);
+  // Start task… names the agent, not its harness: a renamed `pi` row must not
+  // hand its task to the bare `pi` adapter.
+  assert.match(view, /data-act="task" data-scope="\$\{esc\(s\.name\)\}" data-agent="\$\{esc\(a\.name\)\}"/);
 });

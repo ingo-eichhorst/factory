@@ -1216,6 +1216,16 @@ enum AgentCmd {
         #[arg(allow_hyphen_values = true)]
         instances: String,
     },
+    /// Rename an agent this scope's own config declares. Its `name:` is
+    /// rewritten, tasks still waiting for it move to the new name, and its idle
+    /// standing sessions come back up under it. Refused while one of its runs or
+    /// standing instances is in flight. Workflows that name it are listed, not
+    /// rewritten.
+    Rename {
+        scope: String,
+        from: String,
+        to: String,
+    },
     /// What its terminal shows right now.
     Output {
         id: String,
@@ -5768,6 +5778,13 @@ async fn agent_cmd(json: bool, client: &Client, cmd: AgentCmd) -> Result<()> {
                 _ => None,
             })
         }
+        AgentCmd::Rename { scope, from, to } => {
+            let payload = client.send(Request::AgentRename { scope, from, to }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Renamed { rename } => Some(rename.summary()),
+                _ => None,
+            })
+        }
         AgentCmd::Role { id, role } => {
             let payload = client.send(Request::AgentRole { id, role }).await?;
             print(&payload, json, |p| match p {
@@ -7796,6 +7813,9 @@ fn describe_event(e: &Event) -> String {
         Event::AgentScaled { scope, name, previous, wanted, by, .. } => {
             format!("agent    {scope}/{name}  scaled {previous} -> {wanted} by {by}")
         }
+        Event::AgentRenamed { scope, from, to } => {
+            format!("agent    {scope}/{from}  renamed {to}")
+        }
         Event::RolesChanged { scope, name } => {
             format!("role     {name} in {scope}  changed")
         }
@@ -7987,6 +8007,12 @@ mod tests {
         // `-1` is the count, not a flag.
         let cli = Cli::try_parse_from(["factory", "agent", "scale", "root", "claude", "-1"]).unwrap();
         assert!(matches!(cli.command, Command::Agent(AgentCmd::Scale { ref instances, .. }) if instances == "-1"));
+        let cli = Cli::try_parse_from(["factory", "agent", "rename", "projects/factory", "Codex Builder", "reviewer"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Agent(AgentCmd::Rename { ref scope, ref from, ref to })
+                if scope == "projects/factory" && from == "Codex Builder" && to == "reviewer"
+        ));
     }
 
 

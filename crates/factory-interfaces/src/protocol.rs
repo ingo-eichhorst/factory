@@ -25,6 +25,8 @@ pub use factory_agents::skills::{
 };
 // `#343`: the CLI prints these, through `factory_core::protocol::*`.
 pub use factory_kernel::{PageVersionFact, ScopePageFact};
+// `#351`: the CLI prints a rename's answer.
+pub use factory_process::rename::RenameReport;
 use factory_composition::building::{Activity, Cues, RepoMetrics, Shape};
 use factory_composition::config::ScopeAgent;
 use factory_environment::dependencies::{
@@ -95,6 +97,13 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<i64>,
     },
+    /// Rename one agent declared in a scope's own config (`#351`): the
+    /// declaration's `name:`, the tasks still waiting for it, and its idle
+    /// standing sessions, which come back up under the new name. Refused while
+    /// a run or a standing instance of it is in flight. Workflows naming it are
+    /// listed in the answer, not rewritten.
+    #[serde(rename = "agent.rename")]
+    AgentRename { scope: String, from: String, to: String },
     /// Every role in effect in one scope -- where each was defined, what it
     /// may do in the vocabulary the check uses, and who holds it -- plus where
     /// roles are written across the whole tree. With no scope, only the
@@ -1478,6 +1487,7 @@ impl Request {
             Request::IntakePublish { .. } |
             Request::TaskUsage { .. } |
             Request::RunUsage { .. } |
+            Request::AgentRename { .. } |
             Request::Costs { .. } => L4,
             // L5
             Request::TaskSuggest { .. } |
@@ -1630,6 +1640,10 @@ pub enum Payload {
     /// What a scale did (`#329`).
     Scaled {
         scale: ScaleReport,
+    },
+    /// What a rename did (`#351`).
+    Renamed {
+        rename: RenameReport,
     },
     /// What stopping one instance would cost (`#330`).
     StopCheck {

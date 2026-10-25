@@ -241,9 +241,11 @@ impl Engine {
             Request::AgentStart { .. } => Grant::AgentStart,
             // A scale rewrites the declaration's `instances:` in its scope's
             // config (`#329`), so it is the same write as adding one.
-            Request::AgentConfigure { .. } | Request::AgentDelete { .. } | Request::AgentScale { .. } => {
-                Grant::AgentConfigure
-            }
+            // A rename (`#351`) rewrites the declaration's `name:` the same way.
+            Request::AgentConfigure { .. }
+            | Request::AgentDelete { .. }
+            | Request::AgentScale { .. }
+            | Request::AgentRename { .. } => Grant::AgentConfigure,
             // Saving or resetting a scope's own dashboard layout (`#160`).
             // An ordinary grant, unlike the role-layer writes it otherwise
             // resembles: a layout cannot widen what an agent may do.
@@ -745,7 +747,8 @@ impl Engine {
 
             Request::AgentConfigure { scope: s, .. }
             | Request::AgentDelete { scope: s, .. }
-            | Request::AgentScale { scope: s, .. } => match def.reach {
+            | Request::AgentScale { scope: s, .. }
+            | Request::AgentRename { scope: s, .. } => match def.reach {
                 Reach::Scope => in_scope(s),
                 Reach::Own => Err(deny("configure an agent declaration")),
             },
@@ -2530,6 +2533,11 @@ mod tests {
         assert!(allowed(&e, &wearing("scope-editor"), scale("demo")).await);
         assert!(!allowed(&e, &wearing("scope-editor"), scale("other")).await);
         assert!(!allowed(&e, &wearing("self-editor"), scale("demo")).await);
+        // So does a rename (`#351`), and an agent never renames itself.
+        let rename = |scope: &str| Request::AgentRename { scope: scope.into(), from: "w".into(), to: "v".into() };
+        assert!(allowed(&e, &wearing("scope-editor"), rename("demo")).await);
+        assert!(!allowed(&e, &wearing("scope-editor"), rename("other")).await);
+        assert!(!allowed(&e, &wearing("self-editor"), rename("demo")).await);
     }
 
     #[tokio::test]

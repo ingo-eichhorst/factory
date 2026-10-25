@@ -103,6 +103,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("run_settle.rs", L4),
     ("run_start.rs", L4),
     ("learning.rs", L4), // memory and skill writes from a run, and the dispatch handout (#339)
+    ("agent_rename.rs", L4), // an agent renamed from the roster: its waiting tasks and runs, L3 through its port (#351)
     ("scheduling.rs", L4),
     ("supplied.rs", Wiring), // what L5/L6 supply to L4 (quality block, functionary binding) and workflow lint
     ("l2_pages.rs", Wiring), // L2 catalogues composed with L4 runs and journals: attachments, secret metadata

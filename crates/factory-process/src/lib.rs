@@ -23,6 +23,7 @@ pub mod production;
 mod process_metrics;
 pub mod ready;
 pub mod recovery_journal;
+pub mod rename;
 pub mod run;
 pub mod store;
 pub mod supplied;

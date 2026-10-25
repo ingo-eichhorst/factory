@@ -87,6 +87,13 @@ pub enum Event {
         /// The whole answer, in a line.
         summary: String,
     },
+    /// A declaration was renamed in its scope's own configuration, and its
+    /// waiting tasks and standing sessions moved with it (`#351`).
+    AgentRenamed {
+        scope: String,
+        from: String,
+        to: String,
+    },
     /// A role definition was written into, or removed from, one scope's own
     /// configuration. Every scope below it may now resolve that name
     /// differently.
@@ -194,6 +201,7 @@ impl Event {
             | Event::AgentConfigured { .. }
             | Event::AgentDeleted { .. }
             | Event::AgentScaled { .. }
+            | Event::AgentRenamed { .. }
             | Event::RolesChanged { .. }
             | Event::DashboardChanged { .. }
             | Event::PolicyChanged { .. }

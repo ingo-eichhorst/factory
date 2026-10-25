@@ -175,7 +175,7 @@ factory agent attach 'demo/claude#2' --print    # just print the command
 factory agent stop   'demo/claude#2'            # #2 only; #1 and #3 keep running
 factory agent start  demo claude --instance 2   # #2 only
 factory agent start  'demo/claude#2'            # the same, by its id
-factory task log factory:agents                 # who started, stopped, attached to or scaled what
+factory task log factory:agents                 # who started, stopped, attached to, scaled or renamed what
 ```
 
 An instance's id is `scope/name` for instance 1 and `scope/name#n` for the
@@ -220,9 +220,10 @@ agent on the roster have sessions of their own and are not touched by
 stopping an instance. The CLI's `stop` does not ask: it is typed on purpose,
 and scripts rely on it.
 
-Starting, stopping, attaching and scaling are journaled with who asked, under
-the fixed journal id `factory:agents` (`agent_started`, `agent_stopped`,
-`agent_attached`, `agent_scaled`, and `agent_start_refused` for a start that
+Starting, stopping, attaching, scaling and renaming are journaled with who
+asked, under the fixed journal id `factory:agents` (`agent_started`,
+`agent_stopped`, `agent_attached`, `agent_scaled`, `agent_renamed`, and
+`agent_start_refused` for a start that
 did not happen, with the reason; `source` is `owner` or `agent`, `data.by`
 names which). L3 keeps what it was asked in a bounded log and L4 reads it from
 a cursor on its tick (`StandingAgentActionsFact`), the way it reads L3's
@@ -504,6 +505,7 @@ factory agent stop demo/watcher      # stays stopped until someone asks again
 factory agent stop 'demo/claude#2'   # one instance of several (quote the #)
 factory agent attach 'demo/claude#2' # into its terminal; --print to only show the command
 factory agent scale demo claude 3    # keep three standing sessions up
+factory agent rename demo watcher lookout   # its config, waiting tasks and sessions
 factory agent output demo/watcher
 factory agent input demo/watcher --text "how is it going?" --key enter
 factory agent role demo/watcher reviewer
@@ -519,6 +521,60 @@ write only to roles with scope reach; it ships with `foreman`, not `worker`.
 Locally declared agents can be deleted from the same selected-scope roster;
 deleting a standing declaration also closes its session. Synthesized foremen
 and undeclared adapter defaults are shown but cannot be deleted there.
+
+**Renaming one (`#351`).** A locally declared agent can be renamed from its
+roster row -- **Rename…** is offered wherever **Delete** is -- or from the CLI:
+
+```sh
+factory agent rename projects/factory pi scratch
+factory agent rename projects/factory "Codex Builder" reviewer
+```
+
+The same request is `POST /api/agents/rename` (`{scope, from, to}`); all three
+reach one handler, and none of them writes the file itself. The new name is
+checked as **New agent…** checks one -- trimmed, not empty, no `/`, `#` or
+control character, and not the name of another agent in the scope, the
+synthesized foreman included -- before anything is written. A rename also
+refuses, where **New agent…** does not, the name of the scope's default: the
+agent a task naming none goes to, inherited from the instance's
+`default_agent` or the harness of the scope's own `agent:`. A declaration on
+another harness called that would take every such task; one on that harness
+may take the name, as a nameless declaration of it has it. Then the
+declaration's `name:` is rewritten in the scope's own `.factory/config.yaml`
+through the edit path a scale uses: that one line changes, or a declaration
+named after its harness gains `name:` as its first key; every comment stays
+where it was, and the file is parsed back and refused unless it then says
+exactly what was asked. The live snapshot follows, with no restart. An
+unchanged name writes nothing. It takes the `agent.configure` grant with scope
+reach. An inherited or foreman agent is renamed where it is declared, or not
+at all, and a bare `agent: <harness>` names no agent to rename.
+
+A task names its agent, and that name resolves in the task's own scope to a
+declaration first and to a bare adapter second. A task left naming the old
+agent would fail to dispatch or -- where the old name is an adapter's too,
+like `pi` or `codex` -- quietly run on the bare adapter without the
+declaration's arguments, role or sandbox. So the scope's tasks still waiting
+for it (pending, scheduled, blocked, queued for a retry, or in intake) move to
+the new name, each with an `agent_renamed` line in its journal. Finished tasks,
+runs, usage and the journal keep the name they had: history is not rewritten.
+A new name that waiting tasks in the scope already use -- a bare adapter's --
+is refused, since those tasks would be handed to this agent.
+
+A rename never interrupts work. It is refused, saying which, while a run on
+the agent is in flight, or while one of its standing instances is starting,
+working, waiting on an answer or has a person at it. Otherwise its idle
+standing instances are stopped and brought up again under the new name
+(`demo/scratch`, `demo/scratch#2`), each keeping its number and any role
+somebody gave it; one a person stopped stays stopped, and the count and
+autostart are the declaration's, which moved with it. Workflows that name the
+agent -- files under the scope's `workflows/`, stored definitions and the runs
+of one still going -- are not rewritten: the answer lists them, and the roster
+keeps that list at the top of the scope until it is dismissed. Every rename is
+announced as an `agent_renamed` event (`agent demo/pi renamed scratch` in
+`factory watch`) and journaled under `factory:agents`. Renaming the scope's own
+`agent:` declaration when it was named after its harness says one thing more:
+tasks created there without `--agent` name that harness, so they no longer
+reach it.
 
 CLI arguments are entered one argument per line. A line such as `local model`
 is one argument, not two shell words, and their order is preserved in `args:`.
@@ -5397,7 +5453,13 @@ An agent declaration, in `agents:` or the singular `agent:` block, takes
 `temporary`), `role`, `autostart`, `args`, `sandbox`/`openshell`,
 `provider`, `max_sessions` and, for a standing agent, `instances` -- see
 "Task agents and standing agents" above. A name may not contain `/` or `#`:
-`#` is what a standing instance's id carries its number behind.
+`#` is what a standing instance's id carries its number behind. To change a
+name, `factory agent rename <scope> <from> <to>` (or the roster's
+**Rename…**) rewrites `name` in place, giving a nameless declaration one, and
+moves the tasks still waiting for the agent and its standing sessions with it;
+workflows that name it are listed, not rewritten. It refuses a name another
+agent of the scope has, the foreman's included, and the scope's default unless
+the declaration runs on that harness.
 
 Only directories with a valid local scope block appear in the CLI or UI. A
 configured scope is nested below its nearest configured ancestor in the rail;
@@ -6103,7 +6165,8 @@ HTTP maps REST onto the same thing — `GET /api/tasks`, `POST /api/tasks`,
 for only the task's own lines, none of its runs'), `GET /api/runs/{id}/output`,
 `GET /api/runs/{id}/usage`, `GET /api/tasks/{id}/usage`,
 `GET /api/costs?group_by=&from=&to=&scope=`, `GET /api/agents`,
-`POST /api/agents/scale`, `POST /api/agents/start` (`{scope, name}` for
+`POST /api/agents/scale`, `POST /api/agents/rename` (`{scope, from, to}`),
+`POST /api/agents/start` (`{scope, name}` for
 every instance, plus `instance` for one), `POST /api/agents/stop-check` and
 `POST /api/agents/attach` (`{id}`; see "Task agents and standing agents"
 above),
