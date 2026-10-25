@@ -2584,6 +2584,41 @@ mod tests {
     }
 
     #[test]
+    fn a_subtree_reach_is_written_like_any_other_and_an_unknown_one_is_refused() {
+        use factory_agents::role::Reach;
+        // `#376`: in the instance's own `roles:` and in a scope's.
+        let mut c = config_with(
+            "roles:\n  supervisor:\n    grants: [task.run]\n    reach: subtree\n",
+        );
+        c.scopes = vec![
+            scope_with_roles("company", ".", "", None),
+            scope_with_roles(
+                "engineering",
+                "projects",
+                "  lead:\n    grants: [task.run, task.cancel]\n    reach: subtree\n",
+                None,
+            ),
+        ];
+        c.validate().unwrap();
+        let roles = c.roles_for_scope(scope_named(&c, "engineering")).unwrap();
+        for role in ["supervisor", "lead"] {
+            assert_eq!(
+                roles.get(&Role::new(role)).unwrap().reach,
+                Reach::Subtree,
+                "{role}"
+            );
+        }
+
+        let e = serde_yaml_ng::from_str::<Config>(
+            "instance:\n  id: i\n  name: n\nroles:\n  everywhere:\n    grants: [task.run]\n    reach: everywhere\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("unknown variant `everywhere`"), "{e}");
+        assert!(e.contains("subtree"), "the error lists what there is: {e}");
+    }
+
+    #[test]
     fn a_scope_may_not_redefine_a_preset_and_the_error_names_it() {
         let mut c = tree();
         c.scopes.push(scope_with_roles(

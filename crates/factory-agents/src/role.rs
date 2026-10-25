@@ -529,6 +529,22 @@ mod tests {
     }
 
     #[test]
+    fn a_reach_is_written_and_read_by_one_name() {
+        for (reach, name) in [
+            (Reach::Own, "own"),
+            (Reach::Scope, "scope"),
+            (Reach::Subtree, "subtree"),
+        ] {
+            assert_eq!(reach.as_str(), name);
+            let spec: RoleSpec =
+                serde_json::from_value(serde_json::json!({ "reach": name })).unwrap();
+            assert_eq!(spec.reach, reach, "{name}");
+            assert_eq!(serde_json::to_value(reach).unwrap(), name);
+        }
+        assert!(serde_json::from_value::<RoleSpec>(serde_json::json!({ "reach": "everywhere" })).is_err());
+    }
+
+    #[test]
     fn a_preset_cannot_be_redefined() {
         let written = BTreeMap::from([(
             "worker".to_string(),

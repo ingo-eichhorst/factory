@@ -2508,6 +2508,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn defining_a_subtree_role_writes_the_reach_as_it_reads() {
+        // `#376`: the Roles view and `/api/roles` define through here.
+        let instance = Instance::new("subtree", ROOT, &[("projects", "version: 1\nscope:\n  id: p\n  name: projects\n")]);
+        let engine = instance.engine();
+        engine
+            .define_role("projects", "supervisor", spec("runs the project scopes under it", &["task.run"], "subtree"), false)
+            .await
+            .unwrap();
+        let yaml = instance.yaml("projects");
+        assert_eq!(yaml["scope"]["roles"]["supervisor"]["reach"].as_str(), Some("subtree"));
+        let roles = engine.roles_for("projects");
+        assert_eq!(roles.get(&Role::new("supervisor")).unwrap().reach, factory_core::role::Reach::Subtree);
+    }
+
+    #[tokio::test]
     async fn deleting_removes_one_entry_and_the_last_one_takes_the_block() {
         let instance = Instance::new(
             "delete",
