@@ -689,6 +689,10 @@ impl AgentContext {
                         "your own work only -- tasks assigned to you, the run you hold, yourself"
                     }
                     Reach::Scope => "everything in your scope, and nothing past it",
+                    Reach::Subtree => {
+                        "everything in your scope and in every scope below it, \
+                         and nothing above or beside it"
+                    }
                 };
                 out.push_str(&format!(
                     "Your role is {role} ({describe}). Its reach is {reach}. \
@@ -1395,6 +1399,21 @@ mod tests {
         assert!(!guide.contains("task.create"));
         assert!(!guide.contains("task.edit"));
         assert!(!guide.contains("agent.input"));
+    }
+
+    #[test]
+    fn a_subtree_role_is_told_it_reaches_below_its_scope_and_never_above() {
+        // `#376`: the third reach, and the one sentence that says how far.
+        let guide = base(Some(custom(&[Grant::TaskRun], Reach::Subtree))).factory_guide();
+        assert!(
+            guide.contains(
+                "Its reach is everything in your scope and in every scope below it, \
+                 and nothing above or beside it."
+            ),
+            "{guide}"
+        );
+        let scope_guide = base(Some(custom(&[Grant::TaskRun], Reach::Scope))).factory_guide();
+        assert!(!scope_guide.contains("every scope below it"), "{scope_guide}");
     }
 
     #[test]

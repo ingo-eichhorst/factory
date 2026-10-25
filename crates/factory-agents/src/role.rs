@@ -153,6 +153,10 @@ pub enum Reach {
     Own,
     /// Everything in its scope, whoever it belongs to. Never past the scope.
     Scope,
+    /// Everything in its scope and in every registered scope below it, by
+    /// whole path components (`#376`). Never an ancestor or a sibling, and
+    /// never the company-wide grants only the root scope holds.
+    Subtree,
 }
 
 impl Reach {
@@ -160,6 +164,7 @@ impl Reach {
         match self {
             Self::Own => "own",
             Self::Scope => "scope",
+            Self::Subtree => "subtree",
         }
     }
 }
