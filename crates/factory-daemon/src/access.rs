@@ -29,6 +29,18 @@ use factory_core::workflow::WorkflowActor;
 
 use crate::engine::Engine;
 
+/// Whether `subject` names `scope` or a registered scope below it (`#376`).
+/// Both names resolve through the canonical L0 tree -- aliases, legacy paths,
+/// unique leaves -- and ancestry is whole path components, so
+/// `projects/factory-other` is not below `projects/factory`. A name that
+/// resolves to nothing, or to more than one scope, is outside: a deny, never
+/// a guess.
+fn within_subtree(tree: &factory_kernel::ScopeTree, scope: &str, subject: &str) -> bool {
+    let Ok(subject) = tree.scope(subject) else { return false };
+    tree.subtree_scopes(Some(scope))
+        .is_ok_and(|(_, below)| below.iter().any(|s| s.name == subject.name))
+}
+
 /// What a request asks of its caller.
 enum Needs {
     /// Nothing: any agent may make it.
@@ -491,14 +503,25 @@ impl Engine {
             return Err(deny(grant.describe()));
         }
 
+        // `#376`: a `subtree` reach also covers every registered scope below
+        // the caller's, so it needs the scope tree -- read once per request
+        // from the live snapshot, never cached, and only by the reach that
+        // asks for it. `own` and `scope` keep comparing names exactly.
+        let tree = (def.reach == Reach::Subtree).then(|| self.factory_snapshot().scope_tree());
         let in_scope = |s: &str| -> Result<()> {
             if s == scope {
-                Ok(())
-            } else {
-                Err(FactoryError::Denied(format!(
+                return Ok(());
+            }
+            match &tree {
+                Some(tree) if within_subtree(tree, scope, s) => Ok(()),
+                Some(_) => Err(FactoryError::Denied(format!(
+                    "{} works in {scope} and the scopes below it, not in {s}",
+                    caller.describe()
+                ))),
+                None => Err(FactoryError::Denied(format!(
                     "{} works in {scope}, not in {s}",
                     caller.describe()
-                )))
+                ))),
             }
         };
 
@@ -535,7 +558,7 @@ impl Engine {
         // this agent was given.
         let task_in_reach = |def: &RoleDef, task: &Task| -> Result<()> {
             match def.reach {
-                Reach::Scope => in_scope(&task.scope),
+                Reach::Scope | Reach::Subtree => in_scope(&task.scope),
                 Reach::Own if Self::assigned_to(task, scope, name) => Ok(()),
                 Reach::Own => Err(deny("touch a task that is not assigned to it")),
             }
@@ -545,7 +568,7 @@ impl Engine {
         // than a task -- `Reach::Own` is the agent that filed it.
         let suggestion_in_reach = |def: &RoleDef, s: &Suggestion| -> Result<()> {
             match def.reach {
-                Reach::Scope => in_scope(&s.scope),
+                Reach::Scope | Reach::Subtree => in_scope(&s.scope),
                 Reach::Own if s.scope == *scope && s.agent == *name => Ok(()),
                 Reach::Own => Err(deny("touch a suggestion that is not its own")),
             }
@@ -738,7 +761,7 @@ impl Engine {
             }
 
             Request::AgentStart { scope: s, name: n, .. } => match def.reach {
-                Reach::Scope => in_scope(s),
+                Reach::Scope | Reach::Subtree => in_scope(s),
                 Reach::Own if s == scope && n == name => Ok(()),
                 Reach::Own => Err(deny("start an agent other than itself")),
             },
@@ -746,13 +769,13 @@ impl Engine {
             Request::AgentConfigure { scope: s, .. }
             | Request::AgentDelete { scope: s, .. }
             | Request::AgentScale { scope: s, .. } => match def.reach {
-                Reach::Scope => in_scope(s),
+                Reach::Scope | Reach::Subtree => in_scope(s),
                 Reach::Own => Err(deny("configure an agent declaration")),
             },
 
             Request::DashboardSet { scope: s, .. } | Request::DashboardReset { scope: s } => {
                 match def.reach {
-                    Reach::Scope => in_scope(s),
+                    Reach::Scope | Reach::Subtree => in_scope(s),
                     Reach::Own => Err(deny("edit a scope's dashboard layout")),
                 }
             }
@@ -761,7 +784,7 @@ impl Engine {
             // id (`#330`). Its own reach covers every instance of its own
             // declaration -- two instances of one declaration are one agent.
             Request::AgentStop { id } | Request::AgentInput { id, .. } | Request::AgentStopCheck { id } => match def.reach {
-                Reach::Scope => match self.l4.store.get_agent(&AgentSession::canonical_id(id)).await? {
+                Reach::Scope | Reach::Subtree => match self.l4.store.get_agent(&AgentSession::canonical_id(id)).await? {
                     Some(agent) => in_scope(&agent.scope),
                     None => Ok(()),
                 },
@@ -772,7 +795,7 @@ impl Engine {
             },
 
             Request::RunInput { id, .. } | Request::RunAnswer { id, .. } => match def.reach {
-                Reach::Scope => match self.task_of_run(id).await? {
+                Reach::Scope | Reach::Subtree => match self.task_of_run(id).await? {
                     Some(task) => in_scope(&task.scope),
                     None => Ok(()),
                 },
@@ -790,11 +813,11 @@ impl Engine {
             },
 
             Request::WorkflowCreate(draft) => match def.reach {
-                Reach::Scope => in_scope(&draft.scope),
+                Reach::Scope | Reach::Subtree => in_scope(&draft.scope),
                 Reach::Own => Err(deny("manage workflows; that requires scope reach")),
             },
             Request::WorkflowUpdate { id, workflow } => match def.reach {
-                Reach::Scope => {
+                Reach::Scope | Reach::Subtree => {
                     in_scope(&workflow.scope)?;
                     if let Some(found) = self.l4.workflows.get_definition(id).await? {
                         in_scope(&found.scope)?;
@@ -804,14 +827,14 @@ impl Engine {
                 Reach::Own => Err(deny("manage workflows; that requires scope reach")),
             },
             Request::WorkflowDelete { id } | Request::WorkflowStart { id, .. } => match def.reach {
-                Reach::Scope => match self.l4.workflows.get_definition(id).await? {
+                Reach::Scope | Reach::Subtree => match self.l4.workflows.get_definition(id).await? {
                     Some(found) => in_scope(&found.scope),
                     None => Ok(()),
                 },
                 Reach::Own => Err(deny("manage workflows; that requires scope reach")),
             },
             Request::WorkflowRunCancel { id } => match def.reach {
-                Reach::Scope => match self.l4.workflows.get_run(id).await? {
+                Reach::Scope | Reach::Subtree => match self.l4.workflows.get_run(id).await? {
                     Some(found) => in_scope(&found.scope),
                     None => Ok(()),
                 },
@@ -823,7 +846,7 @@ impl Engine {
             Request::KnowledgeImport { .. }
             | Request::KnowledgeAdd { .. }
             | Request::KnowledgeWriteFile { .. } => match def.reach {
-                Reach::Scope => in_root_scope(),
+                Reach::Scope | Reach::Subtree => in_root_scope(),
                 Reach::Own => Err(deny("write to the knowledge base; that requires scope reach")),
             },
             Request::DatasetCreate { .. }
@@ -832,28 +855,28 @@ impl Engine {
             | Request::DatasetFromTasks { .. }
             | Request::DatasetDeleteCase { .. }
             | Request::DatasetDelete { .. } => match def.reach {
-                Reach::Scope => in_root_scope(),
+                Reach::Scope | Reach::Subtree => in_root_scope(),
                 Reach::Own => Err(deny("manage datasets; that requires scope reach")),
             },
             Request::BenchRunStart { .. } | Request::BenchRunCancel { .. } => match def.reach {
-                Reach::Scope => in_root_scope(),
+                Reach::Scope | Reach::Subtree => in_root_scope(),
                 Reach::Own => Err(deny("run benchmarks; that requires scope reach")),
             },
             Request::PolicyAttest { .. } | Request::PolicyWithdraw { .. } => match def.reach {
-                Reach::Scope => in_root_scope(),
+                Reach::Scope | Reach::Subtree => in_root_scope(),
                 Reach::Own => Err(deny("record or withdraw a policy attestation; that requires scope reach")),
             },
             Request::GoalsCheckIn { .. } => match def.reach {
-                Reach::Scope => in_root_scope(),
+                Reach::Scope | Reach::Subtree => in_root_scope(),
                 Reach::Own => Err(deny("record a goals check-in; that requires scope reach")),
             },
             Request::BackupRun | Request::BackupVerify { .. } => match def.reach {
-                Reach::Scope => in_root_scope(),
+                Reach::Scope | Reach::Subtree => in_root_scope(),
                 Reach::Own => Err(deny("take or verify a backup; that requires scope reach")),
             },
             // The catalogue is the instance root's, like a backup.
             Request::SecretSet { .. } => match def.reach {
-                Reach::Scope => in_root_scope(),
+                Reach::Scope | Reach::Subtree => in_root_scope(),
                 Reach::Own => Err(deny("change a declared secret's metadata; that requires scope reach")),
             },
             // The grant is explicit vocabulary, but even a named grant may
@@ -866,7 +889,7 @@ impl Engine {
             Request::DeployStart(req) => {
                 in_scope(&self.l1_service().deploy_scope(req, caller)?)?;
                 match def.reach {
-                    Reach::Scope => Ok(()),
+                    Reach::Scope | Reach::Subtree => Ok(()),
                     Reach::Own if run_id.is_some() => Ok(()),
                     Reach::Own => Err(deny("record a deployment outside a run of its own")),
                 }
@@ -877,7 +900,7 @@ impl Engine {
                     .ok_or_else(|| FactoryError::BadRequest(format!("no declared environment {environment}")))?;
                 in_scope(&scope)?;
                 match def.reach {
-                    Reach::Scope => Ok(()),
+                    Reach::Scope | Reach::Subtree => Ok(()),
                     Reach::Own if run_id.is_some() => Ok(()),
                     Reach::Own => Err(deny("verify an environment outside a run of its own")),
                 }
@@ -888,7 +911,7 @@ impl Engine {
                 };
                 in_scope(&deployment.scope)?;
                 match def.reach {
-                    Reach::Scope => Ok(()),
+                    Reach::Scope | Reach::Subtree => Ok(()),
                     Reach::Own if run_id.is_some() && deployment.actor.run_id == *run_id => Ok(()),
                     Reach::Own => Err(deny("finish a deployment its own run did not start")),
                 }
@@ -898,14 +921,14 @@ impl Engine {
                     .ok_or_else(|| FactoryError::BadRequest(format!("no deployment {id}")))?;
                 in_scope(&deployment.scope)?;
                 match def.reach {
-                    Reach::Scope => Ok(()),
+                    Reach::Scope | Reach::Subtree => Ok(()),
                     Reach::Own => Err(deny("publish a scope deployment; that requires scope reach")),
                 }
             }
             Request::ReleaseAdd(req) => {
                 in_scope(&req.scope)?;
                 match def.reach {
-                    Reach::Scope => Ok(()),
+                    Reach::Scope | Reach::Subtree => Ok(()),
                     Reach::Own if run_id.is_some() => Ok(()),
                     Reach::Own => Err(deny("add a release outside a run of its own")),
                 }
@@ -919,7 +942,7 @@ impl Engine {
             Request::PagePublish { scope: s, .. } => {
                 in_scope(s.as_deref().unwrap_or(scope))?;
                 match def.reach {
-                    Reach::Scope => Ok(()),
+                    Reach::Scope | Reach::Subtree => Ok(()),
                     Reach::Own if run_id.is_some() => Ok(()),
                     Reach::Own => Err(deny("publish a page outside a run of its own")),
                 }
@@ -927,7 +950,7 @@ impl Engine {
             // Showing an older version again is a decision about the page,
             // not a run's output.
             Request::PageRollback { scope: s, .. } => match def.reach {
-                Reach::Scope => in_scope(s),
+                Reach::Scope | Reach::Subtree => in_scope(s),
                 Reach::Own => Err(deny("roll a page back; that requires scope reach")),
             },
 
@@ -3062,6 +3085,283 @@ mod tests {
             );
             assert!(!allowed(&e, &lead, Request::TaskCancel { id: elsewhere.into(), reason: None, run: None }).await);
         }
+    }
+
+    // -- `#376`: a subtree reach ------------------------------------------------
+
+    /// The root scope listed the way discovery lists it -- in `scope:` and in
+    /// `scopes:`, at `.` -- with real paths below it, so ancestry can be tested
+    /// rather than asserted. Names differ from paths on purpose: the subtree
+    /// follows the path, and a stored name is resolved before it is compared.
+    fn engine_subtree() -> Arc<Engine> {
+        let at = |name: &str, path: &str| {
+            let mut scope: factory_core::config::Scope =
+                serde_yaml_ng::from_str(&format!("id: {name}-id\nname: {name}\n")).unwrap();
+            scope.path = PathBuf::from(path);
+            scope
+        };
+        let mut config: Config = serde_yaml_ng::from_str(
+            "instance:\n  id: i\n  name: test\nroles:\n  \
+             supervisor:\n    describe: runs a scope and the project scopes under it\n    \
+             grants: [task.*, agent.*, run.*, workflow.*]\n    reach: subtree\n  \
+             overseer:\n    grants: ['*']\n    reach: subtree\n  \
+             company-wide:\n    grants: [knowledge.write, dataset.edit, bench.run, policy.attest, \
+             goals.checkin, backup.run, secrets.edit, host.power]\n    reach: subtree\n",
+        )
+        .unwrap();
+        config.scope = Some(at("company", "."));
+        config.scopes = vec![
+            at("company", "."),
+            at("projects", "projects"),
+            at("x", "projects/x"),
+            at("x-inner", "projects/x/y"),
+            at("factory", "projects/factory"),
+            at("factory-other", "projects/factory-other"),
+            at("a", "projects/a"),
+            at("b", "projects/b"),
+            // Two scopes whose leaf is `shared`: that name means neither.
+            at("a-shared", "projects/a/shared"),
+            at("b-shared", "projects/b/shared"),
+            // Reads like a child of x by name, and is nowhere near it on disk.
+            at("x/lookalike", "elsewhere"),
+        ];
+        config.validate().unwrap();
+        Arc::new(Engine::new(
+            Factory {
+                root: PathBuf::from("/tmp/factory-access-subtree-test"),
+                config,
+            },
+            Registry::with_builtins(),
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            PathBuf::from("factory"),
+            vec![],
+        ))
+    }
+
+    fn supervisor(scope: &str) -> Caller {
+        in_scope(scope, "boss", "supervisor")
+    }
+
+    /// What the issue names -- create, run and close a task, type at an
+    /// agent, approve a run, start a workflow -- each about a subject that
+    /// lives in `scope`, seeded so no check passes for want of a row.
+    async fn subjects_in(e: &Engine, scope: &str) -> Vec<Request> {
+        let task = format!("task-in-{scope}");
+        task_in(e, &task, scope, "somebody").await;
+        let run = run_of(e, &task, "somebody").await;
+        e.l4.store
+            .put_agent(&AgentSession::new(scope, "somebody", "shell", "herdr", Lifetime::Permanent, Role::worker()))
+            .await
+            .unwrap();
+        let mut flow = factory_core::workflow::WorkflowDefinition::from_draft(WorkflowDraft {
+            name: format!("flow-in-{scope}"),
+            scope: scope.into(),
+            ..Default::default()
+        });
+        flow.id = format!("flow-in-{scope}");
+        e.l4.workflows.put_definition(&flow).await.unwrap();
+        vec![
+            Request::TaskCreate(NewTask { title: "a task".into(), scope: Some(scope.into()), ..Default::default() }),
+            Request::TaskRun { override_wait: false, id: task.clone(), reason: None, continue_run: false },
+            Request::TaskClose { id: task, reason: CloseReason::NotPlanned, duplicate_of: None, note: None },
+            Request::AgentInput { id: AgentSession::id_for(scope, "somebody"), text: Some("hi".into()), keys: vec![] },
+            Request::RunApprove { id: run, reason: "checked".into() },
+            Request::WorkflowStart { id: flow.id, inputs: Default::default() },
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_subtree_role_reaches_its_own_scope_and_every_scope_below_it() {
+        let e = engine_subtree();
+        let mut subjects = Vec::new();
+        for scope in ["company", "projects", "x", "x-inner"] {
+            subjects.push((scope, subjects_in(&e, scope).await));
+        }
+        for (caller, reaches) in [
+            ("company", &["company", "projects", "x", "x-inner"][..]),
+            ("x", &["x", "x-inner"][..]),
+            ("x-inner", &["x-inner"][..]),
+        ] {
+            for (scope, requests) in &subjects {
+                for request in requests {
+                    assert_eq!(
+                        allowed(&e, &supervisor(caller), request.clone()).await,
+                        reaches.contains(scope),
+                        "a supervisor in {caller}, about {scope}: {request:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_subtree_role_never_reaches_a_sibling_or_an_ancestor() {
+        let e = engine_subtree();
+        let mut elsewhere = Vec::new();
+        for scope in ["b", "company", "projects", "b-shared"] {
+            elsewhere.push((scope, subjects_in(&e, scope).await));
+        }
+        for (scope, requests) in elsewhere {
+            for request in requests {
+                assert!(
+                    !allowed(&e, &supervisor("a"), request.clone()).await,
+                    "a supervisor in projects/a should not reach {scope}: {request:?}"
+                );
+            }
+        }
+        let denied = e
+            .authorize(
+                &supervisor("a"),
+                &Request::TaskRun { override_wait: false, id: "task-in-b".into(), reason: None, continue_run: false },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&denied, FactoryError::Denied(m) if m.contains("works in a and the scopes below it, not in b")),
+            "the refusal names the subtree: {denied}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subtree_follows_whole_path_components_never_a_name_prefix() {
+        let e = engine_subtree();
+        for request in subjects_in(&e, "factory-other").await {
+            assert!(
+                !allowed(&e, &supervisor("factory"), request.clone()).await,
+                "projects/factory-other is not below projects/factory: {request:?}"
+            );
+        }
+        for request in subjects_in(&e, "x/lookalike").await {
+            assert!(
+                !allowed(&e, &supervisor("x"), request.clone()).await,
+                "x/lookalike is named like x's child and lives elsewhere: {request:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stored_scope_name_is_resolved_before_the_subtree_check() {
+        let e = engine_subtree();
+        let run = |id: &str| Request::TaskRun { override_wait: false, id: id.into(), reason: None, continue_run: false };
+        // A task written under x-inner's legacy relative path, under its
+        // unique leaf, under a leaf two scopes share, and under no scope.
+        task_in(&e, "legacy-path", "projects/x/y", "somebody").await;
+        task_in(&e, "unique-leaf", "y", "somebody").await;
+        task_in(&e, "ambiguous-leaf", "shared", "somebody").await;
+        task_in(&e, "unknown", "gone", "somebody").await;
+        for caller in ["company", "x", "x-inner"] {
+            assert!(allowed(&e, &supervisor(caller), run("legacy-path")).await, "{caller}");
+            assert!(allowed(&e, &supervisor(caller), run("unique-leaf")).await, "{caller}");
+        }
+        assert!(!allowed(&e, &supervisor("a"), run("legacy-path")).await, "resolved, and still not below a");
+        for id in ["ambiguous-leaf", "unknown"] {
+            let denied = e.authorize(&supervisor("company"), &run(id)).await.unwrap_err();
+            assert!(
+                matches!(&denied, FactoryError::Denied(m) if m.contains("and the scopes below it")),
+                "a name that resolves to no one scope is a deny, never a guess: {denied}"
+            );
+        }
+        // `scope` reach compares names exactly, as it always has: x-inner's
+        // foreman does not reach the same scope written another way.
+        let foreman = in_scope("x-inner", "boss", "foreman");
+        assert!(!allowed(&e, &foreman, run("legacy-path")).await);
+        assert!(!allowed(&e, &foreman, run("unique-leaf")).await);
+    }
+
+    #[tokio::test]
+    async fn a_scope_added_after_start_is_in_reach_from_the_next_request() {
+        let e = engine_subtree();
+        task_in(&e, "late-task", "late", "somebody").await;
+        let run = Request::TaskRun { override_wait: false, id: "late-task".into(), reason: None, continue_run: false };
+        assert!(!allowed(&e, &supervisor("x"), run.clone()).await, "no scope is called late yet");
+        let mut late: factory_core::config::Scope = serde_yaml_ng::from_str("id: late-id\nname: late\n").unwrap();
+        late.path = PathBuf::from("projects/x/late");
+        e.shared.factory.write().unwrap().config.scopes.push(late);
+        assert!(allowed(&e, &supervisor("x"), run.clone()).await, "the same engine reads the live snapshot");
+        assert!(!allowed(&e, &supervisor("a"), run).await);
+    }
+
+    /// The superset property: wherever a foreman is allowed in its own scope,
+    /// a subtree role holding the same grants is too -- and only the subtree
+    /// role carries on into the scope below.
+    #[tokio::test]
+    async fn a_subtree_role_may_do_whatever_a_foreman_may_in_its_own_scope_and_below_it() {
+        let e = engine_subtree();
+        let requests = |scope: &str, task: &str, run: &str| {
+            vec![
+                Request::TaskCreate(NewTask { title: "a task".into(), scope: Some(scope.into()), ..Default::default() }),
+                Request::TaskUpdate { id: task.into(), patch: titled("renamed"), reason: None },
+                Request::TaskDelete { id: task.into() },
+                Request::TaskRun { override_wait: false, id: task.into(), reason: None, continue_run: false },
+                Request::TaskCancel { id: task.into(), reason: None, run: None },
+                Request::TaskSkipNext { id: task.into(), reason: None, slot: None },
+                Request::TaskReport { id: task.into(), report: report() },
+                Request::AgentStart { scope: scope.into(), name: "w".into(), instance: None },
+                Request::AgentConfigure { scope: scope.into(), agent: declaration() },
+                Request::RunInput { id: run.into(), text: Some("hi".into()), keys: vec![] },
+                Request::RunAnswer { id: run.into(), text: "yes".into(), reason: "it asked".into() },
+                Request::IntakeAdd(NewIntake { title: "x".into(), scope: Some(scope.into()), ..Default::default() }),
+                Request::PolicyRemediate { control: "cra/a".parse().unwrap(), scope: scope.into(), agent: None },
+                Request::ScenarioPromote { scenario: "s".into(), scope: scope.into(), agent: None },
+                Request::WorkflowCreate(WorkflowDraft { name: "flow".into(), scope: scope.into(), ..Default::default() }),
+                Request::DashboardReset { scope: scope.into() },
+                Request::PageRollback { scope: scope.into(), name: "p".into(), version: "v".into() },
+            ]
+        };
+        let foreman = in_scope("x", "boss", "foreman");
+        let overseer = in_scope("x", "boss", "overseer");
+        for (scope, task) in [("x", "here"), ("x-inner", "below"), ("projects", "above")] {
+            task_in(&e, task, scope, "w").await;
+            let run = run_of(&e, task, "w").await;
+            for request in requests(scope, task, &run) {
+                let by_foreman = allowed(&e, &foreman, request.clone()).await;
+                let by_overseer = allowed(&e, &overseer, request.clone()).await;
+                assert_eq!(by_foreman, scope == "x", "foreman in x, {scope}: {request:?}");
+                assert_eq!(by_overseer, scope != "projects", "overseer in x, {scope}: {request:?}");
+            }
+        }
+    }
+
+    /// The company-wide grants are the root scope's whatever the reach: a
+    /// subtree role in the root holds them as `scope` would, one below it
+    /// holds none, and the host's power mode stays the owner's.
+    #[tokio::test]
+    async fn a_subtree_reach_widens_no_company_wide_grant() {
+        let e = engine_subtree();
+        let requests = [
+            Request::KnowledgeAdd { sources: vec!["notes.md".into()], into: None, overwrite: false },
+            Request::DatasetCreate { name: "ds".into(), description: None },
+            Request::BenchRunStart {
+                dataset: "ds".into(),
+                agents: vec!["shell".into()],
+                attempts: None,
+                concurrency: None,
+                cases: None,
+            },
+            Request::PolicyWithdraw { id: "att-1".into(), reason: None },
+            Request::GoalsCheckIn {
+                kr: "ship-compliant/dpa-signed".parse().unwrap(),
+                value: 3.0,
+                confidence: 7,
+                note: None,
+            },
+            Request::BackupRun,
+            Request::SecretSet { name: "claude-oauth-token".into(), metadata: Default::default() },
+        ];
+        for request in requests {
+            assert!(
+                allowed(&e, &in_scope("company", "w", "company-wide"), request.clone()).await,
+                "the root scope holds {request:?}"
+            );
+            for below in ["projects", "x", "a"] {
+                assert!(
+                    !allowed(&e, &in_scope(below, "w", "company-wide"), request.clone()).await,
+                    "{below} is below the root and still not it: {request:?}"
+                );
+            }
+        }
+        let power = Request::HostPowerModeSet { mode: factory_core::protocol::PowerMode::HighPerformance };
+        assert!(!allowed(&e, &in_scope("company", "w", "company-wide"), power).await, "the owner's alone");
     }
 
     #[tokio::test]

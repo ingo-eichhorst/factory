@@ -342,7 +342,7 @@ roles:
   runner:
     describe: starts the work that is already on the board, and nothing else
     grants: [task.run, task.cancel]
-    reach: scope          # own (its own work) or scope (everything in it)
+    reach: scope          # own (its own work), scope (everything in it) or subtree (it and every scope below)
   reviewer:
     describe: works its own tasks and says what it found
     grants: [task.edit, task.report]
@@ -350,7 +350,12 @@ roles:
 ```
 
 The grants decide **which** requests an agent may make; the reach decides
-**whose** tasks, agents and sessions it may make them about. `task.*`,
+**whose** tasks, agents and sessions it may make them about: `own` is the
+agent's own work, `scope` everything in its scope, and `subtree` everything in
+its scope and in every registered scope below it — by whole path components,
+so `projects/factory-other` is not below `projects/factory`, and never an
+ancestor or a sibling. A stored scope name is resolved first, and one that
+names no scope, or more than one, is refused rather than guessed. `task.*`,
 `agent.*` and `*` are wildcards; a grant that names nothing is refused at load
 rather than ignored, and so is an agent given a role the instance never defined
 — the message says which agent it was. The grants are:
@@ -447,7 +452,10 @@ is somewhere else is not below `projects`.
   cannot touch a task in `projects/demo`, and a `reach: scope` role inherited
   from `projects` cannot touch a task in `projects`, in a sibling, or in a
   scope below the agent's own. Inheritance decides which roles exist where,
-  never how far one reaches. One narrow exception follows a link Factory
+  never how far one reaches. `reach: subtree` is the explicit opt-in to reach
+  below: it covers the agent's own scope and every scope under it, and still
+  never an ancestor, a sibling, or a company-wide grant only the root scope
+  holds. One narrow exception follows a link Factory
   recorded itself: a role holding `task.close` may close and reopen an
   improvement task in the root scope when every suggestion tasked into it is
   in the role's reach (see [Dismiss and done](#suggestions)) -- closing and

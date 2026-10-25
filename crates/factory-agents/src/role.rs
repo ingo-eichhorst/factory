@@ -153,6 +153,10 @@ pub enum Reach {
     Own,
     /// Everything in its scope, whoever it belongs to. Never past the scope.
     Scope,
+    /// Everything in its scope and in every registered scope below it, by
+    /// whole path components (`#376`). Never an ancestor or a sibling, and
+    /// never the company-wide grants only the root scope holds.
+    Subtree,
 }
 
 impl Reach {
@@ -160,6 +164,7 @@ impl Reach {
         match self {
             Self::Own => "own",
             Self::Scope => "scope",
+            Self::Subtree => "subtree",
         }
     }
 }
@@ -520,6 +525,25 @@ mod tests {
         assert_eq!(
             roles.names(),
             vec!["foreman", "reviewer", "triager", "worker"]
+        );
+    }
+
+    #[test]
+    fn a_reach_is_written_and_read_by_one_name() {
+        for (reach, name) in [
+            (Reach::Own, "own"),
+            (Reach::Scope, "scope"),
+            (Reach::Subtree, "subtree"),
+        ] {
+            assert_eq!(reach.as_str(), name);
+            let spec: RoleSpec =
+                serde_json::from_value(serde_json::json!({ "reach": name })).unwrap();
+            assert_eq!(spec.reach, reach, "{name}");
+            assert_eq!(serde_json::to_value(reach).unwrap(), name);
+        }
+        assert!(
+            serde_json::from_value::<RoleSpec>(serde_json::json!({ "reach": "everywhere" }))
+                .is_err()
         );
     }
 
