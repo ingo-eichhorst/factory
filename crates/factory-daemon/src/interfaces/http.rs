@@ -265,6 +265,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/tasks/{id}/cancel", post(cancel_task))
         .route("/api/tasks/{id}/close", post(close_task))
         .route("/api/tasks/{id}/reopen", post(reopen_task))
+        .route("/api/tasks/{id}/answer", post(answer_task))
         .route("/api/tasks/{id}/skip-next", post(skip_next_task))
         .route("/api/tasks/{id}/report", post(report_task))
         .route("/api/tasks/{id}/suggest", post(suggest_task))
@@ -2689,6 +2690,26 @@ async fn run_answer(
         },
     )
     .await
+}
+
+/// `POST /api/tasks/{id}/answer`'s body: `{"text": "...", "reason": "..."}`,
+/// the reason optional.
+#[derive(serde::Deserialize)]
+struct TaskAnswerBody {
+    text: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// `POST /api/tasks/{id}/answer` -- answer the question a task is waiting
+/// on: typed into its session, or resumed into a new attempt if the
+/// session is gone (`Request::TaskAnswer`).
+async fn answer_task(
+    State(engine): State<Arc<Engine>>,
+    Path(id): Path<String>,
+    Json(body): Json<TaskAnswerBody>,
+) -> AxumResponse {
+    run(&engine, Request::TaskAnswer { id, text: body.text, reason: body.reason }).await
 }
 
 async fn ws_upgrade(State(engine): State<Arc<Engine>>, ws: WebSocketUpgrade) -> AxumResponse {

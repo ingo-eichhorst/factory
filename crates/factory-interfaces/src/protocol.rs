@@ -175,6 +175,19 @@ pub enum Request {
         text: String,
         reason: String,
     },
+    /// Answer the question a task is waiting on, wherever it is now: typed
+    /// into its run's session while that session is still open, otherwise
+    /// handed to a new run that resumes the same conversation -- a session
+    /// closed by the blocked timeout, or lost, no longer leaves the question
+    /// unanswerable. Journaled with who answered and why; a person's text is
+    /// not. Answered with a line saying which of the two happened.
+    #[serde(rename = "task.answer")]
+    TaskAnswer {
+        id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     #[serde(rename = "task.create")]
     TaskCreate(NewTask),
     #[serde(rename = "task.get")]
@@ -1418,6 +1431,7 @@ impl Request {
             Request::RunScreen { .. } |
             Request::RunInput { .. } |
             Request::RunAnswer { .. } |
+            Request::TaskAnswer { .. } |
             Request::TaskCreate(..) |
             Request::TaskGet { .. } |
             Request::TaskList(..) |

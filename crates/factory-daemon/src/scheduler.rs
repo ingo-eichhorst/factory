@@ -164,9 +164,12 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                 .map(|v| v as i64)
                 .unwrap_or(default_blocked);
 
+            // The run's clock, less every block that has ended: time spent
+            // waiting on a person is the blocked timeout's, never the run's.
+            let working_since = run.started_at + chrono::Duration::seconds(run.blocked_secs as i64);
             if let Some((kind, why)) = overdue(
                 run.status,
-                run.started_at,
+                working_since,
                 run.blocked_since,
                 now,
                 ack_secs,
@@ -241,7 +244,8 @@ fn confirmed_gone(streaks: &mut HashMap<String, u32>, run: &str, reads_gone: boo
 /// A run sitting on a hook-reported block is not silent, so `ack_secs` never
 /// applies to it; `timeout_secs` is suspended for exactly as long as it
 /// stays blocked, in favour of `blocked_secs`, and picks back up the moment
-/// it unblocks -- see the comment below on why that reunion is often abrupt.
+/// it unblocks, where it left off: the caller passes the run's start moved on
+/// by every block that has ended (`Run::blocked_secs`) as `started_at`.
 fn overdue(
     status: RunStatus,
     started_at: DateTime<Utc>,
@@ -286,17 +290,13 @@ fn overdue(
         )));
     }
 
-    // `age` is still `now - started_at`, unmodified, which is deliberate but
-    // has a sharp edge: a run just returned from a long `Blocked` spell
-    // reaches this line with `age` counting the whole time it sat blocked,
-    // because `started_at` is never nudged forward to buy that time back --
-    // occupancy's own rule is that a blocked run still honestly occupies its
-    // bay, and shifting `started_at` to hide the wait would make that chart
-    // lie about it. In practice that means a run blocked for longer than
-    // `timeout_secs` will very likely fail here on the very next tick after
-    // it unblocks. A task that expects to sit blocked for a while wants a
-    // correspondingly generous `timeout_seconds`, the same way it would for
-    // any run that legitimately takes long.
+    // `started_at` here is the caller's working clock: the run's own
+    // `started_at` moved on by `Run::blocked_secs`, every block that has
+    // ended. The stored `started_at` is never nudged -- occupancy's rule is
+    // that a blocked run still honestly occupies its bay, and its chart
+    // reads it -- but the run timeout caps work, and a run answered after a
+    // long wait used to fail here on the first tick after it unblocked, for
+    // having waited.
     if age > timeout_secs {
         // Name the condition this actually is -- a total-duration cap on
         // `age`, not a silence watchdog -- so whoever reads the run's error
@@ -317,6 +317,18 @@ mod tests {
 
     fn at(secs: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap()
+    }
+
+    #[test]
+    fn a_run_answered_after_a_long_block_is_not_failed_for_having_waited() {
+        // Started at 0 with a 1 h cap, blocked for 10 h, answered at 10 h
+        // 10 min: 10 minutes of work, so the run timeout is far off.
+        let blocked_secs = 10 * 3600;
+        let working_since = at(0) + chrono::Duration::seconds(blocked_secs);
+        assert_eq!(overdue(RunStatus::Running, working_since, None, at(blocked_secs + 600), 100, 3600, 86_400), None);
+        // And it still has a cap: an hour of work after the block fails it.
+        let (kind, _) = overdue(RunStatus::Running, working_since, None, at(blocked_secs + 3601), 100, 3600, 86_400).unwrap();
+        assert_eq!(kind, FailKind::RunTimeout);
     }
 
     #[test]

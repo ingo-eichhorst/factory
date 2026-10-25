@@ -192,6 +192,21 @@ test("the Inbox exposes approval decisions and evidence-backed rework", async ()
   assert.match(dashboard, /window\.prompt\(`\$\{ACTION_LABELS\[action\]\} reason:`\)/, "approval and rejection capture evidence");
 });
 
+test("the Inbox offers an answer where the question is seen, blocked or failed while it waited", async () => {
+  const el = stubPage(["inbox"]);
+  const waiting = {
+    ...REPORT,
+    attention: [
+      { ...REPORT.attention[0], actions: ["answer", "cancel"] },
+      { ...REPORT.attention[1], kind: "failed_exhausted", actions: ["answer", "run_again"], reason: "waiting for your answer: merge as-is? (attempt 1 ended: gone)" },
+    ],
+  };
+  globalThis.fetch = answering(waiting, []);
+  await loadInbox();
+  assert.equal((el.inbox.innerHTML.match(/data-action="answer"[^>]*>Answer/g) || []).length, 2);
+  assert.doesNotMatch(el.inbox.innerHTML, /data-action="cancel"/, "the rest stay on the Operations tab");
+});
+
 test("the Inbox says when there is nothing, and when it could not ask", async () => {
   const el = stubPage(["inbox"]);
   globalThis.fetch = answering({ ...REPORT, attention: [] }, []);
@@ -317,9 +332,8 @@ test("an answer cannot be sent twice while the first is still on its way", async
   const go = el["oa-confirm"];
   assert.equal(go.disabled, true, "nothing typed yet");
   el["oa-text"].value = "use the staging key";
-  el["oa-reason"].value = "it asked";
-  el["oa-reason"].oninput();
-  assert.equal(go.disabled, false);
+  el["oa-text"].oninput();
+  assert.equal(go.disabled, false, "an answer needs no reason");
 
   const first = go.onclick();
   go.onclick();

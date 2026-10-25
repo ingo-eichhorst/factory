@@ -280,6 +280,10 @@ impl Agent for HarnessAgent {
     }
 }
 
+/// The tools a Claude Code task run may not use: each stops the turn to wait
+/// for a person at the terminal. See `claude_turn_end_settings`.
+const CLAUDE_TASK_RUN_DENIED: [&str; 2] = ["AskUserQuestion", "EnterPlanMode"];
+
 /// Claude Code settings that make the harness itself say when a task run's
 /// turn ends: its `Stop` hook for a turn that finished, `StopFailure` for one
 /// an API error cut short. herdr only guesses a `claude` pane's state from the
@@ -293,6 +297,14 @@ impl Agent for HarnessAgent {
 /// from `FACTORY_TASK_TOKEN`, which a hook inherits from the session -- the
 /// secret stays out of the file. Claude Code merges these with the hooks in
 /// the worktree's own `.claude/settings.json` rather than replacing them.
+///
+/// The same file denies a task run the two tools that stop and wait for a
+/// person at the terminal -- `AskUserQuestion` and `EnterPlanMode` -- the way
+/// the OpenShell image already does. Nobody is at a task run's terminal: a
+/// question has to go through `factory task report --status blocked`, where
+/// the Inbox, an answer and a resume can find it, or the run sits `running`
+/// on a prompt nobody sees until its timeout. A permission deny merges with
+/// the session's other settings like a hook does.
 fn claude_turn_end_settings(ctx: &AgentContext) -> Option<String> {
     let binding = ctx.task.as_ref()?;
     let bin = shell_quote_always(&ctx.factory_bin.display().to_string());
@@ -310,6 +322,9 @@ fn claude_turn_end_settings(ctx: &AgentContext) -> Option<String> {
         "hooks": {
             "Stop": hook("stop"),
             "StopFailure": hook("stop-failure"),
+        },
+        "permissions": {
+            "deny": CLAUDE_TASK_RUN_DENIED,
         }
     });
     Some(serde_json::to_string_pretty(&settings).unwrap_or_default())
@@ -878,6 +893,10 @@ mod tests {
             !std::fs::read_to_string(path).unwrap().contains("tok"),
             "the run token comes from the session's environment, never the file"
         );
+        let denied = settings["permissions"]["deny"].as_array().unwrap();
+        for tool in ["AskUserQuestion", "EnterPlanMode"] {
+            assert!(denied.iter().any(|d| d == tool), "a task run may not stop to ask at its terminal: {tool}");
+        }
         std::fs::remove_dir_all(&context.guides_dir).ok();
     }
 
