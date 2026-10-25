@@ -4,6 +4,7 @@
 use chrono::{DateTime, Utc};
 use factory_core::adapter::runtime::RuntimeStatus;
 use factory_core::run::{FailKind, RunStatus, Trigger};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +18,8 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
     let default_blocked = factory.config.daemon.blocked_timeout_seconds as i64;
     let mut ticker = tokio::time::interval(tick);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // How many ticks in a row each active run's session has read `Gone`.
+    let mut gone_streaks: HashMap<String, u32> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -136,6 +139,8 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
             }
         };
 
+        let still_active: HashSet<String> = active.iter().map(|run| run.id.clone()).collect();
+        gone_streaks.retain(|id, _| still_active.contains(id));
         for run in active {
             let now = Utc::now();
 
@@ -186,10 +191,10 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
             // A verifying run's agent is finished; its session going away
             // (a `shell` pane that exits) says nothing about the gates the
             // daemon is running for it.
-            if run.status != RunStatus::Verifying
+            let reads_gone = run.status != RunStatus::Verifying
                 && age > 30
-                && engine.session_status(&run).await == RuntimeStatus::Gone
-            {
+                && engine.session_status(&run).await == RuntimeStatus::Gone;
+            if confirmed_gone(&mut gone_streaks, &run.id, reads_gone) {
                 engine
                     .l4_service()
                     .fail_run(
@@ -201,6 +206,25 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
             }
         }
     }
+}
+
+/// How many ticks in a row a session must read `Gone` before its run is
+/// failed for it. Failing a run closes its session, so one wrong reading is
+/// not recoverable: a blocked run once lost the live session waiting on its
+/// answer to a single probe that failed while the daemon was out of file
+/// descriptors. Three readings is ten to fifteen seconds at the default tick.
+const GONE_READINGS: u32 = 3;
+
+/// Count one tick's reading of `run`'s session; whether it has now read
+/// `Gone` `GONE_READINGS` times in a row. Any other reading starts over.
+fn confirmed_gone(streaks: &mut HashMap<String, u32>, run: &str, reads_gone: bool) -> bool {
+    if !reads_gone {
+        streaks.remove(run);
+        return false;
+    }
+    let streak = streaks.entry(run.to_string()).or_default();
+    *streak += 1;
+    *streak >= GONE_READINGS
 }
 
 /// Whether an active run has run out of patience, and why -- judged only by
@@ -293,6 +317,18 @@ mod tests {
 
     fn at(secs: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap()
+    }
+
+    #[test]
+    fn a_session_is_gone_only_after_three_readings_in_a_row() {
+        let mut streaks = HashMap::new();
+        // Two bad readings, a good one, two more bad: never three in a row.
+        for reads_gone in [true, true, false, true, true] {
+            assert!(!confirmed_gone(&mut streaks, "r1", reads_gone));
+        }
+        assert!(confirmed_gone(&mut streaks, "r1", true), "the third in a row confirms it");
+        // Each run counts its own.
+        assert!(!confirmed_gone(&mut streaks, "r2", true));
     }
 
     #[test]
