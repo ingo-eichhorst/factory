@@ -55,6 +55,7 @@ mod intake;
 mod interfaces;
 mod metrics;
 mod metrics_page;
+mod escalation;
 mod notify;
 mod occupancy;
 mod occupancy_page;

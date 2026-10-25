@@ -501,6 +501,22 @@ impl Config {
         self.infrastructure.validate()?;
         factory_environment::secrets::validate(&self.secrets)?;
         factory_environment::channels::validate(&self.channels, &self.secrets)?;
+        if let Some(name) = &self.daemon.escalation.channel {
+            match factory_environment::channels::find(&self.channels, name) {
+                None => {
+                    return Err(FactoryError::BadRequest(format!(
+                        "daemon.escalation.channel names {name:?}, which channels: does not declare (it declares: {})",
+                        factory_environment::channels::names(&self.channels)
+                    )))
+                }
+                Some(channel) if channel.inbound.is_none() => {
+                    return Err(FactoryError::BadRequest(format!(
+                        "daemon.escalation.channel {name:?} declares no inbound:, so a reply to a question could never come back"
+                    )))
+                }
+                Some(_) => {}
+            }
+        }
         self.validate_environments()?;
         self.validate_memory(self.scope.iter().chain(&self.scopes))?;
         for scope in self.scope.iter().chain(&self.scopes) {
@@ -1235,6 +1251,28 @@ pub struct DaemonConfig {
     /// skill curate` still does when asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_curation: Option<factory_agents::skills::CurationConfig>,
+    /// Where a question a run is blocked on goes, beyond the Inbox.
+    #[serde(default)]
+    pub escalation: EscalationConfig,
+}
+
+/// Where a run's question goes when it needs the owner:
+///
+/// ```yaml
+/// daemon:
+///   escalation:
+///     channel: owner-telegram   # a declared channel that takes messages in
+/// ```
+///
+/// Every question is in the Inbox regardless. With a channel, it is also
+/// sent there, and a reply to that message -- or a press of one of its
+/// buttons -- answers it (`task.answer`). The channel must declare
+/// `inbound:`, or no reply could ever come back.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EscalationConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
 /// How the daemon checks that a harness starts before dispatching to it.
@@ -1368,6 +1406,7 @@ impl Default for DaemonConfig {
             harness_health: HarnessHealthConfig::default(),
             improvement_agent: None,
             skill_curation: None,
+            escalation: EscalationConfig::default(),
         }
     }
 }

@@ -188,6 +188,25 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// A reply, on `channel`, to the channel message `message` -- answering
+    /// the question it carried (`daemon.escalation`) as `task.answer`
+    /// would. `not_found` when that message carried no question, so the
+    /// gateway takes the reply as any other message. The owner's gateway's
+    /// alone.
+    #[serde(rename = "escalation.reply")]
+    EscalationReply {
+        channel: String,
+        message: i64,
+        text: String,
+    },
+    /// A press of one of a sent question's buttons: answers `run`'s question
+    /// with the text of its `option`. The owner's gateway's alone.
+    #[serde(rename = "escalation.choose")]
+    EscalationChoose {
+        channel: String,
+        run: String,
+        option: usize,
+    },
     #[serde(rename = "task.create")]
     TaskCreate(NewTask),
     #[serde(rename = "task.get")]
@@ -1432,6 +1451,8 @@ impl Request {
             Request::RunInput { .. } |
             Request::RunAnswer { .. } |
             Request::TaskAnswer { .. } |
+            Request::EscalationReply { .. } |
+            Request::EscalationChoose { .. } |
             Request::TaskCreate(..) |
             Request::TaskGet { .. } |
             Request::TaskList(..) |
@@ -2647,6 +2668,10 @@ pub struct Notified {
     /// For a repeat: when the identical message went.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Telegram's ids for the text's messages, in order -- what a reply to
+    /// one of them names. Empty for a repeat, which sent nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_ids: Vec<i64>,
 }
 
 /// One journal line about something that came in on a channel (`#338`).

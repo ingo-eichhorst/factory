@@ -96,6 +96,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("worktree/", L4),
     ("artifacts.rs", L4),
     ("notify.rs", L4),
+    ("escalation.rs", L4),
     ("pages.rs", L4), // `#343`: page publish, rollback and content -- L4Service over its own page store
     ("production.rs", Wiring), // the People-side production endpoint: reads L4's fact as a page
     ("recovery_journal.rs", L4),

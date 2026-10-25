@@ -293,7 +293,7 @@ impl L2Service<'_> {
         let mut items = Vec::new();
         for item in sorted {
             items.push(match item {
-                Sorted::Message { update, message, from, at, text, files } => {
+                Sorted::Message { update, message, from, at, text, files, reply_to } => {
                     let (mut kept, mut refusals) = (Vec::new(), Vec::new());
                     for (i, file) in files.into_iter().enumerate() {
                         match fetch(&api, &token, &file, &dir, update, i, inbound.file_limit()).await {
@@ -301,7 +301,7 @@ impl L2Service<'_> {
                             Err(why) => refusals.push(format!("{} ({}): {}", file.name, file.kind, ch::redact(&why, &secrets))),
                         }
                     }
-                    Inbound::Message { update, message, from, at, text, files: kept, refused: refusals }
+                    Inbound::Message { update, message, from, at, text, files: kept, refused: refusals, reply_to }
                 }
                 Sorted::Button { update, query, message, from, data } => {
                     // The press is answered at once, so the button stops
