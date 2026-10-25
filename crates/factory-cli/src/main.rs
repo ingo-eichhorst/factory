@@ -1201,6 +1201,26 @@ enum AgentCmd {
     /// Take one instance down and leave it down: `demo/watcher` is instance
     /// 1, `'demo/watcher#2'` the second. The others keep running.
     Stop { id: String },
+    /// Stop one standing instance and start it again from its declaration as
+    /// it reads now -- the harness installed now, the args declared now --
+    /// back on the harness conversation it was in (claude `--resume`, codex
+    /// `resume`, pi `--session`). Prints that conversation's id; `--json`
+    /// returns it as `restart.conversation`.
+    ///
+    /// Refused, with nothing stopped and a non-zero exit, while it is busy:
+    /// somebody is attached to it, it is in the middle of a turn, or it is
+    /// waiting on an answer -- the refusal names which, and says "busy", so a
+    /// job can try again on its next tick. Also refused when no conversation
+    /// is known for it, or its harness cannot resume one, unless `--fresh`.
+    /// Needs `agent.restart`: scope reach covers the agent's own scope, and
+    /// every scope from the instance's root scope.
+    Restart {
+        /// One instance's id: `demo/watcher`, or `'demo/watcher#2'`.
+        id: String,
+        /// Start it on a new conversation when its own cannot be resumed.
+        #[arg(long)]
+        fresh: bool,
+    },
     /// Replace this terminal with one instance's: the daemon resolves its
     /// session and this runs the runtime's own attach command (herdr's), so
     /// detaching works the way it always does. Over `--url`, or with
@@ -5812,6 +5832,13 @@ async fn agent_cmd(json: bool, client: &Client, cmd: AgentCmd) -> Result<()> {
                 _ => None,
             })
         }
+        AgentCmd::Restart { id, fresh } => {
+            let payload = client.send(Request::AgentRestart { id, fresh }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Restarted { restart } => Some(restart.summary()),
+                _ => None,
+            })
+        }
         AgentCmd::Scale { scope, name, instances: count } => {
             let (instances, by) = scale_count(&count)?;
             let payload = client.send(Request::AgentScale { scope, name, instances, by }).await?;
@@ -7992,6 +8019,21 @@ mod tests {
         assert!(matches!(cli.command, Command::Agent(AgentCmd::Start { instance: Some(2), .. })));
         let cli = Cli::try_parse_from(["factory", "agent", "attach", "demo/watcher#2", "--print"]).unwrap();
         assert!(matches!(cli.command, Command::Agent(AgentCmd::Attach { print: true, ref id }) if id == "demo/watcher#2"));
+    }
+
+    #[test]
+    fn restart_takes_one_instances_id_and_a_fresh_flag() {
+        let cli = Cli::try_parse_from(["factory", "--root", "/tmp/instance", "agent", "restart", "demo/watcher#2"]).unwrap();
+        assert!(matches!(cli.command, Command::Agent(AgentCmd::Restart { fresh: false, ref id }) if id == "demo/watcher#2"));
+        let cli = Cli::try_parse_from(["factory", "agent", "restart", "demo/watcher", "--fresh"]).unwrap();
+        assert!(matches!(cli.command, Command::Agent(AgentCmd::Restart { fresh: true, .. })));
+        assert!(Cli::try_parse_from(["factory", "agent", "restart"]).is_err(), "an id is required");
+        // What business-factory's nightly refresh asks before it restarts
+        // anything: help that exits 0 is how it learns the command exists.
+        let help = Cli::try_parse_from(["factory", "agent", "restart", "--help"]).err().unwrap();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert_eq!(help.exit_code(), 0);
+        assert!(help.to_string().contains("busy"), "{help}");
     }
 
     #[test]

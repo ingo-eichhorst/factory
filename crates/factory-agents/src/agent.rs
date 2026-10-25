@@ -132,6 +132,12 @@ pub struct AgentSession {
     pub stopped_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_at: Option<DateTime<Utc>>,
+    /// The harness's own conversation this instance is in, as far as Factory
+    /// knows it: written by `factory agent restart` before it stops anything,
+    /// so a restart that cannot finish still says which conversation to pick
+    /// back up, and kept on the session it resumed. A fresh start has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
     pub started_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
 }
@@ -272,6 +278,7 @@ impl AgentSession {
             attach: None,
             stopped_by: None,
             stopped_at: None,
+            conversation: None,
             declared: true,
             error: None,
             started_at: now,
@@ -407,6 +414,36 @@ impl StopCheck {
             let reasons: Vec<&str> = self.reasons.iter().map(|r| r.detail.as_str()).collect();
             format!("{}: {}", self.id, reasons.join("; "))
         })
+    }
+}
+
+/// What `factory agent restart <id>` did: the instance back up on a new
+/// session, and the harness conversation it resumed there -- `None` when
+/// `--fresh` started it on a new one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Restarted {
+    /// The instance as it is now, redacted.
+    pub agent: AgentSession,
+    /// The conversation it came back on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
+    /// The conversation it was in before, when one was found and `--fresh`
+    /// left it behind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<String>,
+    /// The runtime's handle for the session that was stopped.
+    pub previous_session: String,
+}
+
+impl Restarted {
+    /// `"demo/watcher resumed conversation 59edd824-…"`, or what a fresh one
+    /// started on.
+    pub fn summary(&self) -> String {
+        match (&self.conversation, &self.left) {
+            (Some(conversation), _) => format!("{} resumed conversation {conversation}", self.agent.id),
+            (None, Some(left)) => format!("{} restarted fresh, leaving conversation {left}", self.agent.id),
+            (None, None) => format!("{} restarted fresh", self.agent.id),
+        }
     }
 }
 

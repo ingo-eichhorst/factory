@@ -162,6 +162,21 @@ impl Agent for HarnessAgent {
         }
     }
 
+    /// Claude Code writes `<config>/sessions/<pid>.json` for every process it
+    /// runs, and its `sessionId` is the conversation that process is in --
+    /// the config directory being `CLAUDE_CONFIG_DIR`, else `~/.claude`. No
+    /// other harness this build ships keeps one by process.
+    fn live_conversation(&self, pid: u32) -> Option<String> {
+        if self.harness != "claude" {
+            return None;
+        }
+        let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|dir| !dir.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".claude")))?;
+        claude_conversation_of(&config.join("sessions"), pid).filter(|id| self.resume_spec(id).is_some())
+    }
+
     async fn prompt(&self, ctx: &AgentContext) -> Result<String> {
         let binding = ctx.binding()?;
         let task = &binding.task;
@@ -533,6 +548,18 @@ fn shell_single_quote(s: &str) -> Option<String> {
     Some(format!("'{}'", s.replace('\'', r"'\''")))
 }
 
+/// The `sessionId` in Claude Code's `<sessions>/<pid>.json`, when that file
+/// is there and says it is this process's: a record left by an earlier
+/// process that happened to have the same pid names another `pid`.
+fn claude_conversation_of(sessions: &std::path::Path, pid: u32) -> Option<String> {
+    let text = std::fs::read_to_string(sessions.join(format!("{pid}.json"))).ok()?;
+    let record: serde_json::Value = serde_json::from_str(&text).ok()?;
+    if record.get("pid").and_then(serde_json::Value::as_u64).is_some_and(|p| p != u64::from(pid)) {
+        return None;
+    }
+    record.get("sessionId").and_then(serde_json::Value::as_str).map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,6 +578,32 @@ mod tests {
         }
         let agent = HarnessAgent::new("opencode", "opencode", "test");
         assert!(agent.resume_spec("recorded-id").is_none());
+    }
+
+    #[test]
+    fn a_claude_process_names_its_conversation_by_its_own_pid_record_only() {
+        let sessions = std::env::temp_dir().join(format!("factory-claude-sessions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("4242.json"),
+            r#"{"pid":4242,"sessionId":"59edd824-a565-46f8-a94a-b0555ddc645b","cwd":"/x","kind":"interactive"}"#,
+        )
+        .unwrap();
+        // A record a recycled pid left behind names a different process.
+        std::fs::write(sessions.join("7.json"), r#"{"pid":8,"sessionId":"someone-else"}"#).unwrap();
+        std::fs::write(sessions.join("9.json"), "not json").unwrap();
+        assert_eq!(
+            claude_conversation_of(&sessions, 4242).as_deref(),
+            Some("59edd824-a565-46f8-a94a-b0555ddc645b")
+        );
+        assert_eq!(claude_conversation_of(&sessions, 7), None);
+        assert_eq!(claude_conversation_of(&sessions, 9), None);
+        assert_eq!(claude_conversation_of(&sessions, 1), None, "no record at all");
+        // Only claude keeps one; the others say so rather than guess.
+        for harness in ["codex", "pi", "opencode"] {
+            assert_eq!(HarnessAgent::new(harness, harness, "test").live_conversation(4242), None);
+        }
+        std::fs::remove_dir_all(sessions).ok();
     }
 
     fn sample_task() -> Task {

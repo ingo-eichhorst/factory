@@ -961,6 +961,7 @@ mod tests {
             error: None,
             stopped_by: None,
             stopped_at: None,
+            conversation: None,
             started_at: Utc::now(),
             last_seen_at: Utc::now(),
         };

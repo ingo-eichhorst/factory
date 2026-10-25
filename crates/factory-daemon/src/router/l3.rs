@@ -134,6 +134,9 @@ impl Engine {
             Request::AgentAttach { id } => Ok(Payload::Attach {
                 attach: self.l3_service().attach(&id, &asker(caller)).await?,
             }),
+            Request::AgentRestart { id, fresh } => Ok(Payload::Restarted {
+                restart: self.l3_service().restart_asked(&id, fresh, &asker(caller)).await?,
+            }),
             Request::AgentRole { id, role } => Ok(Payload::Agent {
                 agent: self
                     .l3_service().set_agent_role(&id, role.map(Role::new))

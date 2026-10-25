@@ -283,6 +283,7 @@ impl Engine {
                 agents: Arc::new(crate::agent_rows::AgentRows(store.clone())),
                 liveness: Default::default(),
                 attention: Default::default(),
+                lifecycle: Default::default(),
                 learning: Default::default(),
             },
             l4: crate::state::L4State {
