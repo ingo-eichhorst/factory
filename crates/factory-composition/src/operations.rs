@@ -88,7 +88,7 @@ use chrono::{DateTime, Duration, Utc};
 use factory_agents::agent::{AgentSession, AgentState, Lifetime};
 use factory_assurance::metrics::MetricId;
 use factory_process::run::{FailKind, Run, RunStatus, Trigger};
-use factory_process::task::{Schedule, Task, TaskStatus};
+use factory_process::task::{Schedule, Task, TaskEntry, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -172,6 +172,13 @@ pub struct OperationsInput<'a> {
     /// A blocked run's reason in its agent's own words, by run id -- the
     /// journal line its `blocked` report wrote.
     pub block_reasons: BTreeMap<String, String>,
+    /// The question a failed run's agent was still waiting on when the run
+    /// ended (`pending_question`), by run id -- its task can be answered,
+    /// which resumes the conversation, rather than only run again.
+    pub questions: BTreeMap<String, String>,
+    /// A question the orchestrator escalated to the owner, by run id: why,
+    /// and the options it offers.
+    pub escalated: BTreeMap<String, (String, Vec<String>)>,
     /// When each open run last said anything, by run id: its newest
     /// journal entry. Silence past the p95 of its pace basis is a suspicion.
     pub last_progress: BTreeMap<String, DateTime<Utc>>,
@@ -329,7 +336,8 @@ pub enum Action {
     RunAgain,
     /// `task.cancel`. Counts as scrap.
     Cancel,
-    /// `run.input` into the run's own session.
+    /// `task.answer`: typed into the run's own session while it is open,
+    /// otherwise a new attempt resumes the conversation with it.
     Answer,
     /// `task.run` for a scheduled task, ahead of its slot.
     RunNow,
@@ -374,6 +382,10 @@ pub struct Exception {
     /// Other kinds the same run also matched -- a run appears once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<ExceptionKind>,
+    /// The answers an escalated question offers the owner, each a
+    /// one-press answer (`task.answer` with that text).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
 }
 
 /// Work in flight by state, for one scope.
@@ -572,6 +584,35 @@ fn is_zero(n: &u32) -> bool {
 // ================================================================= build
 
 /// The whole report. See the module doc for what each part means.
+/// The question a run is still waiting on: its agent's newest `blocked`
+/// report, unless an answer (`answer`, whoever gave it) or a later report of
+/// the agent's own came after it. A note does not take a question back.
+/// `entries` oldest first, the way the store returns a run's journal.
+pub fn pending_question(entries: &[TaskEntry]) -> Option<&str> {
+    for entry in entries.iter().rev() {
+        if entry.kind == "answer" {
+            return None;
+        }
+        if entry.source == "agent" {
+            match entry.kind.as_str() {
+                "blocked" => return Some(entry.message.as_str()),
+                "note" | "routed_to" => continue,
+                _ => return None,
+            }
+        }
+    }
+    None
+}
+
+/// A question's reason with the orchestrator's word on why it is the
+/// owner's, and the options it offered -- when it escalated one.
+fn with_escalation(reason: String, escalated: Option<&(String, Vec<String>)>) -> (String, Vec<String>) {
+    match escalated {
+        Some((why, options)) => (format!("{reason} -- the orchestrator escalated it: {why}"), options.clone()),
+        None => (reason, Vec::new()),
+    }
+}
+
 pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
     let now = input.now;
     let late_after = Duration::seconds(
@@ -712,6 +753,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 suspicion: false,
                 observation: false,
                 also: Vec::new(),
+                options: Vec::new(),
             }
         };
         if run.status == RunStatus::Blocked {
@@ -737,13 +779,10 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 }
                 _ => vec![Action::Answer, Action::Cancel],
             };
-            found.push(base(
-                ExceptionKind::Blocked,
-                Severity::High,
-                since,
-                reason,
-                actions,
-            ));
+            let (reason, options) = with_escalation(reason, input.escalated.get(&run.id));
+            let mut blocked = base(ExceptionKind::Blocked, Severity::High, since, reason, actions);
+            blocked.options = options;
+            found.push(blocked);
         } else {
             if let Some(since) = run.block_suspected_since {
                 let mut e = base(
@@ -904,15 +943,27 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 && task.bench_origin.is_none()
             {
                 let since = run.ended_at.unwrap_or(run.started_at);
+                let question = input.questions.get(&run.id);
                 let mut actions = vec![Action::RunAgain];
+                if question.is_some() {
+                    actions.insert(0, Action::Answer);
+                }
                 if task.schedule.is_some() && !task.schedule_paused {
                     actions.push(Action::PauseSchedule);
                 }
                 let why = run.error.clone().unwrap_or_else(|| "failed".into());
-                let reason = if task.schedule.is_some() {
-                    format!("attempt {} failed with no retry left: {why}", run.attempt)
-                } else {
-                    format!("attempt {} failed: {why}", run.attempt)
+                let reason = match question {
+                    // The question first: it is what a person can act on,
+                    // and answering it picks the conversation back up.
+                    Some(question) => format!("waiting for your answer: {question} (attempt {} ended: {why})", run.attempt),
+                    None if task.schedule.is_some() => {
+                        format!("attempt {} failed with no retry left: {why}", run.attempt)
+                    }
+                    None => format!("attempt {} failed: {why}", run.attempt),
+                };
+                let (reason, options) = match question {
+                    Some(_) => with_escalation(reason, input.escalated.get(&run.id)),
+                    None => (reason, Vec::new()),
                 };
                 attention.push(Exception {
                     kind: ExceptionKind::FailedExhausted,
@@ -929,6 +980,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                     suspicion: false,
                     observation: false,
                     also: Vec::new(),
+                    options,
                 });
             }
         }
@@ -1009,6 +1061,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 suspicion: false,
                 observation: false,
                 also: Vec::new(),
+                options: Vec::new(),
             });
         }
         if let Some(entries) = skipped.filter(|_| skipped_count > 0) {
@@ -1056,6 +1109,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 suspicion: false,
                 observation: false,
                 also: Vec::new(),
+                options: Vec::new(),
             });
         }
     }
@@ -1093,6 +1147,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             suspicion: false,
             observation: false,
             also: Vec::new(),
+            options: Vec::new(),
         });
     }
 
@@ -1141,6 +1196,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             suspicion: false,
             observation: false,
             also: Vec::new(),
+            options: Vec::new(),
         });
     }
 
@@ -1176,6 +1232,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 suspicion: false,
                 observation: false,
                 also: Vec::new(),
+                options: Vec::new(),
             });
         }
         if let Some(failure) = &sb.readiness.image_build_failure {
@@ -1201,6 +1258,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 suspicion: false,
                 observation: false,
                 also: Vec::new(),
+                options: Vec::new(),
             });
         }
         for expiring in &sb.readiness.expiring {
@@ -1242,6 +1300,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
                 suspicion: false,
                 observation: false,
                 also: Vec::new(),
+                options: Vec::new(),
             });
         }
     }
@@ -1263,6 +1322,7 @@ pub fn report(input: &OperationsInput<'_>) -> OperationsReport {
             suspicion: false,
             observation: true,
             also: Vec::new(),
+            options: Vec::new(),
         });
     }
 
@@ -1683,6 +1743,7 @@ mod tests {
             fail_kind: None,
             blocked_since: None,
             blocked_source: None,
+            blocked_secs: 0,
             block_suspected_since: None,
             turn_ended_at: None,
             turn_end_reason: None,
@@ -2010,6 +2071,35 @@ mod tests {
         );
         assert!(r.attention[0].reason.contains("exit 1"));
         assert_eq!(r.flow[0].retrying, 1);
+    }
+
+    #[test]
+    fn a_failed_run_still_waiting_on_its_question_can_be_answered() {
+        let tasks = vec![task("asked", "demo")];
+        let mut failed = run("x1", "asked", 1, RunStatus::Failed, 300, Some(10));
+        failed.error = Some("the agent's session is gone and it never reported back".into());
+        let runs = vec![failed];
+        let mut inp = input(&tasks, &runs);
+        inp.questions.insert("x1".into(), "merge as-is or suppress?".into());
+        let r = report(&inp);
+        assert_eq!(r.attention[0].kind, ExceptionKind::FailedExhausted);
+        assert_eq!(r.attention[0].actions, vec![Action::Answer, Action::RunAgain]);
+        assert!(r.attention[0].reason.starts_with("waiting for your answer: merge as-is or suppress?"), "{}", r.attention[0].reason);
+        assert!(r.attention[0].reason.contains("session is gone"));
+    }
+
+    #[test]
+    fn a_question_is_pending_until_an_answer_or_the_agents_next_report() {
+        let entry = |source: &str, kind: &str, message: &str| TaskEntry::new(source, kind, message);
+        let asked = vec![entry("agent", "running", "on it"), entry("agent", "blocked", "which db?"), entry("daemon", "failed", "gone")];
+        assert_eq!(pending_question(&asked), Some("which db?"));
+        let noted = vec![entry("agent", "blocked", "which db?"), entry("agent", "note", "still here")];
+        assert_eq!(pending_question(&noted), Some("which db?"), "a note does not take the question back");
+        let answered = vec![entry("agent", "blocked", "which db?"), entry("owner", "answer", "answered")];
+        assert_eq!(pending_question(&answered), None);
+        let moved_on = vec![entry("agent", "blocked", "which db?"), entry("agent", "running", "found it")];
+        assert_eq!(pending_question(&moved_on), None);
+        assert_eq!(pending_question(&[entry("daemon", "blocked", "a hook said so")]), None, "only the agent asks");
     }
 
     #[test]
@@ -2539,6 +2629,7 @@ mod tests {
             suspicion: false,
             observation: false,
             also: Vec::new(),
+            options: Vec::new(),
         };
         let mut q = vec![
             mk(

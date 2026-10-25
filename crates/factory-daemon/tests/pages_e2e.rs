@@ -4,8 +4,9 @@
 //! the real UI, so the isolation claims are tested in a browser rather than
 //! asserted about one.
 //!
-//! Skips (prints why, does not fail) without `herdr` on PATH or the `factory`
-//! binary built next to `factory-daemon`, like `workflow_shell_e2e.rs`; the
+//! Fails, saying why, without `herdr` on PATH or the `factory` binary built
+//! next to `factory-daemon`, like `workflow_shell_e2e.rs` -- whose header says
+//! why that is not a skip, and how `FACTORY_QA_SKIP_E2E=1` makes it one. The
 //! browser half skips on its own without Chrome. Needs no herdr server of its
 //! own: like that file's, every `provision()` starts a headless herdr on a
 //! session of its own, strips the live instance's variables from what it
@@ -232,16 +233,21 @@ fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
+/// Fails, saying why, when this file's tests cannot run; `true` (and prints
+/// why) instead with `FACTORY_QA_SKIP_E2E=1`.
 fn missing_prerequisites() -> bool {
-    if find_on_path("herdr").is_none() {
-        eprintln!("skipping: herdr is not on PATH");
+    let missing = if find_on_path("herdr").is_none() {
+        "herdr is not on PATH"
+    } else if find_factory_bin().is_none() {
+        "the `factory` binary is not built next to factory-daemon (cargo build --workspace first)"
+    } else {
+        return false;
+    };
+    if std::env::var_os("FACTORY_QA_SKIP_E2E").is_some_and(|value| value == "1") {
+        eprintln!("skipping (FACTORY_QA_SKIP_E2E=1): {missing}");
         return true;
     }
-    if find_factory_bin().is_none() {
-        eprintln!("skipping: the `factory` binary is not built next to factory-daemon (cargo build --workspace first)");
-        return true;
-    }
-    false
+    panic!("{missing}; set FACTORY_QA_SKIP_E2E=1 to skip the end-to-end tests instead");
 }
 
 /// One HTTP/1.1 request with `Connection: close`: status, lowercased head,

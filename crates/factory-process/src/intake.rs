@@ -5788,6 +5788,7 @@ mod tests {
                 fail_kind: None,
                 blocked_since: None,
                 blocked_source: None,
+                blocked_secs: 0,
                 block_suspected_since: None,
                 turn_ended_at: None,
                 turn_end_reason: None,

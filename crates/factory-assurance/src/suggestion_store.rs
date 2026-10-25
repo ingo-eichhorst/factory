@@ -137,6 +137,18 @@ impl SuggestionStore {
             s.ask.as_ref().is_some_and(|ask| ask.run_id == run_id && ask.answer.is_none())
         }))
     }
+
+    /// Every suggestion tasked into this improvement task, whatever state it
+    /// has reached since -- `done` and `dismiss` keep the link, so a group
+    /// marked done before its task is closed still answers to it (`#365`).
+    /// The same linear scan as `find_by_ask_run`.
+    pub async fn tasked_into(&self, task_id: &str) -> Result<Vec<Suggestion>> {
+        let all = self.all().await?;
+        Ok(all
+            .into_iter()
+            .filter(|s| s.improvement_task_id.as_deref() == Some(task_id))
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -216,5 +228,36 @@ mod tests {
         s.answer("ask-run", "because".into(), at(3));
         store.put(&s).await.unwrap();
         assert!(store.find_by_ask_run("ask-run").await.unwrap().is_none(), "already answered");
+    }
+
+    #[tokio::test]
+    async fn tasked_into_finds_every_suggestion_linked_to_the_task_even_once_done() {
+        let store = SuggestionStore::in_memory().unwrap();
+        for (id, task) in [
+            ("a", Some("t1")),
+            ("b", Some("t1")),
+            ("c", Some("t2")),
+            ("open", None),
+        ] {
+            let mut s = suggestion(id, "demo", 1);
+            if let Some(task) = task {
+                s.task(task, "owner", at(2)).unwrap();
+            }
+            store.put(&s).await.unwrap();
+        }
+        let mut b = store.get("b").await.unwrap().unwrap();
+        b.done("improver", at(3)).unwrap();
+        store.put(&b).await.unwrap();
+
+        let mut linked: Vec<_> = store
+            .tasked_into("t1")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        linked.sort();
+        assert_eq!(linked, vec!["a", "b"], "done keeps the link");
+        assert!(store.tasked_into("no-such-task").await.unwrap().is_empty());
     }
 }

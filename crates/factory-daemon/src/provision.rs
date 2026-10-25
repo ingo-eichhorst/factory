@@ -26,8 +26,13 @@
 //! - **Values never leave memory except into one child's environment.** A
 //!   credential is read from its source, handed to `openshell provider
 //!   create/update` as `--credential KEY` with `KEY` set in that child's
-//!   environment only, and dropped. Its digest, salted per process, is what
-//!   tells a rotation apart; nothing about it is written down.
+//!   environment only, and dropped. Its digest, salted per instance, is what
+//!   tells a rotation apart. The digests and their salt -- never a value --
+//!   are kept in `openshell-provision/given.json` under the instance's
+//!   `.factory/`, owner-only, so a restarted daemon gives nothing again that
+//!   did not change: every `provider update` or `profile update` makes each
+//!   live sandbox's proxy drop the connections it holds, which killed the
+//!   2026-10-21 audit mid-turn when the daemon was restarted under it.
 //! - **The daemon writes only what is this instance's.** Every profile it
 //!   imports and every provider it creates or updates carries the
 //!   instance's suffix (`openshell::owned_by_instance`); a name without it
@@ -236,7 +241,10 @@ pub(crate) struct ProvisionerInner {
     build: Mutex<BuildState>,
     /// Per catalogue entry: whether its source resolved at the last pass.
     catalogue: Mutex<BTreeMap<String, SourceCheck>>,
-    salt: [u8; 16],
+    salt: Mutex<[u8; 16]>,
+    /// The file `given`, `profiles` and `salt` were recalled from and are
+    /// kept in, once a pass or a gate has named it.
+    remembered: Mutex<Option<PathBuf>>,
     pass: tokio::sync::Mutex<()>,
     /// Asks the loop for a pass now.
     pub(crate) wake: tokio::sync::Notify,
@@ -274,7 +282,8 @@ impl Provisioner {
             smoke_failed: Mutex::default(),
             build: Mutex::default(),
             catalogue: Mutex::default(),
-            salt: *uuid::Uuid::new_v4().as_bytes(),
+            salt: Mutex::new(*uuid::Uuid::new_v4().as_bytes()),
+            remembered: Mutex::default(),
             pass: tokio::sync::Mutex::new(()),
             wake: tokio::sync::Notify::new(),
             settled: tokio::sync::Notify::new(),
@@ -321,7 +330,7 @@ impl Provisioner {
 
     fn digest(&self, scope: &[String], name: &str, value: &Secret) -> [u8; 32] {
         let mut hash = Sha256::new();
-        hash.update(self.salt);
+        hash.update(*lock(&self.salt));
         for word in scope {
             hash.update(word.as_bytes());
             hash.update([0]);
@@ -331,6 +340,83 @@ impl Provisioner {
         hash.update(value.expose().as_bytes());
         hash.finalize().into()
     }
+
+    /// Take up what an earlier daemon gave, from `path`, the first time it
+    /// is named -- before anything is given, so the salt it brings back is
+    /// the one every digest is made with. A missing or unreadable file is
+    /// a first start: everything is given once and written down.
+    fn recall(&self, path: &Path) {
+        let mut remembered = lock(&self.remembered);
+        if remembered.as_deref() == Some(path) {
+            return;
+        }
+        *remembered = Some(path.to_path_buf());
+        let Some(file) = std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str::<Remembered>(&text).ok())
+        else {
+            return;
+        };
+        let Some(salt) = unhex::<16>(&file.salt) else { return };
+        *lock(&self.salt) = salt;
+        for (into, from) in [(&self.given, file.given), (&self.profiles, file.profiles)] {
+            let mut into = lock(into);
+            into.clear();
+            into.extend(from.into_iter().filter_map(|d| Some(((d.gateway, d.name), unhex::<32>(&d.digest)?))));
+        }
+    }
+
+    /// Write `given`, `profiles` and the salt down, owner-only, replacing
+    /// the file whole. A failure is logged: the cost is one more update
+    /// after the next restart, never a run.
+    fn remember(&self) {
+        let Some(path) = lock(&self.remembered).clone() else { return };
+        let listed = |digests: &Mutex<Digests>| -> Vec<RememberedDigest> {
+            lock(digests)
+                .iter()
+                .map(|((gateway, name), digest)| RememberedDigest { gateway: gateway.clone(), name: name.clone(), digest: hex(digest) })
+                .collect()
+        };
+        let file = Remembered { salt: hex(&*lock(&self.salt)), given: listed(&self.given), profiles: listed(&self.profiles) };
+        // Written beside it and renamed over it, so a reader never sees half.
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return };
+        let partial = format!("{name}.partial");
+        let written = write_private(dir, &partial, &serde_json::to_string_pretty(&file).unwrap_or_default())
+            .and_then(|()| std::fs::rename(dir.join(&partial), &path));
+        if let Err(e) = written {
+            tracing::warn!(path = %path.display(), "could not keep the provider digests across a restart: {e}");
+        }
+    }
+}
+
+/// `given.json`: what `recall` reads and `remember` writes.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Remembered {
+    salt: String,
+    given: Vec<RememberedDigest>,
+    profiles: Vec<RememberedDigest>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RememberedDigest {
+    gateway: Vec<String>,
+    name: String,
+    digest: String,
+}
+
+/// Where a daemon keeps `given.json` for its instance.
+pub(crate) fn remembered_path(factory_dir: &Path) -> PathBuf {
+    factory_dir.join("openshell-provision").join("given.json")
+}
+
+fn unhex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != N * 2 {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, pair) in bytes.chunks(2).enumerate() {
+        out[i] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -442,6 +528,7 @@ impl L2Service<'_> {
     /// One reconcile of every declared sandboxed agent. One at a time.
     pub(crate) async fn provision_pass(&self) {
         let _pass = self.state.provision.pass.lock().await;
+        self.state.provision.recall(&remembered_path(&self.wiring.snapshot().factory_dir()));
         self.check_catalogue().await;
         let agents = declared(&self.wiring.snapshot());
         let live: BTreeSet<AgentKey> = agents.iter().map(|d| d.key.clone()).collect();
@@ -562,6 +649,12 @@ impl L2Service<'_> {
                 }
                 ProviderDecl::Managed(managed) => {
                     managed_any = true;
+                    // A provider the gateway no longer has may mean it lost its
+                    // profiles too; a digest an earlier daemon wrote down is not
+                    // taken on trust then.
+                    if !listed.contains_key(&os::managed_name(&managed.name, &suffix)) {
+                        lock(&self.state.provision.profiles).remove(&(base.clone(), os::profile_id(&managed.kind, &suffix)));
+                    }
                     let env = self.ensure_profile(&base, managed, &suffix).await?;
                     let renew = agent.secrets.get(&managed.name).and_then(|s| s.renew.as_deref());
                     self.ensure_provider(&base, managed, renew, &suffix, &env, &listed).await?;
@@ -814,6 +907,7 @@ impl L2Service<'_> {
             .await
             .map_err(|e| needs(format!("the provider profile {id} on the gateway ({e})"), None))?;
         lock(&self.state.provision.profiles).insert(key, digest);
+        self.state.provision.remember();
         Ok(env)
     }
 
@@ -868,6 +962,7 @@ impl L2Service<'_> {
             .map_err(|e| needs(format!("the provider {name} on the gateway ({e})"), None))?;
         tracing::info!(provider = %name, "openshell provider {} from {}", if existing.is_some() { "updated" } else { "created" }, source.describe());
         lock(&self.state.provision.given).insert(key, digest);
+        self.state.provision.remember();
         Ok(())
     }
 
@@ -878,6 +973,7 @@ impl L2Service<'_> {
     /// -- the run's own preflight checks it as it always has.
     pub(crate) async fn sandbox_gate(&self, key: &AgentKey, config: &OpenshellConfig) -> std::result::Result<Resolved, String> {
         let factory = self.wiring.snapshot();
+        self.state.provision.recall(&remembered_path(&factory.factory_dir()));
         let (resolved, secrets) = resolve_secrets(config, &factory.config.secrets).map_err(|missing| needs_reason(missing, None))?;
         let config = &resolved;
         let suffix = os::instance_suffix(&factory.config.instance.id);

@@ -17,7 +17,7 @@ use factory_core::operations::{self as ops, HealthWindow, OperationsReport};
 use factory_core::policy::{self, ControlRef};
 use factory_core::reporting_clock::{self, ClockDeadlineKind, ClockItemRef, ClockMark};
 use factory_core::protocol::{
-    GoalsReport, Payload, PolicyControlDetail, PolicyReport, Request, Response, ScenarioPromoteResult, ScenarioResult, ScenariosReport,
+    Decision, GoalsReport, Payload, PolicyControlDetail, PolicyReport, Request, Response, ScenarioPromoteResult, ScenarioResult, ScenariosReport,
 };
 use factory_core::scenario;
 use factory_core::usage::{CostRowExt, TokenSumsExt};
@@ -157,6 +157,11 @@ enum Command {
     /// Look at individual runs.
     #[command(subcommand)]
     Run(RunCmd),
+    /// An orchestrator's decision on the question its task was made for
+    /// (`daemon.orchestrator`): answer it on the owner's behalf, or
+    /// escalate it to the owner. Run from the decision task's own session.
+    #[command(subcommand)]
+    Decision(DecisionCmd),
     /// Follow the event stream.
     Watch,
     /// Create, run, and report on tasks.
@@ -1418,6 +1423,31 @@ enum RunCmd {
 }
 
 #[derive(Subcommand)]
+enum DecisionCmd {
+    /// Answer the question: the text goes to the blocked agent as the
+    /// answer, typed into its session or carried into its resumed one.
+    Answer {
+        text: String,
+        /// Why, with the evidence. Recorded beside the answer.
+        #[arg(long)]
+        reason: String,
+        /// The decision task; `FACTORY_TASK_ID` in its own session.
+        #[arg(long)]
+        task: Option<String>,
+    },
+    /// Leave the question to the owner, saying why, with up to four
+    /// options the owner can answer with one press.
+    Escalate {
+        #[arg(long)]
+        reason: String,
+        #[arg(long = "option")]
+        options: Vec<String>,
+        #[arg(long)]
+        task: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum TaskCmd {
     /// List tasks.
     List {
@@ -1649,6 +1679,17 @@ enum TaskCmd {
         /// Why, in a few words.
         #[arg(long)]
         note: Option<String>,
+    },
+    /// Answer the question a task is waiting on. Typed into its run's
+    /// session while that is still open; once the session is gone -- the
+    /// blocked timeout closed it, or it was lost -- a new attempt resumes
+    /// the same conversation with your answer. Journaled with who answered,
+    /// and why if you say; your text is not.
+    Answer {
+        id: String,
+        text: String,
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Put a closed task back to pending. Journaled with who asked, and
     /// why if you say.
@@ -2221,6 +2262,17 @@ async fn main() -> Result<()> {
 
         Command::Agent(cmd) => agent_cmd(cli.json, &client, cmd).await,
         Command::Run(cmd) => run_cmd(cli.json, &client, cmd).await,
+        Command::Decision(cmd) => {
+            let (task, decision) = match cmd {
+                DecisionCmd::Answer { text, reason, task } => (task, Decision::Answer { text, reason }),
+                DecisionCmd::Escalate { reason, options, task } => (task, Decision::Escalate { reason, options }),
+            };
+            let payload = client.send(Request::DecisionResolve { id: need_id(task)?, decision }).await?;
+            print(&payload, cli.json, |p| match p {
+                Payload::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+        }
         Command::Task(cmd) => task(cli.json, &client, cmd).await,
         Command::Workflow(cmd) => workflow_cmd(cli.json, &client, cmd).await,
         Command::Dependencies { args } => {
@@ -6357,6 +6409,14 @@ async fn task(json: bool, client: &Client, cmd: TaskCmd) -> Result<()> {
             })
         }
 
+        TaskCmd::Answer { id, text, reason } => {
+            let payload = client.send(Request::TaskAnswer { id, text, reason }).await?;
+            print(&payload, json, |p| match p {
+                Payload::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+        }
+
         TaskCmd::Reopen { id, reason } => {
             let payload = client.send(Request::TaskReopen { id: need_id(id)?, reason }).await?;
             print(&payload, json, |p| match p {
@@ -9286,6 +9346,22 @@ mod tests {
         match parse(&["task", "edit", "t1", "--pause-schedule", "--reason", "stop the line"]).command {
             Command::Task(TaskCmd::Edit { pause_schedule: true, reason: Some(_), .. }) => {}
             _ => panic!("edit"),
+        }
+        match parse(&["decision", "escalate", "--reason", "widens the mandate", "--option", "Merge as-is", "--option", "Wait"]).command {
+            Command::Decision(DecisionCmd::Escalate { reason, options, task }) => {
+                assert_eq!((reason.as_str(), options, task), ("widens the mandate", vec!["Merge as-is".to_string(), "Wait".to_string()], None));
+            }
+            _ => panic!("decision escalate"),
+        }
+        match parse(&["decision", "answer", "use postgres", "--reason", "the repo already does"]).command {
+            Command::Decision(DecisionCmd::Answer { text, .. }) => assert_eq!(text, "use postgres"),
+            _ => panic!("decision answer"),
+        }
+        match parse(&["task", "answer", "t1", "merge as-is"]).command {
+            Command::Task(TaskCmd::Answer { id, text, reason }) => {
+                assert_eq!((id.as_str(), text.as_str(), reason), ("t1", "merge as-is", None));
+            }
+            _ => panic!("task answer"),
         }
         match parse(&["run", "answer", "r1", "use staging", "--reason", "it asked"]).command {
             Command::Run(RunCmd::Answer { id, text, reason }) => {

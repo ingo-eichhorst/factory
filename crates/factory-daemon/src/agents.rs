@@ -999,7 +999,10 @@ impl L3Service<'_> {
             return false;
         };
         let status = match self.wiring.registry().runtime(&session.runtime) {
-            Ok(rt) => rt.status(session).await.unwrap_or(RuntimeStatus::Gone),
+            // A runtime that could not answer has not said the session is
+            // gone; restarting on that would start a second instance beside
+            // one that is still running.
+            Ok(rt) => rt.status(session).await.unwrap_or(RuntimeStatus::Unknown),
             Err(_) => RuntimeStatus::Gone,
         };
         self.observe(&agent.id, &agent.scope, &agent.name, status);

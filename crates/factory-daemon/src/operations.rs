@@ -64,7 +64,9 @@ use factory_core::error::{FactoryError, Result};
 use factory_core::operations::{
     self, HealthWindow, OperationsInput, OperationsReport, ScopeFilter, SkippedSlots,
 };
-use factory_core::run::RunStatus;
+use factory_core::adapter::agent::UpstreamOutput;
+use factory_core::adapter::runtime::RuntimeStatus;
+use factory_core::run::{FailKind, RunStatus};
 use factory_core::task::{CloseReason, Task, TaskClosure, TaskEntry, TaskFilter, TaskPatch, TaskStatus};
 
 use crate::access::Caller;
@@ -482,8 +484,15 @@ impl L4Service<'_> {
                 run.status.as_str()
             )));
         }
+        self.type_answer(&run, text, asked).await
+    }
+
+    /// Type `text` into a blocked run's own session, journal it, press enter.
+    /// The body of `answer_run`, which `answer_task` shares: what the
+    /// journal says and in which order is the same whichever asked.
+    async fn type_answer(&self, run: &factory_core::run::Run, text: &str, asked: &Asked) -> Result<()> {
         let Some(session) = run.session.as_ref() else {
-            return Err(FactoryError::BadRequest(format!("run {run_id} has no session to answer into")));
+            return Err(FactoryError::BadRequest(format!("run {} has no session to answer into", run.id)));
         };
         let runtime = self.wiring.registry().runtime(&session.runtime)?;
         runtime.send_text(session, text).await?;
@@ -513,6 +522,118 @@ impl L4Service<'_> {
         }
         Ok(())
     }
+
+    /// `Request::TaskAnswer`: answer the question a task is waiting on,
+    /// wherever it is now.
+    ///
+    /// - Its run is `Blocked` and the session is still there: the answer is
+    ///   typed into it, exactly as `answer_run` does.
+    /// - The session is gone (closed by the blocked timeout, lost) or the run
+    ///   already failed: the answer goes to a new attempt that resumes the
+    ///   same conversation, the way `task run --continue` does, carried in as
+    ///   a note naming the question and who answered it. A resume that has
+    ///   to fall back to a fresh session still goes ahead, journaled as
+    ///   `continue_fallback` -- the answer and the question travel with it,
+    ///   which is better than leaving the task where it is. The caller
+    ///   starts that attempt (`Answered::Resume`): dispatch takes a while,
+    ///   and the answer to the request should not.
+    ///
+    /// Refused for a run held for an approval or a failed gate -- those are
+    /// answered by approve, reject or accept-rework -- for one doing
+    /// something else, and for a task whose newest attempt did not fail.
+    pub(crate) async fn answer_task(&self, task_id: &str, text: &str, asked: &Asked) -> Result<Answered> {
+        if text.trim().is_empty() {
+            return Err(FactoryError::BadRequest("an answer needs some text".into()));
+        }
+        let task = self.require(task_id).await?;
+        if task.closure.is_some() {
+            return Err(FactoryError::BadRequest(format!("task {task_id} is closed; reopen it before answering")));
+        }
+        if let Some(run) = self.state.store.active_run(task_id).await? {
+            if run.status != RunStatus::Blocked {
+                return Err(FactoryError::BadRequest(format!(
+                    "attempt {} of this task is {}, not waiting for an answer",
+                    run.attempt,
+                    run.status.as_str()
+                )));
+            }
+            if run.blocked_source == Some(factory_core::run::BlockSource::Verification) {
+                return Err(FactoryError::BadRequest(format!(
+                    "attempt {} is held for an approval or a failed required step, not a question: \
+                     approve, reject or accept the rework instead",
+                    run.attempt
+                )));
+            }
+            // A runtime that cannot say is not a session that is gone: the
+            // answer is typed, and a failure to type it is the error.
+            let open = match &run.session {
+                Some(session) => self
+                    .wiring
+                    .registry()
+                    .runtime(&session.runtime)?
+                    .status(session)
+                    .await
+                    .map_or(true, |status| status != RuntimeStatus::Gone),
+                None => false,
+            };
+            if open {
+                self.type_answer(&run, text, asked).await?;
+                return Ok(Answered::Typed { attempt: run.attempt });
+            }
+            self.fail_run(
+                &run.id,
+                FailKind::SessionGone,
+                "the session waiting for an answer is gone; the answer resumes its conversation in a new attempt",
+            )
+            .await;
+        }
+        let Some(prev) = self.state.store.runs(task_id, 1).await?.into_iter().next() else {
+            return Err(FactoryError::BadRequest(format!("task {task_id} has no run to answer")));
+        };
+        if prev.status != RunStatus::Failed {
+            return Err(FactoryError::BadRequest(format!(
+                "attempt {} of this task ended {}; there is no question waiting -- run it again instead",
+                prev.attempt,
+                prev.status.as_str()
+            )));
+        }
+        let entries = self.state.store.run_entries(&prev.id, OPEN_RUN_ENTRIES).await?;
+        let question = operations::pending_question(&entries).map(str::to_string);
+        let from = match asked.source {
+            "owner" => "the owner".to_string(),
+            _ => asked.by.clone(),
+        };
+        let asked_line = question.map(|q| format!("You asked: {q}\n\n")).unwrap_or_default();
+        let note = UpstreamOutput {
+            node_id: "answer".into(),
+            task_id: task_id.to_string(),
+            title: format!("Your question was answered by {from}"),
+            result: Some(format!(
+                "{asked_line}The answer, from {from}:\n\n{text}\n\nContinue the task from where you stopped."
+            )),
+        };
+        self.entry(
+            task_id,
+            asked
+                .entry(
+                    ANSWER_KIND,
+                    format!("answered {}; a new attempt resumes attempt {}'s conversation with it", asked.words(), prev.attempt),
+                    serde_json::json!({ "chars": text.chars().count(), "resumes": prev.attempt }),
+                )
+                .in_run(&prev.id),
+        )
+        .await;
+        Ok(Answered::Resume { prev: Box::new(prev), note })
+    }
+}
+
+/// What `answer_task` did with an answer, or left for its caller to start.
+pub(crate) enum Answered {
+    /// Typed into this attempt's open session.
+    Typed { attempt: u32 },
+    /// The session is gone: start an attempt that resumes `prev`'s
+    /// conversation, with `note` carrying the question and the answer.
+    Resume { prev: Box<factory_core::run::Run>, note: UpstreamOutput },
 }
 
 /// A `schedule_skipped` entry read back into the model's shape. One the
@@ -559,6 +680,8 @@ mod tests {
         typed: Mutex<Vec<String>>,
         /// Refuse every keypress, as a session that died mid-answer would.
         keys_fail: std::sync::atomic::AtomicBool,
+        /// Say every session is gone, as herdr does for a closed pane.
+        gone: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -573,7 +696,11 @@ mod tests {
             Ok(())
         }
         async fn status(&self, _: &SessionRef) -> Result<factory_core::adapter::RuntimeStatus> {
-            Ok(factory_core::adapter::RuntimeStatus::Working)
+            Ok(if self.gone.load(std::sync::atomic::Ordering::SeqCst) {
+                factory_core::adapter::RuntimeStatus::Gone
+            } else {
+                factory_core::adapter::RuntimeStatus::Working
+            })
         }
         async fn send_text(&self, _: &SessionRef, text: &str) -> Result<()> {
             self.typed.lock().unwrap().push(text.to_string());
@@ -1077,6 +1204,89 @@ mod tests {
 
         let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
         assert_eq!(report.health.current.interventions, 1, "an answer is an intervention");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_answer_types_into_a_session_that_is_still_open() {
+        let (engine, runtime, root) = test_engine();
+        let task = task_in(&engine, "demo", "needs a key", None).await;
+        blocked_run(&engine, &task.id, "which key?").await;
+        let response = engine
+            .handle_request(Request::TaskAnswer { id: task.id.clone(), text: "staging".into(), reason: None })
+            .await;
+        match response {
+            Response::Ok { data: Payload::Text { text } } => assert!(text.contains("typed into attempt 1"), "{text}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(*runtime.typed.lock().unwrap(), vec!["staging".to_string(), "<enter>".to_string()]);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_answer_resumes_the_conversation_once_its_session_is_gone() {
+        let (engine, runtime, root) = test_engine();
+        let task = task_in(&engine, "demo", "merge?", None).await;
+        let blocked = blocked_run(&engine, &task.id, "merge as-is or suppress?").await;
+        runtime.gone.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let answered = engine.l4_service().answer_task(&task.id, "merge as-is", &Asked::new(&Caller::Owner, None)).await.unwrap();
+        let Answered::Resume { prev, note } = answered else { panic!("a gone session is resumed, not typed into") };
+        assert_eq!(prev.id, blocked.id);
+        assert_eq!(prev.status, RunStatus::Failed);
+        assert_eq!(prev.fail_kind, Some(FailKind::SessionGone));
+        let said = note.result.unwrap();
+        assert!(said.contains("You asked: merge as-is or suppress?"), "{said}");
+        assert!(said.contains("merge as-is\n\nContinue the task"), "{said}");
+        assert!(note.title.contains("the owner"), "{}", note.title);
+        assert!(runtime.typed.lock().unwrap().is_empty(), "nothing typed into a gone session");
+
+        let entries = engine.l4.store.run_entries(&blocked.id, 50).await.unwrap();
+        let e = entry_of(&entries, ANSWER_KIND);
+        assert_eq!(e.data.as_ref().unwrap()["resumes"], 1);
+        assert!(!e.message.contains("merge as-is"), "a person's text is not journaled: {}", e.message);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_whose_blocked_run_timed_out_is_answered_by_resuming_it() {
+        let (engine, _, root) = test_engine();
+        let task = task_in(&engine, "demo", "overnight", None).await;
+        let blocked = blocked_run(&engine, &task.id, "which region?").await;
+        engine.l4_service().fail_run(&blocked.id, FailKind::BlockedTimeout, "nobody answered").await;
+
+        let report = engine.operations_report(None, HealthWindow::Week, false).await.unwrap();
+        let item = report.attention.iter().find(|e| e.task_id.as_deref() == Some(task.id.as_str())).unwrap();
+        assert_eq!(item.actions.first(), Some(&factory_core::operations::Action::Answer), "{item:?}");
+        assert!(item.reason.contains("which region?"), "{}", item.reason);
+
+        let answered = engine.l4_service().answer_task(&task.id, "eu-central", &owner("morning")).await.unwrap();
+        assert!(matches!(answered, Answered::Resume { ref prev, .. } if prev.id == blocked.id));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_answer_is_refused_with_no_question_to_answer() {
+        let (engine, runtime, root) = test_engine();
+        let task = task_in(&engine, "demo", "t", None).await;
+        let run = run_of(&engine, &task.id).await;
+        engine
+            .l4.store
+            .update_run(&run.id, &RunPatch { status: Some(RunStatus::Running), session: Some(session(&run)), ..Default::default() })
+            .await
+            .unwrap();
+        let err = engine.l4_service().answer_task(&task.id, "yes", &owner("r")).await.err().unwrap();
+        assert!(err.to_string().contains("not waiting for an answer"), "{err}");
+        let err = engine.l4_service().answer_task(&task.id, "  ", &owner("r")).await.err().unwrap();
+        assert!(err.to_string().contains("needs some text"), "{err}");
+        engine
+            .l4.store
+            .update_run(&run.id, &RunPatch { status: Some(RunStatus::Done), ..Default::default() })
+            .await
+            .unwrap();
+        let err = engine.l4_service().answer_task(&task.id, "yes", &owner("r")).await.err().unwrap();
+        assert!(err.to_string().contains("no question waiting"), "{err}");
+        assert!(runtime.typed.lock().unwrap().is_empty());
         std::fs::remove_dir_all(root).ok();
     }
 

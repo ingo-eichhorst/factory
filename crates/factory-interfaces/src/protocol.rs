@@ -186,6 +186,46 @@ pub enum Request {
         text: String,
         reason: String,
     },
+    /// Answer the question a task is waiting on, wherever it is now: typed
+    /// into its run's session while that session is still open, otherwise
+    /// handed to a new run that resumes the same conversation -- a session
+    /// closed by the blocked timeout, or lost, no longer leaves the question
+    /// unanswerable. Journaled with who answered and why; a person's text is
+    /// not. Answered with a line saying which of the two happened.
+    #[serde(rename = "task.answer")]
+    TaskAnswer {
+        id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// A reply, on `channel`, to the channel message `message` -- answering
+    /// the question it carried (`daemon.escalation`) as `task.answer`
+    /// would. `not_found` when that message carried no question, so the
+    /// gateway takes the reply as any other message. The owner's gateway's
+    /// alone.
+    #[serde(rename = "escalation.reply")]
+    EscalationReply {
+        channel: String,
+        message: i64,
+        text: String,
+    },
+    /// A press of one of a sent question's buttons: answers `run`'s question
+    /// with the text of its `option`. The owner's gateway's alone.
+    #[serde(rename = "escalation.choose")]
+    EscalationChoose {
+        channel: String,
+        run: String,
+        option: usize,
+    },
+    /// The orchestrator's decision on the question its decision task `id`
+    /// was made for (`daemon.orchestrator`): answer it on the owner's
+    /// behalf, or escalate it to the owner. Once per decision task.
+    #[serde(rename = "decision.resolve")]
+    DecisionResolve {
+        id: String,
+        decision: Decision,
+    },
     #[serde(rename = "task.create")]
     TaskCreate(NewTask),
     #[serde(rename = "task.get")]
@@ -246,7 +286,9 @@ pub enum Request {
     /// an optional note, journaled with who closed it. Works with no run at
     /// all, and on a task blocked by a failure; refused while a run is
     /// active (cancel it first) and on a task already closed (reopen it
-    /// first).
+    /// first). Needs `task.close` and reach over the task -- or, for an
+    /// improvement task (`#365`), over every suggestion tasked into it.
+    /// Reopening needs the same.
     #[serde(rename = "task.close")]
     TaskClose {
         id: String,
@@ -1428,6 +1470,10 @@ impl Request {
             Request::RunScreen { .. } |
             Request::RunInput { .. } |
             Request::RunAnswer { .. } |
+            Request::TaskAnswer { .. } |
+            Request::EscalationReply { .. } |
+            Request::EscalationChoose { .. } |
+            Request::DecisionResolve { .. } |
             Request::TaskCreate(..) |
             Request::TaskGet { .. } |
             Request::TaskList(..) |
@@ -2647,6 +2693,26 @@ pub struct Notified {
     /// For a repeat: when the identical message went.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Telegram's ids for the text's messages, in order -- what a reply to
+    /// one of them names. Empty for a repeat, which sent nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_ids: Vec<i64>,
+}
+
+/// What an orchestrator decided about a blocked run's question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Decision {
+    /// Answer it: `text` goes to the blocked agent as the answer, and
+    /// `reason` -- why, with the evidence -- into the record beside it.
+    Answer { text: String, reason: String },
+    /// The owner must decide: `reason` says why, and `options`, at most
+    /// four, become the owner's one-press answers.
+    Escalate {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<String>,
+    },
 }
 
 /// One journal line about something that came in on a channel (`#338`).

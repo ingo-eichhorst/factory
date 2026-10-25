@@ -504,7 +504,11 @@ is somewhere else is not below `projects`.
   cannot touch a task in `projects/demo`, and a `reach: scope` role inherited
   from `projects` cannot touch a task in `projects`, in a sibling, or in a
   scope below the agent's own. Inheritance decides which roles exist where,
-  never how far one reaches.
+  never how far one reaches. One narrow exception follows a link Factory
+  recorded itself: a role holding `task.close` may close and reopen an
+  improvement task in the root scope when every suggestion tasked into it is
+  in the role's reach (see [Dismiss and done](#suggestions)) -- closing and
+  reopening only, never editing, running or deleting it.
 
 The instance root writes its roles only in its top-level `roles:`; a
 `scope.roles` block in the root's config is refused at startup, because one
@@ -1219,8 +1223,9 @@ channels:
   labels `inbound.channel`, `inbound.message` and `inbound.update`. The owner
   gets an acknowledgement within seconds, and the run's `--result` comes back
   as the answer when the run ends -- there is no fixed timeout but the run's
-  own. A run that reports `blocked` has its question passed on; it is
-  answered in Factory as any other. The run is told in its reporting
+  own. A run that reports `blocked` has its question passed on, and a
+  reply to it answers it when the channel is also the escalation channel
+  (below); otherwise it is answered in Factory. The run is told in its reporting
   contract that its result is the answer. Each message is a run of its own,
   in a fresh session: the conversation carries no memory between messages
   beyond what the agent keeps itself. A waiting answer survives a restart:
@@ -1271,6 +1276,101 @@ channels:
 are the owner's alone. `notify` gains `reply_to` and `buttons`, also the
 owner's alone: a run sends its result, and an answer to a particular message
 is never another answer's repeat.
+
+### Questions to the owner, answered by a reply
+
+```yaml
+daemon:
+  escalation:
+    channel: owner-telegram   # must declare inbound:, or no reply could come back
+```
+
+With an escalation channel, every question an agent asks with `factory task
+report --status blocked` also goes to the owner there, as well as into the
+Inbox. The message names the task, its scope, the question, and which task
+and attempt asked. **A Telegram reply to it answers it**, the same way the
+Inbox's Answer does (`task.answer`): typed into the session while it is
+open, or resumed into a new attempt once the session is gone. A question
+sent with options -- what an escalation from the orchestrator carries --
+has one button per option, and pressing one answers with that option's
+text. The gateway confirms what happened ("typed into attempt 1's
+session") or says why not; a reply to a question already answered, from
+anywhere, is told so.
+
+- **Sent once per question.** An agent repeating its block sends nothing
+  new, a different question is sent.
+- **Kept in the journal:** an `escalation_sent` entry on the run holds the
+  channel, the question, its options and the message ids. A reply finds its
+  question there for 14 days.
+- **Chat tasks:** a question from a task that came in on the same channel
+  goes into that message's thread, and the gateway's own "Waiting for you"
+  notice steps aside.
+- **The owner's alone:** `escalation.reply` and `escalation.choose` are
+  requests only the owner's gateway makes. A reply that answers nothing is
+  an ordinary message, as before.
+
+### An orchestrator decides first
+
+```yaml
+daemon:
+  orchestrator:
+    agent: orchestrator              # declared in the instance root's own scope:
+    policy: .factory/orchestrator.md # what it may decide; handed to every decision
+    max_decisions_per_task: 3        # then every further question is the owner's
+    exclude: [assistant]             # scopes whose questions go straight to the owner
+```
+
+With an orchestrator, a question an agent asks with `report --status
+blocked` goes to it **at once**, before the owner. The daemon makes a
+**decision task** in the root scope for that agent. It is labelled
+`decides.task`/`decides.run`, has no worktree, and starts immediately. Its
+prompt holds:
+
+- the question;
+- the blocked task's instructions, which are its mandate;
+- the run's last 40 journal entries and the end of its screen;
+- its working directory, to read;
+- the policy file's path.
+
+The orchestrator then does exactly one of:
+
+```sh
+factory decision answer "<the answer>" --reason "<why, with evidence>"
+factory decision escalate --reason "<why the owner must decide>" --option "<choice>" --option "<choice>"
+```
+
+- **An answer** goes to the blocked agent through `task.answer`: typed into
+  its session, or resumed into a new attempt. It is recorded as
+  `orchestrator_decided`, with the text *and* the reason. A person's answer
+  text is never recorded; a decision made on the owner's behalf is.
+- **An escalation** is recorded as `orchestrator_escalated` and becomes the
+  owner's question: in the Inbox with the orchestrator's reason and its
+  options as one-press answers, and on the escalation channel with the
+  options as buttons.
+- **A decision run that ends without deciding** (failed, timed out, done
+  with neither) leaves the question with the owner (`orchestrator_silent`).
+  A decision that arrives after the question was answered some other way is
+  dropped (`decision_stale`).
+
+**What never reaches it:**
+
+- a hook-reported block, which may be a permission prompt nobody read;
+- an approval hold or a failed required step;
+- the orchestrator's own question;
+- a chat task's question, where the owner is already in the conversation;
+- an excluded scope;
+- a task past `max_decisions_per_task`.
+
+**Deciding within the mandate is the policy's job.** The prompt and the
+policy file tell it to escalate anything that widens what the task may do
+(merging outside its stated rule, releasing, publishing, sending, spending,
+deleting) and anything reasonable owners could decide differently at real
+cost. As with roles, this bounds what the orchestrator does by accident.
+It does not stop an agent that ignores its instructions.
+
+`decision.resolve` takes the decision task's id (`FACTORY_TASK_ID` in its
+session) and needs `task.report`, with the same reach as a report: the
+orchestrator answers only the question its own task was made for.
 
 ## Dependencies
 
@@ -2997,7 +3097,14 @@ field -- it never silently falls back to the complaining agent's own scope.
 **Dismiss and done.** `factory suggestion dismiss <id> --reason "..."` and
 `factory suggestion done <id>` (`POST /api/suggestions/{id}/dismiss` and
 `.../done`) move a suggestion to a terminal state; both are refused, saying
-so, once it has already reached one.
+so, once it has already reached one. Closing the improvement task itself
+(`factory task close`/`reopen`) takes `task.close` too, and although the
+task lives in the root scope, an agent outside it may do so when every
+suggestion tasked into that task is in its reach (`#365`) -- so the agent
+that answered the suggestions can also close the task. A group that
+includes a suggestion from a scope the agent cannot reach, or a task no
+suggestion is tied to any more (one tasked again elsewhere moves its tie),
+stays a person's to close.
 
 **Ask the agent.** Because a suggestion records the agent and its harness
 session, `factory suggestion ask <id> "<question>"`
@@ -3787,7 +3894,7 @@ to process attention.
 |---|---|---|
 | `blocked` | the run is `Blocked`, said by its agent or a lifecycle hook; the reason is its own words | high |
 | `suspected_stuck` | the runtime suspects the run is waiting, or it has said nothing past the p95 of its history -- always marked a **suspicion**, never a status | medium |
-| `failed_exhausted` | the newest run failed and no retry is left; a failing run that will be retried is a `retrying` count in Flow instead | high |
+| `failed_exhausted` | the newest run failed and no retry is left; a failing run that will be retried is a `retrying` count in Flow instead. If its agent's last word was a `blocked` question nobody answered, the reason leads with that question and **Answer** is offered first | high |
 | `aging` | running past the p85 (medium) or p95 (high) of its history | medium/high |
 | `schedule_late` | a slot passed two ticks ago and nothing was dispatched | medium |
 | `schedule_missed` | slots the scheduler passed over (`schedule_skipped`) in the last day | medium |
@@ -3806,8 +3913,31 @@ factory task cancel <id> --reason "..."       # journals cancel_requested; count
 factory task close <id> --reason not_planned --note "..."   # task.close; journals closed
 factory task edit <id> --pause-schedule --reason "stop the line"
 factory task skip-next <id> --reason "..."    # task.skip_next; journals slot_skipped
+factory task answer <id> "text" [--reason "..."]   # task.answer: typed, or resumed
 factory run answer <run-id> "text" --reason "..."   # run.answer
 ```
+
+**Answering a question** (`task.answer`). An agent that needs a person
+reports `blocked` with the question, and the Inbox shows it with an
+**Answer** button -- as it shows the question of a run that *failed* while
+it waited (the blocked timeout closed its session, or the session was lost).
+One answer reaches the agent either way:
+
+- **The session is still open:** the text is typed into it and enter is
+  pressed, as `run.answer` does.
+- **It is gone, or the run already failed:** a new attempt resumes the same
+  conversation, as `--continue` does, with the question and the answer in
+  its prompt. If the harness cannot resume, it falls back to a fresh session
+  (journaled `continue_fallback`) that still carries both.
+
+The reason is optional, the text is never journaled, and a run held for an
+approval or a failed gate is answered by approve, reject or accept-rework
+instead. A run's `task_timeout_seconds` counts only time *not* spent
+blocked (`Run::blocked_secs`), so a run answered in the morning is not
+failed for the night it waited. A Claude Code task run is denied
+`AskUserQuestion` and `EnterPlanMode` in its per-run settings: both stop at
+the terminal for a person nobody is watching for, so its questions go
+through `report --status blocked` instead.
 
 `task.cancel` takes an optional `run` (`run_id` over HTTP): the attempt the
 caller was shown. If another run is the task's active one by then -- a
@@ -3833,9 +3963,10 @@ otherwise; an agent that unblocks itself in the moment between the check
 and the typing gets the answer in whatever it is doing next. Over HTTP: `POST /api/tasks/{id}/run`, `.../cancel` and
 `.../skip-next` take an optional `{"reason": ...}` body (skip-next also
 `slot`), `PATCH
-/api/tasks/{id}` a `reason` beside the patch's fields, and `POST
-/api/runs/{id}/answer` `{text, reason}`. Skipping is `task.edit`, like
-pausing; answering is `run.input`, with the same reach -- no new grants.
+/api/tasks/{id}` a `reason` beside the patch's fields, `POST
+/api/tasks/{id}/answer` `{text, reason?}`, and `POST /api/runs/{id}/answer`
+`{text, reason}`. Skipping is `task.edit`, like pausing; answering, either
+way, is `run.input`, with the same reach -- no new grants.
 
 **Interventions** are what the record shows the owner doing: a manual run
 of a task whose previous attempt failed or was cancelled, a cancel by the
@@ -5069,12 +5200,29 @@ Three timeouts catch the rest:
   the probe below; an acknowledgement timeout also makes the next dispatch to
   that harness probe it again rather than trust an earlier answer.
 - `task_timeout_seconds` (3600 by default) — a cap on the whole run, counted
-  from `started_at`: the run has not finished within this many seconds,
-  however often it has reported in between.
+  from `started_at` less the time it spent blocked: the run has not finished
+  within this many seconds of work, however often it has reported in
+  between.
 - `blocked_timeout_seconds` (86400 by default) — a run a hook reported
   `Blocked` is exempt from the two above and given this much longer clock
   instead, counted from when the block began rather than when the run did, so
   a person has a real chance to see it and answer before the daemon gives up.
+
+A run whose session is no longer there fails `session_gone`, `Blocked` or not,
+because it can never report again. Failing a run closes its session, so the
+daemon makes sure first:
+
+- **Only herdr itself saying `pane_not_found` reads as gone.** herdr must be
+  running and asked. Its server not running, `herdr` failing to start, or an
+  answer that is not herdr's JSON is `unknown`, which fails nothing.
+- **The pane must read gone on three ticks in a row**, which is ten to fifteen
+  seconds at the default tick.
+
+On 2026-10-22 a single failed probe did this to a live, blocked session that
+was waiting on its owner's answer. The daemon was out of file descriptors, so
+`herdr` never started, and that was read as gone. The daemon now raises its
+soft open-file limit at startup from launchd's 256 towards the hard limit,
+capped at 10240, and logs the change.
 
 None of the three above notice a host that cannot execute at all. A run's
 `task_timeout_seconds` is spent by wall clock, and wall clock keeps moving
@@ -5271,8 +5419,10 @@ journal entry naming the one reason it fell back.
 - **Falls back to fresh, journaled with the reason, when:** the task's agent
   or adapter changed since the previous run; no session id was recorded; the
   adapter declares no resume; the worktree is gone or on another branch;
-  the guide, role, declaration or observed harness version changed (legacy
-  runs with no compatibility checkpoint also fall back); eight consecutive
+  the guide, role, declaration or the harness's release series changed --
+  `2.1` for Claude Code `2.1.306`, so the nightly patch upgrade does not cut
+  off a run blocked overnight, while a minor release does (legacy runs with
+  no compatibility checkpoint also fall back); eight consecutive
   resumes have been used; or the runtime does not
   confirm the previous session is gone (`AgentRuntime::status`, asked at
   `--continue` time) -- Factory never runs two processes on one conversation,

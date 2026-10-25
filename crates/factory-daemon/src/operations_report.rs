@@ -57,10 +57,45 @@ impl Engine {
             runs.extend(self.l4.store.runs(&id, 1).await?);
         }
 
+        // A task whose newest attempt failed while its agent was waiting on
+        // a question still has that question: answering it resumes the
+        // conversation (`task.answer`). Its run's journal is read with the
+        // open runs', in the same pass.
+        let mut newest_failed = BTreeSet::new();
+        for task in tasks.iter().filter(|t| t.has_failed() && t.bench_origin.is_none()) {
+            let newest = runs.iter().filter(|r| r.task_id == task.id).max_by_key(|r| r.attempt);
+            if let Some(run) = newest.filter(|r| r.status == RunStatus::Failed) {
+                newest_failed.insert(run.id.clone());
+            }
+        }
+
         let mut block_reasons = BTreeMap::new();
+        let mut questions = BTreeMap::new();
+        let mut escalated = BTreeMap::new();
         let mut last_progress = BTreeMap::new();
-        for run in runs.iter().filter(|r| !r.status.is_terminal() && in_scope(&r.task_id)) {
+        let read = |r: &&factory_core::run::Run| !r.status.is_terminal() || newest_failed.contains(&r.id);
+        for run in runs.iter().filter(read).filter(|r| in_scope(&r.task_id)) {
             let entries = self.l4.store.run_entries(&run.id, OPEN_RUN_ENTRIES).await?;
+            // The orchestrator's escalation of the question still waiting:
+            // newer than the agent's latest question, or it was another's.
+            let newest = entries.iter().rev().find(|e| {
+                e.kind == crate::escalation::ORCHESTRATOR_ESCALATED_KIND || (e.source == "agent" && e.kind == "blocked")
+            });
+            if let Some(said) = newest.filter(|e| e.kind == crate::escalation::ORCHESTRATOR_ESCALATED_KIND) {
+                let data = said.data.clone().unwrap_or_default();
+                let why = data.get("reason").and_then(|r| r.as_str()).unwrap_or_default().to_string();
+                let options = data
+                    .get("options")
+                    .and_then(|o| serde_json::from_value::<Vec<String>>(o.clone()).ok())
+                    .unwrap_or_default();
+                escalated.insert(run.id.clone(), (why, options));
+            }
+            if run.status.is_terminal() {
+                if let Some(question) = operations::pending_question(&entries) {
+                    questions.insert(run.id.clone(), question.to_string());
+                }
+                continue;
+            }
             if let Some(last) = entries.last() {
                 last_progress.insert(run.id.clone(), last.at);
             }
@@ -122,6 +157,8 @@ impl Engine {
             window,
             capacity: capacity.max_sessions,
             block_reasons,
+            questions,
+            escalated,
             last_progress,
             skipped,
             signposts: Vec::new(),

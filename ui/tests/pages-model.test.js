@@ -13,6 +13,7 @@ import {
   frameHtml,
   dataMessage,
   isReadyMessage,
+  conferenceChoice,
   formatBytes,
   pageRows,
   versionRows,
@@ -99,7 +100,7 @@ test("frame attributes carry what the data hand-over needs, escaped", () => {
   assert.doesNotMatch(frameHtml(hostile, PAGE.current), /<script>/);
 });
 
-test("the data message is the one thing posted in, and ready is the one thing answered", () => {
+test("the data message and ready handshake keep their own shapes", () => {
   const message = dataMessage({ scope: "radar", name: "conference-radar", version: SHA_A }, { n: 1 }, "foundry-light");
   assert.deepEqual(message, {
     type: DATA_MESSAGE,
@@ -114,6 +115,21 @@ test("the data message is the one thing posted in, and ready is the one thing an
   for (const other of [null, "factory:page-ready", { type: "factory:page-data" }, { type: "navigate", url: "/api/tasks" }]) {
     assert.equal(isReadyMessage(other), false, JSON.stringify(other));
   }
+});
+
+test("the conference choice bridge accepts only a bounded known decision", () => {
+  const choice = { type: "conference-radar:choice", conference: "DemoConf", edition_year: "2027", status: "waitlisted" };
+  assert.deepEqual(conferenceChoice(choice), { conference: "DemoConf", edition_year: "2027", kind: "conference", status: "waitlisted" });
+  assert.equal(conferenceChoice({ ...choice, status: "not_this_time" })?.status, "not_this_time");
+  assert.equal(conferenceChoice({ ...choice, kind: "rfp", status: "applied" })?.kind, "rfp");
+  for (const bad of [
+    { ...choice, type: "navigate" },
+    { ...choice, conference: "x".repeat(251) },
+    { ...choice, edition_year: "../../etc" },
+    { ...choice, status: "submitted<script>" },
+    { ...choice, kind: "malicious" },
+    { ...choice, kind: "rfp", status: "attending" },
+  ]) assert.equal(conferenceChoice(bad), null);
 });
 
 // ------------------------------------------------------------------- shapes

@@ -16,6 +16,331 @@ use factory_core::protocol::{PageContentBody, PagePart};
 use factory_core::task::TaskEntry;
 use factory_kernel::PageVersionFact;
 use factory_process::pages::{csp_findings, NewPageVersion, PageDecl};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::path::Path;
+use std::sync::OnceLock;
+use tokio::sync::Mutex;
+
+use crate::engine::Engine;
+
+/// The calendar is the only scope page allowed to edit its source tracker.
+/// Keep the write narrow: a known conference edition and one enumerated status.
+const RADAR_SCOPE: &str = "conference-radar";
+const RADAR_PAGE: &str = "conference-radar";
+const RADAR_TRACKER: &str = "data/ingo-conference-radar.json";
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ConferenceChoice {
+    pub scope: String,
+    pub name: String,
+    pub conference: String,
+    pub edition_year: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ConferenceChoiceRow {
+    pub conference: String,
+    pub edition_year: String,
+    pub status: String,
+    pub rfp_status: String,
+    pub conference_status: String,
+}
+
+fn choice_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn choice_status(value: &str) -> Option<&'static str> {
+    match value {
+        "unreviewed" => Some("watchlist"),
+        "not_interested" => Some("not interested"),
+        "not_this_time" => Some("not this time"),
+        "interested" => Some("interested"),
+        "applied" => Some("submitted/applied"),
+        "accepted" => Some("accepted/participating"),
+        "waitlisted" => Some("waitlisted"),
+        "rejected" => Some("rejected"),
+        "withdrawn" => Some("withdrawn"),
+        "attending" => Some("accepted/participating"),
+        _ => None,
+    }
+}
+
+fn display_status(value: &str) -> &'static str {
+    match value {
+        "not interested" => "not_interested",
+        "not this time" => "not_this_time",
+        "interested" => "interested",
+        "submitted/applied" => "applied",
+        "accepted/participating" => "accepted",
+        "waitlisted" => "waitlisted",
+        "rejected" | "rejected/declined" => "rejected",
+        "withdrawn" => "withdrawn",
+        _ => "unreviewed",
+    }
+}
+
+fn rfp_status(entry: &Value) -> &'static str {
+    if let Some(value) = entry.get("rfp_decision").and_then(Value::as_str) {
+        if value != "attending" && choice_status(value).is_some() {
+            return match value {
+                "not_interested" => "not_interested",
+                "not_this_time" => "not_this_time",
+                "interested" => "interested",
+                "applied" => "applied",
+                "accepted" => "accepted",
+                "waitlisted" => "waitlisted",
+                "rejected" => "rejected",
+                "withdrawn" => "withdrawn",
+                _ => "unreviewed",
+            };
+        }
+    }
+    if entry.get("conference_status").and_then(Value::as_str).is_some() {
+        return "unreviewed";
+    }
+    // The old single status is only an RFP decision when it clearly refers to
+    // applying or declining. An old "accepted/participating" may mean attendance.
+    match display_status(entry.get("application_status").and_then(Value::as_str).unwrap_or("watchlist")) {
+        "interested" => "interested",
+        "applied" => "applied",
+        "not_interested" => "not_interested",
+        "not_this_time" => "not_this_time",
+        "waitlisted" => "waitlisted",
+        "rejected" => "rejected",
+        "withdrawn" => "withdrawn",
+        _ => "unreviewed",
+    }
+}
+
+fn conference_status(entry: &Value, today: chrono::NaiveDate) -> &'static str {
+    if let Some(value) = entry.get("conference_status").and_then(Value::as_str) {
+        if choice_status(value).is_some() {
+            return match value {
+                "not_interested" => "not_interested",
+                "not_this_time" => "not_this_time",
+                "interested" => "interested",
+                "applied" => "applied",
+                "accepted" => "accepted",
+                "waitlisted" => "waitlisted",
+                "rejected" => "rejected",
+                "withdrawn" => "withdrawn",
+                "attending" => "attending",
+                _ => "unreviewed",
+            };
+        }
+    }
+    let legacy = display_status(entry.get("application_status").and_then(Value::as_str).unwrap_or("watchlist"));
+    if rfp_status(entry) == "applied" {
+        let deadline = entry.get("cfp_deadline").and_then(Value::as_str).filter(|value| !value.is_empty())
+            .or_else(|| entry.get("rfp_deadline").and_then(Value::as_str)).unwrap_or_default();
+        if matches!(legacy, "unreviewed" | "interested" | "applied")
+            && chrono::NaiveDate::parse_from_str(deadline, "%Y-%m-%d").is_ok_and(|date| date < today) {
+            return "applied";
+        }
+    }
+    legacy
+}
+
+fn edition_year(entry: &Value) -> String {
+    if let Some(start) = entry.get("event_start_date").and_then(Value::as_str) {
+        if let Some(year) = start.get(..4).filter(|year| year.bytes().all(|b| b.is_ascii_digit())) {
+            return year.to_string();
+        }
+    }
+    let dates = entry
+        .get("event_dates")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    dates
+        .as_bytes()
+        .windows(4)
+        .find(|part| part.starts_with(b"20") && part.iter().all(u8::is_ascii_digit))
+        .map(|part| String::from_utf8_lossy(part).to_string())
+        .unwrap_or_else(|| "undated".into())
+}
+
+fn tracker_rows(tracker: &Value) -> Result<Vec<ConferenceChoiceRow>> {
+    let today = chrono::Local::now().date_naive();
+    let entries = tracker
+        .get("conferences")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            FactoryError::BadRequest("the conference tracker has no conferences array".into())
+        })?;
+    Ok(entries
+        .iter()
+        .filter_map(|entry| {
+            let conference = entry.get("name")?.as_str()?.to_string();
+            Some(ConferenceChoiceRow {
+                conference,
+                edition_year: edition_year(entry),
+                status: display_status(
+                    entry
+                        .get("application_status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("watchlist"),
+                )
+                .into(),
+                rfp_status: rfp_status(entry).into(),
+                conference_status: conference_status(entry, today).into(),
+            })
+        })
+        .collect())
+}
+
+fn apply_choice(tracker: &mut Value, choice: &ConferenceChoice, status: &str) -> Result<bool> {
+    let entries = tracker
+        .get_mut("conferences")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            FactoryError::BadRequest("the conference tracker has no conferences array".into())
+        })?;
+    let matching: Vec<_> = entries
+        .iter_mut()
+        .filter(|entry| {
+            entry.get("name").and_then(Value::as_str) == Some(choice.conference.as_str())
+                && edition_year(entry) == choice.edition_year
+        })
+        .collect();
+    if matching.len() != 1 {
+        return Err(FactoryError::BadRequest(
+            "conference edition was not found uniquely in the tracker".into(),
+        ));
+    }
+    let entry = &mut *matching.into_iter().next().unwrap();
+    let before = entry.clone();
+    let kind = choice.kind.as_deref().unwrap_or("conference");
+    if kind == "rfp" {
+        entry["rfp_decision"] = Value::String(choice.status.clone());
+        entry["rfp_status_source"] = Value::String("dashboard user".into());
+        if before.get("rfp_decision").and_then(Value::as_str) != Some(choice.status.as_str()) {
+            entry["rfp_status_updated_at"] = Value::String(chrono::Utc::now().to_rfc3339());
+        }
+        let manually_attending = entry.get("conference_status").and_then(Value::as_str) == Some("attending");
+        if matches!(choice.status.as_str(), "accepted" | "rejected") && !manually_attending {
+            entry["conference_status"] = Value::String(choice.status.clone());
+            entry["conference_status_source"] = Value::String("rfp".into());
+            if before.get("conference_status").and_then(Value::as_str) != Some(choice.status.as_str()) {
+                entry["conference_status_updated_at"] = Value::String(chrono::Utc::now().to_rfc3339());
+            }
+        } else if entry.get("conference_status_source").and_then(Value::as_str) == Some("rfp") {
+            let object = entry.as_object_mut().unwrap();
+            object.remove("conference_status");
+            object.remove("conference_status_source");
+            object.remove("conference_status_updated_at");
+        }
+    } else {
+        if before.get("rfp_decision").is_none() && before.get("conference_status").is_none() {
+            let legacy_rfp = rfp_status(&before);
+            if legacy_rfp != "unreviewed" {
+                entry["rfp_decision"] = Value::String(legacy_rfp.into());
+                entry["rfp_status_source"] = Value::String("legacy application_status".into());
+            }
+        }
+        entry["conference_status"] = Value::String(choice.status.clone());
+        entry["conference_status_source"] = Value::String("dashboard user".into());
+        entry["application_status"] = Value::String(status.into());
+        entry["status_source"] = Value::String("dashboard user".into());
+        if before.get("conference_status").and_then(Value::as_str) != Some(choice.status.as_str()) {
+            entry["status_updated_at"] = Value::String(chrono::Utc::now().to_rfc3339());
+            entry["conference_status_updated_at"] = entry["status_updated_at"].clone();
+        }
+    }
+    Ok(*entry != before)
+}
+
+async fn read_tracker(path: &Path) -> Result<Value> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| FactoryError::Other(anyhow::anyhow!("reading {}: {e}", path.display())))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| FactoryError::Other(anyhow::anyhow!("parsing {}: {e}", path.display())))
+}
+
+impl Engine {
+    fn radar_tracker_path(&self, scope: &str, name: &str) -> Result<std::path::PathBuf> {
+        if scope != RADAR_SCOPE || name != RADAR_PAGE {
+            return Err(FactoryError::BadRequest(
+                "conference choices are available only for conference-radar".into(),
+            ));
+        }
+        let factory = self.factory_snapshot();
+        let found = factory.scope(scope)?;
+        if !found.pages.iter().any(|page| page.name == name) {
+            return Err(FactoryError::BadRequest(
+                "the conference-radar page is not declared".into(),
+            ));
+        }
+        Ok(factory.scope_path(scope)?.join(RADAR_TRACKER))
+    }
+
+    pub(crate) async fn conference_choices(
+        &self,
+        scope: &str,
+        name: &str,
+    ) -> Result<Vec<ConferenceChoiceRow>> {
+        let path = self.radar_tracker_path(scope, name)?;
+        let _guard = choice_lock().lock().await;
+        tracker_rows(&read_tracker(&path).await?)
+    }
+
+    pub(crate) async fn save_conference_choice(
+        &self,
+        choice: ConferenceChoice,
+    ) -> Result<Vec<ConferenceChoiceRow>> {
+        let path = self.radar_tracker_path(&choice.scope, &choice.name)?;
+        if choice.conference.is_empty() || choice.conference.len() > 250 ||
+            !(choice.edition_year == "undated" || choice.edition_year.len() == 4 &&
+              choice.edition_year.starts_with("20") && choice.edition_year.bytes().all(|b| b.is_ascii_digit())) {
+            return Err(FactoryError::BadRequest("invalid conference edition".into()));
+        }
+        let kind = choice.kind.as_deref().unwrap_or("conference");
+        if kind != "conference" && kind != "rfp" {
+            return Err(FactoryError::BadRequest("invalid conference choice kind".into()));
+        }
+        let status = choice_status(&choice.status)
+            .ok_or_else(|| FactoryError::BadRequest("invalid conference choice".into()))?;
+        if kind == "rfp" && choice.status == "attending" {
+            return Err(FactoryError::BadRequest("attending is a conference status".into()));
+        }
+        let _guard = choice_lock().lock().await;
+        let mut tracker = read_tracker(&path).await?;
+        if !apply_choice(&mut tracker, &choice, status)? {
+            return tracker_rows(&tracker);
+        }
+        let today = chrono::Utc::now().format("%Y%m%d").to_string();
+        let backup = path.parent().unwrap().join("backups").join(format!(
+            "ingo-conference-radar.json.bak-{today}-dashboard-{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(backup.parent().unwrap())
+            .await
+            .map_err(|e| {
+                FactoryError::Other(anyhow::anyhow!("creating tracker backup directory: {e}"))
+            })?;
+        tokio::fs::copy(&path, &backup)
+            .await
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("backing up tracker: {e}")))?;
+        let mut bytes = serde_json::to_vec_pretty(&tracker)
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("serializing tracker: {e}")))?;
+        bytes.push(b'\n');
+        let temp = path.with_extension(format!("json.{}", uuid::Uuid::new_v4()));
+        tokio::fs::write(&temp, bytes)
+            .await
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("writing tracker: {e}")))?;
+        tokio::fs::rename(&temp, &path)
+            .await
+            .map_err(|e| FactoryError::Other(anyhow::anyhow!("replacing tracker: {e}")))?;
+        tracker_rows(&tracker)
+    }
+}
+
 
 /// At most this many CSP findings are listed in a refusal; the rest are counted.
 const FINDINGS_SHOWN: usize = 10;
@@ -214,6 +539,7 @@ mod tests {
     //! Publishing through `Engine::handle`, the way the CLI, `/api/rpc` and
     //! `/api/pages/publish` all arrive: envelope, caller, authorize, handler.
     use crate::engine::Engine;
+    use super::{apply_choice, choice_status, conference_status, edition_year, tracker_rows, ConferenceChoice};
     use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
     use factory_core::protocol::{Envelope, PagePart, Payload, Request, Response};
     use factory_core::run::{NewRun, Run, Trigger};
@@ -223,6 +549,158 @@ mod tests {
     use std::sync::Arc;
 
     const RADAR: &str = include_str!("../../../examples/pages/conference-radar.html");
+
+    #[test]
+    fn conference_choices_update_one_edition_and_preserve_other_records() {
+        let mut tracker = serde_json::json!({"conferences": [
+            {"name":"DemoConf", "event_start_date":"2026-11-12", "application_status":"watchlist", "note":"keep"},
+            {"name":"DemoConf", "event_start_date":"2027-11-12", "application_status":"accepted/participating"}
+        ], "notes": ["keep"]});
+        let choice = ConferenceChoice {
+            scope: "conference-radar".into(),
+            name: "conference-radar".into(),
+            conference: "DemoConf".into(),
+            edition_year: "2026".into(),
+            kind: None,
+            status: "interested".into(),
+        };
+        assert_eq!(choice_status("interested"), Some("interested"));
+        assert_eq!(choice_status("not_this_time"), Some("not this time"));
+        assert_eq!(choice_status("malicious"), None);
+        assert_eq!(edition_year(&tracker["conferences"][0]), "2026");
+        assert!(apply_choice(&mut tracker, &choice, "interested").unwrap());
+        assert!(!apply_choice(&mut tracker, &choice, "interested").unwrap());
+        assert_eq!(
+            tracker["conferences"][0]["application_status"],
+            "interested"
+        );
+        assert_eq!(tracker["conferences"][0]["note"], "keep");
+        assert_eq!(
+            tracker["conferences"][1]["application_status"],
+            "accepted/participating"
+        );
+        assert_eq!(tracker["notes"][0], "keep");
+        assert_eq!(tracker_rows(&tracker).unwrap()[0].status, "interested");
+        assert_eq!(tracker_rows(&tracker).unwrap()[0].rfp_status, "unreviewed");
+        let declined = ConferenceChoice { status: "not_this_time".into(), ..choice.clone() };
+        assert!(apply_choice(&mut tracker, &declined, "not this time").unwrap());
+        assert_eq!(tracker_rows(&tracker).unwrap()[0].status, "not_this_time");
+        assert_eq!(tracker_rows(&tracker).unwrap()[0].conference_status, "not_this_time");
+        let missing = ConferenceChoice {
+            edition_year: "2028".into(),
+            ..choice
+        };
+        assert!(apply_choice(&mut tracker, &missing, "rejected").is_err());
+    }
+
+    #[test]
+    fn rfp_result_links_to_conference_but_manual_attendance_wins() {
+        let mut tracker = serde_json::json!({"conferences": [{
+            "name":"DemoConf", "event_start_date":"2027-02-12", "cfp_deadline":"2026-10-20",
+            "application_status":"watchlist"
+        }]});
+        let mut choice = ConferenceChoice {
+            scope: "conference-radar".into(), name: "conference-radar".into(),
+            conference: "DemoConf".into(), edition_year: "2027".into(),
+            kind: Some("rfp".into()), status: "applied".into(),
+        };
+        let after_deadline = chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
+        assert_eq!(conference_status(&tracker["conferences"][0], after_deadline), "unreviewed");
+        let interested = ConferenceChoice { status: "interested".into(), ..choice.clone() };
+        assert!(apply_choice(&mut tracker, &interested, "interested").unwrap());
+        assert_eq!(conference_status(&tracker["conferences"][0], after_deadline), "unreviewed");
+        assert!(apply_choice(&mut tracker, &choice, "submitted/applied").unwrap());
+        assert_eq!(tracker_rows(&tracker).unwrap()[0].rfp_status, "applied");
+        assert_eq!(conference_status(&tracker["conferences"][0], after_deadline), "applied");
+        assert!(tracker["conferences"][0].get("conference_status").is_none());
+        choice.status = "rejected".into();
+        assert!(apply_choice(&mut tracker, &choice, "rejected").unwrap());
+        assert_eq!(tracker["conferences"][0]["conference_status"], "rejected");
+        assert_eq!(tracker["conferences"][0]["conference_status_source"], "rfp");
+        choice.status = "accepted".into();
+        assert!(apply_choice(&mut tracker, &choice, "accepted/participating").unwrap());
+        assert_eq!(tracker["conferences"][0]["conference_status"], "accepted");
+        let attendance = ConferenceChoice { kind: Some("conference".into()), status: "attending".into(), ..choice.clone() };
+        assert!(apply_choice(&mut tracker, &attendance, "accepted/participating").unwrap());
+        choice.status = "rejected".into();
+        assert!(apply_choice(&mut tracker, &choice, "rejected").unwrap());
+        assert_eq!(tracker["conferences"][0]["conference_status"], "attending");
+    }
+
+    #[test]
+    fn a_legacy_application_survives_a_new_conference_decision() {
+        let mut tracker = serde_json::json!({"conferences": [{
+            "name":"DemoConf", "event_start_date":"2027-02-12",
+            "application_status":"submitted/applied"
+        }]});
+        let choice = ConferenceChoice {
+            scope: "conference-radar".into(), name: "conference-radar".into(),
+            conference: "DemoConf".into(), edition_year: "2027".into(),
+            kind: Some("conference".into()), status: "attending".into(),
+        };
+        assert!(apply_choice(&mut tracker, &choice, "accepted/participating").unwrap());
+        let row = &tracker_rows(&tracker).unwrap()[0];
+        assert_eq!(row.rfp_status, "applied");
+        assert_eq!(row.conference_status, "attending");
+    }
+
+    #[tokio::test]
+    async fn conference_choice_write_is_durable_and_backed_up() {
+        let base = engine();
+        let mut factory = base.factory_snapshot();
+        factory.config.scopes[0].name = "conference-radar".into();
+        let tracker = factory
+            .root
+            .join("projects/radar/data/ingo-conference-radar.json");
+        std::fs::create_dir_all(tracker.parent().unwrap()).unwrap();
+        std::fs::write(&tracker, "{\n  \"conferences\": [{\"name\": \"DemoConf\", \"event_start_date\": \"2026-11-12\", \"application_status\": \"watchlist\"}]\n}\n").unwrap();
+        let app = Engine::new(
+            factory,
+            Registry::with_builtins(),
+            base.l4.store.clone(),
+            PathBuf::from("factory"),
+            Vec::new(),
+        );
+        let choice = ConferenceChoice {
+            scope: "conference-radar".into(),
+            name: "conference-radar".into(),
+            conference: "DemoConf".into(),
+            edition_year: "2026".into(),
+            kind: None,
+            status: "interested".into(),
+        };
+        assert_eq!(
+            app.conference_choices("conference-radar", "conference-radar")
+                .await
+                .unwrap()[0]
+                .status,
+            "unreviewed"
+        );
+        assert_eq!(
+            app.save_conference_choice(choice).await.unwrap()[0].status,
+            "interested"
+        );
+        assert_eq!(
+            app.conference_choices("conference-radar", "conference-radar")
+                .await
+                .unwrap()[0]
+                .status,
+            "interested"
+        );
+        let backups = tracker.parent().unwrap().join("backups");
+        let backup = std::fs::read_dir(backups)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(std::fs::read_to_string(backup)
+            .unwrap()
+            .contains("\"watchlist\""));
+        assert!(std::fs::read_to_string(tracker)
+            .unwrap()
+            .contains("\"interested\""));
+    }
 
     fn engine() -> Arc<Engine> {
         let root = std::env::temp_dir().join(format!("factory-pages-test-{}", uuid::Uuid::new_v4()));

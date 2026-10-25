@@ -96,6 +96,7 @@ const OWNERS: &[(&str, Owner)] = &[
     ("worktree/", L4),
     ("artifacts.rs", L4),
     ("notify.rs", L4),
+    ("escalation.rs", L4),
     ("pages.rs", L4), // `#343`: page publish, rollback and content -- L4Service over its own page store
     ("production.rs", Wiring), // the People-side production endpoint: reads L4's fact as a page
     ("recovery_journal.rs", L4),
@@ -191,7 +192,7 @@ const ARC_ENGINE_BASELINE: &[(&str, usize)] = &[
 /// (`services`), reads `Facts::<People>` outside the routers (`people`) or calls `::provider(` directly (`providers`).
 /// May only shrink; what each page composes is named in its entry in `OWNERS`.
 const PAGE_BASELINE: &[(&str, &str, usize)] = &[
-    ("access.rs", "reach", 22),
+    ("access.rs", "reach", 21),
     ("access.rs", "services", 6),
     ("commands.rs", "people", 1),
     ("commands.rs", "providers", 2),
