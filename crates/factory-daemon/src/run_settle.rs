@@ -638,6 +638,9 @@ impl L4Service<'_> {
         }
         self.mirror_to_task(&run).await;
         self.settle_retry(&run).await;
+        // An orchestrator's decision run that ended without deciding leaves
+        // its question with the owner (`escalation.rs`).
+        self.settle_decision(&run).await;
         self.sweep_workspaces().await;
         if status != RunStatus::Done {
             if let Ok(Some(task)) = self.state.store.get(&run.task_id).await {

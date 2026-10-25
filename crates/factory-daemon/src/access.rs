@@ -206,7 +206,8 @@ impl Engine {
             Request::TaskSkipNext { .. } => Grant::TaskEdit,
             // The harness saying a turn ended is a report on the run in
             // everything but who is speaking: same token, same authority.
-            Request::TaskReport { .. } | Request::TaskTurnEnded { .. } => Grant::TaskReport,
+            // An orchestrator's decision is its decision task's report.
+            Request::TaskReport { .. } | Request::TaskTurnEnded { .. } | Request::DecisionResolve { .. } => Grant::TaskReport,
             // `#339`: changing the scope's memory or improving one of its
             // skills is part of doing the task, from inside its run, with
             // the run's own token -- the same authority as reporting on it.
@@ -724,6 +725,7 @@ impl Engine {
 
             Request::TaskReport { id, .. }
             | Request::TaskTurnEnded { id, .. }
+            | Request::DecisionResolve { id, .. }
             | Request::MemoryWrite { id, .. }
             | Request::SkillSubmit { id, .. }
             | Request::TaskAttach { id, .. } => {
