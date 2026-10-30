@@ -3846,6 +3846,70 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// `#379`: a scope two levels down inside a larger repository gets a
+    /// worktree of the whole repository, recorded as the run's
+    /// `worktree_path`, but its session starts in the scope's own directory
+    /// inside it -- where a `--no-worktree` run starts. A bench case's reset
+    /// still runs at the worktree root, so existing datasets keep working.
+    #[tokio::test]
+    async fn a_scope_nested_in_a_repository_starts_in_its_own_directory_inside_the_worktree() {
+        let repo = temp_dir("nested");
+        let scope_dir = repo.join("projects").join("demo");
+        std::fs::create_dir_all(&scope_dir).unwrap();
+        std::fs::write(scope_dir.join("AGENTS.md"), "the scope's own mandate\n").unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "factory@example.com"][..],
+            &["config", "user.name", "factory"][..],
+            &["add", "."][..],
+            &["commit", "-q", "-m", "base"][..],
+        ] {
+            assert!(std::process::Command::new("git").args(args).current_dir(&repo).status().unwrap().success());
+        }
+        let engine = test_engine(scope_dir.clone());
+        let root = engine.factory_snapshot().root.clone();
+
+        // A reset that only passes at the worktree root.
+        let bench = serde_json::json!({"bench_run_id":"b","case_id":"c","agent":"shell","attempt":1,"reset":"test -f projects/demo/AGENTS.md"});
+        for origin in [None, Some(bench)] {
+            let mut task = engine
+                .l4_service()
+                .create(NewTask { title: "nested".into(), instructions: "true".into(), scope: Some("demo".into()), agent: Some("shell".into()), ..Default::default() })
+                .await
+                .unwrap();
+            let trigger = if origin.is_some() { Trigger::Bench } else { Trigger::Manual };
+            task.bench_origin = origin.map(|origin| serde_json::from_value(origin).unwrap());
+            let run = engine
+                .l4
+                .store
+                .create_run(&factory_core::run::NewRun {
+                    task_id: task.id.clone(),
+                    trigger,
+                    agent: "shell".into(),
+                    adapter: "shell".into(),
+                    runtime: task.runtime.clone(),
+                    token: "tok".into(),
+                    queued_at: None,
+                    scheduled_for: None,
+                })
+                .await
+                .unwrap();
+            let worktree = engine.factory_snapshot().worktrees_dir().join(&run.id);
+
+            let (cwd, run) = engine.l4_service().place_run(&task, run, &scope_dir, Workspace::Fresh).await.unwrap();
+            assert_eq!(cwd, worktree.join("projects").join("demo"), "the session starts in the scope's own directory");
+            assert!(cwd.join("AGENTS.md").is_file(), "and finds the scope's own AGENTS.md there");
+            assert_eq!(
+                run.worktree_path.as_deref(),
+                Some(worktree.display().to_string().as_str()),
+                "worktree_path stays the worktree root"
+            );
+        }
+
+        std::fs::remove_dir_all(&repo).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     // -- args land in the order the daemon promises -------------------------
 
     #[test]
@@ -5102,6 +5166,40 @@ mod tests {
             assert_eq!(start.cwd, PathBuf::from(prev.worktree_path.clone().unwrap()));
 
             std::fs::remove_dir_all(&scope_dir).ok();
+        }
+
+        /// `#379`, through a real dispatch: the session of a scope nested two
+        /// levels down in a repository starts in the scope's own directory
+        /// inside the worktree, and a `--continue` starts there again -- the
+        /// directory a harness keys its conversation on -- while
+        /// `worktree_path` stays the root both times.
+        #[tokio::test]
+        async fn a_nested_scope_starts_and_resumes_in_its_own_directory_inside_the_worktree() {
+            let repo = git_scope_dir("continue-nested").await;
+            let scope_dir = repo.join("projects").join("demo");
+            std::fs::create_dir_all(&scope_dir).unwrap();
+            std::fs::write(scope_dir.join("AGENTS.md"), "the scope's own mandate\n").unwrap();
+            for args in [vec!["add", "."], vec!["commit", "-q", "-m", "scope"]] {
+                assert!(tokio::process::Command::new("git").args(&args).current_dir(&repo).status().await.unwrap().success());
+            }
+            let (engine, runtime) = continue_engine(scope_dir.clone(), true, RuntimeStatus::Gone);
+            let task = task_for(&engine, true).await;
+
+            let prev = dispatched_then_failed(&engine, &task, FailKind::AckTimeout).await;
+            let root = PathBuf::from(prev.worktree_path.clone().expect("the run got a worktree"));
+            assert_eq!(root, engine.factory_snapshot().worktrees_dir().join(&prev.id), "worktree_path is the worktree root");
+            let fresh = runtime.starts.lock().unwrap().last().unwrap().cwd.clone();
+            assert_eq!(fresh, root.join("projects").join("demo"), "the session starts in the scope's own directory");
+
+            seed_session_id(&engine, &prev, "sess-nested").await;
+            let prev = engine.l4.store.get_run(&prev.id).await.unwrap().unwrap();
+            let run = engine.l4_service().dispatch(&task.id, Trigger::Manual, Due::now(), Some(prev.clone())).await.unwrap();
+            assert_eq!(run.resumed_session.as_deref(), Some("sess-nested"));
+            assert_eq!(run.worktree_path, prev.worktree_path, "the same worktree root, not the subdirectory");
+            let resumed = runtime.starts.lock().unwrap().last().unwrap().cwd.clone();
+            assert_eq!(resumed, fresh, "the continuation starts where the conversation began");
+
+            std::fs::remove_dir_all(&repo).ok();
         }
 
         // ==============================================================

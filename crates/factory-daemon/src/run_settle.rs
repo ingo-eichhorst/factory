@@ -194,6 +194,10 @@ impl L4Service<'_> {
     /// `git worktree add` actually made (`Workspace::Fresh`) or that a
     /// previous run already made and the task lifetime (`#178`) is reusing
     /// (`Workspace::Reuse`). There is no other path.
+    ///
+    /// The path returned is where the session starts: for a worktree, the
+    /// scope's own directory inside it (`session_dir`, `#379`). The run's
+    /// `worktree_path`, and a bench case's reset, stay at the worktree root.
     pub(crate) async fn place_run(&self, task: &Task, run: Run, scope_path: &Path, workspace: Workspace) -> Result<(PathBuf, Run)> {
         if !task.worktree {
             return Ok((scope_path.to_path_buf(), run));
@@ -279,15 +283,14 @@ impl L4Service<'_> {
         // reads this exact "reset failed" prefix back off `run.error` to
         // settle the attempt `skipped` rather than `error`, without ever
         // dispatching the agent.
-        if task.bench_origin.is_some() {
-            if reused { return Ok((dir, run)); }
+        if task.bench_origin.is_some() && !reused {
             if let Some(reset) = &placement.reset {
                 if let Err(detail) = run_workspace_reset(&dir, reset).await {
                     return Err(FactoryError::BadRequest(format!("reset failed: {detail}")));
                 }
             }
         }
-        Ok((dir, run))
+        Ok((session_dir(&dir, scope_path).await?, run))
     }
     /// The token is what makes a call about a run come from that run --
     /// the agent's own report, or its harness's turn-end hook -- rather than
@@ -1052,4 +1055,21 @@ async fn run_workspace_reset(dir: &Path, command: &str) -> std::result::Result<(
         Some(code) => Err(format!("exit {code}: {}", factory_core::bench::tail_4kib(&output))),
         None => Err(output),
     }
+}
+
+/// Where a worktree run's session starts: the scope's own directory inside the worktree, the same place a
+/// `--no-worktree` run starts (`#379`). The worktree itself is the whole repository, so a scope inside a larger one
+/// is joined back to its own subdirectory; a scope that is its own repository gets the worktree unchanged. When the
+/// base has nothing committed there, the directory is made -- after any reset, which could clean an empty one away --
+/// rather than falling back to the root: an empty directory is one git never sees.
+async fn session_dir(worktree: &Path, scope_path: &Path) -> Result<PathBuf> {
+    let prefix = worktree::scope_prefix(scope_path).await.map_err(|e| FactoryError::adapter("workspace", e))?;
+    if prefix.as_os_str().is_empty() {
+        return Ok(worktree.to_path_buf());
+    }
+    let dir = worktree.join(prefix);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| FactoryError::adapter("workspace", format!("creating {}: {e}", dir.display())))?;
+    Ok(dir)
 }

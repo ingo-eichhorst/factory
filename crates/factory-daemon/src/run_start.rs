@@ -620,6 +620,12 @@ impl L4Service<'_> {
             _ => Workspace::Fresh,
         };
         let (cwd, run) = self.place_run(&task, run, &scope_path, workspace).await?;
+        // `#379`: the session starts in the scope's own directory inside the
+        // worktree, but an OpenShell sandbox is still handed the worktree
+        // itself -- its upload refuses a worktree by the `.git` at its root,
+        // which a subdirectory does not have, and `--continue` predicts the
+        // sandbox's working directory from the root.
+        let sandbox_cwd = run.worktree_path.as_ref().map_or_else(|| cwd.clone(), PathBuf::from);
         let resumes = if run.resumed_session.is_some() {
             continue_from.as_ref().and_then(|previous| previous.resume_context.as_ref())
                 .map_or(1, |previous| previous.resumes.saturating_add(1))
@@ -699,7 +705,7 @@ impl L4Service<'_> {
             // What the agent is told its working directory is: inside a
             // sandbox, the host path names nothing.
             cwd: match &openshell {
-                Some((config, _)) => PathBuf::from(factory_core::openshell::workdir_for(config, &cwd)?),
+                Some((config, _)) => PathBuf::from(factory_core::openshell::workdir_for(config, &sandbox_cwd)?),
                 None => cwd.clone(),
             },
             factory_bin: match &openshell {
@@ -795,7 +801,7 @@ impl L4Service<'_> {
                         let prompt_fresh = l3.port().prompt(&adapter_name, &ctx_fresh).await?;
                         Box::pin(l3.port().prepare_environment(
                             sandbox_request(
-                                &factory, &task, &run.id, &cwd, &launch_fresh, &prompt_fresh,
+                                &factory, &task, &run.id, &sandbox_cwd, &launch_fresh, &prompt_fresh,
                                 Some((&launch, prompt.as_str(), local_dir.as_path())),
                                 config, callback, &resolved,
                             ),
@@ -804,7 +810,7 @@ impl L4Service<'_> {
                         .await?
                     }
                     None => Box::pin(l3.port().prepare_environment(
-                        sandbox_request(&factory, &task, &run.id, &cwd, &launch, &prompt, None, config, callback, &resolved),
+                        sandbox_request(&factory, &task, &run.id, &sandbox_cwd, &launch, &prompt, None, config, callback, &resolved),
                         &notes,
                     ))
                     .await?,

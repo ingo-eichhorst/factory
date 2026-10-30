@@ -1821,7 +1821,16 @@ to it. A case names a scope, carries instructions, and may pin a `base`
 commit, a `reset` command that runs before an attempt starts, and a `gate`
 command whose exit status is the verdict. `gate` and `reset` run as the owner
 inside the attempt's own worktree — the same trust as the `shell` agent, and
-the dataset view says so. Datasets are built three ways: by hand
+the dataset view says so. They run at the worktree's root, which is the root
+of the scope's repository: for a scope inside a larger repository, a path in
+them is relative to that repository, not to the scope. The agent's session
+starts somewhere else for such a scope: in the scope's own directory inside
+the worktree (`<worktree>/company/finance` for a scope at `company/finance`),
+where a `--no-worktree` run of it starts too, so it reads the scope's own
+`AGENTS.md` (#379). The run's recorded worktree, which `bench clean` removes,
+is still the root. A scope that is its own repository sees no difference. An
+attempt in an OpenShell sandbox is the exception: the sandbox is still handed
+the worktree root. Datasets are built three ways: by hand
 (`factory dataset create` and `case add`), generated from recorded tasks
 (`factory dataset from-tasks`, which copies title, instructions and scope,
 records `origin` for reference only, and never sets a `gate`), or
