@@ -1216,9 +1216,16 @@ mod tests {
         let asked = Outgoing { buttons: vec![Button { text: "Ja".into(), data: "ok:1".into() }], ..base.clone() };
         assert_ne!(asked.digest(&[]), plain);
 
-        assert_eq!(reply_parameters(42), r#"{"allow_sending_without_reply":true,"message_id":42}"#);
+        // Compared as JSON, not as text: the daemon builds serde_json with
+        // `preserve_order`, so a workspace build keeps the keys as written and
+        // a build of this crate alone sorts them. Telegram reads either.
+        let json = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+        assert_eq!(json(&reply_parameters(42)), serde_json::json!({ "message_id": 42, "allow_sending_without_reply": true }));
         let keyboard = inline_keyboard(&[Button { text: "Ja".into(), data: "ok:1".into() }, Button { text: "Nein".into(), data: "no:1".into() }]).unwrap();
-        assert_eq!(keyboard, r#"{"inline_keyboard":[[{"callback_data":"ok:1","text":"Ja"},{"callback_data":"no:1","text":"Nein"}]]}"#);
+        assert_eq!(
+            json(&keyboard),
+            serde_json::json!({ "inline_keyboard": [[{ "text": "Ja", "callback_data": "ok:1" }, { "text": "Nein", "callback_data": "no:1" }]] })
+        );
         assert!(inline_keyboard(&[Button { text: "x".into(), data: "y".repeat(65) }]).is_err());
     }
 

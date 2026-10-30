@@ -2734,8 +2734,10 @@ mod tests {
             now(),
         ))
         .unwrap();
-        let keys: Vec<&String> = json.as_object().unwrap().keys().collect();
-        assert_eq!(keys, vec!["attributes", "profiles", "scope", "tradeoffs"]);
+        // A set, not a list: the daemon's serde_json `preserve_order` keeps
+        // field order in a workspace build, and a build of this crate sorts.
+        let keys: BTreeSet<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, BTreeSet::from(["attributes", "profiles", "scope", "tradeoffs"]));
         let attr = json["attributes"][0].as_object().unwrap();
         assert!(!attr.keys().any(|k| k.contains("score")), "{attr:?}");
         assert_eq!(json["attributes"][0]["status"], "no_data");
