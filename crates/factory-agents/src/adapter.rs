@@ -21,6 +21,15 @@ pub struct TaskBinding {
     /// run that used the scope directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// The worktree's root, set only when the run's working directory is a
+    /// subdirectory of it: a scope inside a larger repository works in its
+    /// own directory of a worktree of the whole repository (`#379`), and the
+    /// prompt says so, since a commit there must take changes outside it
+    /// too. `None` for a scope that is its own repository, a run without a
+    /// worktree, or a sandboxed run -- and absent on the wire then, like
+    /// `upstream`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_root: Option<PathBuf>,
     /// Set only when this run is `factory task run --continue` (#178) having
     /// actually resumed the harness's own conversation -- mirrors
     /// `Run::resumed_session`. Tells `reporting_contract`/`prompt` to say
@@ -1274,6 +1283,7 @@ mod tests {
             attempt: 1,
             token: "tok".into(),
             worktree_branch: None,
+            worktree_root: None,
             resumed_session: None,
             upstream: Vec::new(),
             knowledge: None,

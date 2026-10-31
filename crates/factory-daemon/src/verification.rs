@@ -1132,10 +1132,14 @@ impl L4Service<'_> {
             return Ok(());
         }
         let task = self.require(&run.task_id).await?;
+        // The source judged is the whole worktree; the gates run where the
+        // session works -- the scope's own directory, where a `--no-worktree`
+        // run of the same scope runs them too (`#379`).
         let dir = match &run.worktree_path {
             Some(path) => std::path::PathBuf::from(path),
             None => self.wiring.snapshot().scope_path(&task.scope)?,
         };
+        let session = self.run_session_dir(&run, &task.scope).await?;
         let category = control_plan::effective_category(task.category.as_deref()).to_string();
         let state = git_state(&dir).await;
         let mut attestations = self.state.run_evidence.step_attestations(&run.id).await?;
@@ -1174,7 +1178,7 @@ impl L4Service<'_> {
                 continue; // nothing to run: `judge` reports it missing
             };
             let timeout = step.timeout_seconds.unwrap_or(DEFAULT_GATE_TIMEOUT_SECS);
-            let (exit_code, output) = run_shell_capture(&dir, command, timeout).await;
+            let (exit_code, output) = run_shell_capture(&session, command, timeout).await;
             let verdict = if exit_code == Some(0) {
                 AttestationVerdict::Pass
             } else {
@@ -1197,7 +1201,7 @@ impl L4Service<'_> {
                 command: Some(command.to_string()),
                 exit_code,
                 output: Some(factory_core::bench::tail_4kib(&output)),
-                dir: dir.display().to_string(),
+                dir: session.display().to_string(),
                 commit: state.commit.clone(),
                 dirty: state.dirty,
                 worktree_digest: state.digest.clone(),
@@ -3166,6 +3170,68 @@ mod tests {
             );
         }
         assert_eq!(files_under(&root.join(".factory/artifacts")).len(), 3);
+    }
+
+    /// `#379`: a worktree run of a scope inside a larger repository works in
+    /// the scope's own directory of a worktree of the whole repository. A
+    /// relative `--artifact` starts there and must stay inside the worktree,
+    /// and a required gate runs there too -- where a `--no-worktree` run of
+    /// the scope runs it -- while the source both are bound to is the whole
+    /// worktree's.
+    #[tokio::test]
+    async fn a_nested_scope_worktree_run_resolves_artifacts_and_runs_gates_in_its_own_directory() {
+        let (engine, work) = provenance_engine_at(
+            "      - { applies_to: [feature], step: tests, gate: \"test -f scope.txt\" }",
+            false,
+            "instance",
+            "repo/projects/demo",
+        );
+        let repo = work.parent().unwrap().parent().unwrap().to_path_buf();
+        // Only in the scope's own directory: the gate fails anywhere else.
+        std::fs::write(work.join("scope.txt"), "the scope's own file").unwrap();
+        provenance_git(&repo);
+        let task = engine
+            .l4_service()
+            .create(NewTask {
+                title: "report from a nested scope".into(),
+                instructions: "true".into(),
+                scope: Some("demo".into()),
+                agent: Some("shell".into()),
+                runtime: Some("quiet".into()),
+                worktree: Some(true),
+                category: Some("feature".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        engine.l4_service().start_run(&task.id, Trigger::Manual).await;
+        let run = engine.l4.store.active_run(&task.id).await.unwrap().unwrap();
+        let worktree = PathBuf::from(run.worktree_path.clone().expect("a worktree run"));
+        let session = worktree.join("projects").join("demo");
+        std::fs::create_dir_all(session.join("out")).unwrap();
+        std::fs::write(session.join("out/report.txt"), "the report").unwrap();
+        let outside = repo.parent().unwrap().join("outside.txt");
+        std::fs::write(&outside, "not this run's").unwrap();
+
+        let refused = provenance_done(&engine, &task, &[outside.to_str().unwrap()]).await.unwrap_err();
+        assert!(refused.to_string().contains("inside this run's working directory"), "{refused}");
+
+        let held = provenance_done(&engine, &task, &["out/report.txt"]).await.unwrap();
+        assert_eq!(held.status, RunStatus::Verifying);
+        assert_eq!(
+            held.artifacts[0].source_path,
+            std::fs::canonicalize(session.join("out/report.txt")).unwrap().display().to_string(),
+            "the path started from the scope's own directory, not the worktree root"
+        );
+        engine.verify_run(&held.id).await.unwrap();
+        assert_eq!(engine.l4_service().require_run(&held.id).await.unwrap().status, RunStatus::Done);
+        let attestations = engine.l4_service().run_attestations(&held.id).await.unwrap();
+        let gate = attestations.iter().find(|a| a.kind == StepKind::Gate).expect("the gate ran");
+        assert_eq!(gate.verdict, AttestationVerdict::Pass, "{:?}", gate.output);
+        assert_eq!(gate.dir, session.display().to_string());
+        let records = engine.l4_service().run_provenance(&held.id).await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(std::fs::read(&records[0].artifact.source_path).unwrap(), b"the report");
     }
 
     #[tokio::test]

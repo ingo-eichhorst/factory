@@ -151,6 +151,21 @@ pub async fn create(scope_path: &Path, dir: &Path, branch: &str, base: Option<&s
     })
 }
 
+/// Where the scope sits inside its repository, relative to the top level:
+/// `company/finance` for a scope inside a larger repository, empty for a
+/// scope that is its own. `git worktree add` checks out the whole
+/// repository, so this is what joins a worktree back to the scope's own
+/// directory (`#379`). Asked of git rather than worked out by stripping
+/// paths, which a symlinked temp directory gets wrong.
+pub async fn scope_prefix(scope_path: &Path) -> Result<std::path::PathBuf, String> {
+    let output = git_output(scope_path, &["rev-parse", "--show-prefix"]).await?;
+    if !output.status.success() {
+        return Err(git_error("git rev-parse --show-prefix", &output));
+    }
+    let prefix = String::from_utf8_lossy(&output.stdout);
+    Ok(std::path::PathBuf::from(prefix.trim_end_matches(['\n', '/'])))
+}
+
 /// Refresh one remote base before an integration branch is cut.  The fetch
 /// is deliberately explicit: a decomposition must not quietly integrate an
 /// old local `main` when `origin/main` has moved.

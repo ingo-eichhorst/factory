@@ -245,14 +245,32 @@ impl Agent for HarnessAgent {
         // A fresh worktree holds only what git tracks -- an agent that reaches
         // for something ignored or never committed needs to hear that here,
         // not discover it as an unexplained failure partway through.
-        if let Some(branch) = &binding.worktree_branch {
-            prompt.push_str(&format!(
+        // `#379`: a scope inside a larger repository works in its own
+        // directory of a worktree of the whole repository, and a commit made
+        // from there must not leave behind what it changed outside it.
+        let nested = binding.worktree_root.as_deref().and_then(|root| {
+            ctx.cwd.strip_prefix(root).ok().filter(|prefix| !prefix.as_os_str().is_empty()).map(|prefix| (root, prefix))
+        });
+        match (&binding.worktree_branch, nested) {
+            (Some(branch), Some((root, prefix))) => prompt.push_str(&format!(
+                "This directory is {prefix} inside a git worktree of the whole repository, \
+                 rooted at {root}, on branch {branch}. Commit your work as you go, and \
+                 include any changes outside this directory too (for example \
+                 `git -C {root} add -A`) -- a person decides what happens to the branch \
+                 afterward, so nothing here merges, rebases, or pushes it for you. \
+                 Anything the repository's git ignores or never tracked -- .env, \
+                 node_modules, target, and the like -- is not present.\n",
+                prefix = prefix.display(),
+                root = root.display(),
+            )),
+            (Some(branch), None) => prompt.push_str(&format!(
                 "This directory is a git worktree of the scope, on branch {branch}. \
                  Commit your work here as you go -- a person decides what happens to \
                  the branch afterward, so nothing here merges, rebases, or pushes it \
                  for you. Anything the scope's git ignores or never tracked -- .env, \
                  node_modules, target, and the like -- is not present.\n"
-            ));
+            )),
+            (None, _) => {}
         }
         // Direct parents only, never a transitive ancestor -- see the
         // README's Workflows section. This is task content (what upstream
@@ -673,6 +691,7 @@ mod tests {
                 attempt: 1,
                 token: "tok".into(),
                 worktree_branch,
+                worktree_root: None,
                 resumed_session: None,
                 upstream: Vec::new(),
                 knowledge: None,
@@ -709,6 +728,36 @@ mod tests {
         );
         assert!(prompt.contains("git worktree"), "and said plainly what this directory is");
         assert!(prompt.contains("Commit your work"), "and that committing is expected");
+    }
+
+    /// `#379`: a scope inside a larger repository works in its own directory
+    /// of a worktree of the whole repository. The prompt names both, and that
+    /// a commit has to take what changed outside the directory too.
+    #[tokio::test]
+    async fn a_nested_scope_is_told_where_it_sits_in_the_worktree_and_to_commit_from_the_root() {
+        let agent = HarnessAgent::claude_code();
+        let mut nested = ctx(Some("factory/t1-fix-the-flaky-test".into()));
+        nested.cwd = PathBuf::from("/tmp/worktrees/r1/company/finance");
+        nested.task.as_mut().unwrap().worktree_root = Some(PathBuf::from("/tmp/worktrees/r1"));
+        let prompt = agent.prompt(&nested).await.unwrap();
+        assert!(prompt.contains("Working directory: /tmp/worktrees/r1/company/finance\n"), "{prompt}");
+        assert!(
+            prompt.contains(
+                "This directory is company/finance inside a git worktree of the whole repository, \
+                 rooted at /tmp/worktrees/r1, on branch factory/t1-fix-the-flaky-test."
+            ),
+            "{prompt}"
+        );
+        assert!(prompt.contains("git -C /tmp/worktrees/r1 add -A"), "{prompt}");
+        assert!(!prompt.contains("a git worktree of the scope"), "{prompt}");
+
+        // The same run without a root -- a scope that is its own repository -- reads exactly as before.
+        let own = agent.prompt(&ctx(Some("factory/t1-fix-the-flaky-test".into()))).await.unwrap();
+        assert!(own.contains(
+            "This directory is a git worktree of the scope, on branch factory/t1-fix-the-flaky-test. \
+             Commit your work here as you go"
+        ), "{own}");
+        assert!(!own.contains("whole repository"), "{own}");
     }
 
     #[tokio::test]
