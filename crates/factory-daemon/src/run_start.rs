@@ -721,6 +721,13 @@ impl L4Service<'_> {
                 attempt: run.attempt,
                 token,
                 worktree_branch: run.worktree_branch.clone(),
+                // `#379`: only when the session works below the root. A
+                // sandboxed session is handed the root, so it never is.
+                worktree_root: run
+                    .worktree_path
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .filter(|root| openshell.is_none() && *root != cwd),
                 resumed_session: run.resumed_session.clone(),
                 upstream,
                 knowledge,

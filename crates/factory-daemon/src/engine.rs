@@ -3910,6 +3910,67 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// `#379`: a scope with nothing committed at the base has no directory in
+    /// the checked-out worktree. The run ends before the agent is handed
+    /// anything, naming the missing path, rather than starting in a directory
+    /// made up for it -- and for a bench attempt without the "reset failed"
+    /// text that would settle it `skipped` instead of `error`.
+    #[tokio::test]
+    async fn a_scope_missing_from_the_checked_out_base_fails_the_run_naming_the_path() {
+        let repo = temp_dir("nested-missing");
+        std::fs::write(repo.join("README.md"), "the repository\n").unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "factory@example.com"][..],
+            &["config", "user.name", "factory"][..],
+            &["add", "README.md"][..],
+            &["commit", "-q", "-m", "base"][..],
+        ] {
+            assert!(std::process::Command::new("git").args(args).current_dir(&repo).status().unwrap().success());
+        }
+        // On disk in the checkout the scope is registered from, never committed.
+        let scope_dir = repo.join("projects").join("demo");
+        std::fs::create_dir_all(&scope_dir).unwrap();
+        std::fs::write(scope_dir.join("AGENTS.md"), "not committed yet\n").unwrap();
+        let engine = test_engine(scope_dir.clone());
+        let root = engine.factory_snapshot().root.clone();
+
+        let bench = serde_json::json!({"bench_run_id":"b","case_id":"c","agent":"shell","attempt":1,"reset":"true"});
+        for origin in [None, Some(bench)] {
+            let mut task = engine
+                .l4_service()
+                .create(NewTask { title: "missing".into(), instructions: "true".into(), scope: Some("demo".into()), agent: Some("shell".into()), ..Default::default() })
+                .await
+                .unwrap();
+            let trigger = if origin.is_some() { Trigger::Bench } else { Trigger::Manual };
+            task.bench_origin = origin.map(|origin| serde_json::from_value(origin).unwrap());
+            let run = engine
+                .l4
+                .store
+                .create_run(&factory_core::run::NewRun {
+                    task_id: task.id.clone(),
+                    trigger,
+                    agent: "shell".into(),
+                    adapter: "shell".into(),
+                    runtime: task.runtime.clone(),
+                    token: "tok".into(),
+                    queued_at: None,
+                    scheduled_for: None,
+                })
+                .await
+                .unwrap();
+            let missing = engine.factory_snapshot().worktrees_dir().join(&run.id).join("projects").join("demo");
+
+            let error = engine.l4_service().place_run(&task, run, &scope_dir, Workspace::Fresh).await.unwrap_err().to_string();
+            assert!(error.contains(&missing.display().to_string()), "the error names the missing path: {error}");
+            assert!(!error.contains("reset failed"), "a bench attempt reads this as an error, not skipped: {error}");
+            assert!(!missing.exists(), "nothing was made up in its place");
+        }
+
+        std::fs::remove_dir_all(&repo).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     // -- args land in the order the daemon promises -------------------------
 
     #[test]

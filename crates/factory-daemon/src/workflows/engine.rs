@@ -1830,6 +1830,42 @@ mod tests {
             && entry.data.as_ref().is_some_and(|data| data.to_string().contains("did not finish within 1s"))));
     }
 
+    /// `#379`: a node of a scope inside a larger repository works in the
+    /// scope's own directory of its worktree, and its exit `check:` runs there
+    /// -- where it runs for a `--no-worktree` node of the same scope -- so a
+    /// scope-relative check holds whichever the node used.
+    #[tokio::test]
+    async fn a_nested_scopes_exit_check_runs_in_its_own_directory_inside_the_worktree() {
+        let root = std::env::temp_dir().join(format!("factory-nested-exit-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        let scope_dir = repo.join("projects").join("demo");
+        std::fs::create_dir_all(&scope_dir).unwrap();
+        std::fs::write(scope_dir.join("scope.txt"), "only here\n").unwrap();
+        git_ok(&repo, &["init", "-q"]).await;
+        git_ok(&repo, &["config", "user.name", "Nested exit QA"]).await;
+        git_ok(&repo, &["config", "user.email", "nested@example.invalid"]).await;
+        git_ok(&repo, &["add", "."]).await;
+        git_ok(&repo, &["commit", "-q", "-m", "base"]).await;
+        let engine = engine_in_git_scope(root.clone(), scope_dir.clone());
+        let mut a = node("a");
+        a.task.worktree = Some(true);
+        a.exits = vec![WorkflowExit { to: "c".into(), check: Some("test -f scope.txt".into()), agent: None, max_rounds: None }];
+        let definition = create(&engine, vec![a, node("b"), node("c")], vec![edge("a", "b"), edge("b", "c"), edge("a", "c")]).await;
+        engine.start_workflow(&definition.id, Default::default(), &Caller::Owner).await.unwrap();
+
+        let a = wait_for_tasks(&engine, 1).await.pop().unwrap();
+        let run = wait_for_worktree_run(&engine, &a.id).await;
+        assert!(Path::new(run.worktree_path.as_deref().unwrap()).join("projects/demo/scope.txt").is_file());
+        finish(&engine, &a.id, RunStatus::Done).await;
+        let all = wait_for_tasks(&engine, 2).await;
+        assert_eq!(of_node(&all, "b").len(), 0, "the check held in the scope's own directory, so the exit was taken");
+        assert_eq!(of_node(&all, "c").len(), 1);
+        let entries = engine.l4.store.entries(&a.id, 20).await.unwrap();
+        assert!(entries.iter().any(|entry| entry.kind == "exit_checked"
+            && entry.data.as_ref().is_some_and(|data| data["exit_code"] == 0)));
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[tokio::test]
     async fn exits_are_first_match_wins_and_send_to_refusals_name_alternatives() {
         let standalone_engine = engine();
@@ -4769,11 +4805,14 @@ impl L4Service<'_> {
 
         for (index, exit) in exits.iter().enumerate() {
             let holds = if let Some(command) = &exit.check {
+                // Where the node's session worked: the scope's own directory,
+                // inside its worktree or not, so a scope-relative check holds
+                // or fails the same either way (`#379`).
                 let dir = if let Some(task) = &task {
-                    let latest = self.state.store.runs(&task.id, 1).await?.into_iter().next();
-                    latest
-                        .and_then(|attempt| attempt.worktree_path.map(std::path::PathBuf::from))
-                        .unwrap_or(self.wiring.snapshot().scope_path(&task.scope)?)
+                    match self.state.store.runs(&task.id, 1).await?.into_iter().next() {
+                        Some(latest) => self.run_session_dir(&latest, &task.scope).await?,
+                        None => self.wiring.snapshot().scope_path(&task.scope)?,
+                    }
                 } else {
                     self.wiring.snapshot().scope_path(&run.scope)?
                 };

@@ -95,11 +95,15 @@ async fn source(dir: &Path) -> Result<ArtifactSource> {
     }
 }
 
-fn artifact_path(dir: &Path, asked: &str) -> Result<PathBuf> {
-    let path = std::fs::canonicalize(dir.join(asked))
+/// `asked` is relative to `session`, the run's working directory, and must
+/// land inside `root`, the worktree it works in. The two differ only for a
+/// worktree run of a scope inside a larger repository (`#379`): the session
+/// is the scope's own directory, the worktree the whole repository.
+fn artifact_path(root: &Path, session: &Path, asked: &str) -> Result<PathBuf> {
+    let path = std::fs::canonicalize(session.join(asked))
         .map_err(|e| refused(format!("artifact {asked:?}: {e}")))?;
     let relative = path
-        .strip_prefix(dir)
+        .strip_prefix(root)
         .map_err(|_| refused("an artifact must be inside this run's working directory"))?;
     if relative
         .components()
@@ -136,12 +140,21 @@ impl Copies {
 }
 
 impl L4Service<'_> {
-    fn artifact_workdir(&self, run: &Run, scope: &str) -> Result<PathBuf> {
-        let dir = match &run.worktree_path {
+    /// The worktree an artifact must be inside, whose source digest it is
+    /// bound to, and the session directory its relative path starts from --
+    /// the same directory for a `--no-worktree` run or a scope that is its
+    /// own repository.
+    async fn artifact_workdir(&self, run: &Run, scope: &str) -> Result<(PathBuf, PathBuf)> {
+        let root = match &run.worktree_path {
             Some(path) => PathBuf::from(path),
             None => self.wiring.snapshot().scope_path(scope)?,
         };
-        std::fs::canonicalize(dir).map_err(|e| refused(format!("artifact worktree: {e}")))
+        let session = self.run_session_dir(run, scope).await?;
+        let root =
+            std::fs::canonicalize(root).map_err(|e| refused(format!("artifact worktree: {e}")))?;
+        let session = std::fs::canonicalize(session)
+            .map_err(|e| refused(format!("artifact working directory: {e}")))?;
+        Ok((root, session))
     }
 
     pub(crate) async fn capture_artifacts(
@@ -153,12 +166,12 @@ impl L4Service<'_> {
         if paths.len() > MAX_ARTIFACTS {
             return Err(refused("at most 16 artifacts may be reported at once"));
         }
-        let dir = self.artifact_workdir(run, &task.scope)?;
+        let (dir, session) = self.artifact_workdir(run, &task.scope).await?;
         // Reject every target before reading source bytes or writing any
         // snapshots; in particular never open a directory, device or FIFO.
         let mut names = std::collections::BTreeSet::new();
         for asked in paths {
-            let path = artifact_path(&dir, asked)?;
+            let path = artifact_path(&dir, &session, asked)?;
             let metadata = std::fs::metadata(&path).map_err(|e| refused(e.to_string()))?;
             if !metadata.is_file() || metadata.len() > MAX_ARTIFACT_BYTES {
                 return Err(refused(
@@ -184,11 +197,12 @@ impl L4Service<'_> {
         let paths = paths.to_vec();
         let source_snapshot = before.clone();
         let copy_dir = dir.clone();
+        let copy_session = session.clone();
         let copied = tokio::task::spawn_blocking(move || {
             let mut records = Vec::new();
             let mut names = std::collections::BTreeSet::new();
             for (asked, id) in paths.into_iter().zip(ids) {
-                let path = artifact_path(&copy_dir, &asked)?;
+                let path = artifact_path(&copy_dir, &copy_session, &asked)?;
                 let name = path
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -275,7 +289,7 @@ impl L4Service<'_> {
         let Some(first) = run.artifacts.first() else {
             return Ok(Vec::new());
         };
-        let dir = self.artifact_workdir(run, &first.scope)?;
+        let (dir, session) = self.artifact_workdir(run, &first.scope).await?;
         let now = source(&dir).await?;
         if run.artifacts.iter().any(|a| a.source != now) {
             return Err(refused(
@@ -310,7 +324,7 @@ impl L4Service<'_> {
         let root = self.wiring.snapshot().root;
         tokio::task::spawn_blocking(move || {
             for a in records {
-                let original = artifact_path(&dir, &a.source_path)?;
+                let original = artifact_path(&dir, &session, &a.source_path)?;
                 let expected = (a.sha256, a.size_bytes);
                 if hash_file(&original)? != expected
                     || hash_file(&root.join(a.storage_path))? != expected
@@ -404,8 +418,8 @@ pub(crate) mod tests {
         std::fs::write(root.join("outside"), "private").unwrap();
         std::fs::write(dir.join("release.bin"), "release").unwrap();
         std::fs::write(dir.join(".factory/private"), "private").unwrap();
-        assert!(artifact_path(&dir, "../outside").is_err());
-        assert!(artifact_path(&dir, ".factory/private").is_err());
+        assert!(artifact_path(&dir, &dir, "../outside").is_err());
+        assert!(artifact_path(&dir, &dir, ".factory/private").is_err());
         assert!(hash_file(&dir).is_err());
         let large = dir.join("large.bin");
         std::fs::File::create(&large)
@@ -416,7 +430,7 @@ pub(crate) mod tests {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(root.join("outside"), dir.join("escape")).unwrap();
-            assert!(artifact_path(&dir, "escape").is_err());
+            assert!(artifact_path(&dir, &dir, "escape").is_err());
             let fifo = dir.join("pipe");
             assert!(std::process::Command::new("mkfifo")
                 .arg(&fifo)

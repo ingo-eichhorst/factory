@@ -290,7 +290,34 @@ impl L4Service<'_> {
                 }
             }
         }
-        Ok((session_dir(&dir, scope_path).await?, run))
+        // A scope with nothing committed at the base has no directory in the
+        // checkout. Making one would hand the agent an empty directory, not
+        // the scope, so the run ends here instead -- a bench attempt with an
+        // `error` verdict and this reason, never `skipped`: the text must not
+        // say "reset failed".
+        let session = session_dir(&dir, scope_path).await?;
+        if !session.is_dir() {
+            return Err(FactoryError::BadRequest(format!(
+                "the scope's directory {} is not in the checked-out base: the scope has nothing committed there, \
+                 so the run was not started in the worktree root instead",
+                session.display()
+            )));
+        }
+        Ok((session, run))
+    }
+    /// Where a run's session works, worked out again after dispatch -- for
+    /// its gates, its workflow exit checks and its relative `--artifact`
+    /// paths: the scope's own directory inside the run's worktree, or the
+    /// scope itself for a `--no-worktree` run. Both are the directory a
+    /// `--no-worktree` run of that scope uses (`#379`), so a scope-relative
+    /// command never passes or fails on the worktree flag. A bench case's
+    /// reset and gate are not this: they stay at the worktree root.
+    pub(crate) async fn run_session_dir(&self, run: &Run, scope: &str) -> Result<PathBuf> {
+        let scope_path = self.wiring.snapshot().scope_path(scope)?;
+        match &run.worktree_path {
+            Some(worktree) => session_dir(Path::new(worktree), &scope_path).await,
+            None => Ok(scope_path),
+        }
     }
     /// The token is what makes a call about a run come from that run --
     /// the agent's own report, or its harness's turn-end hook -- rather than
@@ -1057,19 +1084,15 @@ async fn run_workspace_reset(dir: &Path, command: &str) -> std::result::Result<(
     }
 }
 
-/// Where a worktree run's session starts: the scope's own directory inside the worktree, the same place a
+/// Where a worktree run's session works: the scope's own directory inside the worktree, the same place a
 /// `--no-worktree` run starts (`#379`). The worktree itself is the whole repository, so a scope inside a larger one
-/// is joined back to its own subdirectory; a scope that is its own repository gets the worktree unchanged. When the
-/// base has nothing committed there, the directory is made -- after any reset, which could clean an empty one away --
-/// rather than falling back to the root: an empty directory is one git never sees.
+/// is joined back to its own subdirectory; a scope that is its own repository gets the worktree unchanged. Only the
+/// path: whether it exists is `place_run`'s question, which refuses a missing one rather than making it.
 async fn session_dir(worktree: &Path, scope_path: &Path) -> Result<PathBuf> {
     let prefix = worktree::scope_prefix(scope_path).await.map_err(|e| FactoryError::adapter("workspace", e))?;
+    // Joining an empty prefix would leave a trailing `/` on the path the prompt names.
     if prefix.as_os_str().is_empty() {
         return Ok(worktree.to_path_buf());
     }
-    let dir = worktree.join(prefix);
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| FactoryError::adapter("workspace", format!("creating {}: {e}", dir.display())))?;
-    Ok(dir)
+    Ok(worktree.join(prefix))
 }
