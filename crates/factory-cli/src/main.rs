@@ -2188,6 +2188,10 @@ async fn main() -> Result<()> {
                             if !a.declared {
                                 flags.push("undeclared".into());
                             }
+                            // Sent only when it differs from the daemon's (`#385`).
+                            if let Some(secs) = a.ack_timeout_seconds {
+                                flags.push(format!("ack {secs}s"));
+                            }
                             // One standing session keeps its state on the row;
                             // more than one (`#329`) is a count there. Either
                             // way every instance on record gets a line of its

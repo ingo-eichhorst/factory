@@ -94,6 +94,9 @@ pub enum AgentRef {
         /// See `ScopeAgent::instances`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         instances: Option<u32>,
+        /// See `ScopeAgent::ack_timeout_seconds`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ack_timeout_seconds: Option<u64>,
     },
 }
 
@@ -128,6 +131,8 @@ impl<'de> Deserialize<'de> for AgentRef {
             max_sessions: Option<u32>,
             #[serde(default)]
             instances: Option<u32>,
+            #[serde(default)]
+            ack_timeout_seconds: Option<u64>,
         }
 
         let value = serde_yaml_ng::Value::deserialize(deserializer)?;
@@ -148,6 +153,7 @@ impl<'de> Deserialize<'de> for AgentRef {
                     provider: declaration.provider,
                     max_sessions: declaration.max_sessions,
                     instances: declaration.instances,
+                    ack_timeout_seconds: declaration.ack_timeout_seconds,
                 })
             }
             _ => Err(serde::de::Error::custom(
@@ -224,6 +230,15 @@ pub struct ScopeAgent {
     /// a task agent are refused at load. `factory agent scale` rewrites it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instances: Option<u32>,
+    /// How long a run of this agent may sit `dispatching` -- given the task,
+    /// not yet having said a word -- before it fails as an `ack_timeout`
+    /// (`#385`). Absent means the daemon's `ack_timeout_seconds`; a task's
+    /// own `ack_timeout_seconds` still beats this. For an agent whose first
+    /// turn is legitimately slow, a local model with a long prefill, without
+    /// making every other agent wait as long to be caught on a trust prompt.
+    /// `0` is refused at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_timeout_seconds: Option<u64>,
 }
 
 impl ScopeAgent {
@@ -277,6 +292,7 @@ pub fn declared_agents(agent: Option<&AgentRef>, agents: &[ScopeAgent]) -> Vec<S
         provider,
         max_sessions,
         instances,
+        ack_timeout_seconds,
     }) = agent
     {
         out.push(ScopeAgent {
@@ -291,6 +307,7 @@ pub fn declared_agents(agent: Option<&AgentRef>, agents: &[ScopeAgent]) -> Vec<S
             provider: provider.clone(),
             max_sessions: *max_sessions,
             instances: *instances,
+            ack_timeout_seconds: *ack_timeout_seconds,
         });
     }
     for a in agents {
@@ -343,6 +360,8 @@ pub fn agents_with(
         max_sessions: None,
         // One of it: there is no declaration to say otherwise.
         instances: None,
+        // And the daemon's patience.
+        ack_timeout_seconds: None,
     });
     out
 }

@@ -890,6 +890,7 @@ impl Engine {
             .infrastructure
             .refuse_unknown_provider(&from_file, &agent)?;
         factory_core::config::refuse_bad_openshell(&from_file, &agent)?;
+        factory_core::config::refuse_zero_ack_timeout(&from_file, &agent)?;
         if agent.lifetime == Lifetime::Task && agent.autostart.is_some() {
             return Err(bad("a task agent cannot set autostart"));
         }
@@ -1889,6 +1890,7 @@ mod tests {
             provider: None,
             max_sessions: None,
             instances: None,
+            ack_timeout_seconds: None,
         }
     }
 
@@ -2065,6 +2067,43 @@ mod tests {
 
         assert!(engine.configure_agent("demo", invalid).is_err());
         assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    /// `#385`: an agent added from the roster keeps its own
+    /// acknowledgement timeout on disk and in the live snapshot, and a zero
+    /// is refused before the file is touched -- the same refusal a load
+    /// would make, so the edit cannot leave a config the daemon will not start.
+    #[test]
+    fn an_added_agent_keeps_its_ack_timeout_and_a_zero_is_refused_before_writing() {
+        let yaml = "version: 1\nscope: { id: scope-id, name: demo }\n";
+        let scratch = Scratch::new("ack-timeout", yaml);
+        let engine = engine(&scratch);
+        let path = scratch.0.join(FACTORY_DIR).join(CONFIG_FILE);
+        let before = fs::read(&path).unwrap();
+
+        let zero = ScopeAgent {
+            ack_timeout_seconds: Some(0),
+            ..agent("local")
+        };
+        let error = engine
+            .configure_agent("demo", zero)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ack_timeout_seconds: 0"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        let local = ScopeAgent {
+            ack_timeout_seconds: Some(600),
+            ..agent("local")
+        };
+        engine.configure_agent("demo", local).unwrap();
+        let yaml: Value = serde_yaml_ng::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            yaml["scope"]["agents"][0]["ack_timeout_seconds"].as_u64(),
+            Some(600)
+        );
+        let (_, _, declared) = engine.resolve_agent("demo", "local").unwrap();
+        assert_eq!(declared.unwrap().ack_timeout_seconds, Some(600));
     }
 
     #[test]

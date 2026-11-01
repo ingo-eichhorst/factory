@@ -2296,6 +2296,13 @@ pub struct AgentView {
     /// above are instance 1's, as they always were.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub instances: Vec<AgentInstanceView>,
+    /// How long a run of it may go unacknowledged before it fails as an
+    /// `ack_timeout`, when its declaration sets a value that differs from
+    /// the daemon's own `ack_timeout_seconds` (`#385`). Absent when it
+    /// answers to the daemon's, and from an older daemon. A task's own
+    /// `ack_timeout_seconds` still beats it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_timeout_seconds: Option<u64>,
 }
 
 /// One standing instance of an agent, as the roster lists it (`#329`).

@@ -1693,6 +1693,7 @@ mod tests {
                 provider: None,
                 max_sessions,
                 instances: None,
+                ack_timeout_seconds: None,
             }
         }
 
@@ -2060,6 +2061,179 @@ mod tests {
                 }
             }
             assert_eq!(waiting_count, 9);
+        }
+
+        /// `#385`, from the dispatch to the watchdog's verdict: an agent
+        /// declaring `ack_timeout_seconds: 600` is still waited for 200 s
+        /// in, past the daemon's 180, while one that declares nothing is
+        /// failed as an `ack_timeout` at the same moment. The stub runtime
+        /// never reports, so every run sits `Dispatching` exactly as a slow
+        /// first turn does; `now` is passed in, so nothing sleeps.
+        #[tokio::test]
+        async fn an_agents_own_ack_timeout_outlasts_the_daemons_and_a_tasks_own_still_beats_it() {
+            let local = ScopeAgent {
+                ack_timeout_seconds: Some(600),
+                ..agent("local", "shell", None)
+            };
+            let engine = capacity_engine(vec![local, agent("hosted", "shell", None)], None);
+            let daemon = engine.factory_snapshot().config.daemon.clone();
+            assert_eq!(
+                daemon.ack_timeout_seconds, 180,
+                "the default this test is measured against"
+            );
+            let defaults = crate::scheduler::Patience {
+                ack: daemon.ack_timeout_seconds,
+                timeout: daemon.task_timeout_seconds,
+                blocked: daemon.blocked_timeout_seconds,
+            };
+
+            let slow = task(&engine, "local model", "local").await;
+            let quick = task(&engine, "hosted model", "hosted").await;
+            // A task that names its own patience beats its agent's.
+            let hurried = engine
+                .l4_service()
+                .create(NewTask {
+                    title: "local model, in a hurry".into(),
+                    instructions: "true".into(),
+                    scope: Some("demo".into()),
+                    agent: Some("local".into()),
+                    worktree: Some(false),
+                    ack_timeout_seconds: Some(60),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let mut runs = Vec::new();
+            for t in [&slow, &quick, &hurried] {
+                engine.l4_service().start_run(&t.id, Trigger::Manual).await;
+                let run = engine
+                    .l4
+                    .store
+                    .active_run(&t.id)
+                    .await
+                    .unwrap()
+                    .expect("dispatched");
+                assert_eq!(run.status, RunStatus::Dispatching, "{}", t.title);
+                runs.push(run);
+            }
+            let [slow_run, quick_run, hurried_run] = runs.try_into().unwrap();
+            let after = |run: &Run, secs: i64| run.started_at + chrono::Duration::seconds(secs);
+
+            assert!(
+                !engine
+                    .l4_service()
+                    .fail_if_overdue(&slow_run, after(&slow_run, 200), defaults)
+                    .await,
+                "an agent that declares 600 s is still being waited for at 200 s"
+            );
+            assert_eq!(
+                engine
+                    .l4_service()
+                    .require_run(&slow_run.id)
+                    .await
+                    .unwrap()
+                    .status,
+                RunStatus::Dispatching
+            );
+
+            assert!(
+                engine
+                    .l4_service()
+                    .fail_if_overdue(&quick_run, after(&quick_run, 200), defaults)
+                    .await,
+                "an agent that declares nothing is failed at 200 s, past the daemon's 180"
+            );
+            let failed = engine
+                .l4_service()
+                .require_run(&quick_run.id)
+                .await
+                .unwrap();
+            assert_eq!(failed.status, RunStatus::Failed);
+            assert_eq!(failed.fail_kind, Some(FailKind::AckTimeout));
+            assert!(
+                failed
+                    .error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("within 180s"),
+                "{:?}",
+                failed.error
+            );
+
+            assert!(
+                engine
+                    .l4_service()
+                    .fail_if_overdue(&hurried_run, after(&hurried_run, 200), defaults)
+                    .await,
+                "the task's own 60 s beats its agent's 600"
+            );
+            let failed = engine
+                .l4_service()
+                .require_run(&hurried_run.id)
+                .await
+                .unwrap();
+            assert_eq!(failed.fail_kind, Some(FailKind::AckTimeout));
+            assert!(
+                failed.error.as_deref().unwrap_or("").contains("within 60s"),
+                "{:?}",
+                failed.error
+            );
+
+            // And the agent's own patience is a limit, not an exemption.
+            assert!(
+                engine
+                    .l4_service()
+                    .fail_if_overdue(&slow_run, after(&slow_run, 601), defaults)
+                    .await
+            );
+            let failed = engine.l4_service().require_run(&slow_run.id).await.unwrap();
+            assert_eq!(failed.fail_kind, Some(FailKind::AckTimeout));
+            assert!(
+                failed
+                    .error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("within 600s"),
+                "{:?}",
+                failed.error
+            );
+        }
+
+        /// `factory agents` names an agent's own acknowledgement timeout
+        /// only where it changes something: a declared 600 is shown, a
+        /// declared value equal to the daemon's and an absent one are not.
+        #[tokio::test]
+        async fn the_roster_shows_an_agents_ack_timeout_only_when_it_differs_from_the_daemons() {
+            let engine = capacity_engine(
+                vec![
+                    ScopeAgent {
+                        ack_timeout_seconds: Some(600),
+                        ..agent("local", "shell", None)
+                    },
+                    ScopeAgent {
+                        ack_timeout_seconds: Some(180),
+                        ..agent("same", "shell", None)
+                    },
+                    agent("hosted", "shell", None),
+                ],
+                None,
+            );
+            let (views, _) = engine.scope_views().await.unwrap();
+            let shown = |name: &str| {
+                views[0]
+                    .agents
+                    .iter()
+                    .find(|a| a.name == name)
+                    .expect(name)
+                    .ack_timeout_seconds
+            };
+            assert_eq!(shown("local"), Some(600));
+            assert_eq!(
+                shown("same"),
+                None,
+                "the daemon's own 180, restated, changes nothing"
+            );
+            assert_eq!(shown("hosted"), None);
         }
     }
 
@@ -2466,6 +2640,7 @@ mod tests {
                 provider: None,
                 max_sessions: None,
                 instances: None,
+                ack_timeout_seconds: None,
             });
         }
 
@@ -2885,6 +3060,7 @@ mod tests {
                 provider: None,
                 max_sessions: None,
                 instances: None,
+                ack_timeout_seconds: None,
             });
             factory.config.daemon.foreman.enabled = true;
         }
@@ -6101,6 +6277,7 @@ edges: [{id: next, from: implement, to: review}]
                 provider: None,
                 max_sessions: None,
                 instances: None,
+                ack_timeout_seconds: None,
             });
             let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
             let engine = Arc::new(Engine::new(factory, registry, store, PathBuf::from("factory"), Vec::new()));

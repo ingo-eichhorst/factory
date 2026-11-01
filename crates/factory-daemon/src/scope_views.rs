@@ -227,6 +227,11 @@ impl Engine {
                         .flatten(),
                     wanted,
                     instances,
+                    // Only where it changes something: an agent that answers
+                    // to the daemon's own patience says nothing (`#385`).
+                    ack_timeout_seconds: decl
+                        .ack_timeout_seconds
+                        .filter(|secs| *secs != factory.config.daemon.ack_timeout_seconds),
                 });
             }
 
@@ -267,6 +272,7 @@ impl Engine {
                         readiness: None,
                         wanted: None,
                         instances: Vec::new(),
+                        ack_timeout_seconds: None,
                     },
                 );
             }
@@ -305,6 +311,7 @@ impl Engine {
                     readiness: None,
                     wanted: None,
                     instances: Vec::new(),
+                    ack_timeout_seconds: None,
                 });
             }
 

@@ -1483,6 +1483,7 @@ mod tests {
                     provider: None,
                     max_sessions: None,
                     instances: None,
+                    ack_timeout_seconds: None,
                 }],
                 runtime: Some("quiet".into()),
                 ..Default::default()
