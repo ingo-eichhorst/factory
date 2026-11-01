@@ -146,8 +146,11 @@ pub struct BenchAttempt {
     pub run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<Verdict>,
-    /// `done` or `failed` -- set only for `Verdict::Unverified`, the agent's
-    /// own word about how it ended.
+    /// `done`, `failed` or `blocked` -- the agent's own word about how it
+    /// ended, set whenever the verdict came from the case's gate (or its
+    /// absence, `Verdict::Unverified`) rather than from the daemon giving up.
+    /// `blocked` (#381) means the attempt was judged on a blocked report: a
+    /// bench run never answers, so the gate ran then and the run was ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported: Option<String>,
     /// Free text: why this attempt was skipped, or the daemon's reason for
