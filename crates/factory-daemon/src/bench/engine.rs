@@ -1623,22 +1623,23 @@ mod tests {
         assert_eq!(settled.status, BenchRunStatus::Done, "the bench run settles: {settled:?}");
 
         // Then the attempt ends: its run and task settle and nothing is left
-        // waiting on an answer.
+        // waiting on an answer. `finish_run` writes the run before it mirrors
+        // the run onto the task, so both are waited for.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let ended = loop {
+        let (ended, task_after) = loop {
             let run = engine.l4.store.get_run(&task_run.id).await.unwrap().unwrap();
-            if run.status.is_terminal() {
-                break run;
+            let task = engine.l4.store.get(&task.id).await.unwrap().unwrap();
+            if run.status.is_terminal() && task.is_settled() {
+                break (run, task);
             }
-            assert!(std::time::Instant::now() < deadline, "the blocked run was never ended: {run:?}");
+            assert!(std::time::Instant::now() < deadline, "the blocked attempt was never ended: {run:?} {task:?}");
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         };
         assert_eq!(ended.status, RunStatus::Cancelled, "{ended:?}");
         assert_eq!(ended.fail_kind, Some(factory_core::run::FailKind::CancelledWithParent), "{ended:?}");
         assert!(ended.session.is_none() && ended.blocked_since.is_none(), "{ended:?}");
         assert!(engine.l4.store.active_run(&task.id).await.unwrap().is_none());
-        let task_after = engine.l4.store.get(&task.id).await.unwrap().unwrap();
-        assert!(task_after.is_settled(), "{task_after:?}");
+        assert_eq!(task_after.status, TaskStatus::Cancelled, "{task_after:?}");
 
         // The journal says it was judged on a blocked report.
         let entries = engine.l4.store.entries(&task.id, 200).await.unwrap();
