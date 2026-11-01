@@ -316,7 +316,7 @@ mod tests {
             role: None, policy_frameworks: vec![], goal: None, quality: vec![],
             task: Some(TaskBinding {
                 task: (&task).try_into().unwrap(), run_id: "r2".into(), attempt: 2,
-                token: "test-token".into(), worktree_branch: Some("task/t1".into()),
+                token: "test-token".into(), worktree_branch: Some("task/t1".into()), worktree_root: None,
                 resumed_session: Some("conversation".into()), upstream: vec![UpstreamOutput {
                     node_id: "upstream-node".into(), task_id: "upstream-task".into(),
                     title: "upstream".into(), result: Some("result".into()),

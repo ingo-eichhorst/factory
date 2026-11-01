@@ -95,17 +95,20 @@ fn read_file(path: &Path) -> Result<ReadFile> {
     Ok(ReadFile { sha256: ch::sha256_hex(&bytes), file: OutgoingFile { name, bytes } })
 }
 
-/// Where a run's files may come from: its working directory, and nothing
-/// under `.git` or `.factory` inside it. The owner's may come from anywhere.
-fn file_path(dir: Option<&Path>, asked: &str) -> Result<PathBuf> {
+/// Where a run's files may come from: a path relative to its working
+/// directory, inside the worktree it works in -- the two differ only for a
+/// worktree run of a scope inside a larger repository (`#379`) -- and
+/// nothing under `.git` or `.factory` inside it. `dirs` is that worktree and
+/// that working directory. The owner's may come from anywhere.
+fn file_path(dirs: Option<(&Path, &Path)>, asked: &str) -> Result<PathBuf> {
     let given = Path::new(asked);
-    let Some(dir) = dir else {
+    let Some((dir, session)) = dirs else {
         if !given.is_absolute() {
             return Err(refused(format!("{asked:?} is not an absolute path")));
         }
         return std::fs::canonicalize(given).map_err(|e| refused(format!("{asked:?}: {e}")));
     };
-    let path = std::fs::canonicalize(dir.join(given)).map_err(|e| refused(format!("{asked:?}: {e}")))?;
+    let path = std::fs::canonicalize(session.join(given)).map_err(|e| refused(format!("{asked:?}: {e}")))?;
     let inside = path
         .strip_prefix(dir)
         .map_err(|_| refused(format!("{asked:?} is not inside this run's working directory; a run sends only its own files")))?;
@@ -270,22 +273,24 @@ impl L4Service<'_> {
         }
         ch::split_text(&text).map_err(refused)?;
 
-        let dir = match &sender {
+        let dirs = match &sender {
             Sender::Owner => None,
-            Sender::Run { run, task } => Some(
+            Sender::Run { run, task } => Some((
                 std::fs::canonicalize(match &run.worktree_path {
                     Some(path) => PathBuf::from(path),
                     None => snapshot.scope_path(&task.scope)?,
                 })
-                .map_err(|e| refused(format!("this run's working directory: {e}")))?,
-            ),
+                .map_err(|e| refused(format!("this run's worktree: {e}")))?,
+                std::fs::canonicalize(self.run_session_dir(run, &task.scope).await?)
+                    .map_err(|e| refused(format!("this run's working directory: {e}")))?,
+            )),
         };
         if files.len() > ch::MAX_FILES {
             return Err(refused(format!("at most {} files go in one send", ch::MAX_FILES)));
         }
         let mut read = Vec::new();
         for asked in &files {
-            read.push(read_file(&file_path(dir.as_deref(), asked)?)?);
+            read.push(read_file(&file_path(dirs.as_ref().map(|(dir, session)| (dir.as_path(), session.as_path())), asked)?)?);
         }
 
         let mut data = serde_json::json!({
@@ -708,6 +713,28 @@ mod tests {
         assert_eq!(withdrawn.deliver, None);
         let kinds: Vec<_> = rig.journal(&task.id).await.into_iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&"delivery_approved".to_string()) && kinds.contains(&"delivery_withdrawn".to_string()), "{kinds:?}");
+    }
+
+    /// `#379`: a worktree run of a scope inside a larger repository works in
+    /// the scope's own directory of a worktree of the whole repository. A
+    /// relative `--file` starts there, and must stay inside the worktree.
+    #[test]
+    fn a_nested_scopes_relative_file_starts_in_its_own_directory_inside_the_worktree() {
+        let base = std::env::temp_dir().join(format!("factory-notify-nested-{}", uuid::Uuid::new_v4()));
+        let worktree = base.join("worktree");
+        let session = worktree.join("company/finance");
+        std::fs::create_dir_all(session.join("out")).unwrap();
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        std::fs::write(session.join("out/report.pdf"), "the report").unwrap();
+        std::fs::write(worktree.join(".git/config"), "git's own").unwrap();
+        std::fs::write(base.join("outside.txt"), "not the run's").unwrap();
+        let (worktree, session) = (std::fs::canonicalize(&worktree).unwrap(), std::fs::canonicalize(&session).unwrap());
+        let dirs = Some((worktree.as_path(), session.as_path()));
+
+        assert_eq!(super::file_path(dirs, "out/report.pdf").unwrap(), session.join("out/report.pdf"));
+        assert!(super::file_path(dirs, "../../../outside.txt").is_err(), "outside the worktree");
+        assert!(super::file_path(dirs, "../../.git/config").is_err(), "git's internals");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[tokio::test]

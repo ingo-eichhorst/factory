@@ -1821,7 +1821,21 @@ to it. A case names a scope, carries instructions, and may pin a `base`
 commit, a `reset` command that runs before an attempt starts, and a `gate`
 command whose exit status is the verdict. `gate` and `reset` run as the owner
 inside the attempt's own worktree — the same trust as the `shell` agent, and
-the dataset view says so. Datasets are built three ways: by hand
+the dataset view says so. They run at the worktree's root, which is the root
+of the scope's repository: for a scope inside a larger repository, a path in
+them is relative to that repository, not to the scope, and existing datasets
+depend on that. The agent's session works somewhere else for such a scope:
+in the scope's own directory inside the worktree (`<worktree>/company/finance`
+for a scope at `company/finance`), where a `--no-worktree` run of it starts
+too, so it reads the scope's own `AGENTS.md` (#379). Its relative `--artifact`
+and `notify --file` paths start there too, and must stay inside the worktree;
+outside the bench, so do a policy's required gates and a workflow exit's
+`check:`. If the case's `base` has nothing committed in that directory, the
+attempt is not started in the root instead: it ends before dispatch with an
+`error` verdict naming the missing path. The run's recorded worktree, which
+`bench clean` removes, is still the root. A scope that is its own repository
+sees no difference. An attempt in an OpenShell sandbox is the exception: the
+sandbox is still handed the worktree root. Datasets are built three ways: by hand
 (`factory dataset create` and `case add`), generated from recorded tasks
 (`factory dataset from-tasks`, which copies title, instructions and scope,
 records `origin` for reference only, and never sets a `gate`), or
@@ -4964,8 +4978,10 @@ edges:
   by.
 - **Ordered exits.** A task node's `exits:` are checked top to bottom after
   its agent reports `done`; the first match wins. `check:` runs a bounded
-  shell command in that node's worktree (`0` holds, `1` does not, any other
-  result blocks the node with its output). `agent:` holds only when the agent
+  shell command in that node's session directory -- the scope's own
+  directory, inside the node's worktree or not, as a required gate does
+  (#379): `0` holds, `1` does not, any other result blocks the node with its
+  output. `agent:` holds only when the agent
   reports `done --send-to <to>`; the reporting contract lists the allowed
   targets, their exact rules, and rounds left. If nothing matches, all plain
   outgoing edges remain the default. A forward exit needs a matching plain
@@ -5079,9 +5095,14 @@ The same `requires:` list goes on an attribute of a quality profile
   reporting contract.
 - **`verifying`, and the `done` gate.** A run with required steps that reports
   `done` becomes `verifying`. The daemon runs each gate itself -- the bench
-  gate runner, `sh -c` in the run's worktree (the scope directory for a
-  `--no-worktree` task), exit 0 passes, ten minutes unless the requirement
-  says otherwise -- in plan order, stopping at the first failure. Every gate
+  gate runner, `sh -c` in the run's session directory, exit 0 passes, ten
+  minutes unless the requirement says otherwise -- in plan order, stopping at
+  the first failure. The session directory is the scope's own directory: the
+  scope itself for a `--no-worktree` task, and the same directory inside the
+  run's worktree otherwise (`<worktree>/company/finance` for a scope at
+  `company/finance` in a larger repository, #379), so a scope-relative gate
+  passes or fails the same with or without a worktree. The tree it judges is
+  still the whole worktree. Every gate
   appends an **attestation**: the step, who ran it (`factory-daemon`), the
   verdict, exit code, output tail, and the commit and dirtiness of the tree
   it judged. The run is `done` only when every required step has a passing
