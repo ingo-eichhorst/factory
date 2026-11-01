@@ -5785,6 +5785,9 @@ fn bench_run_detail(r: &BenchRun, results: &[BenchResult]) -> String {
             a.verdict.map(verdict_str).unwrap_or("pending"),
             a.task_id.as_deref().unwrap_or("--"),
         ));
+        if a.reported.as_deref() == Some("blocked") {
+            out.push_str("      judged on a blocked report\n");
+        }
         if let Some(reason) = &a.reason {
             out.push_str(&format!("      {reason}\n"));
         }
@@ -7948,6 +7951,39 @@ where
 
 #[cfg(test)]
 mod tests {
+    /// #381: `bench show` says which attempts were judged on a blocked
+    /// report, and says nothing of the kind for the others.
+    #[test]
+    fn bench_show_names_an_attempt_judged_on_a_blocked_report() {
+        use factory_core::bench::{BenchAttempt, BenchRunStatus};
+        let attempt = |agent: &str, reported: &str| {
+            let mut a = BenchAttempt::pending(format!("a-{agent}"), "boundary".into(), agent.into(), 1);
+            a.task_id = Some(format!("task-{agent}"));
+            a.verdict = Some(Verdict::Pass);
+            a.reported = Some(reported.into());
+            a
+        };
+        let run = BenchRun {
+            id: "8f16d6d2-0000-0000-0000-000000000000".into(),
+            dataset: "finance".into(),
+            dataset_revision: 3,
+            cases: Vec::new(),
+            case_bases: Default::default(),
+            agents: vec!["claude".into(), "kolibri".into()],
+            attempts_per_case: 1,
+            concurrency: 2,
+            status: BenchRunStatus::Done,
+            attempts: vec![attempt("claude", "blocked"), attempt("kolibri", "done")],
+            started_at: chrono::Utc::now(),
+            ended_at: None,
+        };
+        let text = bench_run_detail(&run, &[]);
+        let attempts = text.split("ATTEMPTS").nth(1).unwrap();
+        let (claude, kolibri) = attempts.split_once("kolibri").unwrap();
+        assert!(claude.contains("judged on a blocked report"), "{text}");
+        assert!(!kolibri.contains("blocked"), "{text}");
+    }
+
     #[test]
     fn notify_takes_a_channel_a_text_and_files_and_never_a_recipient() {
         let cli = Cli::try_parse_from(["factory", "notify", "owner-telegram", "Radar: 2 neue CFPs", "--file", "out/a.html", "--file", "b.pdf"]).unwrap();

@@ -124,7 +124,8 @@ function resultRow(r) {
 function chip(attempt) {
   const task = attempt.task_id ? state.tasks.get(attempt.task_id) : undefined;
   const v = attemptState(attempt, task);
-  const why = attempt.reason ? ` -- ${attempt.reason}` : "";
+  const blocked = attempt.reported === "blocked" ? " -- judged on a blocked report" : "";
+  const why = blocked + (attempt.reason ? ` -- ${attempt.reason}` : "");
   if (!attempt.task_id) {
     return `<span class="badge v-${esc(v)}" title="attempt ${esc(attempt.attempt)}${esc(why)}">${esc(v)}</span>`;
   }

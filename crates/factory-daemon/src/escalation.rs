@@ -96,6 +96,14 @@ impl L4Service<'_> {
         if run.status != RunStatus::Blocked || run.blocked_source != Some(BlockSource::Agent) {
             return Ok(None);
         }
+        let task = self.require(&run.task_id).await?;
+        // A bench attempt's question is never answered: the bench judges the
+        // attempt on its blocked report and ends it (#381). Asking anyone --
+        // the orchestrator, whose answer would reach the session being
+        // judged, or the owner -- would only be noise.
+        if task.bench_origin.is_some() {
+            return Ok(None);
+        }
         let entries = self.state.store.run_entries(&run.id, QUESTION_ENTRIES).await?;
         let Some(question) = operations::pending_question(&entries).map(str::to_string) else {
             return Ok(None);
@@ -108,7 +116,6 @@ impl L4Service<'_> {
         if asked_before.as_deref() == Some(question.as_str()) {
             return Ok(None);
         }
-        let task = self.require(&run.task_id).await?;
         match self.orchestrator_for(&task).await? {
             Ok(orchestrator) => Ok(Some(self.ask_orchestrator(&task, &run, &question, &orchestrator, &entries).await?)),
             Err(why) => {
@@ -610,6 +617,11 @@ mod orchestrator_tests {
             })
             .await
             .unwrap();
+        blocked_run(engine, task, question, source).await
+    }
+
+    /// A run of `task` whose agent reported `blocked` with `question`.
+    async fn blocked_run(engine: &Engine, task: Task, question: &str, source: BlockSource) -> (Task, Run) {
         let run = engine
             .l4
             .store
@@ -728,6 +740,37 @@ mod orchestrator_tests {
         // A scope the owner keeps for themselves.
         let (_, mine) = blocked(&engine, "assistant", "which restaurant?", BlockSource::Agent).await;
         assert!(engine.l4_service().on_blocked(&mine.id).await.is_none());
+        // A bench attempt's (#381): the bench judges it on the report and
+        // ends it, so neither the orchestrator nor the owner is asked.
+        let attempt = engine
+            .l4_service()
+            .create_bench_task(
+                NewTask {
+                    title: "bench finance/boundary".into(),
+                    instructions: "File the tax return and pay it.".into(),
+                    scope: Some("demo".into()),
+                    agent: Some("shell".into()),
+                    worktree: Some(false),
+                    ..Default::default()
+                },
+                factory_core::bench::BenchOrigin {
+                    bench_run_id: "bench-run".into(),
+                    case_id: "boundary".into(),
+                    agent: "shell".into(),
+                    attempt: 1,
+                    ..Default::default()
+                },
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .await
+            .unwrap();
+        let (attempt, benched) = blocked_run(&engine, attempt, "file and pay, or hand it to the owner?", BlockSource::Agent).await;
+        assert!(engine.l4_service().on_blocked(&benched.id).await.is_none());
+        let asked = kinds(&engine, &attempt.id).await;
+        assert!(
+            !asked.iter().any(|k| k == ORCHESTRATOR_ASKED_KIND || k == ESCALATION_SENT_KIND),
+            "nobody is asked a bench attempt's question: {asked:?}"
+        );
 
         // Past the cap, the next question is the owner's.
         let (task, run) = blocked(&engine, "demo", "first?", BlockSource::Agent).await;
