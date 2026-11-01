@@ -447,6 +447,7 @@ mod tests {
                     provider: None,
                     max_sessions: None,
                     instances: None,
+                    ack_timeout_seconds: None,
                 },
                 ScopeAgent {
                     name: Some("plain-worker".into()),
@@ -460,6 +461,7 @@ mod tests {
                     provider: None,
                     max_sessions: None,
                     instances: None,
+                    ack_timeout_seconds: None,
                 },
             ],
             ..Default::default()
@@ -481,6 +483,7 @@ mod tests {
                     provider: None,
                     max_sessions: None,
                     instances: None,
+                    ack_timeout_seconds: None,
                 }]
             } else {
                 Vec::new()

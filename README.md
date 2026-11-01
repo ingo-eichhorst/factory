@@ -100,6 +100,10 @@ scope:
     - name: codex
       harness: codex
       max_sessions: 3         # at most 3 sessions of this agent at once (#179)
+    - name: local
+      harness: pi
+      args: ["--model", "qwen3.8-27b"]
+      ack_timeout_seconds: 600 # a local model's slow first turn (#385); absent = the daemon's
 ```
 
 A permanent agent is **never failed for being quiet** — being quiet is what it
@@ -5229,6 +5233,20 @@ Three timeouts catch the rest:
   instead, counted from when the block began rather than when the run did, so
   a person has a real chance to see it and answer before the daemon gives up.
 
+All three are daemon-wide, and a task may set any of them for itself
+(`--ack-timeout`, `--timeout`, `--blocked-timeout`). An agent may set its own
+`ack_timeout_seconds` too, in its declaration next to `harness` and `args`
+(`#385`), for an agent whose first turn is slow on every task. A local model is
+the usual case: pi with Qwen3.8 27B on a local server spent 35 s on prefill and
+then about 140 s reasoning before its first tool call, so it was failed at 180 s
+while it was working. Raising the daemon-wide value would let every other agent
+sit on a trust prompt or a login for as long before anyone noticed; declaring
+`ack_timeout_seconds: 600` on that one agent leaves them alone. Its runs,
+benchmark attempts included, answer to that value; a task that sets its own
+still beats it; and `factory agents` shows it as `ack 600s` when it differs
+from the daemon's. It must be a positive whole number of seconds, or the
+config is refused at load. The other two timeouts have no per-agent form.
+
 A run whose session is no longer there fails `session_gone`, `Blocked` or not,
 because it can never report again. Failing a run closes its session, so the
 daemon makes sure first:
@@ -5613,7 +5631,8 @@ scope:
 An agent declaration, in `agents:` or the singular `agent:` block, takes
 `name` (default: the harness), `harness`, `lifetime` (`task`, `permanent` or
 `temporary`), `role`, `autostart`, `args`, `sandbox`/`openshell`,
-`provider`, `max_sessions` and, for a standing agent, `instances` -- see
+`provider`, `max_sessions`, `ack_timeout_seconds` (see the three timeouts
+in "How a task actually runs") and, for a standing agent, `instances` -- see
 "Task agents and standing agents" above. A name may not contain `/` or `#`:
 `#` is what a standing instance's id carries its number behind.
 

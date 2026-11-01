@@ -541,6 +541,7 @@ impl Config {
             let roles = self.roles_for_scope(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
+                refuse_zero_ack_timeout(scope, &agent)?;
                 refuse_bad_openshell(scope, &agent)?;
                 refuse_bad_secret_refs(&self.secrets, scope, &agent)?;
                 self.infrastructure.refuse_unknown_provider(scope, &agent)?;
@@ -681,6 +682,7 @@ impl Config {
             refuse_bad_instances(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
+                refuse_zero_ack_timeout(scope, &agent)?;
                 refuse_bad_openshell(scope, &agent)?;
                 refuse_bad_secret_refs(&self.secrets, scope, &agent)?;
                 self.infrastructure.refuse_unknown_provider(scope, &agent)?;
@@ -950,6 +952,24 @@ fn refuse_zero_max_sessions(scope: &Scope) -> Result<()> {
                 agent.name(),
             )));
         }
+    }
+    Ok(())
+}
+
+/// An agent's `ack_timeout_seconds: 0` would fail every run of it on the
+/// first watchdog tick, before any agent could answer (`#385`). Refused at
+/// load like `max_sessions: 0`, and by a roster edit before it writes; a
+/// negative or fractional value never gets this far, because the field does
+/// not parse.
+pub fn refuse_zero_ack_timeout(scope: &Scope, agent: &ScopeAgent) -> Result<()> {
+    if agent.ack_timeout_seconds == Some(0) {
+        return Err(FactoryError::BadRequest(format!(
+            "scope {:?} at {} gives {:?} ack_timeout_seconds: 0, which would fail every run of it \
+             before it could answer; give a positive number of seconds, or leave it out for the daemon's",
+            scope.name,
+            scope.path.display(),
+            agent.name(),
+        )));
     }
     Ok(())
 }
@@ -4063,6 +4083,67 @@ mod tests {
         let e = c.validate().unwrap_err().to_string();
         assert!(e.contains("projects/demo"), "{e}");
         assert!(e.contains("max_sessions: 0"), "{e}");
+    }
+
+    /// `ack_timeout_seconds` sits in the same three places `max_sessions`
+    /// does, and is proved from both spellings for the same reason (`#385`).
+    #[test]
+    fn ack_timeout_seconds_loads_from_both_agent_spellings_and_absent_means_the_daemons() {
+        let s: Scope = serde_yaml_ng::from_str(
+            "name: a\npath: .\nagent:\n  name: local\n  harness: pi\n  ack_timeout_seconds: 600\n\
+             agents:\n  - name: slow\n    harness: codex\n    ack_timeout_seconds: 300\n\
+             \x20 - name: bare\n    harness: shell\n",
+        )
+        .unwrap();
+        let declared = s.declared_agents();
+        assert_eq!(
+            declared[0].ack_timeout_seconds,
+            Some(600),
+            "the singular agent: spelling"
+        );
+        assert_eq!(
+            declared[1].ack_timeout_seconds,
+            Some(300),
+            "the agents: list spelling"
+        );
+        assert_eq!(
+            declared[2].ack_timeout_seconds, None,
+            "absent means the daemon's"
+        );
+        // And it survives being written back, as a roster edit does.
+        let again: Scope = serde_yaml_ng::from_str(&serde_yaml_ng::to_string(&s).unwrap()).unwrap();
+        let declared = again.declared_agents();
+        assert_eq!(declared[0].ack_timeout_seconds, Some(600));
+        assert_eq!(declared[1].ack_timeout_seconds, Some(300));
+    }
+
+    #[test]
+    fn a_zero_ack_timeout_is_refused_at_load_naming_the_scopes_path() {
+        for agents in [
+            "    agents:\n      - name: local\n        harness: pi\n        ack_timeout_seconds: 0\n",
+            "    agent:\n      name: local\n      harness: pi\n      ack_timeout_seconds: 0\n",
+        ] {
+            let c = config_with(&format!("scopes:\n  - name: demo\n    path: projects/demo\n{agents}"));
+            let e = c.validate().unwrap_err().to_string();
+            assert!(e.contains("projects/demo"), "{e}");
+            assert!(e.contains("local"), "{e}");
+            assert!(e.contains("ack_timeout_seconds: 0"), "{e}");
+        }
+    }
+
+    /// Only a positive whole number of seconds is an `ack_timeout_seconds`:
+    /// anything else is refused when the scope is read, from either
+    /// spelling, rather than loaded as the default.
+    #[test]
+    fn a_negative_fractional_or_quoted_ack_timeout_does_not_parse() {
+        for value in ["-5", "1.5", "\"600\"", "ten"] {
+            for yaml in [
+                format!("name: a\npath: .\nagents:\n  - name: local\n    harness: pi\n    ack_timeout_seconds: {value}\n"),
+                format!("name: a\npath: .\nagent:\n  name: local\n  harness: pi\n  ack_timeout_seconds: {value}\n"),
+            ] {
+                assert!(serde_yaml_ng::from_str::<Scope>(&yaml).is_err(), "{value} parsed:\n{yaml}");
+            }
+        }
     }
 
     /// `instances` sits in the same three places `max_sessions` does, and is

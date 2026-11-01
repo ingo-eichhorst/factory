@@ -3,19 +3,32 @@
 
 use chrono::{DateTime, Utc};
 use factory_core::adapter::runtime::RuntimeStatus;
-use factory_core::run::{FailKind, RunStatus, Trigger};
+use factory_core::run::{FailKind, Run, RunStatus, Trigger};
+use factory_core::task::Task;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::engine::Engine;
+use crate::l4_service::L4Service;
+
+/// The daemon's own patience, in seconds: what a run answers to when neither
+/// its task nor its agent says otherwise.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Patience {
+    pub(crate) ack: u64,
+    pub(crate) timeout: u64,
+    pub(crate) blocked: u64,
+}
 
 pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
     let factory = engine.factory_snapshot();
     let tick = Duration::from_secs(factory.config.daemon.tick_seconds.max(1));
-    let default_timeout = factory.config.daemon.task_timeout_seconds as i64;
-    let default_ack = factory.config.daemon.ack_timeout_seconds as i64;
-    let default_blocked = factory.config.daemon.blocked_timeout_seconds as i64;
+    let defaults = Patience {
+        ack: factory.config.daemon.ack_timeout_seconds,
+        timeout: factory.config.daemon.task_timeout_seconds,
+        blocked: factory.config.daemon.blocked_timeout_seconds,
+    };
     let mut ticker = tokio::time::interval(tick);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // How many ticks in a row each active run's session has read `Gone`.
@@ -143,46 +156,11 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
         gone_streaks.retain(|id, _| still_active.contains(id));
         for run in active {
             let now = Utc::now();
-
-            // A task may set its own patience. Read it per run rather than
-            // once before the loop, or an override would only take effect
-            // after the daemon was restarted.
-            let task = engine.l4.store.get(&run.task_id).await.ok().flatten();
-            let ack_secs = task
-                .as_ref()
-                .and_then(|t| t.ack_timeout_seconds)
-                .map(|v| v as i64)
-                .unwrap_or(default_ack);
-            let timeout_secs = task
-                .as_ref()
-                .and_then(|t| t.timeout_seconds)
-                .map(|v| v as i64)
-                .unwrap_or(default_timeout);
-            let blocked_secs = task
-                .as_ref()
-                .and_then(|t| t.blocked_timeout_seconds)
-                .map(|v| v as i64)
-                .unwrap_or(default_blocked);
-
-            // The run's clock, less every block that has ended: time spent
-            // waiting on a person is the blocked timeout's, never the run's.
-            let working_since = run.started_at + chrono::Duration::seconds(run.blocked_secs as i64);
-            if let Some((kind, why)) = overdue(
-                run.status,
-                working_since,
-                run.blocked_since,
-                now,
-                ack_secs,
-                timeout_secs,
-                blocked_secs,
-            ) {
-                // A run nobody acknowledged may be a harness that stopped
-                // starting since it was last probed: the next dispatch to
-                // it probes again rather than trusting the cache (#131).
-                if kind == FailKind::AckTimeout {
-                    engine.l4_service().doubt_harness_of(task.as_ref());
-                }
-                engine.l4_service().fail_run(&run.id, kind, &why).await;
+            if engine
+                .l4_service()
+                .fail_if_overdue(&run, now, defaults)
+                .await
+            {
                 continue;
             }
 
@@ -208,6 +186,77 @@ pub async fn run(engine: Arc<Engine>, mut shutdown: tokio::sync::watch::Receiver
                     .await;
             }
         }
+    }
+}
+
+impl L4Service<'_> {
+    /// Fail `run` if it has run out of patience at `now`, and say whether it
+    /// did. A task may set its own patience; read it per run rather than once
+    /// before the loop, or an override would only take effect after the
+    /// daemon was restarted.
+    pub(crate) async fn fail_if_overdue(
+        &self,
+        run: &Run,
+        now: DateTime<Utc>,
+        defaults: Patience,
+    ) -> bool {
+        let task = self.state.store.get(&run.task_id).await.ok().flatten();
+        let ack_secs = self.ack_timeout_for(task.as_ref(), run, defaults.ack) as i64;
+        let timeout_secs = task
+            .as_ref()
+            .and_then(|t| t.timeout_seconds)
+            .unwrap_or(defaults.timeout) as i64;
+        let blocked_secs = task
+            .as_ref()
+            .and_then(|t| t.blocked_timeout_seconds)
+            .unwrap_or(defaults.blocked) as i64;
+
+        // The run's clock, less every block that has ended: time spent
+        // waiting on a person is the blocked timeout's, never the run's.
+        let working_since = run.started_at + chrono::Duration::seconds(run.blocked_secs as i64);
+        let Some((kind, why)) = overdue(
+            run.status,
+            working_since,
+            run.blocked_since,
+            now,
+            ack_secs,
+            timeout_secs,
+            blocked_secs,
+        ) else {
+            return false;
+        };
+        // A run nobody acknowledged may be a harness that stopped
+        // starting since it was last probed: the next dispatch to
+        // it probes again rather than trusting the cache (#131).
+        if kind == FailKind::AckTimeout {
+            self.doubt_harness_of(task.as_ref());
+        }
+        self.fail_run(&run.id, kind, &why).await;
+        true
+    }
+
+    /// How long `run` may stay `Dispatching` before it is failed as an
+    /// `ack_timeout`: its task's own `ack_timeout_seconds`, which names this
+    /// one piece of work and so is the most specific; else the one its
+    /// agent's declaration sets (`#385`), for an agent whose first turn is
+    /// slow on every task (a local model's long prefill); else the daemon's.
+    ///
+    /// The agent is the one the run actually dispatched to, `run.agent`, not
+    /// whatever the task names now, and it is looked up in the live config,
+    /// so an edited declaration counts from the next tick. One that no longer
+    /// resolves -- removed since, or a bare adapter name that declares
+    /// nothing -- has no patience of its own, and the daemon's applies.
+    pub(crate) fn ack_timeout_for(&self, task: Option<&Task>, run: &Run, default: u64) -> u64 {
+        let Some(task) = task else { return default };
+        task.ack_timeout_seconds
+            .or_else(|| {
+                self.wiring
+                    .resolve_agent(&task.scope, &run.agent)
+                    .ok()
+                    .and_then(|(_, _, declared)| declared)
+                    .and_then(|declared| declared.ack_timeout_seconds)
+            })
+            .unwrap_or(default)
     }
 }
 
