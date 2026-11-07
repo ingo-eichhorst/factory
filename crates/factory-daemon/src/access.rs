@@ -436,6 +436,10 @@ impl Engine {
             // Explicit, destructive, and rare: only the owner cleans a bench
             // run's worktrees and branches away.
             Request::BenchRunClean { .. } => return Needs::Owner,
+            // #388: a composed run is a statement about which results belong
+            // side by side -- which runs, which attempts left out -- and that
+            // is the owner's to make, as cleaning is.
+            Request::BenchRunCompose { .. } => return Needs::Owner,
             // Restore materializes the whole company into a new root. Unlike
             // run/verify, no role grant opens it: choosing a cutover candidate
             // is the owner's decision alone (#153).
@@ -1422,6 +1426,42 @@ mod tests {
         assert!(!allowed(&e, &wearing("everything"), request.clone()).await);
         assert!(!allowed(&e, &foreman(), request.clone()).await);
         assert!(!allowed(&e, &worker("w"), request).await);
+    }
+
+    /// #388: composing a bench run is the owner's alone, as cleaning one is
+    /// -- no grant opens either, not even every grant at scope reach, and
+    /// not `bench.run`, which starts and cancels runs.
+    #[tokio::test]
+    async fn bench_compose_and_clean_are_the_owners_alone_even_when_a_role_has_every_grant() {
+        let e = engine_with_roles(
+            "roles:\n  everything:\n    grants: ['*']\n    reach: scope\n  bencher:\n    grants: [bench.run]\n    reach: scope\n",
+        );
+        let compose = Request::BenchRunCompose {
+            dataset: "finance".into(),
+            from: vec!["r1".into(), "r2".into()],
+            exclude: vec!["a1".into()],
+            note: Some("side by side".into()),
+        };
+        let clean = Request::BenchRunClean { id: "r1".into() };
+        for request in [compose, clean] {
+            assert!(
+                allowed(&e, &Caller::Owner, request.clone()).await,
+                "{request:?}"
+            );
+            assert!(
+                !allowed(&e, &wearing("everything"), request.clone()).await,
+                "{request:?}"
+            );
+            assert!(
+                !allowed(&e, &wearing("bencher"), request.clone()).await,
+                "{request:?}"
+            );
+            assert!(
+                !allowed(&e, &foreman(), request.clone()).await,
+                "{request:?}"
+            );
+            assert!(!allowed(&e, &worker("w"), request).await);
+        }
     }
 
     /// `deploy.record` is checked against the environment's own scope; own

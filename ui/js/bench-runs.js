@@ -86,6 +86,10 @@ function selectBenchRun(id) {
 
 // ------------------------------------------------------------------ render
 
+// #388: a run `bench compose` made from other runs' settled attempts.
+const composed = (r) => (r.composed_from || []).length > 0;
+const composedTag = (r) => (composed(r) ? ` <span class="sub">composed</span>` : "");
+
 function benchRunRow(r) {
   const { settled, total } = progress(r.attempts);
   const on = r.id === state.benchRunId ? ` aria-current="true"` : "";
@@ -93,7 +97,7 @@ function benchRunRow(r) {
     <td>${esc(r.dataset)}@${esc(r.dataset_revision)}</td>
     <td class="sub">${esc((r.agents || []).join(", "))}</td>
     <td class="sub">${esc(new Date(r.started_at).toLocaleString())}</td>
-    <td>${statusBadge(r.status)}</td>
+    <td>${statusBadge(r.status)}${composedTag(r)}</td>
     <td class="sub">${settled}/${total} settled</td>
   </tr>`;
 }
@@ -207,10 +211,11 @@ function renderBenchRunDetail() {
   $("bench-run-title").textContent = `${run.dataset}@${run.dataset_revision}`;
   const { settled, total } = progress(run.attempts);
   $("bench-run-status").innerHTML =
-    `${statusBadge(run.status)} <span class="sub">${settled}/${total} settled · agents ${esc((run.agents || []).join(", "))}</span>`;
+    `${statusBadge(run.status)}${composedTag(run)} <span class="sub">${settled}/${total} settled · agents ${esc((run.agents || []).join(", "))}</span>`;
 
-  $("bench-run-cancel").disabled = run.status !== "running";
-  $("bench-run-clean").disabled = run.status === "running";
+  // A composed run's worktrees are its sources': the daemon refuses both.
+  $("bench-run-cancel").disabled = run.status !== "running" || composed(run);
+  $("bench-run-clean").disabled = run.status === "running" || composed(run);
 
   $("bench-results").innerHTML = results.map(resultRow).join("");
 

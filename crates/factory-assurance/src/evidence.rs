@@ -1751,6 +1751,9 @@ mod tests {
             attempts: Vec::new(),
             started_at: time(),
             ended_at: None,
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         };
         bench.put_run(&run).await.unwrap();
         let mut attempt =

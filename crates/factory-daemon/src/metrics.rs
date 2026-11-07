@@ -1653,6 +1653,9 @@ mod tests {
             attempts: vec![pass.clone(), fail.clone()],
             started_at: Utc::now(),
             ended_at: Some(Utc::now()),
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         };
         // `put_run` never trusts `attempts` embedded on the struct -- they
         // live in their own table (`BenchStore::attempts`), written
@@ -1692,6 +1695,9 @@ mod tests {
             attempts: vec![pass.clone()],
             started_at: settled - chrono::Duration::hours(1),
             ended_at: Some(settled),
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         };
         engine.l5.bench.put_run(&run).await.unwrap();
         engine.l5.bench.put_attempt(&run.id, &pass).await.unwrap();

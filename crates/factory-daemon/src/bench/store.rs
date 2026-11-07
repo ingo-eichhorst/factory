@@ -20,6 +20,9 @@ mod integration_tests {
             attempts: Vec::new(),
             started_at: chrono::Utc::now(),
             ended_at: None,
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         }
     }
 

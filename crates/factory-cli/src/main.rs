@@ -1105,8 +1105,24 @@ enum BenchCmd {
     /// marks the rest cancelled.
     Cancel { id: String },
     /// Remove exactly this finished run's worktrees and branches. Owner
-    /// only; refused while the run is still going.
+    /// only; refused while the run is still going, and for a composed run.
     Clean { id: String },
+    /// Make one finished run from the settled attempts of existing runs of
+    /// the dataset, to read their results side by side. Dispatches nothing,
+    /// makes no worktree and runs no gate. Owner only.
+    Compose {
+        dataset: String,
+        /// A finished bench run of the dataset, repeatable, in the order the
+        /// composed run lists them.
+        #[arg(long = "from", required = true)]
+        from: Vec<String>,
+        /// An attempt id of one of those runs to leave out, repeatable.
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+        /// Free text kept with the composed run.
+        #[arg(long)]
+        note: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -5698,7 +5714,53 @@ async fn bench_cmd(json: bool, client: &Client, cmd: BenchCmd) -> Result<()> {
                 _ => None,
             })
         }
+        BenchCmd::Compose {
+            dataset,
+            from,
+            exclude,
+            note,
+        } => {
+            let payload = client
+                .send(Request::BenchRunCompose {
+                    dataset,
+                    from,
+                    exclude,
+                    note,
+                })
+                .await?;
+            print(&payload, json, |p| match p {
+                Payload::BenchRun { run, results } => Some(bench_run_detail(run, results)),
+                _ => None,
+            })
+        }
     }
+}
+
+/// The first eight characters of a run id, the way `bench runs` lists it.
+fn short_id(id: &str) -> &str {
+    &id[..8.min(id.len())]
+}
+
+/// #388: `finance@3 (ca6bc9d0, ad614d2c), finance@4 (7f40d36b)` -- each
+/// source revision with the sources at it, in `--from` order -- or `None`
+/// when every source is at the same revision and there is nothing to say.
+fn source_revisions_line(r: &BenchRun) -> Option<String> {
+    let mut by_revision: std::collections::BTreeMap<u64, Vec<&str>> = Default::default();
+    for id in &r.composed_from {
+        if let Some(revision) = r.source_revisions.get(id) {
+            by_revision.entry(*revision).or_default().push(short_id(id));
+        }
+    }
+    if by_revision.len() < 2 {
+        return None;
+    }
+    Some(
+        by_revision
+            .iter()
+            .map(|(revision, ids)| format!("{}@{revision} ({})", r.dataset, ids.join(", ")))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 fn knowledge_write_text(p: &Payload) -> Option<String> {
@@ -5736,14 +5798,15 @@ fn knowledge_write_text(p: &Payload) -> Option<String> {
 fn bench_run_line(r: &BenchRun) -> String {
     let settled = r.attempts.iter().filter(|a| a.verdict.is_some()).count();
     format!(
-        "{}  {}@{}  agents={}  {:<9} {}/{} settled",
-        &r.id[..8.min(r.id.len())],
+        "{}  {}@{}  agents={}  {:<9} {}/{} settled{}",
+        short_id(&r.id),
         r.dataset,
         r.dataset_revision,
         r.agents.join(","),
         r.status.as_str(),
         settled,
         r.attempts.len(),
+        if r.is_composed() { "  composed" } else { "" },
     )
 }
 
@@ -5763,6 +5826,18 @@ fn bench_run_detail(r: &BenchRun, results: &[BenchResult]) -> String {
     if let Some(ended) = r.ended_at {
         out.push_str(&format!("  ended      {}\n", ended.to_rfc3339()));
     }
+    if r.is_composed() {
+        out.push_str(&format!(
+            "  composed   from {}\n",
+            r.composed_from.join(", ")
+        ));
+        if let Some(revisions) = source_revisions_line(r) {
+            out.push_str(&format!("  revisions  the sources differ: {revisions}\n"));
+        }
+    }
+    if let Some(note) = &r.note {
+        out.push_str(&format!("  note       {note}\n"));
+    }
     out.push_str("\nRESULTS\n");
     for res in results {
         out.push_str(&format!(
@@ -5781,8 +5856,13 @@ fn bench_run_detail(r: &BenchRun, results: &[BenchResult]) -> String {
     }
     out.push_str("\nATTEMPTS\n");
     for a in &r.attempts {
+        let source = a
+            .source_run
+            .as_deref()
+            .map(|s| format!("  from {}", short_id(s)))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "  {:<24} {:<12} #{:<2} {:<10} {}\n",
+            "  {:<24} {:<12} #{:<2} {:<10} {}{source}\n",
             a.case_id,
             a.agent,
             a.attempt,
@@ -7980,12 +8060,132 @@ mod tests {
             attempts: vec![attempt("claude", "blocked"), attempt("kolibri", "done")],
             started_at: chrono::Utc::now(),
             ended_at: None,
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         };
         let text = bench_run_detail(&run, &[]);
         let attempts = text.split("ATTEMPTS").nth(1).unwrap();
         let (claude, kolibri) = attempts.split_once("kolibri").unwrap();
         assert!(claude.contains("judged on a blocked report"), "{text}");
         assert!(!kolibri.contains("blocked"), "{text}");
+    }
+
+    /// #388: a composed run says where it came from, its note, which source
+    /// each attempt is from, and -- only when they differ -- the sources'
+    /// dataset revisions.
+    #[test]
+    fn bench_show_says_a_run_was_composed_and_from_what() {
+        use factory_core::bench::{BenchAttempt, BenchRunStatus};
+        let attempt = |id: &str, agent: &str, source: &str| {
+            let mut a = BenchAttempt::pending(id.into(), "boundary".into(), agent.into(), 1);
+            a.verdict = Some(Verdict::Pass);
+            a.source_run = Some(source.into());
+            a
+        };
+        let mut run = BenchRun {
+            id: "c0c0c0c0-0000-0000-0000-000000000000".into(),
+            dataset: "finance".into(),
+            dataset_revision: 4,
+            cases: Vec::new(),
+            case_bases: Default::default(),
+            agents: vec!["sonnet".into(), "qwen".into()],
+            attempts_per_case: 1,
+            concurrency: 0,
+            status: BenchRunStatus::Done,
+            attempts: vec![
+                attempt("x1", "sonnet", "ca6bc9d0-6337-4cc9-b265-c19f00c87842"),
+                attempt("x2", "qwen", "7f40d36b-38a2-4c40-a70e-607937037f61"),
+            ],
+            started_at: chrono::Utc::now(),
+            ended_at: None,
+            composed_from: vec![
+                "ca6bc9d0-6337-4cc9-b265-c19f00c87842".into(),
+                "ad614d2c-8ce2-4754-9851-836e169815a6".into(),
+                "7f40d36b-38a2-4c40-a70e-607937037f61".into(),
+            ],
+            source_revisions: [
+                ("ca6bc9d0-6337-4cc9-b265-c19f00c87842".to_string(), 3),
+                ("ad614d2c-8ce2-4754-9851-836e169815a6".to_string(), 3),
+                ("7f40d36b-38a2-4c40-a70e-607937037f61".to_string(), 4),
+            ]
+            .into(),
+            note: Some("latest of each".into()),
+        };
+        let text = bench_run_detail(&run, &[]);
+        assert!(
+            text.contains(
+                "composed   from ca6bc9d0-6337-4cc9-b265-c19f00c87842, ad614d2c-8ce2-4754-9851-836e169815a6, \
+                 7f40d36b-38a2-4c40-a70e-607937037f61"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("note       latest of each"), "{text}");
+        assert!(text.contains("revisions  the sources differ: finance@3 (ca6bc9d0, ad614d2c), finance@4 (7f40d36b)"), "{text}");
+        let attempts = text.split("ATTEMPTS").nth(1).unwrap();
+        let (sonnet, qwen) = attempts.split_once("qwen").unwrap();
+        assert!(sonnet.contains("from ca6bc9d0"), "{text}");
+        assert!(qwen.contains("from 7f40d36b"), "{text}");
+        assert!(
+            bench_run_line(&run).ends_with("  composed"),
+            "{}",
+            bench_run_line(&run)
+        );
+
+        // One revision among the sources: nothing to point out.
+        run.source_revisions.values_mut().for_each(|r| *r = 4);
+        assert!(!bench_run_detail(&run, &[]).contains("revisions"));
+
+        // An ordinary run says none of it.
+        run.composed_from.clear();
+        run.source_revisions.clear();
+        run.note = None;
+        run.attempts.iter_mut().for_each(|a| a.source_run = None);
+        let text = bench_run_detail(&run, &[]);
+        assert!(
+            !text.contains("composed") && !text.contains("from ") && !text.contains("note"),
+            "{text}"
+        );
+        assert!(!bench_run_line(&run).contains("composed"));
+    }
+
+    #[test]
+    fn bench_compose_takes_repeated_from_and_exclude() {
+        let cli = Cli::try_parse_from([
+            "factory",
+            "bench",
+            "compose",
+            "finance",
+            "--from",
+            "r1",
+            "--from",
+            "r2",
+            "--exclude",
+            "a1",
+            "--note",
+            "side by side",
+        ])
+        .unwrap();
+        let Command::Bench { cmd: Some(cmd) } = cli.command else {
+            panic!("bench")
+        };
+        let BenchCmd::Compose {
+            dataset,
+            from,
+            exclude,
+            note,
+        } = cmd
+        else {
+            panic!("bench compose")
+        };
+        assert_eq!(dataset, "finance");
+        assert_eq!(from, ["r1", "r2"]);
+        assert_eq!(exclude, ["a1"]);
+        assert_eq!(note.as_deref(), Some("side by side"));
+        assert!(
+            Cli::try_parse_from(["factory", "bench", "compose", "finance"]).is_err(),
+            "--from is required"
+        );
     }
 
     #[test]

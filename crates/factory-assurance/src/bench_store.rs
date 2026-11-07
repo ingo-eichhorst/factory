@@ -57,6 +57,33 @@ fn decode_all<T: serde::de::DeserializeOwned>(rows: Vec<(String, String)>, table
         .collect()
 }
 
+fn write_run(conn: &Connection, meta: &BenchRun) -> Result<()> {
+    let data = serde_json::to_string(meta).map_err(error)?;
+    let status = match meta.status {
+        BenchRunStatus::Running => "running",
+        BenchRunStatus::Done => "done",
+        BenchRunStatus::Cancelled => "cancelled",
+    };
+    conn.execute(
+        "INSERT INTO bench_runs (id, dataset, status, updated_at, data) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET dataset=excluded.dataset, status=excluded.status, updated_at=excluded.updated_at, data=excluded.data",
+        params![meta.id, meta.dataset, status, chrono::Utc::now().to_rfc3339(), data],
+    )
+    .map_err(error)?;
+    Ok(())
+}
+
+fn write_attempt(conn: &Connection, run_id: &str, attempt: &BenchAttempt) -> Result<()> {
+    let data = serde_json::to_string(attempt).map_err(error)?;
+    conn.execute(
+        "INSERT INTO bench_attempts (id, bench_run_id, data) VALUES (?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+        params![attempt.id, run_id, data],
+    )
+    .map_err(error)?;
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct BenchStore {
     conn: Arc<Mutex<Connection>>,
@@ -102,40 +129,39 @@ impl BenchStore {
     pub async fn put_run(&self, run: &BenchRun) -> Result<()> {
         let mut meta = run.clone();
         meta.attempts = Vec::new();
-        self.with_conn(move |conn| {
-            let data = serde_json::to_string(&meta).map_err(error)?;
-            let status = match meta.status {
-                BenchRunStatus::Running => "running",
-                BenchRunStatus::Done => "done",
-                BenchRunStatus::Cancelled => "cancelled",
-            };
-            conn.execute(
-                "INSERT INTO bench_runs (id, dataset, status, updated_at, data) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(id) DO UPDATE SET dataset=excluded.dataset, status=excluded.status, updated_at=excluded.updated_at, data=excluded.data",
-                params![meta.id, meta.dataset, status, chrono::Utc::now().to_rfc3339(), data],
-            ).map_err(error)?;
-            Ok(())
-        }).await
+        self.with_conn(move |conn| write_run(conn, &meta)).await
     }
 
     pub async fn put_attempt(&self, run_id: &str, attempt: &BenchAttempt) -> Result<()> {
         let run_id = run_id.to_string();
         let attempt = attempt.clone();
+        self.with_conn(move |conn| write_attempt(conn, &run_id, &attempt))
+            .await
+    }
+
+    /// A run and every one of its attempts, in one transaction: either the
+    /// whole run is there afterwards or none of it is. For a run whose
+    /// attempts are all known at once -- a composed one (#388) -- which
+    /// must never be read back with only some of them.
+    pub async fn put_run_with_attempts(&self, run: &BenchRun) -> Result<()> {
+        let mut meta = run.clone();
+        let attempts = std::mem::take(&mut meta.attempts);
         self.with_conn(move |conn| {
-            let data = serde_json::to_string(&attempt).map_err(error)?;
-            conn.execute(
-                "INSERT INTO bench_attempts (id, bench_run_id, data) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(id) DO UPDATE SET data=excluded.data",
-                params![attempt.id, run_id, data],
-            )
-            .map_err(error)?;
-            Ok(())
+            let tx = conn.transaction().map_err(error)?;
+            write_run(&tx, &meta)?;
+            for attempt in &attempts {
+                write_attempt(&tx, &meta.id, attempt)?;
+            }
+            tx.commit().map_err(error)
         })
         .await
     }
 
     /// Every attempt of one run, ordered by case then agent then attempt
-    /// number so the same run always reassembles in the same order.
+    /// number so the same run always reassembles in the same order. A
+    /// composed run (#388) can hold two `#1`s of one agent at one case, one
+    /// from each source; the source run, then the id, keeps that order
+    /// stable too.
     pub async fn attempts(&self, run_id: &str) -> Result<Vec<BenchAttempt>> {
         let run_id = run_id.to_string();
         self.with_conn(move |conn| {
@@ -155,6 +181,8 @@ impl BenchStore {
                     .cmp(&b.case_id)
                     .then_with(|| a.agent.cmp(&b.agent))
                     .then_with(|| a.attempt.cmp(&b.attempt))
+                    .then_with(|| a.source_run.cmp(&b.source_run))
+                    .then_with(|| a.id.cmp(&b.id))
             });
             Ok(attempts)
         })
@@ -275,6 +303,9 @@ mod tests {
             attempts: Vec::new(),
             started_at: chrono::Utc::now(),
             ended_at: None,
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         }
     }
 
@@ -320,6 +351,78 @@ mod tests {
         let active = store.active_runs().await.unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].id, "running-run");
+    }
+
+    /// #388: rows written before `composed_from`, `source_revisions`, `note`
+    /// and `source_run` existed are read back, through the store, with those
+    /// fields empty -- the exact JSON an older daemon wrote, not a value
+    /// this one serialized.
+    #[tokio::test]
+    async fn rows_written_before_bench_compose_still_decode() {
+        let store = BenchStore::in_memory().unwrap();
+        let run = r#"{"id":"old","dataset":"finance","dataset_revision":3,"cases":[],"case_bases":{},"agents":["shell"],"attempts_per_case":1,"concurrency":1,"status":"done","attempts":[],"started_at":"2026-11-01T10:00:00Z","ended_at":"2026-11-01T11:00:00Z"}"#;
+        let attempt = r#"{"id":"old-a1","case_id":"c1","agent":"shell","attempt":1,"task_id":"t1","run_id":"r1","verdict":"pass","gate_exit_code":0,"gate_output":"ok"}"#;
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO bench_runs (id, dataset, status, updated_at, data) VALUES ('old', 'finance', 'done', '2026-11-01T11:00:00Z', ?1)",
+                [run],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO bench_attempts (id, bench_run_id, data) VALUES ('old-a1', 'old', ?1)",
+                [attempt],
+            )
+            .unwrap();
+        }
+
+        let loaded = store
+            .get_run("old")
+            .await
+            .unwrap()
+            .expect("the old row decodes");
+        assert!(
+            loaded.composed_from.is_empty()
+                && loaded.source_revisions.is_empty()
+                && loaded.note.is_none()
+        );
+        assert_eq!(loaded.attempts.len(), 1);
+        assert_eq!(loaded.attempts[0].source_run, None);
+        assert_eq!(loaded.attempts[0].gate_output.as_deref(), Some("ok"));
+        assert_eq!(
+            store.runs(Some("finance"), 10).await.unwrap().len(),
+            1,
+            "and lists, not skipped as malformed"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_run_with_attempts_writes_the_run_and_all_its_attempts() {
+        let store = BenchStore::in_memory().unwrap();
+        let mut run = run("composed");
+        run.status = BenchRunStatus::Done;
+        run.composed_from = vec!["a".into(), "b".into()];
+        run.note = Some("side by side".into());
+        for (id, source) in [("x2", "b"), ("x1", "a")] {
+            let mut attempt = BenchAttempt::pending(id.into(), "case".into(), "builder".into(), 1);
+            attempt.source_run = Some(source.into());
+            run.attempts.push(attempt);
+        }
+        store.put_run_with_attempts(&run).await.unwrap();
+
+        let loaded = store.get_run("composed").await.unwrap().unwrap();
+        assert_eq!(loaded.composed_from, ["a", "b"]);
+        assert_eq!(loaded.note.as_deref(), Some("side by side"));
+        let order: Vec<_> = loaded
+            .attempts
+            .iter()
+            .map(|a| (a.id.as_str(), a.source_run.as_deref()))
+            .collect();
+        assert_eq!(
+            order,
+            [("x1", Some("a")), ("x2", Some("b"))],
+            "two #1s order by source run"
+        );
     }
 
     #[tokio::test]
