@@ -171,8 +171,16 @@ impl Engine {
                 let results = factory_core::bench::aggregate(&run.attempts);
                 Ok(Payload::BenchRun { run, results })
             }
-            Request::BenchRunCompose { dataset, from, exclude, note } => {
-                let run = self.l5_service().compose_bench_run(&dataset, from, exclude, note).await?;
+            Request::BenchRunCompose {
+                dataset,
+                from,
+                exclude,
+                note,
+            } => {
+                let run = self
+                    .l5_service()
+                    .compose_bench_run(&dataset, from, exclude, note)
+                    .await?;
                 let results = factory_core::bench::aggregate(&run.attempts);
                 Ok(Payload::BenchRun { run, results })
             }

@@ -1444,10 +1444,22 @@ mod tests {
         };
         let clean = Request::BenchRunClean { id: "r1".into() };
         for request in [compose, clean] {
-            assert!(allowed(&e, &Caller::Owner, request.clone()).await, "{request:?}");
-            assert!(!allowed(&e, &wearing("everything"), request.clone()).await, "{request:?}");
-            assert!(!allowed(&e, &wearing("bencher"), request.clone()).await, "{request:?}");
-            assert!(!allowed(&e, &foreman(), request.clone()).await, "{request:?}");
+            assert!(
+                allowed(&e, &Caller::Owner, request.clone()).await,
+                "{request:?}"
+            );
+            assert!(
+                !allowed(&e, &wearing("everything"), request.clone()).await,
+                "{request:?}"
+            );
+            assert!(
+                !allowed(&e, &wearing("bencher"), request.clone()).await,
+                "{request:?}"
+            );
+            assert!(
+                !allowed(&e, &foreman(), request.clone()).await,
+                "{request:?}"
+            );
             assert!(!allowed(&e, &worker("w"), request).await);
         }
     }

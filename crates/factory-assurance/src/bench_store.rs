@@ -376,12 +376,24 @@ mod tests {
             .unwrap();
         }
 
-        let loaded = store.get_run("old").await.unwrap().expect("the old row decodes");
-        assert!(loaded.composed_from.is_empty() && loaded.source_revisions.is_empty() && loaded.note.is_none());
+        let loaded = store
+            .get_run("old")
+            .await
+            .unwrap()
+            .expect("the old row decodes");
+        assert!(
+            loaded.composed_from.is_empty()
+                && loaded.source_revisions.is_empty()
+                && loaded.note.is_none()
+        );
         assert_eq!(loaded.attempts.len(), 1);
         assert_eq!(loaded.attempts[0].source_run, None);
         assert_eq!(loaded.attempts[0].gate_output.as_deref(), Some("ok"));
-        assert_eq!(store.runs(Some("finance"), 10).await.unwrap().len(), 1, "and lists, not skipped as malformed");
+        assert_eq!(
+            store.runs(Some("finance"), 10).await.unwrap().len(),
+            1,
+            "and lists, not skipped as malformed"
+        );
     }
 
     #[tokio::test]
@@ -401,8 +413,16 @@ mod tests {
         let loaded = store.get_run("composed").await.unwrap().unwrap();
         assert_eq!(loaded.composed_from, ["a", "b"]);
         assert_eq!(loaded.note.as_deref(), Some("side by side"));
-        let order: Vec<_> = loaded.attempts.iter().map(|a| (a.id.as_str(), a.source_run.as_deref())).collect();
-        assert_eq!(order, [("x1", Some("a")), ("x2", Some("b"))], "two #1s order by source run");
+        let order: Vec<_> = loaded
+            .attempts
+            .iter()
+            .map(|a| (a.id.as_str(), a.source_run.as_deref()))
+            .collect();
+        assert_eq!(
+            order,
+            [("x1", Some("a")), ("x2", Some("b"))],
+            "two #1s order by source run"
+        );
     }
 
     #[tokio::test]

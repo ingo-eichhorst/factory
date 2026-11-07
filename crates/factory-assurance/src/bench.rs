@@ -355,8 +355,13 @@ pub fn compose(
     }
     let excluded: BTreeSet<&str> = exclude.iter().map(String::as_str).collect();
     for id in &excluded {
-        if !sources.iter().any(|s| s.attempts.iter().any(|a| a.id == *id)) {
-            return Err(format!("--exclude {id} is not an attempt of any --from run"));
+        if !sources
+            .iter()
+            .any(|s| s.attempts.iter().any(|a| a.id == *id))
+        {
+            return Err(format!(
+                "--exclude {id} is not an attempt of any --from run"
+            ));
         }
     }
 
@@ -384,13 +389,15 @@ pub fn compose(
     }
     let mut per_cell: BTreeMap<(&str, &str), u32> = BTreeMap::new();
     for attempt in &attempts {
-        *per_cell.entry((&attempt.agent, &attempt.case_id)).or_default() += 1;
+        *per_cell
+            .entry((&attempt.agent, &attempt.case_id))
+            .or_default() += 1;
     }
     let attempts_per_case = per_cell.values().copied().max().unwrap_or(0);
 
     // Newest first; a stable sort keeps `--from` order among equal starts.
     let mut by_age: Vec<&BenchRun> = sources.iter().collect();
-    by_age.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    by_age.sort_by_key(|s| std::cmp::Reverse(s.started_at));
     let mut cases = Vec::new();
     let mut case_bases = BTreeMap::new();
     for source in by_age {
@@ -409,7 +416,11 @@ pub fn compose(
     Ok(BenchRun {
         id: new_id(),
         dataset: dataset.to_string(),
-        dataset_revision: sources.iter().map(|s| s.dataset_revision).max().unwrap_or(0),
+        dataset_revision: sources
+            .iter()
+            .map(|s| s.dataset_revision)
+            .max()
+            .unwrap_or(0),
         cases,
         case_bases,
         agents,
@@ -417,10 +428,17 @@ pub fn compose(
         concurrency: 0,
         status: BenchRunStatus::Done,
         attempts,
-        started_at: sources.iter().map(|s| s.started_at).min().expect("at least one source"),
+        started_at: sources
+            .iter()
+            .map(|s| s.started_at)
+            .min()
+            .expect("at least one source"),
         ended_at: sources.iter().filter_map(|s| s.ended_at).max(),
         composed_from: sources.iter().map(|s| s.id.clone()).collect(),
-        source_revisions: sources.iter().map(|s| (s.id.clone(), s.dataset_revision)).collect(),
+        source_revisions: sources
+            .iter()
+            .map(|s| (s.id.clone(), s.dataset_revision))
+            .collect(),
         note,
     })
 }
@@ -722,7 +740,15 @@ mod tests {
         serde_json::from_value(serde_json::json!({"id": id, "title": id, "scope": "demo"})).unwrap()
     }
 
-    fn settled(id: &str, case: &str, agent: &str, n: u32, cfg: &ConfigSnapshot, verdict: Verdict, gate: &str) -> BenchAttempt {
+    fn settled(
+        id: &str,
+        case: &str,
+        agent: &str,
+        n: u32,
+        cfg: &ConfigSnapshot,
+        verdict: Verdict,
+        gate: &str,
+    ) -> BenchAttempt {
         let mut a = BenchAttempt::pending(id.into(), case.into(), agent.into(), n);
         a.task_id = Some(format!("task-{id}"));
         a.run_id = Some(format!("run-{id}"));
@@ -738,13 +764,24 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn source(id: &str, revision: u64, start: &str, end: &str, cases: &[(&str, &str)], agents: &[&str], attempts: Vec<BenchAttempt>) -> BenchRun {
+    fn source(
+        id: &str,
+        revision: u64,
+        start: &str,
+        end: &str,
+        cases: &[(&str, &str)],
+        agents: &[&str],
+        attempts: Vec<BenchAttempt>,
+    ) -> BenchRun {
         BenchRun {
             id: id.into(),
             dataset: "finance".into(),
             dataset_revision: revision,
             cases: cases.iter().map(|(c, _)| case(c)).collect(),
-            case_bases: cases.iter().map(|(c, b)| (c.to_string(), b.to_string())).collect(),
+            case_bases: cases
+                .iter()
+                .map(|(c, b)| (c.to_string(), b.to_string()))
+                .collect(),
             agents: agents.iter().map(|a| a.to_string()).collect(),
             attempts_per_case: 1,
             concurrency: 1,
@@ -772,8 +809,24 @@ mod tests {
             &["sonnet"],
             vec![
                 settled("o-1", "c1", "sonnet", 1, &sonnet, Verdict::Pass, "all good"),
-                settled("o-2", "c2", "sonnet", 1, &sonnet, Verdict::Fail, "assertion failed: 1 == 2"),
-                settled("o-3", "c2", "sonnet", 2, &sonnet, Verdict::Pass, "flaky pass"),
+                settled(
+                    "o-2",
+                    "c2",
+                    "sonnet",
+                    1,
+                    &sonnet,
+                    Verdict::Fail,
+                    "assertion failed: 1 == 2",
+                ),
+                settled(
+                    "o-3",
+                    "c2",
+                    "sonnet",
+                    2,
+                    &sonnet,
+                    Verdict::Pass,
+                    "flaky pass",
+                ),
             ],
         );
         let newer = source(
@@ -786,7 +839,15 @@ mod tests {
             vec![
                 settled("n-1", "c1", "qwen", 1, &qwen, Verdict::Pass, "qwen ok"),
                 settled("n-2", "c3", "qwen", 1, &qwen, Verdict::Unverified, ""),
-                settled("n-3", "c1", "sonnet", 1, &sonnet, Verdict::Fail, "sonnet broke c1"),
+                settled(
+                    "n-3",
+                    "c1",
+                    "sonnet",
+                    1,
+                    &sonnet,
+                    Verdict::Fail,
+                    "sonnet broke c1",
+                ),
             ],
         );
         (older, newer)
@@ -801,16 +862,31 @@ mod tests {
     }
 
     #[test]
-    fn composing_two_runs_with_an_exclude_copies_every_other_settled_attempt_unchanged_under_a_new_id() {
+    fn composing_two_runs_with_an_exclude_copies_every_other_settled_attempt_unchanged_under_a_new_id(
+    ) {
         let (older, newer) = two_sources();
         let sources = [older.clone(), newer.clone()];
-        let run = compose("finance", &sources, &["o-3".into()], Some("  side by side \n".into()), ids()).unwrap();
+        let run = compose(
+            "finance",
+            &sources,
+            &["o-3".into()],
+            Some("  side by side \n".into()),
+            ids(),
+        )
+        .unwrap();
 
-        assert_eq!(run.attempts.len(), 5, "three and three, less the one excluded");
+        assert_eq!(
+            run.attempts.len(),
+            5,
+            "three and three, less the one excluded"
+        );
         let originals: Vec<&BenchAttempt> = sources.iter().flat_map(|s| &s.attempts).collect();
         let new_ids: BTreeSet<&str> = run.attempts.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(new_ids.len(), 5, "every copy has an id of its own");
-        assert!(originals.iter().all(|o| !new_ids.contains(o.id.as_str())), "no source id is reused");
+        assert!(
+            originals.iter().all(|o| !new_ids.contains(o.id.as_str())),
+            "no source id is reused"
+        );
         assert!(!new_ids.contains(run.id.as_str()));
 
         // Everything but the id and `source_run` is the source attempt's own.
@@ -825,9 +901,17 @@ mod tests {
             let mut back = copy.clone();
             back.id = original.id.clone();
             back.source_run = None;
-            assert_eq!(&back, original, "verdict, gate output and the rest are unchanged");
+            assert_eq!(
+                &back, original,
+                "verdict, gate output and the rest are unchanged"
+            );
         }
-        assert!(run.attempts.iter().all(|a| a.task_id.as_deref() != Some("task-o-3")), "the excluded attempt is left out");
+        assert!(
+            run.attempts
+                .iter()
+                .all(|a| a.task_id.as_deref() != Some("task-o-3")),
+            "the excluded attempt is left out"
+        );
 
         let results = aggregate(&run.attempts);
         assert_eq!(results.len(), 2, "one row per configuration: {results:?}");
@@ -838,19 +922,35 @@ mod tests {
 
         assert_eq!(run.status, BenchRunStatus::Done);
         assert_eq!(run.dataset, "finance");
-        assert_eq!(run.dataset_revision, 4, "the highest revision among the sources");
+        assert_eq!(
+            run.dataset_revision, 4,
+            "the highest revision among the sources"
+        );
         assert_eq!(run.started_at, older.started_at, "the earliest start");
         assert_eq!(run.ended_at, newer.ended_at, "the latest end");
-        assert_eq!(run.agents, ["sonnet", "qwen"], "the union, in order of first appearance");
-        assert_eq!(run.attempts_per_case, 2, "sonnet attempted c1 once in each source");
+        assert_eq!(
+            run.agents,
+            ["sonnet", "qwen"],
+            "the union, in order of first appearance"
+        );
+        assert_eq!(
+            run.attempts_per_case, 2,
+            "sonnet attempted c1 once in each source"
+        );
         assert_eq!(run.concurrency, 0);
         assert_eq!(run.composed_from, ["older", "newer"]);
-        assert_eq!(run.source_revisions, BTreeMap::from([("older".into(), 3), ("newer".into(), 4)]));
+        assert_eq!(
+            run.source_revisions,
+            BTreeMap::from([("older".into(), 3), ("newer".into(), 4)])
+        );
         assert_eq!(run.note.as_deref(), Some("side by side"));
         assert!(run.is_composed() && run.settled());
 
         // The newest source's cases and bases, then the case only the older one has.
-        assert_eq!(run.cases.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["c1", "c3", "c2"]);
+        assert_eq!(
+            run.cases.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["c1", "c3", "c2"]
+        );
         assert_eq!(
             run.case_bases,
             BTreeMap::from([
@@ -890,19 +990,29 @@ mod tests {
         let mut other = newer.clone();
         other.dataset = "legal".into();
         let e = refused(&[older.clone(), other], &[]);
-        assert!(e.contains("\"legal\"") && e.contains("not \"finance\""), "{e}");
+        assert!(
+            e.contains("\"legal\"") && e.contains("not \"finance\""),
+            "{e}"
+        );
 
         let e = refused(&[older.clone(), newer.clone()], &["o-1", "nope"]);
-        assert!(e.contains("--exclude nope") && e.contains("not an attempt"), "{e}");
+        assert!(
+            e.contains("--exclude nope") && e.contains("not an attempt"),
+            "{e}"
+        );
 
         let e = refused(&[older.clone(), older.clone()], &[]);
         assert!(e.contains("named twice"), "{e}");
 
-        let composed = compose("finance", &[older.clone(), newer.clone()], &[], None, ids()).unwrap();
+        let composed =
+            compose("finance", &[older.clone(), newer.clone()], &[], None, ids()).unwrap();
         let e = refused(&[composed], &[]);
-        assert!(e.contains("itself composed") && e.contains("older, newer"), "{e}");
+        assert!(
+            e.contains("itself composed") && e.contains("older, newer"),
+            "{e}"
+        );
 
-        let e = refused(&[older.clone()], &["o-1", "o-2", "o-3"]);
+        let e = refused(std::slice::from_ref(&older), &["o-1", "o-2", "o-3"]);
         assert!(e.contains("nothing to compose"), "{e}");
     }
 
@@ -921,7 +1031,11 @@ mod tests {
             "attempts": [], "started_at": "2026-11-01T10:00:00Z"
         });
         let decoded: BenchRun = serde_json::from_value(run.clone()).unwrap();
-        assert!(decoded.composed_from.is_empty() && decoded.source_revisions.is_empty() && decoded.note.is_none());
+        assert!(
+            decoded.composed_from.is_empty()
+                && decoded.source_revisions.is_empty()
+                && decoded.note.is_none()
+        );
         assert!(!decoded.is_composed());
         assert_eq!(serde_json::to_value(&decoded).unwrap(), run);
     }

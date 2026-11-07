@@ -5714,8 +5714,20 @@ async fn bench_cmd(json: bool, client: &Client, cmd: BenchCmd) -> Result<()> {
                 _ => None,
             })
         }
-        BenchCmd::Compose { dataset, from, exclude, note } => {
-            let payload = client.send(Request::BenchRunCompose { dataset, from, exclude, note }).await?;
+        BenchCmd::Compose {
+            dataset,
+            from,
+            exclude,
+            note,
+        } => {
+            let payload = client
+                .send(Request::BenchRunCompose {
+                    dataset,
+                    from,
+                    exclude,
+                    note,
+                })
+                .await?;
             print(&payload, json, |p| match p {
                 Payload::BenchRun { run, results } => Some(bench_run_detail(run, results)),
                 _ => None,
@@ -5815,7 +5827,10 @@ fn bench_run_detail(r: &BenchRun, results: &[BenchResult]) -> String {
         out.push_str(&format!("  ended      {}\n", ended.to_rfc3339()));
     }
     if r.is_composed() {
-        out.push_str(&format!("  composed   from {}\n", r.composed_from.join(", ")));
+        out.push_str(&format!(
+            "  composed   from {}\n",
+            r.composed_from.join(", ")
+        ));
         if let Some(revisions) = source_revisions_line(r) {
             out.push_str(&format!("  revisions  the sources differ: {revisions}\n"));
         }
@@ -5841,7 +5856,11 @@ fn bench_run_detail(r: &BenchRun, results: &[BenchResult]) -> String {
     }
     out.push_str("\nATTEMPTS\n");
     for a in &r.attempts {
-        let source = a.source_run.as_deref().map(|s| format!("  from {}", short_id(s))).unwrap_or_default();
+        let source = a
+            .source_run
+            .as_deref()
+            .map(|s| format!("  from {}", short_id(s)))
+            .unwrap_or_default();
         out.push_str(&format!(
             "  {:<24} {:<12} #{:<2} {:<10} {}{source}\n",
             a.case_id,
@@ -8107,7 +8126,11 @@ mod tests {
         let (sonnet, qwen) = attempts.split_once("qwen").unwrap();
         assert!(sonnet.contains("from ca6bc9d0"), "{text}");
         assert!(qwen.contains("from 7f40d36b"), "{text}");
-        assert!(bench_run_line(&run).ends_with("  composed"), "{}", bench_run_line(&run));
+        assert!(
+            bench_run_line(&run).ends_with("  composed"),
+            "{}",
+            bench_run_line(&run)
+        );
 
         // One revision among the sources: nothing to point out.
         run.source_revisions.values_mut().for_each(|r| *r = 4);
@@ -8119,24 +8142,50 @@ mod tests {
         run.note = None;
         run.attempts.iter_mut().for_each(|a| a.source_run = None);
         let text = bench_run_detail(&run, &[]);
-        assert!(!text.contains("composed") && !text.contains("from ") && !text.contains("note"), "{text}");
+        assert!(
+            !text.contains("composed") && !text.contains("from ") && !text.contains("note"),
+            "{text}"
+        );
         assert!(!bench_run_line(&run).contains("composed"));
     }
 
     #[test]
     fn bench_compose_takes_repeated_from_and_exclude() {
         let cli = Cli::try_parse_from([
-            "factory", "bench", "compose", "finance", "--from", "r1", "--from", "r2", "--exclude", "a1", "--note", "side by side",
+            "factory",
+            "bench",
+            "compose",
+            "finance",
+            "--from",
+            "r1",
+            "--from",
+            "r2",
+            "--exclude",
+            "a1",
+            "--note",
+            "side by side",
         ])
         .unwrap();
-        let Command::Bench { cmd: Some(BenchCmd::Compose { dataset, from, exclude, note }) } = cli.command else {
+        let Command::Bench { cmd: Some(cmd) } = cli.command else {
+            panic!("bench")
+        };
+        let BenchCmd::Compose {
+            dataset,
+            from,
+            exclude,
+            note,
+        } = cmd
+        else {
             panic!("bench compose")
         };
         assert_eq!(dataset, "finance");
         assert_eq!(from, ["r1", "r2"]);
         assert_eq!(exclude, ["a1"]);
         assert_eq!(note.as_deref(), Some("side by side"));
-        assert!(Cli::try_parse_from(["factory", "bench", "compose", "finance"]).is_err(), "--from is required");
+        assert!(
+            Cli::try_parse_from(["factory", "bench", "compose", "finance"]).is_err(),
+            "--from is required"
+        );
     }
 
     #[test]

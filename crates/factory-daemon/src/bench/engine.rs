@@ -936,12 +936,22 @@ impl L5Service<'_> {
         let _guard = self.state.bench_edit.lock().await;
         let mut sources = Vec::with_capacity(from.len());
         for id in &from {
-            sources.push(self.state.bench.get_run(id).await?.ok_or_else(|| missing("bench run", id))?);
+            sources.push(
+                self.state
+                    .bench
+                    .get_run(id)
+                    .await?
+                    .ok_or_else(|| missing("bench run", id))?,
+            );
         }
-        let run = factory_core::bench::compose(dataset, &sources, &exclude, note, || uuid::Uuid::new_v4().to_string())
-            .map_err(FactoryError::BadRequest)?;
+        let run = factory_core::bench::compose(dataset, &sources, &exclude, note, || {
+            uuid::Uuid::new_v4().to_string()
+        })
+        .map_err(FactoryError::BadRequest)?;
         self.state.bench.put_run_with_attempts(&run).await?;
-        self.wiring.bus().publish(Event::BenchRunUpdated { run: run.clone() });
+        self.wiring
+            .bus()
+            .publish(Event::BenchRunUpdated { run: run.clone() });
         Ok(run)
     }
 
@@ -2158,20 +2168,37 @@ mod tests {
     /// A finished run of `dataset` with one settled attempt per agent at case
     /// `c1`, written the way the store holds any run. Each attempt names a
     /// task run that does not exist, as one whose worktree is already gone.
-    async fn seed_finished(engine: &Arc<Engine>, id: &str, dataset: &str, revision: u64, agents: &[&str]) -> BenchRun {
-        let case: Case =
-            serde_json::from_value(serde_json::json!({"id": "c1", "title": "case one", "scope": "demo"})).unwrap();
+    async fn seed_finished(
+        engine: &Arc<Engine>,
+        id: &str,
+        dataset: &str,
+        revision: u64,
+        agents: &[&str],
+    ) -> BenchRun {
+        let case: Case = serde_json::from_value(
+            serde_json::json!({"id": "c1", "title": "case one", "scope": "demo"}),
+        )
+        .unwrap();
         let attempts = agents
             .iter()
             .map(|agent| {
-                let mut a = BenchAttempt::pending(format!("{id}-{agent}"), "c1".into(), agent.to_string(), 1);
+                let mut a = BenchAttempt::pending(
+                    format!("{id}-{agent}"),
+                    "c1".into(),
+                    agent.to_string(),
+                    1,
+                );
                 a.task_id = Some(format!("task-{id}-{agent}"));
                 a.run_id = Some(format!("gone-{id}-{agent}"));
                 a.verdict = Some(Verdict::Pass);
                 a.reported = Some("done".into());
                 a.gate_exit_code = Some(0);
                 a.gate_output = Some(format!("{agent} passed in {id}"));
-                a.config = Some(derive_config("shell", &["--model".into(), agent.to_string()], "none"));
+                a.config = Some(derive_config(
+                    "shell",
+                    &["--model".into(), agent.to_string()],
+                    "none",
+                ));
                 a
             })
             .collect();
@@ -2203,7 +2230,8 @@ mod tests {
     async fn bench_compose_makes_one_finished_run_from_two_with_an_exclude() {
         use factory_core::protocol::{Envelope, Payload, Request, Response};
         let engine = build_engine(temp_dir("compose"));
-        let kolibri = seed_finished(&engine, "run-kolibri", "finance", 3, &["kolibri", "sonnet"]).await;
+        let kolibri =
+            seed_finished(&engine, "run-kolibri", "finance", 3, &["kolibri", "sonnet"]).await;
         let qwen = seed_finished(&engine, "run-qwen", "finance", 4, &["qwen"]).await;
 
         let response = engine
@@ -2217,7 +2245,10 @@ mod tests {
                 token: None,
             })
             .await;
-        let Response::Ok { data: Payload::BenchRun { run, results } } = response else {
+        let Response::Ok {
+            data: Payload::BenchRun { run, results },
+        } = response
+        else {
             panic!("compose refused: {response:?}")
         };
         assert_eq!(run.attempts.len(), 2);
@@ -2226,20 +2257,49 @@ mod tests {
         assert_eq!(run.note.as_deref(), Some("latest of each"));
         assert_eq!(run.dataset_revision, 4);
 
-        let stored = engine.l5.bench.get_run(&run.id).await.unwrap().expect("the composed run is stored");
+        let stored = engine
+            .l5
+            .bench
+            .get_run(&run.id)
+            .await
+            .unwrap()
+            .expect("the composed run is stored");
         assert_eq!(stored, run);
         for copy in &stored.attempts {
-            let source = [&kolibri, &qwen].into_iter().find(|s| Some(&s.id) == copy.source_run.as_ref()).unwrap();
-            let original = source.attempts.iter().find(|a| a.agent == copy.agent).unwrap();
+            let source = [&kolibri, &qwen]
+                .into_iter()
+                .find(|s| Some(&s.id) == copy.source_run.as_ref())
+                .unwrap();
+            let original = source
+                .attempts
+                .iter()
+                .find(|a| a.agent == copy.agent)
+                .unwrap();
             assert_ne!(copy.id, original.id, "a new attempt id");
             assert_eq!(copy.verdict, original.verdict);
             assert_eq!(copy.gate_output, original.gate_output);
-            assert_eq!(copy.run_id, original.run_id, "still pointing at the source's task run");
+            assert_eq!(
+                copy.run_id, original.run_id,
+                "still pointing at the source's task run"
+            );
         }
         for source in [&kolibri, &qwen] {
-            assert_eq!(&engine.l5.bench.get_run(&source.id).await.unwrap().unwrap(), source, "sources are untouched");
+            assert_eq!(
+                &engine.l5.bench.get_run(&source.id).await.unwrap().unwrap(),
+                source,
+                "sources are untouched"
+            );
         }
-        assert!(engine.l4.store.list(&Default::default()).await.unwrap().is_empty(), "nothing was dispatched");
+        assert!(
+            engine
+                .l4
+                .store
+                .list(&Default::default())
+                .await
+                .unwrap()
+                .is_empty(),
+            "nothing was dispatched"
+        );
     }
 
     #[tokio::test]
@@ -2256,7 +2316,12 @@ mod tests {
             let from = from.iter().map(|s| s.to_string()).collect();
             let exclude = exclude.iter().map(|s| s.to_string()).collect();
             async move {
-                engine.l5_service().compose_bench_run("finance", from, exclude, None).await.unwrap_err().to_string()
+                engine
+                    .l5_service()
+                    .compose_bench_run("finance", from, exclude, None)
+                    .await
+                    .unwrap_err()
+                    .to_string()
             }
         };
         let e = refused(&["run-done", "no-such-run"], &[]).await;
@@ -2266,10 +2331,20 @@ mod tests {
         let e = refused(&["run-done", "run-legal"], &[]).await;
         assert!(e.contains("run-legal") && e.contains("\"legal\""), "{e}");
         let e = refused(&["run-done"], &["run-going-sonnet"]).await;
-        assert!(e.contains("--exclude run-going-sonnet") && e.contains("not an attempt"), "{e}");
+        assert!(
+            e.contains("--exclude run-going-sonnet") && e.contains("not an attempt"),
+            "{e}"
+        );
 
-        assert_eq!(engine.l5.bench.runs(None, 10).await.unwrap().len(), 3, "a refusal writes nothing");
-        assert_eq!(engine.l5.bench.get_run(&done.id).await.unwrap().unwrap(), done);
+        assert_eq!(
+            engine.l5.bench.runs(None, 10).await.unwrap().len(),
+            3,
+            "a refusal writes nothing"
+        );
+        assert_eq!(
+            engine.l5.bench.get_run(&done.id).await.unwrap().unwrap(),
+            done
+        );
     }
 
     /// A composed run's worktrees are its sources', so cleaning or cancelling
@@ -2282,17 +2357,48 @@ mod tests {
         seed_finished(&engine, "run-b", "finance", 1, &["sonnet"]).await;
         let composed = engine
             .l5_service()
-            .compose_bench_run("finance", vec!["run-a".into(), "run-b".into()], Vec::new(), None)
+            .compose_bench_run(
+                "finance",
+                vec!["run-a".into(), "run-b".into()],
+                Vec::new(),
+                None,
+            )
             .await
             .unwrap();
 
-        let e = engine.l5_service().clean_bench_run(&composed.id).await.unwrap_err().to_string();
-        assert!(e.contains("composed from run-a, run-b") && e.contains("clean"), "{e}");
-        let e = engine.l5_service().cancel_bench_run(&composed.id).await.unwrap_err().to_string();
-        assert!(e.contains("composed from run-a, run-b") && e.contains("cancel"), "{e}");
+        let e = engine
+            .l5_service()
+            .clean_bench_run(&composed.id)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("composed from run-a, run-b") && e.contains("clean"),
+            "{e}"
+        );
+        let e = engine
+            .l5_service()
+            .cancel_bench_run(&composed.id)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("composed from run-a, run-b") && e.contains("cancel"),
+            "{e}"
+        );
 
-        engine.l5_service().clean_bench_run("run-a").await.expect("a source is still the owner's to clean");
-        let after = engine.l5.bench.get_run(&composed.id).await.unwrap().unwrap();
+        engine
+            .l5_service()
+            .clean_bench_run("run-a")
+            .await
+            .expect("a source is still the owner's to clean");
+        let after = engine
+            .l5
+            .bench
+            .get_run(&composed.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(after, composed, "the composed run keeps its records");
         assert_eq!(after.status, BenchRunStatus::Done);
     }

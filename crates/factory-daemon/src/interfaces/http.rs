@@ -1991,7 +1991,12 @@ async fn compose_bench_run(
 ) -> AxumResponse {
     run(
         &engine,
-        Request::BenchRunCompose { dataset: body.dataset, from: body.from, exclude: body.exclude, note: body.note },
+        Request::BenchRunCompose {
+            dataset: body.dataset,
+            from: body.from,
+            exclude: body.exclude,
+            note: body.note,
+        },
     )
     .await
 }
@@ -3027,14 +3032,28 @@ mod tests {
         )
         .await;
         assert_eq!(status, 200, "{body}");
-        assert_eq!(body["data"]["run"]["composed_from"], serde_json::json!(["run-a", "run-b"]));
+        assert_eq!(
+            body["data"]["run"]["composed_from"],
+            serde_json::json!(["run-a", "run-b"])
+        );
         assert_eq!(body["data"]["run"]["attempts"].as_array().unwrap().len(), 1);
         assert_eq!(body["data"]["run"]["attempts"][0]["source_run"], "run-a");
 
-        let (status, body) =
-            request(engine, "POST", "/api/bench/runs/compose", Some(r#"{"dataset":"finance","from":["nope"]}"#)).await;
+        let (status, body) = request(
+            engine,
+            "POST",
+            "/api/bench/runs/compose",
+            Some(r#"{"dataset":"finance","from":["nope"]}"#),
+        )
+        .await;
         assert_eq!(status, 400, "{body}");
-        assert!(body["message"].as_str().unwrap().contains("no such bench run: nope"), "{body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("no such bench run: nope"),
+            "{body}"
+        );
     }
 
     /// `#343`: the UI itself carries a baseline CSP: scripts only from

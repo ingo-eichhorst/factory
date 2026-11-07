@@ -143,7 +143,11 @@ async fn the_benchmark_owner_composes_finished_runs_without_the_upper_facade() {
 
     let loaded = store.get_run(&composed.id).await.unwrap().unwrap();
     assert_eq!(loaded.composed_from, ["qwen-run", "sonnet-run"]);
-    assert_eq!(aggregate(&loaded.attempts).len(), 2, "one row per configuration");
+    assert_eq!(
+        aggregate(&loaded.attempts).len(),
+        2,
+        "one row per configuration"
+    );
     for source in &sources {
         let reread = store.get_run(&source.id).await.unwrap().unwrap();
         assert_eq!(&reread, source, "a source run is read, never changed");
