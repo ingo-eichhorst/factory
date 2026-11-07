@@ -16,6 +16,7 @@ use crate::benchmark::{analyze_args, missing_fields};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub use factory_kernel::BenchVerdict as Verdict;
 
@@ -170,6 +171,11 @@ pub struct BenchAttempt {
     pub wall_clock_seconds: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<ConfigSnapshot>,
+    /// #388: the bench run `bench compose` copied this attempt from. `None`
+    /// on an attempt its own run dispatched -- and on every attempt written
+    /// before the field existed, which is the same thing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_run: Option<String>,
 }
 
 impl BenchAttempt {
@@ -190,6 +196,7 @@ impl BenchAttempt {
             ended_at: None,
             wall_clock_seconds: None,
             config: None,
+            source_run: None,
         }
     }
 
@@ -261,6 +268,19 @@ pub struct BenchRun {
     pub started_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<DateTime<Utc>>,
+    /// #388: the runs `bench compose` made this one from, in the order they
+    /// were given. Empty for a run that dispatched its own attempts, and for
+    /// every run written before the field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub composed_from: Vec<String>,
+    /// Each source's own `dataset_revision`, by source run id, recorded when
+    /// the run was composed -- what lets `bench show` say the sources
+    /// disagree about the dataset without reading them again.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_revisions: BTreeMap<String, u64>,
+    /// Free text a person gave `bench compose --note`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl BenchRun {
@@ -268,6 +288,141 @@ impl BenchRun {
     pub fn settled(&self) -> bool {
         self.attempts.iter().all(|a| a.verdict.is_some())
     }
+
+    /// Made by `bench compose` from other runs' attempts, rather than by
+    /// dispatching its own. Its attempts' worktrees belong to those runs.
+    pub fn is_composed(&self) -> bool {
+        !self.composed_from.is_empty()
+    }
+}
+
+/// #388: one finished bench run made from the settled attempts of existing
+/// runs of `dataset`, so configurations that could only be run one at a time
+/// read side by side. Pure: the caller loads `sources` (in `--from` order),
+/// supplies fresh ids, and writes the result. Nothing is dispatched and no
+/// attempt is judged again -- each settled attempt is copied as it is, under
+/// a new id (`bench_attempts.id` is the primary key) and with `source_run`
+/// naming the run it came from. Its `attempt` number stays the source's, so
+/// two sources' first attempts at a case are both `#1`; `source_run` tells
+/// them apart.
+///
+/// Refuses: no source, a source named twice, a source of another dataset, a
+/// source still running, a source that is itself composed (compose from its
+/// sources instead -- every `source_run` then names the run whose worktree it
+/// is), an `exclude` id that is no attempt of any source, and a result with
+/// no attempt left at all.
+///
+/// The composed run is `done`, with `concurrency` 0. It spans the earliest
+/// start to the latest end of its sources; `agents` is their union in order
+/// of first appearance; `dataset_revision` the highest among them;
+/// `attempts_per_case` the most attempts any agent × case now has. `cases`
+/// and `case_bases` are the newest source's (latest `started_at`), plus any
+/// case only an older source has, with that source's base.
+pub fn compose(
+    dataset: &str,
+    sources: &[BenchRun],
+    exclude: &[String],
+    note: Option<String>,
+    mut new_id: impl FnMut() -> String,
+) -> std::result::Result<BenchRun, String> {
+    if sources.is_empty() {
+        return Err("bench compose needs at least one --from run".into());
+    }
+    let mut seen = BTreeSet::new();
+    for source in sources {
+        if !seen.insert(source.id.as_str()) {
+            return Err(format!("bench run {} is named twice in --from", source.id));
+        }
+        if source.dataset != dataset {
+            return Err(format!(
+                "bench run {} is a run of dataset {:?}, not {dataset:?}",
+                source.id, source.dataset
+            ));
+        }
+        if source.status == BenchRunStatus::Running {
+            return Err(format!(
+                "bench run {} is still going; wait for it to finish or cancel it first",
+                source.id
+            ));
+        }
+        if source.is_composed() {
+            return Err(format!(
+                "bench run {} is itself composed; compose from its sources instead: {}",
+                source.id,
+                source.composed_from.join(", ")
+            ));
+        }
+    }
+    let excluded: BTreeSet<&str> = exclude.iter().map(String::as_str).collect();
+    for id in &excluded {
+        if !sources.iter().any(|s| s.attempts.iter().any(|a| a.id == *id)) {
+            return Err(format!("--exclude {id} is not an attempt of any --from run"));
+        }
+    }
+
+    let mut attempts = Vec::new();
+    for source in sources {
+        for attempt in &source.attempts {
+            if attempt.verdict.is_none() || excluded.contains(attempt.id.as_str()) {
+                continue;
+            }
+            let mut copy = attempt.clone();
+            copy.id = new_id();
+            copy.source_run = Some(source.id.clone());
+            attempts.push(copy);
+        }
+    }
+    if attempts.is_empty() {
+        return Err("nothing to compose: every settled attempt of those runs is excluded".into());
+    }
+
+    let mut agents: Vec<String> = Vec::new();
+    for agent in sources.iter().flat_map(|s| &s.agents) {
+        if !agents.contains(agent) {
+            agents.push(agent.clone());
+        }
+    }
+    let mut per_cell: BTreeMap<(&str, &str), u32> = BTreeMap::new();
+    for attempt in &attempts {
+        *per_cell.entry((&attempt.agent, &attempt.case_id)).or_default() += 1;
+    }
+    let attempts_per_case = per_cell.values().copied().max().unwrap_or(0);
+
+    // Newest first; a stable sort keeps `--from` order among equal starts.
+    let mut by_age: Vec<&BenchRun> = sources.iter().collect();
+    by_age.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    let mut cases = Vec::new();
+    let mut case_bases = BTreeMap::new();
+    for source in by_age {
+        for case in &source.cases {
+            if cases.iter().any(|c: &crate::dataset::Case| c.id == case.id) {
+                continue;
+            }
+            if let Some(base) = source.case_bases.get(&case.id) {
+                case_bases.insert(case.id.clone(), base.clone());
+            }
+            cases.push(case.clone());
+        }
+    }
+
+    let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    Ok(BenchRun {
+        id: new_id(),
+        dataset: dataset.to_string(),
+        dataset_revision: sources.iter().map(|s| s.dataset_revision).max().unwrap_or(0),
+        cases,
+        case_bases,
+        agents,
+        attempts_per_case,
+        concurrency: 0,
+        status: BenchRunStatus::Done,
+        attempts,
+        started_at: sources.iter().map(|s| s.started_at).min().expect("at least one source"),
+        ended_at: sources.iter().filter_map(|s| s.ended_at).max(),
+        composed_from: sources.iter().map(|s| s.id.clone()).collect(),
+        source_revisions: sources.iter().map(|s| (s.id.clone(), s.dataset_revision)).collect(),
+        note,
+    })
 }
 
 /// One row of `bench show`'s results table, one per distinct `config_hash`
@@ -488,6 +643,9 @@ mod tests {
             attempts: vec![a],
             started_at: Utc::now(),
             ended_at: None,
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         };
         let json = serde_json::to_string(&run).unwrap();
         assert!(!json.contains("s3cret"), "{json}");
@@ -556,6 +714,216 @@ mod tests {
     #[test]
     fn tail_4kib_is_a_no_op_under_the_cap() {
         assert_eq!(tail_4kib("short"), "short");
+    }
+
+    // -- #388: bench compose ----------------------------------------------
+
+    fn case(id: &str) -> crate::dataset::Case {
+        serde_json::from_value(serde_json::json!({"id": id, "title": id, "scope": "demo"})).unwrap()
+    }
+
+    fn settled(id: &str, case: &str, agent: &str, n: u32, cfg: &ConfigSnapshot, verdict: Verdict, gate: &str) -> BenchAttempt {
+        let mut a = BenchAttempt::pending(id.into(), case.into(), agent.into(), n);
+        a.task_id = Some(format!("task-{id}"));
+        a.run_id = Some(format!("run-{id}"));
+        a.verdict = Some(verdict);
+        a.reported = Some("done".into());
+        a.gate_exit_code = Some(if verdict == Verdict::Pass { 0 } else { 1 });
+        a.gate_output = Some(gate.into());
+        a.started_at = Some("2026-11-01T10:00:00Z".parse().unwrap());
+        a.ended_at = Some("2026-11-01T10:05:00Z".parse().unwrap());
+        a.wall_clock_seconds = Some(300);
+        a.config = Some(cfg.clone());
+        a
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn source(id: &str, revision: u64, start: &str, end: &str, cases: &[(&str, &str)], agents: &[&str], attempts: Vec<BenchAttempt>) -> BenchRun {
+        BenchRun {
+            id: id.into(),
+            dataset: "finance".into(),
+            dataset_revision: revision,
+            cases: cases.iter().map(|(c, _)| case(c)).collect(),
+            case_bases: cases.iter().map(|(c, b)| (c.to_string(), b.to_string())).collect(),
+            agents: agents.iter().map(|a| a.to_string()).collect(),
+            attempts_per_case: 1,
+            concurrency: 1,
+            status: BenchRunStatus::Done,
+            attempts,
+            started_at: start.parse().unwrap(),
+            ended_at: Some(end.parse().unwrap()),
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
+        }
+    }
+
+    /// Two runs of `finance`, the older at revision 3 and the newer at 4.
+    /// Sonnet ran in both; Qwen only in the newer one.
+    fn two_sources() -> (BenchRun, BenchRun) {
+        let sonnet = config("claude-code", &["--model", "sonnet"]);
+        let qwen = config("pi", &["--model", "qwen"]);
+        let older = source(
+            "older",
+            3,
+            "2026-11-01T10:00:00Z",
+            "2026-11-01T11:00:00Z",
+            &[("c1", "base-old-c1"), ("c2", "base-old-c2")],
+            &["sonnet"],
+            vec![
+                settled("o-1", "c1", "sonnet", 1, &sonnet, Verdict::Pass, "all good"),
+                settled("o-2", "c2", "sonnet", 1, &sonnet, Verdict::Fail, "assertion failed: 1 == 2"),
+                settled("o-3", "c2", "sonnet", 2, &sonnet, Verdict::Pass, "flaky pass"),
+            ],
+        );
+        let newer = source(
+            "newer",
+            4,
+            "2026-11-02T10:00:00Z",
+            "2026-11-02T12:00:00Z",
+            &[("c1", "base-new-c1"), ("c3", "base-new-c3")],
+            &["qwen", "sonnet"],
+            vec![
+                settled("n-1", "c1", "qwen", 1, &qwen, Verdict::Pass, "qwen ok"),
+                settled("n-2", "c3", "qwen", 1, &qwen, Verdict::Unverified, ""),
+                settled("n-3", "c1", "sonnet", 1, &sonnet, Verdict::Fail, "sonnet broke c1"),
+            ],
+        );
+        (older, newer)
+    }
+
+    fn ids() -> impl FnMut() -> String {
+        let mut n = 0;
+        move || {
+            n += 1;
+            format!("new-{n}")
+        }
+    }
+
+    #[test]
+    fn composing_two_runs_with_an_exclude_copies_every_other_settled_attempt_unchanged_under_a_new_id() {
+        let (older, newer) = two_sources();
+        let sources = [older.clone(), newer.clone()];
+        let run = compose("finance", &sources, &["o-3".into()], Some("  side by side \n".into()), ids()).unwrap();
+
+        assert_eq!(run.attempts.len(), 5, "three and three, less the one excluded");
+        let originals: Vec<&BenchAttempt> = sources.iter().flat_map(|s| &s.attempts).collect();
+        let new_ids: BTreeSet<&str> = run.attempts.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(new_ids.len(), 5, "every copy has an id of its own");
+        assert!(originals.iter().all(|o| !new_ids.contains(o.id.as_str())), "no source id is reused");
+        assert!(!new_ids.contains(run.id.as_str()));
+
+        // Everything but the id and `source_run` is the source attempt's own.
+        for copy in &run.attempts {
+            let source_id = copy.source_run.as_deref().expect("source_run is set");
+            let source = sources.iter().find(|s| s.id == source_id).unwrap();
+            let original = source
+                .attempts
+                .iter()
+                .find(|o| o.task_id == copy.task_id)
+                .expect("copied from an attempt of the run it names");
+            let mut back = copy.clone();
+            back.id = original.id.clone();
+            back.source_run = None;
+            assert_eq!(&back, original, "verdict, gate output and the rest are unchanged");
+        }
+        assert!(run.attempts.iter().all(|a| a.task_id.as_deref() != Some("task-o-3")), "the excluded attempt is left out");
+
+        let results = aggregate(&run.attempts);
+        assert_eq!(results.len(), 2, "one row per configuration: {results:?}");
+        let sonnet = results.iter().find(|r| r.label.contains("sonnet")).unwrap();
+        let qwen = results.iter().find(|r| r.label.contains("qwen")).unwrap();
+        assert_eq!((sonnet.attempts, sonnet.pass, sonnet.fail), (3, 1, 2));
+        assert_eq!((qwen.attempts, qwen.pass, qwen.unverified), (2, 1, 1));
+
+        assert_eq!(run.status, BenchRunStatus::Done);
+        assert_eq!(run.dataset, "finance");
+        assert_eq!(run.dataset_revision, 4, "the highest revision among the sources");
+        assert_eq!(run.started_at, older.started_at, "the earliest start");
+        assert_eq!(run.ended_at, newer.ended_at, "the latest end");
+        assert_eq!(run.agents, ["sonnet", "qwen"], "the union, in order of first appearance");
+        assert_eq!(run.attempts_per_case, 2, "sonnet attempted c1 once in each source");
+        assert_eq!(run.concurrency, 0);
+        assert_eq!(run.composed_from, ["older", "newer"]);
+        assert_eq!(run.source_revisions, BTreeMap::from([("older".into(), 3), ("newer".into(), 4)]));
+        assert_eq!(run.note.as_deref(), Some("side by side"));
+        assert!(run.is_composed() && run.settled());
+
+        // The newest source's cases and bases, then the case only the older one has.
+        assert_eq!(run.cases.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["c1", "c3", "c2"]);
+        assert_eq!(
+            run.case_bases,
+            BTreeMap::from([
+                ("c1".into(), "base-new-c1".into()),
+                ("c2".into(), "base-old-c2".into()),
+                ("c3".into(), "base-new-c3".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn compose_takes_only_settled_attempts_and_drops_an_empty_note() {
+        let (mut older, _) = two_sources();
+        older.status = BenchRunStatus::Cancelled;
+        older.attempts[2].verdict = None;
+        let run = compose("finance", &[older], &[], Some("   ".into()), ids()).unwrap();
+        assert_eq!(run.attempts.len(), 2);
+        assert_eq!(run.note, None);
+        assert_eq!(run.attempts_per_case, 1);
+    }
+
+    #[test]
+    fn compose_refuses_what_it_cannot_honestly_combine() {
+        let (older, newer) = two_sources();
+        let refused = |sources: &[BenchRun], exclude: &[&str]| {
+            let exclude: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
+            compose("finance", sources, &exclude, None, ids()).unwrap_err()
+        };
+
+        assert!(refused(&[], &[]).contains("at least one --from"));
+
+        let mut running = newer.clone();
+        running.status = BenchRunStatus::Running;
+        let e = refused(&[older.clone(), running], &[]);
+        assert!(e.contains("newer") && e.contains("still going"), "{e}");
+
+        let mut other = newer.clone();
+        other.dataset = "legal".into();
+        let e = refused(&[older.clone(), other], &[]);
+        assert!(e.contains("\"legal\"") && e.contains("not \"finance\""), "{e}");
+
+        let e = refused(&[older.clone(), newer.clone()], &["o-1", "nope"]);
+        assert!(e.contains("--exclude nope") && e.contains("not an attempt"), "{e}");
+
+        let e = refused(&[older.clone(), older.clone()], &[]);
+        assert!(e.contains("named twice"), "{e}");
+
+        let composed = compose("finance", &[older.clone(), newer.clone()], &[], None, ids()).unwrap();
+        let e = refused(&[composed], &[]);
+        assert!(e.contains("itself composed") && e.contains("older, newer"), "{e}");
+
+        let e = refused(&[older.clone()], &["o-1", "o-2", "o-3"]);
+        assert!(e.contains("nothing to compose"), "{e}");
+    }
+
+    /// A run and an attempt written before #388 decode with the new fields
+    /// empty, and one that never had them writes none of them back.
+    #[test]
+    fn a_run_and_an_attempt_without_the_compose_fields_decode_and_round_trip_unchanged() {
+        let attempt = serde_json::json!({"id": "a1", "case_id": "c1", "agent": "shell", "attempt": 1, "verdict": "pass"});
+        let decoded: BenchAttempt = serde_json::from_value(attempt.clone()).unwrap();
+        assert_eq!(decoded.source_run, None);
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), attempt);
+
+        let run = serde_json::json!({
+            "id": "r1", "dataset": "finance", "dataset_revision": 3, "cases": [], "case_bases": {},
+            "agents": ["shell"], "attempts_per_case": 1, "concurrency": 1, "status": "done",
+            "attempts": [], "started_at": "2026-11-01T10:00:00Z"
+        });
+        let decoded: BenchRun = serde_json::from_value(run.clone()).unwrap();
+        assert!(decoded.composed_from.is_empty() && decoded.source_revisions.is_empty() && decoded.note.is_none());
+        assert!(!decoded.is_composed());
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), run);
     }
 
     #[test]

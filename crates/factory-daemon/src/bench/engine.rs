@@ -292,6 +292,9 @@ impl L5Service<'_> {
             attempts,
             started_at: Utc::now(),
             ended_at: None,
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         };
         self.state.bench.put_run(&run).await?;
         for attempt in &run.attempts {
@@ -1136,6 +1139,9 @@ mod tests {
             attempts: vec![],
             started_at: Utc::now(),
             ended_at: None,
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         };
         engine.l5.bench.put_run(&run).await.unwrap();
         engine.l5.bench.put_attempt(&run.id, &attempt).await.unwrap();
@@ -1241,6 +1247,9 @@ mod tests {
             attempts: vec![attempt],
             started_at: Utc::now(),
             ended_at: None,
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         };
         engine.l5.bench.put_run(&run).await.unwrap();
         for attempt in &run.attempts {
@@ -1769,6 +1778,9 @@ mod tests {
             attempts: vec![attempt],
             started_at: Utc::now(),
             ended_at: None,
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         };
         engine.l5.bench.put_run(&run).await.unwrap();
         for a in &run.attempts {

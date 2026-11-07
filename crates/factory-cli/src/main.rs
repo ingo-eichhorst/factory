@@ -7980,6 +7980,9 @@ mod tests {
             attempts: vec![attempt("claude", "blocked"), attempt("kolibri", "done")],
             started_at: chrono::Utc::now(),
             ended_at: None,
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         };
         let text = bench_run_detail(&run, &[]);
         let attempts = text.split("ATTEMPTS").nth(1).unwrap();

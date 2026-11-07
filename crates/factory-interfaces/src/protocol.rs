@@ -3509,6 +3509,9 @@ mod tests {
             attempts: vec![attempt],
             started_at: chrono::Utc::now(),
             ended_at: Some(chrono::Utc::now()),
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         };
         let results: Vec<BenchResult> = factory_assurance::bench::aggregate(&run.attempts);
         let response = Response::ok(Payload::BenchRun { run, results });

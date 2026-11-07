@@ -1067,6 +1067,9 @@ mod tests {
             attempts: Vec::new(),
             started_at: Utc::now() - chrono::Duration::hours(1),
             ended_at: Some(Utc::now()),
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         };
         engine.l5.bench.put_run(&run).await.unwrap();
         let mut attempt =

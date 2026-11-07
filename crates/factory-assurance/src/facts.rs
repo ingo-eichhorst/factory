@@ -138,6 +138,9 @@ mod tests {
             attempts,
             started_at: "2026-09-25T12:00:00Z".parse().unwrap(),
             ended_at: None,
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
         }
     }
 
