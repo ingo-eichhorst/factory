@@ -1890,6 +1890,26 @@ the owner. Restarting the daemon mid-run resumes it: an attempt already
 settled but not yet judged is judged, one that never started is started, and
 one still in flight is left to the ordinary run watchdog.
 
+`factory bench compose <dataset> --from <run>... [--exclude <attempt>...]
+[--note "<text>"]` (owner only) puts results that could only be run one at a
+time side by side — a local model that holds the machine, an agent that
+cannot run beside another — without running anything again. It makes a new,
+`done` bench run from the settled attempts of finished runs of that dataset:
+each attempt is copied as it is (task, run, verdict, gate exit code and
+output, timings, configuration) under a new id, with `source_run` naming the
+run it came from, so the results table still has one row per configuration.
+It dispatches nothing, makes no worktree and runs no gate, and refuses an
+unknown run, a run of another dataset, a run still going, a run that is
+itself composed, and an `--exclude` that is no attempt of a `--from` run.
+The composed run spans its sources' earliest start to their latest end, at
+the highest dataset revision among them, with `concurrency` 0; its cases are
+the newest source's plus any only an older one has. `bench show` prints what
+it was composed from and its note, marks each attempt with its source, and
+says when the sources were at different dataset revisions. `bench clean` and
+`bench cancel` refuse a composed run — its attempts' worktrees belong to the
+sources — while cleaning a source stays allowed and the composed run keeps
+its records.
+
 ## Policies
 
 A **policy** is a catalogue of **controls** — a regulation, a standard, or the
@@ -6354,7 +6374,7 @@ limit), `GET /api/benchmarks`, dataset CRUD under `/api/datasets` (plus
 `DELETE /api/datasets/{name}/cases/{id}`), bench runs under
 `POST /api/bench/runs`, `GET /api/bench/runs[?dataset=]`,
 `GET /api/bench/runs/{id}`, `POST /api/bench/runs/{id}/cancel` and
-`.../clean`, policy status and detail under `GET /api/policy?scope=` and
+`.../clean`, `POST /api/bench/runs/compose`, policy status and detail under `GET /api/policy?scope=` and
 `GET /api/policy/controls/{framework}/{id}?scope=`, attestations under
 `POST /api/policy/attestations` and
 `POST /api/policy/attestations/{id}/withdraw`, closing a gap under
