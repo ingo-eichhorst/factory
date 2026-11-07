@@ -33,6 +33,22 @@ fn missing(kind: &str, id: &str) -> FactoryError {
     FactoryError::BadRequest(format!("no such {kind}: {id}"))
 }
 
+/// #388: a composed run's attempts ran -- and their worktrees live -- in the
+/// runs it was composed from, so neither cancelling nor cleaning it means
+/// anything but touching those runs' evidence behind their back. Cleaning a
+/// source stays allowed; the composed run keeps its records either way.
+fn refuse_composed(run: &BenchRun, what: &str) -> Result<()> {
+    if run.is_composed() {
+        return Err(FactoryError::BadRequest(format!(
+            "bench run {} was composed from {}; there is nothing of its own to {what} -- its attempts' worktrees \
+             belong to those runs",
+            run.id,
+            run.composed_from.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 /// #381: the run is blocked on its agent's own `task report --status
 /// blocked`. For a bench attempt that is as finished as it gets -- a bench run
 /// never answers -- so the judge takes it as it takes a terminal run. A block
@@ -788,6 +804,7 @@ impl L5Service<'_> {
         let task_ids = {
             let _guard = self.state.bench_edit.lock().await;
             let mut run = self.state.bench.get_run(run_id).await?.ok_or_else(|| missing("bench run", run_id))?;
+            refuse_composed(&run, "cancel")?;
             if run.status != BenchRunStatus::Running {
                 return Ok(run);
             }
@@ -875,6 +892,7 @@ impl L5Service<'_> {
     /// going -- worktrees are evidence until a person asks for them back.
     pub(crate) async fn clean_bench_run(&self, run_id: &str) -> Result<BenchRun> {
         let run = self.state.bench.get_run(run_id).await?.ok_or_else(|| missing("bench run", run_id))?;
+        refuse_composed(&run, "clean")?;
         if run.status == BenchRunStatus::Running {
             return Err(FactoryError::BadRequest(
                 "this bench run is still going; cancel it first".into(),
@@ -895,6 +913,35 @@ impl L5Service<'_> {
                 let _ = self.wiring.l4().port().release_workspaces(&[std::path::PathBuf::from(path)]).await;
             }
         }
+        Ok(run)
+    }
+
+    // -- compose -----------------------------------------------------------
+
+    /// #388: a new, finished bench run made from the settled attempts of
+    /// existing runs of `dataset` -- `bench::compose` decides what it holds
+    /// and what it refuses; this loads the sources and writes the result in
+    /// one transaction. Nothing is dispatched, no worktree is made and no
+    /// gate runs. Owner-only (`access.rs`). An unknown `--from` id is refused
+    /// by name before anything is combined.
+    pub(crate) async fn compose_bench_run(
+        &self,
+        dataset: &str,
+        from: Vec<String>,
+        exclude: Vec<String>,
+        note: Option<String>,
+    ) -> Result<BenchRun> {
+        crate::datasets::refuse_bad_name(dataset)?;
+        // Held so no source is read halfway through a cancel's own edit.
+        let _guard = self.state.bench_edit.lock().await;
+        let mut sources = Vec::with_capacity(from.len());
+        for id in &from {
+            sources.push(self.state.bench.get_run(id).await?.ok_or_else(|| missing("bench run", id))?);
+        }
+        let run = factory_core::bench::compose(dataset, &sources, &exclude, note, || uuid::Uuid::new_v4().to_string())
+            .map_err(FactoryError::BadRequest)?;
+        self.state.bench.put_run_with_attempts(&run).await?;
+        self.wiring.bus().publish(Event::BenchRunUpdated { run: run.clone() });
         Ok(run)
     }
 
@@ -2102,6 +2149,152 @@ mod tests {
         // regardless of which terminal status the agent's own entry named.
         assert_eq!(attempt.reported.as_deref(), Some("failed"), "{attempt:?}");
         assert_eq!(attempt.verdict, Some(Verdict::Pass), "{attempt:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // #388: bench compose
+    // ------------------------------------------------------------------
+
+    /// A finished run of `dataset` with one settled attempt per agent at case
+    /// `c1`, written the way the store holds any run. Each attempt names a
+    /// task run that does not exist, as one whose worktree is already gone.
+    async fn seed_finished(engine: &Arc<Engine>, id: &str, dataset: &str, revision: u64, agents: &[&str]) -> BenchRun {
+        let case: Case =
+            serde_json::from_value(serde_json::json!({"id": "c1", "title": "case one", "scope": "demo"})).unwrap();
+        let attempts = agents
+            .iter()
+            .map(|agent| {
+                let mut a = BenchAttempt::pending(format!("{id}-{agent}"), "c1".into(), agent.to_string(), 1);
+                a.task_id = Some(format!("task-{id}-{agent}"));
+                a.run_id = Some(format!("gone-{id}-{agent}"));
+                a.verdict = Some(Verdict::Pass);
+                a.reported = Some("done".into());
+                a.gate_exit_code = Some(0);
+                a.gate_output = Some(format!("{agent} passed in {id}"));
+                a.config = Some(derive_config("shell", &["--model".into(), agent.to_string()], "none"));
+                a
+            })
+            .collect();
+        let run = BenchRun {
+            id: id.into(),
+            dataset: dataset.into(),
+            dataset_revision: revision,
+            cases: vec![case],
+            case_bases: Default::default(),
+            agents: agents.iter().map(|a| a.to_string()).collect(),
+            attempts_per_case: 1,
+            concurrency: 1,
+            status: BenchRunStatus::Done,
+            attempts,
+            started_at: Utc::now(),
+            ended_at: Some(Utc::now()),
+            composed_from: Vec::new(),
+            source_revisions: Default::default(),
+            note: None,
+        };
+        engine.l5.bench.put_run_with_attempts(&run).await.unwrap();
+        run
+    }
+
+    /// Composing two runs with an exclude, through the protocol request the
+    /// CLI sends: the copies are new, carry their source, keep their verdict
+    /// and gate output, and read back as one row per configuration.
+    #[tokio::test]
+    async fn bench_compose_makes_one_finished_run_from_two_with_an_exclude() {
+        use factory_core::protocol::{Envelope, Payload, Request, Response};
+        let engine = build_engine(temp_dir("compose"));
+        let kolibri = seed_finished(&engine, "run-kolibri", "finance", 3, &["kolibri", "sonnet"]).await;
+        let qwen = seed_finished(&engine, "run-qwen", "finance", 4, &["qwen"]).await;
+
+        let response = engine
+            .handle(Envelope {
+                request: Request::BenchRunCompose {
+                    dataset: "finance".into(),
+                    from: vec![kolibri.id.clone(), qwen.id.clone()],
+                    exclude: vec!["run-kolibri-sonnet".into()],
+                    note: Some("latest of each".into()),
+                },
+                token: None,
+            })
+            .await;
+        let Response::Ok { data: Payload::BenchRun { run, results } } = response else {
+            panic!("compose refused: {response:?}")
+        };
+        assert_eq!(run.attempts.len(), 2);
+        assert_eq!(results.len(), 2, "one row per configuration: {results:?}");
+        assert_eq!(run.composed_from, ["run-kolibri", "run-qwen"]);
+        assert_eq!(run.note.as_deref(), Some("latest of each"));
+        assert_eq!(run.dataset_revision, 4);
+
+        let stored = engine.l5.bench.get_run(&run.id).await.unwrap().expect("the composed run is stored");
+        assert_eq!(stored, run);
+        for copy in &stored.attempts {
+            let source = [&kolibri, &qwen].into_iter().find(|s| Some(&s.id) == copy.source_run.as_ref()).unwrap();
+            let original = source.attempts.iter().find(|a| a.agent == copy.agent).unwrap();
+            assert_ne!(copy.id, original.id, "a new attempt id");
+            assert_eq!(copy.verdict, original.verdict);
+            assert_eq!(copy.gate_output, original.gate_output);
+            assert_eq!(copy.run_id, original.run_id, "still pointing at the source's task run");
+        }
+        for source in [&kolibri, &qwen] {
+            assert_eq!(&engine.l5.bench.get_run(&source.id).await.unwrap().unwrap(), source, "sources are untouched");
+        }
+        assert!(engine.l4.store.list(&Default::default()).await.unwrap().is_empty(), "nothing was dispatched");
+    }
+
+    #[tokio::test]
+    async fn bench_compose_refuses_an_unknown_running_or_foreign_source_and_an_unknown_exclude() {
+        let engine = build_engine(temp_dir("compose-refusals"));
+        let done = seed_finished(&engine, "run-done", "finance", 1, &["qwen"]).await;
+        let mut running = seed_finished(&engine, "run-going", "finance", 1, &["sonnet"]).await;
+        running.status = BenchRunStatus::Running;
+        engine.l5.bench.put_run(&running).await.unwrap();
+        seed_finished(&engine, "run-legal", "legal", 1, &["sonnet"]).await;
+
+        let refused = |from: &[&str], exclude: &[&str]| {
+            let engine = engine.clone();
+            let from = from.iter().map(|s| s.to_string()).collect();
+            let exclude = exclude.iter().map(|s| s.to_string()).collect();
+            async move {
+                engine.l5_service().compose_bench_run("finance", from, exclude, None).await.unwrap_err().to_string()
+            }
+        };
+        let e = refused(&["run-done", "no-such-run"], &[]).await;
+        assert!(e.contains("no such bench run: no-such-run"), "{e}");
+        let e = refused(&["run-done", "run-going"], &[]).await;
+        assert!(e.contains("run-going") && e.contains("still going"), "{e}");
+        let e = refused(&["run-done", "run-legal"], &[]).await;
+        assert!(e.contains("run-legal") && e.contains("\"legal\""), "{e}");
+        let e = refused(&["run-done"], &["run-going-sonnet"]).await;
+        assert!(e.contains("--exclude run-going-sonnet") && e.contains("not an attempt"), "{e}");
+
+        assert_eq!(engine.l5.bench.runs(None, 10).await.unwrap().len(), 3, "a refusal writes nothing");
+        assert_eq!(engine.l5.bench.get_run(&done.id).await.unwrap().unwrap(), done);
+    }
+
+    /// A composed run's worktrees are its sources', so cleaning or cancelling
+    /// it is refused; cleaning a source is still allowed, and the composed
+    /// run keeps every record it had.
+    #[tokio::test]
+    async fn clean_and_cancel_refuse_a_composed_run_but_a_source_can_still_be_cleaned() {
+        let engine = build_engine(temp_dir("compose-clean"));
+        seed_finished(&engine, "run-a", "finance", 1, &["qwen"]).await;
+        seed_finished(&engine, "run-b", "finance", 1, &["sonnet"]).await;
+        let composed = engine
+            .l5_service()
+            .compose_bench_run("finance", vec!["run-a".into(), "run-b".into()], Vec::new(), None)
+            .await
+            .unwrap();
+
+        let e = engine.l5_service().clean_bench_run(&composed.id).await.unwrap_err().to_string();
+        assert!(e.contains("composed from run-a, run-b") && e.contains("clean"), "{e}");
+        let e = engine.l5_service().cancel_bench_run(&composed.id).await.unwrap_err().to_string();
+        assert!(e.contains("composed from run-a, run-b") && e.contains("cancel"), "{e}");
+
+        engine.l5_service().clean_bench_run("run-a").await.expect("a source is still the owner's to clean");
+        let after = engine.l5.bench.get_run(&composed.id).await.unwrap().unwrap();
+        assert_eq!(after, composed, "the composed run keeps its records");
+        assert_eq!(after.status, BenchRunStatus::Done);
     }
 
     #[tokio::test]

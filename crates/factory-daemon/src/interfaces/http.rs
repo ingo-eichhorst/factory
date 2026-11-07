@@ -214,6 +214,7 @@ fn router(engine: Arc<Engine>) -> Router {
         .route("/api/datasets/{name}/from-tasks", post(dataset_from_tasks))
         .route("/api/datasets/{name}/cases/{id}", delete(delete_dataset_case))
         .route("/api/bench/runs", get(list_bench_runs).post(start_bench_run))
+        .route("/api/bench/runs/compose", post(compose_bench_run))
         .route("/api/bench/runs/{id}", get(get_bench_run))
         .route("/api/bench/runs/{id}/cancel", post(cancel_bench_run))
         .route("/api/bench/runs/{id}/clean", post(clean_bench_run))
@@ -1973,6 +1974,28 @@ async fn start_bench_run(
     .await
 }
 
+/// `POST /api/bench/runs/compose` (#388), the body `bench.compose` takes.
+#[derive(serde::Deserialize)]
+struct ComposeBenchRun {
+    dataset: String,
+    from: Vec<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn compose_bench_run(
+    State(engine): State<Arc<Engine>>,
+    Json(body): Json<ComposeBenchRun>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::BenchRunCompose { dataset: body.dataset, from: body.from, exclude: body.exclude, note: body.note },
+    )
+    .await
+}
+
 #[derive(serde::Deserialize)]
 struct BenchRunsQuery {
     #[serde(default)]
@@ -2977,6 +3000,41 @@ mod tests {
         };
         let store: Arc<dyn factory_core::adapter::TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         Arc::new(Engine::new(Factory { root, config }, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    /// #388: `POST /api/bench/runs/compose` takes the body `bench.compose`
+    /// takes -- `exclude` and `note` optional -- and answers with the
+    /// composed run; a refusal is the ordinary 4xx envelope.
+    #[tokio::test]
+    async fn bench_runs_compose_is_routed_beside_start() {
+        let engine = engine_with_quality();
+        for id in ["run-a", "run-b"] {
+            let run: factory_core::bench::BenchRun = serde_json::from_value(serde_json::json!({
+                "id": id, "dataset": "finance", "dataset_revision": 1, "cases": [], "case_bases": {},
+                "agents": ["shell"], "attempts_per_case": 1, "concurrency": 1, "status": "done",
+                "attempts": [{"id": format!("{id}-1"), "case_id": "c1", "agent": "shell", "attempt": 1, "verdict": "pass"}],
+                "started_at": "2026-11-01T10:00:00Z", "ended_at": "2026-11-01T11:00:00Z"
+            }))
+            .unwrap();
+            engine.l5.bench.put_run_with_attempts(&run).await.unwrap();
+        }
+
+        let (status, body) = request(
+            engine.clone(),
+            "POST",
+            "/api/bench/runs/compose",
+            Some(r#"{"dataset":"finance","from":["run-a","run-b"],"exclude":["run-b-1"]}"#),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["run"]["composed_from"], serde_json::json!(["run-a", "run-b"]));
+        assert_eq!(body["data"]["run"]["attempts"].as_array().unwrap().len(), 1);
+        assert_eq!(body["data"]["run"]["attempts"][0]["source_run"], "run-a");
+
+        let (status, body) =
+            request(engine, "POST", "/api/bench/runs/compose", Some(r#"{"dataset":"finance","from":["nope"]}"#)).await;
+        assert_eq!(status, 400, "{body}");
+        assert!(body["message"].as_str().unwrap().contains("no such bench run: nope"), "{body}");
     }
 
     /// `#343`: the UI itself carries a baseline CSP: scripts only from

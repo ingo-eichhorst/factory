@@ -909,6 +909,23 @@ pub enum Request {
     /// still going.
     #[serde(rename = "bench.clean")]
     BenchRunClean { id: String },
+    /// `factory bench compose` (#388). Owner-only: a new, finished bench run
+    /// made from the settled attempts of existing runs of `dataset`, each
+    /// copied under a new id with `source_run` naming where it came from.
+    /// Dispatches nothing. Refused for an unknown run, a run of another
+    /// dataset, a run still going, and an `exclude` id that is no attempt of
+    /// any `from` run.
+    #[serde(rename = "bench.compose")]
+    BenchRunCompose {
+        dataset: String,
+        /// The source bench run ids, in the order the composed run lists them.
+        from: Vec<String>,
+        /// Attempt ids of those runs to leave out.
+        #[serde(default)]
+        exclude: Vec<String>,
+        #[serde(default)]
+        note: Option<String>,
+    },
     /// The L6 Policy tab: every applicable control's status for `scope` and
     /// every scope below it, rolled up per framework over that subtree, plus
     /// every `n/a`, finding and catalogue -- so nothing is silent. `scope:
@@ -1556,6 +1573,7 @@ impl Request {
             Request::BenchRunGet { .. } |
             Request::BenchRunCancel { .. } |
             Request::BenchRunClean { .. } |
+            Request::BenchRunCompose { .. } |
             Request::Metrics { .. } |
             Request::Signposts |
             Request::Quality { .. } |
