@@ -32,6 +32,7 @@ import {
   gapRows,
   kindLabel,
   notApplicableRows,
+  notSelectedRows,
   policyClockRows,
   refLinks,
   remediateAction,
@@ -39,6 +40,7 @@ import {
   statusLabel,
   statusOf,
   taskHref,
+  templateRows,
 } from "./policy-model.js";
 import { nowFromClock } from "./clock-model.js";
 
@@ -125,9 +127,24 @@ function gapRow(row) {
 function applicabilityRow(row) {
   return `<tr>
     <td><div class="title">${esc(row.title)}</div><code class="id">${esc(row.framework)}</code></td>
-    <td class="sub">${esc(row.rule)}</td>
     <td>${row.covers.length ? row.covers.map(esc).join(", ") : `<span class="sub">no scope here</span>`}</td>
-    <td>${row.excluded.length ? row.excluded.map(esc).join(", ") : `<span class="sub">—</span>`}</td>
+    <td>${row.noPolicy.length ? row.noPolicy.map(esc).join(", ") : `<span class="sub">—</span>`}</td>
+  </tr>`;
+}
+
+function notSelectedRow(row) {
+  return `<tr>
+    <td><div class="title">${esc(row.title)}</div><code class="id">${esc(row.control)}</code></td>
+    <td>${esc(row.scope)}</td>
+  </tr>`;
+}
+
+function templateRow(row) {
+  return `<tr>
+    <td><div class="title">${esc(row.title)}</div><code class="id">${esc(row.template)}</code></td>
+    <td>${esc(kindLabel(row.kind))}</td>
+    <td>${esc(String(row.controls))}</td>
+    <td>${row.usedBy.length ? row.usedBy.map(esc).join(", ") : `<span class="sub">no scope yet</span>`}</td>
   </tr>`;
 }
 
@@ -258,17 +275,21 @@ export function renderPolicy() {
   const workflowEnforcementEl = $("policy-workflow-enforcement");
   const applicabilityEl = $("policy-applicability");
   const applicabilitySection = $("policy-applicability-section");
+  const notSelectedBody = $("policy-not-selected");
+  const templatesBody = $("policy-templates");
 
   if (!report) {
     if (applicabilityEl) applicabilityEl.innerHTML = "";
     if (applicabilitySection) applicabilitySection.hidden = true;
+    if (notSelectedBody) notSelectedBody.innerHTML = "";
+    if (templatesBody) templatesBody.innerHTML = "";
     if (cardsEl) cardsEl.innerHTML = "";
     if (countEl) countEl.textContent = "";
     if (gapsBody) gapsBody.innerHTML = "";
     if (naBody) naBody.innerHTML = "";
     if (findingsEl) findingsEl.innerHTML = "";
     if (workflowEnforcementEl) workflowEnforcementEl.innerHTML = "";
-    for (const id of ["policy-empty", "policy-no-gaps", "policy-no-na", "policy-no-findings", "policy-no-workflow-enforcement"]) {
+    for (const id of ["policy-empty", "policy-no-gaps", "policy-no-na", "policy-no-not-selected", "policy-no-templates", "policy-no-findings", "policy-no-workflow-enforcement"]) {
       const el = $(id);
       if (el) el.hidden = true;
     }
@@ -280,8 +301,9 @@ export function renderPolicy() {
   if (cardsEl) cardsEl.innerHTML = cards.map(frameworkCard).join("");
   if (emptyEl) emptyEl.hidden = cards.length !== 0;
 
-  // Only once the root restricts a framework (#332): where each applies,
-  // and a framework excluded here -- with no card above -- named anyway.
+  // #390: which scopes in the subtree own a policy for each framework, and
+  // which have none -- listed, never counted -- once there is more than the
+  // selected scope alone to speak of.
   const applicability = applicabilityRows(report);
   if (applicabilityEl) applicabilityEl.innerHTML = applicability.map(applicabilityRow).join("");
   if (applicabilitySection) applicabilitySection.hidden = applicability.length === 0;
@@ -301,6 +323,16 @@ export function renderPolicy() {
   if (naBody) naBody.innerHTML = na.map(naRow).join("");
   const noNa = $("policy-no-na");
   if (noNa) noNa.hidden = na.length !== 0;
+
+  const notSelected = notSelectedRows(report);
+  if (notSelectedBody) notSelectedBody.innerHTML = notSelected.map(notSelectedRow).join("");
+  const noNotSelected = $("policy-no-not-selected");
+  if (noNotSelected) noNotSelected.hidden = notSelected.length !== 0;
+
+  const templates = templateRows(report);
+  if (templatesBody) templatesBody.innerHTML = templates.map(templateRow).join("");
+  const noTemplates = $("policy-no-templates");
+  if (noTemplates) noTemplates.hidden = templates.length !== 0;
 
   if (findingsEl) findingsEl.innerHTML = findingsHtml(report.findings);
   const noFindings = $("policy-no-findings");

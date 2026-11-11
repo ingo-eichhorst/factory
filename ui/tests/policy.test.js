@@ -27,9 +27,12 @@ test("L6 Direction is live: the level button carries no disabled/title, and the 
   assert.match(wiring, /policy:\s*\{\s*onShow:\s*loadPolicy\s*\}/);
 });
 
-test("the applicability table (#332) is in the markup, hidden until the root restricts a framework", () => {
+test("the applicability, not-selected and templates tables (#390) are in the markup", () => {
   assert.match(page, /<section id="policy-applicability-section" hidden>/);
   assert.match(page, /<tbody id="policy-applicability"><\/tbody>/);
+  assert.match(page, /<th>Policy at<\/th><th>No policy at<\/th>/);
+  assert.match(page, /<tbody id="policy-not-selected"><\/tbody>/);
+  assert.match(page, /<tbody id="policy-templates"><\/tbody>/);
 });
 
 test("a policy_changed event and the refresh button both go through the same loader", () => {
@@ -76,6 +79,12 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
     "policy-no-gaps": { hidden: false },
     "policy-na": { innerHTML: "" },
     "policy-no-na": { hidden: false },
+    "policy-applicability": { innerHTML: "" },
+    "policy-applicability-section": { hidden: true },
+    "policy-not-selected": { innerHTML: "" },
+    "policy-no-not-selected": { hidden: false },
+    "policy-templates": { innerHTML: "" },
+    "policy-no-templates": { hidden: false },
     "policy-findings": { innerHTML: "" },
     "policy-no-findings": { hidden: false },
     "policy-workflow-enforcement": { innerHTML: "" },
@@ -122,9 +131,12 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
                   },
                 ],
                 rollup: [],
+                not_selected: [{ control: "cra/annex-i-2-5", title: "A disclosure policy is published" }],
                 open_tasks: { "cra/annex-i-2-3": "task-open-3" },
               },
             ],
+            applicability: [{ framework: "cra", covers: ["demo"], no_policy: ["demo/docs"] }],
+            templates: [{ template: "cra", title: "Cyber Resilience Act", kind: "regulation", controls: 12, used_by: ["demo"] }],
             rollup: [
               {
                 framework: "cra",
@@ -176,6 +188,11 @@ test("loading asks for the selected scope and renders a card, a gap link, an n/a
     "... and offers no Create task button beside it",
   );
   assert.match(elements["policy-na"].innerHTML, /covered at the root/);
+  assert.match(elements["policy-applicability"].innerHTML, /demo\/docs/, "a descendant with no policy is named");
+  assert.equal(elements["policy-applicability-section"].hidden, false);
+  assert.match(elements["policy-not-selected"].innerHTML, /cra\/annex-i-2-5/);
+  assert.equal(elements["policy-no-not-selected"].hidden, true);
+  assert.match(elements["policy-templates"].innerHTML, /Cyber Resilience Act/);
   assert.match(elements["policy-findings"].innerHTML, /names a control nothing defines/);
   assert.match(elements["policy-workflow-enforcement"].innerHTML, /review <b>review<\/b> on publish/);
   assert.match(elements["policy-workflow-enforcement"].innerHTML, /no independent functionary/);

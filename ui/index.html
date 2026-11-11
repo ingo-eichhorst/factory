@@ -328,19 +328,19 @@
     <p class="env-note">"Compliant" means the evidence is complete for every regulation and standard that
       applies here -- never that anything is certified. A best-practice control is shown but never counted.</p>
     <p class="env-note bad" id="policy-error" hidden></p>
-    <div class="empty" id="policy-empty" hidden>No framework applies here yet -- declare one under
-      <code class="id">policies:</code> in the instance root's config, or <code class="id">scope.policies</code>
-      in a scope's own.</div>
+    <div class="empty" id="policy-empty" hidden>No scope here has a policy yet. A policy belongs to one scope:
+      write it at <code class="id">&lt;scope&gt;/.factory/policies/&lt;framework&gt;.yaml</code>, picking controls from a
+      template (<code>factory policy templates</code>) and giving each one that scope's own evidence.</div>
 
     <div class="pol-cards" id="policy-cards"></div>
 
     <section id="policy-applicability-section" hidden>
       <h3>Applicability</h3>
-      <p class="env-note">Where each framework applies. Only the instance root's
-        <code class="id">policies.frameworks</code> may limit one with <code class="id">scopes</code> or
-        <code class="id">except</code>; a framework excluded here has no card above.</p>
+      <p class="env-note">The cards above aggregate the selected scope's own policies and every descendant's.
+        A policy belongs to the scope that owns it -- nothing is inherited -- so a scope without one is listed
+        here, never counted as compliant.</p>
       <table>
-        <thead><tr><th>Framework</th><th>Bound</th><th>Applies at</th><th>Excluded at</th></tr></thead>
+        <thead><tr><th>Framework</th><th>Policy at</th><th>No policy at</th></tr></thead>
         <tbody id="policy-applicability"></tbody>
       </table>
     </section>
@@ -361,6 +361,29 @@
         <tbody id="policy-na"></tbody>
       </table>
       <div class="empty" id="policy-no-na" hidden>Nothing is marked not applicable.</div>
+    </section>
+
+    <section style="margin-top:14px">
+      <h3>Not selected</h3>
+      <p class="env-note">Template controls a scope's policy neither picked nor marked n/a: listed so the Statement
+        of Applicability accounts for the whole template, never counted.</p>
+      <table>
+        <thead><tr><th>Control</th><th>Scope</th></tr></thead>
+        <tbody id="policy-not-selected"></tbody>
+      </table>
+      <div class="empty" id="policy-no-not-selected" hidden>Every template control is selected or marked n/a.</div>
+    </section>
+
+    <section style="margin-top:14px">
+      <h3>Templates</h3>
+      <p class="env-note">Lists of possible controls, with no evidence, in
+        <code class="id">.factory/policies/templates/</code>. <code>factory policy template show &lt;name&gt; --scope S</code>
+        says what a scope selected.</p>
+      <table>
+        <thead><tr><th>Template</th><th>Kind</th><th>Controls</th><th>Used by</th></tr></thead>
+        <tbody id="policy-templates"></tbody>
+      </table>
+      <div class="empty" id="policy-no-templates" hidden>No templates on disk.</div>
     </section>
 
     <section style="margin-top:14px">
