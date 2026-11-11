@@ -823,8 +823,10 @@ impl AgentContext {
         out.push_str(
             "Your reach stops where the boundary above says it does. Never \
              write anything of Factory's own -- like this guide -- into a \
-             scope; a scope owns only its own config.yaml, and everything \
-             else Factory keeps stays under the instance root's .factory/.",
+             scope; a scope owns only its own config.yaml and the \
+             policies a person authored in its .factory/policies/, and \
+             everything else Factory keeps stays under the instance root's \
+             .factory/.",
         );
 
         out

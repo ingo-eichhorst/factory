@@ -244,16 +244,20 @@ something impossible.
   and outcomes belong to the run. The task mirrors its newest run so lists stay
   cheap -- if you add a field to that mirror, clear it too, or a successful
   retry will show the previous attempt's error.
-- A scope owns only its `.factory/config.yaml`. Runtime state stays in the
-  instance root's `.factory/`; never put the database, socket, worktrees, or
-  other daemon-owned state inside a scope. `.factory/knowledge/`,
-  `.factory/datasets/`, `.factory/policies/` (including its `drafts/`
-  subdirectory), `.factory/goals/`, `.factory/scenarios/`,
+- A scope owns only its `.factory/config.yaml` and its own authored
+  policies, `<scope>/.factory/policies/<framework>.yaml` (#390): a policy
+  belongs to the scope it is written in, nothing is inherited down the
+  tree, and Factory reads those files but never writes them. Runtime state
+  stays in the instance root's `.factory/`; never put the database, socket,
+  worktrees, or other daemon-owned state inside a scope.
+  `.factory/knowledge/`, `.factory/datasets/`, `.factory/policies/` (the
+  root scope's own policies, plus its `templates/` and `drafts/`
+  subdirectories), `.factory/goals/`, `.factory/scenarios/`,
   `.factory/quality/`, `.factory/vex/`, `.factory/intake/` and
   `.factory/budgets/` are the one
   exception: authored
   content -- pages,
-  dataset YAML, policy catalogues (real and draft), the goals
+  dataset YAML, policy templates and policies (real and draft), the goals
   direction/cycle files, scenario files, quality profiles, VEX judgments and
   per-scope definitions of ready and monthly budget limits a person or an agent wrote by hand -- that
   nothing in Factory ever deletes

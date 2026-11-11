@@ -1921,117 +1921,135 @@ picture of the plant, not a policy engine — design §8 of the company spec
 defers a rule language evaluated at runtime, and this does not narrow that.
 See `.specs/adr/0004-policy-controls.md` in the company repository.
 
-**The catalogue.** `<root>/.factory/policies/<framework>.yaml` — authored
-content, like the knowledge vault and datasets: hand-written, re-parsed on
-every read, never written by Factory. One file per framework:
+**A policy belongs to one scope** (`#390`). A scope that needs one writes it
+in its own directory, `<scope>/.factory/policies/<framework>.yaml`; the root
+scope's own policies are `<root>/.factory/policies/<framework>.yaml`. A
+scope without one has none — nothing is inherited down the tree. Each
+control states its evidence in that scope's own terms: its tasks,
+workflows, metrics, datasets. All of it is authored content, like the
+knowledge vault and datasets: hand-written, re-parsed on every read, never
+written by Factory.
+
+**Templates** are lists of possible controls — the CRA, ISO 27001, the
+GDPR, the AI Act — with no evidence. They only help a scope pick its
+controls. They live at `<root>/.factory/policies/templates/<name>.yaml`, and
+Factory ships starter templates for all four in
+`examples/policies/templates/` (ISO 27001's carries the Annex A ids and our
+own titles only — the norm text is copyrighted, ADR 0004):
 
 ```yaml
-# .factory/policies/cra.yaml
-framework: cra
+# .factory/policies/templates/cra.yaml
+template: cra
 title: Cyber Resilience Act
-kind: regulation                # regulation | standard | best-practice
+kind: regulation                  # regulation | standard | best-practice
 controls:
-  - id: annex-i-2-1             # [a-z0-9][a-z0-9-]*, referenced as cra/annex-i-2-1
+  - id: annex-i-2-1               # [a-z0-9][a-z0-9-]*
     title: Identify and document components (SBOM)
-    max_age: 30d                # Nd, Nh, or Nw
-    maps_to: [iso27001/a-8-8]
+    maps_to: [iso27001/a-5-9]
+    remediation: |
+      Generic guidance on what evidence usually closes this.
+```
+
+A template control with `evidence:` is a finding (`template_evidence`), and
+the evidence is ignored. **A scope's policy** picks controls from a template
+by id and gives each one that scope's evidence:
+
+```yaml
+# projects/irrlicht/.factory/policies/cra.yaml
+framework: cra                    # must equal the file stem
+template: cra                     # optional: lets controls be picked by id
+controls:
+  - id: annex-i-2-1               # title, kind, maps_to, remediation come from the template
     evidence:
-      - check: knowledge        # a vault page tagged control/cra/annex-i-2-1
-      - check: attestation      # a person's recorded word, with an expiry
-      - check: task              # the task's newest *finished* run, done within max_age
+      - check: task
         task: sbom-export
         max_age: 30d
+  - id: annex-i-2-3
+    not_applicable: "No product data leaves the host"   # n/a needs a rationale
+  # a picked control may set its own `remediation:`, which replaces the template's
 ```
 
-See `examples/policies/cra.yaml` for a complete one and
-`crates/factory-core/src/policy.rs` for every field. `kind` is set per
-framework and may be overridden per control; only `regulation` and `standard`
-controls count towards a rollup's `compliant` — `best-practice` controls are
-shown but never counted, since nobody is out of compliance for skipping a
-recommendation. `maps_to` names equivalent controls in other frameworks,
-declared one way and read both, one hop only — so one piece of evidence
-satisfies every framework asking for the same fact, and deliberately not
-transitive, so a chain of loosely related controls can never bootstrap each
-other into looking compliant. A file that fails to parse, names a `framework`
-other than its own file stem, or repeats a control id is a finding naming the
-file; every other file still loads.
-
-**Applicability, down the tree.** Which frameworks bind a scope is `policies:`
-at the instance root and `scope.policies` in a nested scope's own config — the
-same root-to-leaf chain `Engine::roles_for` walks for roles, resolved fresh
-from the live config on every read, never a second copy kept in step. Unlike
-roles, where the nearest definition wins, a policy layer may only **add or
-tighten**: name another framework, shorten a control's `max_age`, or mark one
-`n/a` with a rationale — never drop or loosen a commitment an ancestor already
-made, or a child project could opt itself out of the GDPR. A control's
-effective `max_age` is the minimum across the catalogue's own value, its
-checks' own value, and every layer's tightening, root to leaf; a `tighten`
-that would not lower that running minimum has no effect and is reported as a
-finding rather than silently ignored. `n/a` needs a non-empty rationale — an
-empty one is a finding and the control stays applicable — and every `n/a`, at
-whichever scope declared it, is always listed rather than left silent: ISO
-27001 calls this a Statement of Applicability, and ADR 0004 keeps the name.
-
-**Where a framework applies, decided at the root** (`#332`). Additive-only
-leaves one thing unsaid: a framework the root binds holds everywhere, even in
-a scope it has nothing to say about — the CRA in a `finance` scope that ships
-no product. So the root, and only the root, may say per framework where it
-applies. Each entry of the root's `policies.frameworks` is a name or an object:
+A policy without `template:` declares its own controls, each with a
+`title` and its `evidence` — the shape a scope-specific policy such as a
+finance department's (`framework: finance`, its own metrics and its monthly
+close task) always had:
 
 ```yaml
-# .factory/config.yaml                  (instance root)
-policies:
-  frameworks:
-    - name: cra
-      except: [finance]          # the whole tree minus these subtrees
-    - name: dsgvo
-      except: [finance]
-    - name: finance
-      scopes: [finance]          # only these subtrees
-    - iso27001                   # a plain name: the whole tree, as before
+# company/finance/.factory/policies/finance.yaml
+framework: finance
+title: Finance
+kind: regulation
+controls:
+  - id: belege
+    title: Every booking references its source document (§146 AO, GoBD)
+    max_age: 35d                  # Nd, Nh, or Nw; also per check
+    evidence:
+      - check: metric
+        metric: reported.finance.bookings_without_beleg
+        below: 0
+        max_age: 35d
 ```
 
-`scopes` is the named scopes and everything below each (absent: the whole
-tree); `except` removes subtrees from that set, applied after `scopes`. Both
-may be given. Names are configured scope names — not paths, not leaf
-aliases — and ancestry is the path tree, the same as every chain above, so
-`except: [finance]` reaches `finance/ledger` but never a `finance-archive`
-beside it. Naming the root scope itself is the whole tree. A plain string,
-or an object with neither key, means exactly what a string always meant, so
-an existing config loads unchanged. A name no scope carries is a finding on
-the board (`unknown_scope`), never a load failure — a renamed scope must not
-stop the daemon — and the framework applies as if the name were absent: an
-unknown `except` removes nothing, and a `scopes` list of nothing but unknown
-names applies nowhere, which the board says rather than guessing a whole
-tree. Listing a framework twice with `scopes` or `except` on either entry is
-refused at load, since a person would be left guessing which one decides.
+See `examples/policies/cra.yaml` for a complete scope policy and
+`crates/factory-direction/src/policy.rs` for every field. The rules:
 
-The invariant above survives because a nested scope still only adds or
-tightens: its own `scope.policies` has no `scopes` or `except` — the daemon
-refuses one at load, naming the scope — but it may bind a framework the root
-left out for it, and then the root's tightening and `n/a` for that framework
-hold there as they would anywhere it applies. Adding is always allowed;
-dropping still is not. The root's own `scope:` block still refuses
-`policies` altogether. Resolution happens in one place,
-`policy_intent::chain_for_scope` (`Config::policy_chain_for_scope` calls
-it): the root's layer is narrowed to what applies at the scope being asked
-about, so everything that reads a chain — the board and its rollups, control
-detail, attestation, remediation, a control plan's `requires:`, the agent
-guide's list of frameworks, `compliance.<framework>` — agrees without
-knowing exclusions exist. A scope that no longer exists gets the root's
-layer as it applies at the root itself.
+- A picked control inherits the template's `title`, `kind`, `maps_to` and
+  `remediation`; the scope's own `remediation:` replaces the template's. A
+  picked control that sets `title`, `kind` or `maps_to` is a finding
+  (`template_override`) and the template's value holds.
+- An unknown `template:` (`unknown_template`) or a control id the template
+  does not define (`unknown_control`) is a finding. With an unknown
+  template, the controls still load, each under its own title or its id.
+- A picked control with no evidence is a finding (`no_evidence`) and stays
+  `open`, so it is still counted.
+- `not_applicable` needs a non-empty rationale; an empty one is a finding
+  (`empty_rationale`) and the control stays applicable.
+- Template controls the scope neither picks nor marks `n/a` are **not
+  selected**: listed per scope on the board, in `factory policy` and in the
+  export, and never counted. A Statement of Applicability so still accounts
+  for every control of the template.
+- A control's `max_age` is the minimum of its own and each of its checks'.
+- `kind` is set per policy (or template) and may be overridden per control.
+  Only `regulation` and `standard` controls count towards a rollup's
+  `compliant`; `best-practice` controls are shown but never counted.
+- `maps_to` names equivalent controls in other frameworks, declared one way
+  and read both, one hop only — never transitive, so loosely related
+  controls cannot bootstrap each other into looking compliant. It is
+  evaluated **within one scope**: evidence for `iso27001/a-8-8` in project A
+  satisfies `cra/annex-i-2-1` in project A, and never in project B. A
+  `maps_to` naming no control of any loaded template or policy is a finding.
+- A file that fails to parse, names a `framework` (or `template`) other than
+  its own file stem, or repeats a control id is a finding naming the file;
+  every other file still loads. Neither `templates/` nor `drafts/` is ever
+  read as a policy, at any level.
+- A policy file at the instance root when the root is not a configured
+  scope belongs to nobody and is a finding (`no_owning_scope`).
 
-Nothing about it is silent. `factory policy --scope S` and the L6 tab leave a
-framework excluded at `S` out of its rows and rollup, and say where it does
-apply instead; the instance-wide board says which scopes each framework
-covers. The report's `applicability` lists, per framework, the layers binding
-it, every scope it covers, the root's `scopes`/`except` (unknown names left
-out) and every scope that restriction excludes, with the root as the layer
-that decided it; `factory policy export` prints it as the Statement of
-Applicability's own section. `factory policy show`, `attest` and `remediate`
-refuse a control in a scope its framework is excluded from, and name the
-exclusion: `cra/annex-i-2-1 does not apply at "finance": the instance root
-("company") excludes cra from the "finance" subtree (except: [finance])`.
+**The subtree aggregate.** The board at scope `S` shows `S`'s own policies
+and every descendant's, one row per owning scope (ancestry by whole path
+components, the canonical L0 scope tree — `projects/factory` never
+aggregates `projects/factory-other`). An organizational scope with no
+policy of its own (`company/`, `projects/`) shows only the aggregate; the
+root's view is the whole instance. A framework's rollup at `S` counts every
+(scope, control) pair in the subtree, so `S` is compliant for a framework
+only when every scope in its subtree that has a policy for it is. A scope in
+the subtree **without** a policy for a framework another scope there uses is
+listed as "no policy" — never counted as compliant. This is the guarantee
+in place of inheritance: visibility. A parent's aggregate shows which
+descendants have no policy for a framework, and which template controls
+each scope left unselected or marked `n/a`. `compliance.<framework>` and
+`open_controls.<framework>` at `S` are this same aggregate rollup.
+
+**Legacy `policies:` blocks.** Earlier versions bound frameworks centrally:
+the root's top-level `policies:` (`frameworks` with `scopes`/`except`,
+`tighten`, `not_applicable`) and a nested scope's `scope.policies`. Factory
+no longer reads either. A config that still has one loads and the daemon
+starts — the block is kept verbatim, so a roster rewrite never drops it —
+and the board reports a `legacy_policies` finding on that scope naming the
+migration: move each framework into that scope's
+`.factory/policies/<framework>.yaml`, picking from a template, and delete
+the block. A top-level `policies:` written in a nested scope's own file
+(where nothing ever read it) is carried into the same finding.
 
 **Checks and statuses.** Evidence is evaluated per check kind, and all thirteen
 are evaluated for real: `knowledge` (a vault page tagged
@@ -2192,27 +2210,36 @@ same root-scope rule as `knowledge.write`: an attestation speaks for the
 company, not for one project, so only the owner or a foreman whose own scope
 *is* the instance root may record or withdraw one.
 
-**The subtree rollup.** Asking about a scope, or the whole instance, folds
-every scope in that subtree's own evaluation into one status per control: a
-scope where the control is `n/a` has nothing to say about it, and among the
-rest the worst status wins — `open` beats `stale` beats `attested` beats
-`satisfied` — so a control counts compliant only when every scope it applies
-to is, not merely one.
-
 `factory policy [status] [--scope S] [--framework F] [--json]` shows this:
-every applicable control's status, findings, and every `n/a` in scope, rolled
-up per framework — and, once the root restricts any framework, an
-APPLICABILITY section saying where each one applies. `factory policy show <fw>/<id> [--scope S] [--json]` is one
-control's full detail, including its whole attestation history. `factory
+the aggregate rollup per framework, every open and stale (scope, control)
+pair labelled with its owning scope, every unselected template control, the
+findings — and, once more than one scope is involved, an APPLICABILITY
+section naming the scopes with a policy for each framework and those
+without one. `factory policy show <fw>/<id> [--scope S] [--json]` is one
+control's full detail in the scope that owns it, including its whole
+attestation history there; a scope that does not own the control is
+refused, naming the scopes below it that do. `factory
 policy attest <fw>/<id> --scope S --evidence <pointer> --expires
-<30d|2027-01-01> [--note N]` records one; `factory policy withdraw
-<attestation-id> --reason R` withdraws it. `factory policy frameworks
-[--json]` lists every loaded catalogue. The same requests answer over HTTP:
+<30d|2027-01-01> [--note N]` records one, in the scope that owns the
+control; `factory policy withdraw <attestation-id> --reason R` withdraws
+it. An attestation speaks only for the scope it is recorded at — an
+ancestor's never covers a descendant's policy. `factory policy frameworks
+[--json]` lists every framework some scope has a policy for.
+
+**Choosing controls.** `factory policy templates` lists the templates and
+the scopes picking from each. `factory policy template show <name>
+[--scope S]` lists each control and whether `S` (or, without `--scope`,
+every scope picking from it) selected it, marked it `n/a` with its
+rationale, or did not select it. `factory policy template skeleton <name>
+[--framework F]` prints a policy picking every control to stdout, to save as
+`<scope>/.factory/policies/<framework>.yaml` and fill in — Factory never
+writes authored content itself. The same requests answer over HTTP:
 `GET /api/policy?scope=`, `GET /api/policy/controls/{framework}/{id}?scope=`,
-`POST /api/policy/attestations`, and `POST /api/policy/attestations/{id}/withdraw`.
+`POST /api/policy/attestations`, `POST /api/policy/attestations/{id}/withdraw`,
+`GET /api/policy/templates` and `GET /api/policy/templates/{name}?scope=`.
 
 **Closing a gap.** `factory policy remediate <fw>/<id> --scope S [--agent A]`
-creates an ordinary task in `S` through the exact path `factory task create`
+creates an ordinary task in `S` — the scope that owns the control — through the exact path `factory task create`
 itself uses (`Engine::create`) — its validation, its worktree, its
 `Event::TaskCreated`, none of it a hand-rolled copy — titled `Close
 <fw>/<id>: <title>` and labelled `policy=<fw>/<id>`. Its instructions are the
@@ -2220,13 +2247,14 @@ catalogue's own `remediation:` text (if the control carries one), the
 missing evidence — each unsatisfied check and why, verbatim, the same
 reasons the L6 tab and `policy show` themselves print — and a closing line
 naming every check that would satisfy the control
-(`policy::remediation_instructions`). It needs `task.create` in `S`, under
+(`policy::remediation_instructions`). The remediation text is the scope's
+own `remediation:`, or the template's when the scope set none. It needs `task.create` in `S`, under
 the exact reach rule `Request::TaskCreate` itself is checked against
 (`access.rs` maps both to the same grant and the same caller's-own-scope
 check) — this is not a second door into creating a task, it is the one
 door. Refused outright when the control is already `satisfied`, `attested`,
-or `n/a` at `S` — there is nothing to remediate; refused, naming the
-exclusion, when the root excludes the control's framework from `S`; refused, naming the
+or `n/a` at `S` — there is nothing to remediate; refused, naming the scopes
+that do own it, when `S` has no policy with the control; refused, naming the
 existing task by id and title, when a non-terminal task already carries
 that label in `S` — a second `remediate` finds the same task rather than
 spawning a duplicate. `POST /api/policy/remediate` (`{control, scope,
@@ -2241,14 +2269,16 @@ it, and a refusal shows inline, next to the button — this page uses neither
 **Exporting for an audit.** `factory policy export [--scope S] [--format
 md|json]` prints a snapshot to stdout: an instance/scope/produced-at header
 and the "compliant means evidence complete, not certified" sentence, then
-each framework's applicability — the layers binding it, every scope it
-covers, and every subtree the root excluded and by which rule — then per
-framework its rollup, then — scope by scope — every control that
-framework applies to there with its status, reasons, `refs` (the task, run,
-workflow run, bench run or attestation id behind it, never a page's own
-text), and its whole attestation history at that scope (evidence pointer,
-by, attested, expires, withdrawn — an audit trail, so a withdrawn or expired
-one is shown, not dropped), then every `n/a` with its rationale and
+each framework's applicability — every scope in the subtree with a policy
+for it and every scope without one — then per framework its aggregate
+rollup, then — scope by scope — every control that scope's own policy
+selects, with its status, reasons, `refs` (the task, run, workflow run,
+bench run or attestation id behind it, never a page's own text), and its
+whole attestation history at that scope (evidence pointer, by, attested,
+expires, withdrawn — an audit trail, so a withdrawn or expired one is
+shown, not dropped), then the **Statement of Applicability per scope**:
+every template control selected (with its status), `n/a` with its
+rationale, or not selected — then every `n/a` with its rationale and
 declaring scope, then every finding. No page text anywhere in it, only
 pointers. `format` defaults to `md`; `json` is the same data
 (`policy_export::PolicyExport`, wrapping the `Request::Policy` report plus
@@ -2393,8 +2423,8 @@ design §8 the same way a policy check does. `factory metrics` (or `GET
 | `scrap_rate` | `scrapped/finished`, trailing 28 days | `production.rs`'s daily grid |
 | `agent_hours` | hours covered by run blocks, with overlaps for one agent counted once | occupancy `busy_seconds` |
 | `blocked_hours` | blocked hours inside those run blocks, included in rather than subtracted from agent hours | occupancy `blocked_seconds` |
-| `compliance.<framework>` | share of counted controls satisfied, attested, or n/a | the selected scope's policy subtree rollup |
-| `open_controls.<framework>` | count of counted controls still open or stale | the selected scope's policy subtree rollup |
+| `compliance.<framework>` | share of counted (scope, control) pairs satisfied, attested, or n/a | the selected scope's subtree aggregate (#390) |
+| `open_controls.<framework>` | count of counted (scope, control) pairs still open or stale | the selected scope's subtree aggregate (#390) |
 | `conformance_rate.<category>` | `conforms()/held()` (every enforced required step's newest non-self attestation passed, among runs held to at least one) over finished runs of `category`, trailing 28 days; a held run whose own failure never reached an agent (`FailKind::is_infrastructure`: an ack timeout, a run timeout, a vanished session, a dispatch that never happened) is excluded from both sides of the ratio | `Engine::attested_runs`'s finished runs and `StepAttestation`s (`factory_core::conformance`, #158) |
 | `gate_fail_rate` | failed gate attestations over every gate attestation, across every category and re-verification round, trailing 28 days | `Engine::attested_runs`'s finished runs and `StepAttestation`s (`factory_core::conformance`, #158) |
 | `review_reject_rate` | failed independent review decisions over all review decisions on finished runs, trailing 28 days; each step/round counts once (newest duplicate wins), excluding self-review and actors other than the frozen reviewer; missing reviews are unknown | the same L4 `AttestedRun` fact port and append-only run attestations (#158); available in Goals, Scenarios, signposts and dashboard tiles through the existing registry |
@@ -2681,8 +2711,8 @@ assumptions: |
   required from the 2027 deadline.
 from: 2026-09-01        # when the horizon below is measured from -- see "Staleness"
 horizon: 26w             # Nd/Nh/Nw; defaults to 26 weeks
-policy:                  # an overlay on the real chain -- add or tighten only
-  add_frameworks: [ai-act]      # a real catalogue's framework, or a draft's (below)
+policy:                  # an overlay on each scope's own policies -- add or tighten only
+  add_frameworks: [ai-act]      # a draft policy's framework (below), or a template's
   tighten: { cra/annex-i-2-1: { max_age: 14d } }
   drop_not_applicable: []       # controls whose n/a no longer holds in this scenario
 drivers:                 # overrides on the built-in driver tree -- see "Drivers"
@@ -2698,24 +2728,26 @@ narrative:                # the qualitative workshop layer -- carried verbatim, 
   premortem: [We under-resourced human oversight and missed the deadline]
 ```
 
-**Drafts.** `<root>/.factory/policies/drafts/<framework>.yaml` — a
-framework not yet real enough for `.factory/policies/`, only for a
-scenario's own `add_frameworks` to name (`policy::load_all`'s own
-non-recursion into subdirectories keeps a draft from ever affecting the
-real Policy tab by accident — see `examples/policies/drafts/ai-act.yaml`).
-A draft whose `framework` collides with an already-loaded real one is
-dropped whole from the merge and reported as a
-`FindingKind::DraftCollidesWithReal` finding — a draft is a stand-in for a
-framework that does not exist yet, never a second, competing definition of
-one that already does; the real catalogue always wins.
+**Drafts.** `<root>/.factory/policies/drafts/<framework>.yaml` — a policy
+(with or without a `template:`) not yet real enough for any scope, only for
+a scenario's own `add_frameworks` to name. No policy loader reads
+`drafts/`, so a draft never affects the real Policy tab — see
+`examples/policies/drafts/ai-act.yaml`. The overlay applies per scope in
+the asked subtree (#390): for each scope, `add_frameworks` adds the draft of
+that name resolved as if the scope owned it — or, with no draft, every
+control of the template of that name with no evidence ("what if this scope
+adopted it") — unless the scope already has a real policy for the
+framework, which then wins (a draft naming it too is a
+`FindingKind::DraftCollidesWithReal` finding). `tighten` shortens a
+control's `max_age` in the scope's own policies and never lengthens it;
+`drop_not_applicable` clears an `n/a` there.
 
 **Three layers, never mixed into one number** (`scenario.rs`'s own module
 doc comment, the issue's own guardrail):
 
-- **Exact:** the policy delta. `overlay_chain` builds the overlaid chain
-  from the real one (`Engine::policy_chain`, root through every ancestor);
-  `policy::applicable`/`evaluate` run against it exactly the way the real
-  Policy tab's own evaluation does — same evidence-gathering
+- **Exact:** the policy delta. `overlay_policies` overlays each scope's own
+  resolved policies (#390); `evaluate` runs against them exactly the way the
+  real Policy tab's own evaluation does — same evidence-gathering
   (`policies::Engine::dataset_level_facts`/`evidence_for_scope`, extracted
   from `policy_report` for exactly this reuse, so a scenario's overlay
   asking a check kind the baseline never needed — an `add_frameworks`
@@ -2938,9 +2970,9 @@ tradeoffs:
 
 **Declaration.** The instance root's top-level `quality: [profile, …]`
 applies everywhere; a scope's own `scope.quality: [profile, …]` adds
-profiles for itself and every scope below it by path — the policy chain
-exactly (`Config::quality_chain_for_scope`, ancestry by `Scope.path`, never
-by name). Down the chain a descendant may only **add** (attributes,
+profiles for itself and every scope below it by path
+(`Config::quality_chain_for_scope`, ancestry by `Scope.path`, never by
+name). Down the chain a descendant may only **add** (attributes,
 scenarios) or **tighten** (raise importance, raise `above`, lower `below`,
 shorten `max_age`); anything looser is a finding and the inherited value is
 kept. A scope whose chain binds nothing is left out of the report: an
@@ -3498,8 +3530,10 @@ the one deviation from the issue that first asked for this (below).
   against that literal reading — AGENTS.md's "a scope owns only its
   `.factory/config.yaml`", and `backup::AUTHORED`, which only ever walks
   paths under the instance root — so every definition lives under the
-  instance root instead, exactly as quality profiles and policy catalogues
-  already do, and a nested scope opts in with a name rather than a path.
+  instance root instead, exactly as quality profiles do, and a nested scope
+  opts in with a name rather than a path. (Policies are the one later
+  exception, `#390`: a policy is a scope's own commitment, so it lives in
+  that scope's `.factory/policies/` and backups take it from there.)
 
 `factory intake [--scope S]` (or `factory intake list --scope S`) prints the
 board: every open item by column, the routes it can go to, and — since
@@ -5099,12 +5133,13 @@ The same `requires:` list goes on an attribute of a quality profile
   category. A category is a name (`[a-z0-9][a-z0-9_-]*`); nothing else is
   checked.
 - **The control plan** for a scope and category is resolved from what already
-  applies there, down the same chain `policies:` and `quality:` use: add or
-  tighten only. A scope adds a framework and with it the framework's
-  requirements; the same step and command required twice is one step naming
-  both controls; the same step with two commands runs both; a timeout only
-  shortens. The one way a requirement leaves the plan is an `n/a` with a
-  rationale on its control, and the plan lists that as a waiver.
+  applies there: the `requires:` of the run's own scope's policies (#390 —
+  nothing is inherited from an ancestor's policy), plus the `quality:`
+  chain, add or tighten only. The same step and command required twice is
+  one step naming both controls; the same step with two commands runs both;
+  a timeout only shortens. The one way a requirement leaves the plan is an
+  `n/a` with a rationale on its control, and the plan lists that as a
+  waiver.
 - **Injection at dispatch.** When a workflow run starts, each task node's plan
   is merged into the run's immutable snapshot as locked control nodes.
   `approval` is a prerequisite before the task launches; deterministic `gate`
@@ -5663,50 +5698,26 @@ Discovery is performed at daemon startup; add or remove a marker, then restart
 to refresh the scope list. Duplicate IDs and names, malformed files, and
 missing IDs or names stop startup with the files involved named in the error.
 
-### Policy applicability (#332)
+### Policies live in each scope (#390)
 
-The instance root's top-level `policies:` binds frameworks, tightens
-controls and marks them `n/a`; a nested scope's `scope.policies` does the
-same for its subtree, additive only (see "Policies" above). Only at the root
-may a `frameworks` entry say where it applies:
+There is no policy block in any config file. A scope's policies are files in
+its own directory — `<scope>/.factory/policies/<framework>.yaml`, the root
+scope's in `<root>/.factory/policies/` — picking controls from the
+templates in `<root>/.factory/policies/templates/` (see "Policies" above):
 
-```yaml
-# root .factory/config.yaml, top level (like `roles:`)
-policies:
-  frameworks:
-    - cra                        # the whole tree
-    - name: dsgvo                # the same as `- dsgvo`
-    - name: finance
-      scopes: [finance]          # these scopes and everything below them
-    - name: iso27001
-      scopes: [engineering, finance]
-      except: [sandbox]          # subtrees removed, after `scopes`
-  tighten:
-    cra/annex-i-2-1: { max_age: 14d }
-  not_applicable:
-    - { control: dsgvo/art-37, rationale: fewer than 20 people process personal data }
+```text
+.factory/policies/templates/cra.yaml          # a template: possible controls, no evidence
+.factory/policies/dsgvo.yaml                  # the root scope's own policy
+projects/irrlicht/.factory/policies/cra.yaml  # irrlicht's own CRA policy
+company/finance/.factory/policies/finance.yaml
 ```
 
-| key | where | meaning |
-| --- | --- | --- |
-| `frameworks[]: <name>` | root, nested | binds the framework to the whole tree (root) or the scope's subtree (nested) |
-| `frameworks[].name` | root, nested | the framework, a catalogue's file stem |
-| `frameworks[].scopes` | root only | configured scope names; the framework applies to each and everything below it. Absent: the whole tree |
-| `frameworks[].except` | root only | configured scope names whose subtrees are removed, applied after `scopes` |
-| `tighten`, `not_applicable` | root, nested | unchanged; the root's for an excluded framework hold only where something binds it back |
-
-```yaml
-# a nested scope: projects/demo/.factory/config.yaml
-scope:
-  name: demo
-  policies:
-    frameworks: [ai-act]         # add only: `scopes`/`except` here is refused at load
-```
-
-An unknown name is an `unknown_scope` finding on the board, not a load
-failure; a framework listed twice with `scopes`/`except` on either entry, and
-a misspelt key inside the object form, are refused at load like any other
-typo in a policy declaration.
+The root's top-level `policies:` and a nested scope's `scope.policies` —
+`frameworks` with `scopes`/`except` (#332), `tighten` and `not_applicable` —
+are no longer read. A config that still carries either loads unchanged and
+the daemon starts; the Policy board reports a `legacy_policies` finding on
+that scope naming the migration. A backup takes every scope's own
+`.factory/policies/` along with the root's.
 
 ### Where a scope's tasks live
 
