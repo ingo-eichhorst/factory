@@ -8320,6 +8320,58 @@ mod tests {
     }
 
     #[test]
+    fn policy_templates_and_template_show_and_skeleton_parse_and_render_the_selection() {
+        let cli = Cli::try_parse_from(["factory", "policy", "templates"]).unwrap();
+        assert!(matches!(cli.command, Command::Policy { command: Some(PolicyCmd::Templates), .. }));
+        let cli = Cli::try_parse_from(["factory", "policy", "template", "show", "cra", "--scope", "irrlicht"]).unwrap();
+        let Command::Policy { command: Some(PolicyCmd::Template { cmd: TemplateCmd::Show { name, scope } }), .. } = cli.command
+        else {
+            panic!("template show")
+        };
+        assert_eq!((name.as_str(), scope.as_deref()), ("cra", Some("irrlicht")));
+        let cli = Cli::try_parse_from(["factory", "policy", "template", "skeleton", "cra", "--framework", "cra-product"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Policy { command: Some(PolicyCmd::Template { cmd: TemplateCmd::Skeleton { .. } }), .. }
+        ));
+        assert!(Cli::try_parse_from(["factory", "policy", "template", "show"]).is_err(), "a name is required");
+
+        let templates: Vec<factory_core::protocol::TemplateSummary> = serde_json::from_value(serde_json::json!([
+            {"template": "cra", "title": "Cyber Resilience Act", "kind": "regulation", "controls": 12, "used_by": ["irrlicht"]},
+            {"template": "iso27001", "title": "ISO/IEC 27001", "kind": "standard", "controls": 20}
+        ]))
+        .unwrap();
+        let text = policy_templates_text(&templates);
+        assert!(text.contains("cra") && text.contains("used by irrlicht"), "{text}");
+        assert!(text.contains("used by no scope"), "{text}");
+        assert_eq!(policy_templates_text(&[]), "no templates in .factory/policies/templates/");
+
+        let view: factory_core::protocol::TemplateView = serde_json::from_value(serde_json::json!({
+            "template": {"template": "cra", "title": "Cyber Resilience Act", "kind": "regulation",
+                "controls": [{"id": "sbom", "title": "SBOM"}, {"id": "hw", "title": "Hardware"}, {"id": "cvd", "title": "Disclosure"}]},
+            "scopes": [
+                {"scope": "irrlicht", "framework": "cra", "controls": [
+                    {"id": "sbom", "title": "SBOM", "selection": "selected"},
+                    {"id": "hw", "title": "Hardware", "selection": "not_applicable", "rationale": "No hardware ships"},
+                    {"id": "cvd", "title": "Disclosure", "selection": "not_selected"}
+                ]},
+                {"scope": "projects", "controls": []}
+            ]
+        }))
+        .unwrap();
+        let text = policy_template_text(&view);
+        assert!(text.starts_with("cra  Cyber Resilience Act  [regulation]  3 control(s)"), "{text}");
+        assert!(text.contains("irrlicht (policy cra)"), "{text}");
+        assert!(text.contains("sbom") && text.contains("selected"), "{text}");
+        assert!(text.contains("n/a: No hardware ships"), "{text}");
+        assert!(text.contains("not selected"), "{text}");
+        assert!(text.contains("projects (no policy from this template)"), "{text}");
+        let skeleton = policy::skeleton(&view.template, Some("cra-product"));
+        assert!(skeleton.contains("framework: cra-product\ntemplate: cra\n"), "{skeleton}");
+        assert!(skeleton.contains("  - id: hw "), "{skeleton}");
+    }
+
+    #[test]
     fn notify_takes_a_channel_a_text_and_files_and_never_a_recipient() {
         let cli = Cli::try_parse_from(["factory", "notify", "owner-telegram", "Radar: 2 neue CFPs", "--file", "out/a.html", "--file", "b.pdf"]).unwrap();
         let Command::Notify { channel, text, files } = cli.command else { panic!("notify") };

@@ -511,9 +511,16 @@ fn deltas_from_statuses(
         baseline_all.push(base.clone());
         scenario_all.push(scen.clone());
     }
-    let subtree = scenario::policy_delta(
+    // Which controls change is read per control id, the worst status over
+    // the subtree; the rollups count every (scope, control) pair (#390), the
+    // same as the Policy board and `ScenarioBaseline::policy`.
+    let mut subtree = scenario::policy_delta(
         &policy::worst_across_scopes(&baseline_all),
         &policy::worst_across_scopes(&scenario_all),
+    );
+    subtree.per_framework = scenario::framework_deltas(
+        &baseline_all.concat(),
+        &scenario_all.concat(),
     );
     (per_scope, subtree)
 }

@@ -17,7 +17,7 @@
 //! Three different kinds of answer live in this module, and they are never
 //! combined into one number (the issue's own guardrail):
 //!
-//! - **Exact:** [`overlay_chain`] and [`policy_delta`] reuse `policy.rs`'s
+//! - **Exact:** [`overlay_policies`] and [`policy_delta`] reuse `policy.rs`'s
 //!   own pure evaluator -- a control is open or it is not, deterministically,
 //!   the same as the real report.
 //! - **Probabilistic:** [`forecast_completion`], [`tornado`] and
@@ -54,13 +54,13 @@
 //! `name`, is a [`Finding`] naming it, and every other file still loads. A
 //! missing directory is empty, not an error.
 //!
-//! Draft policy catalogues -- a framework not yet real enough for
+//! Draft policies -- a policy not yet real enough for any scope's
 //! `.factory/policies/`, only for playing out a what-if -- live at
-//! `<root>/.factory/policies/drafts/*.yaml`. [`load_drafts`] reads them with
-//! `policy::load_all`'s own semantics; a test in this module pins that
-//! `policy::load_all` on the real `policies/` directory never recurses into
-//! `drafts/`, so a draft can never leak into the real compliance report by
-//! accident.
+//! `<root>/.factory/policies/drafts/*.yaml`. [`load_drafts`] reads them as
+//! policy files, resolved per scope by [`overlay_policies`]; a test in this
+//! module pins that `policy::load_all` on the real `policies/` directory
+//! never recurses into `drafts/`, so a draft can never leak into the real
+//! compliance report by accident.
 //!
 //! ## Deviations from the issue's sketch (read before assuming a shape)
 //!
@@ -78,15 +78,16 @@
 //!    every scenario the moment a worktree is cut. `from` unset means
 //!    staleness is simply never checked for that scenario (see
 //!    [`stale_findings`]).
-//! 2. **`overlay_chain` takes `&Scenario`, not `&PolicyOverlay`, and returns
-//!    findings.** The issue's own sketch is
-//!    `overlay_chain(chain, overlay) -> Vec<PolicyLayer>`. A scenario's
+//! 2. **`overlay_policies` takes `&Scenario`, not `&PolicyOverlay`, and
+//!    returns findings.** The issue's own sketch overlaid a policy chain;
+//!    since #390 there is none, and the overlay applies to each scope's own
+//!    resolved policies instead. A scenario's
 //!    `policy:` section is optional (only a `kind: [policy, ...]` scenario
 //!    authors one), so taking the whole `Scenario` lets "no policy overlay"
 //!    be a clean no-op instead of forcing every caller to unwrap
 //!    `scenario.policy` first. The synthetic layer's scope is
 //!    `scenario:<name>` -- the issue offers "or the leaf scope's" as an
-//!    alternative, rejected because `policy::applicable`'s own findings
+//!    alternative, rejected because the overlay's own policy findings
 //!    (`UnknownFramework`, `LooseningHasNoEffect`, ...) name `layer.scope`
 //!    as their subject, and attributing a scenario author's own mistake to
 //!    the real scope it was evaluated against would point a person at the
@@ -266,22 +267,20 @@ impl Scenario {
     }
 }
 
-/// An overlay on the real policy chain -- add frameworks, tighten a
-/// control's freshness window, or say a control marked not-applicable no
-/// longer is. Never loosens anything: see [`overlay_chain`].
+/// An overlay on each scope's own policies (#390) -- add frameworks, tighten
+/// a control's freshness window, or say a control marked not-applicable no
+/// longer is. Never loosens anything: see [`overlay_policies`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyOverlay {
     #[serde(default)]
     pub add_frameworks: Vec<String>,
-    /// Reuses `policy::Tighten` verbatim -- the same `{max_age}` shape a
-    /// real scope's own `tighten:` config already writes, so
-    /// `policy::applicable`'s add-or-tighten-only arithmetic applies to a
-    /// scenario's tighten exactly the way it applies to a real one.
+    /// `{max_age}` per control: [`overlay_policies`] applies it only where
+    /// it shortens the scope's own window.
     #[serde(default)]
     pub tighten: BTreeMap<ControlRef, policy::Tighten>,
-    /// Controls to strip a `not_applicable` declaration from, in the chain
-    /// copy [`overlay_chain`] builds -- "what if this control's n/a
+    /// Controls to strip a `not_applicable` declaration from, in the copy
+    /// of a scope's policies [`overlay_policies`] builds -- "what if this control's n/a
     /// rationale no longer holds".
     #[serde(default)]
     pub drop_not_applicable: Vec<ControlRef>,
@@ -343,7 +342,7 @@ pub struct Narrative {
 
 // ================================================================ findings
 
-/// One of the things [`load`] (or [`stale_findings`], or [`overlay_chain`])
+/// One of the things [`load`] (or [`stale_findings`], or [`overlay_policies`])
 /// checks for. Never stops another file, or another part of the same file,
 /// from loading -- exactly `policy::Finding`'s and `goals::Finding`'s own
 /// promise.
@@ -382,7 +381,7 @@ pub enum FindingKind {
     Stale,
     /// A policy overlay's `drop_not_applicable` names a control that was
     /// never marked not-applicable anywhere in the chain it was applied to
-    /// -- see [`overlay_chain`], deviation 2 in the module doc comment.
+    /// -- see [`overlay_policies`], deviation 2 in the module doc comment.
     DropNotApplicableHasNoEffect,
     /// A draft catalogue in `.factory/policies/drafts/` names the same
     /// `framework` as an already-loaded real one -- see [`merge_catalogues`].
@@ -887,6 +886,22 @@ pub fn policy_delta(baseline: &[ControlStatus], scenario: &[ControlStatus]) -> P
     newly_applicable_but_covered.sort();
     missing_from_scenario.sort();
 
+    let per_framework = framework_deltas(baseline, scenario);
+
+    PolicyDelta {
+        newly_open,
+        newly_stale,
+        newly_applicable_but_covered,
+        unchanged,
+        missing_from_scenario,
+        per_framework,
+    }
+}
+
+/// Each framework's rollup before and after, over whatever statuses each
+/// side passes -- one scope's, or (#390) every (scope, control) pair of a
+/// subtree, so a scenario's subtree rollup agrees with the Policy board's.
+pub fn framework_deltas(baseline: &[ControlStatus], scenario: &[ControlStatus]) -> Vec<FrameworkDelta> {
     let before_rollup: BTreeMap<String, policy::FrameworkRollup> = policy::rollup(baseline)
         .into_iter()
         .map(|r| (r.framework.clone(), r))
@@ -900,23 +915,14 @@ pub fn policy_delta(baseline: &[ControlStatus], scenario: &[ControlStatus]) -> P
         .chain(after_rollup.keys())
         .cloned()
         .collect();
-    let per_framework = frameworks
+    frameworks
         .into_iter()
         .map(|fw| FrameworkDelta {
             before: before_rollup.get(&fw).cloned(),
             after: after_rollup.get(&fw).cloned(),
             framework: fw,
         })
-        .collect();
-
-    PolicyDelta {
-        newly_open,
-        newly_stale,
-        newly_applicable_but_covered,
-        unchanged,
-        missing_from_scenario,
-        per_framework,
-    }
+        .collect()
 }
 
 /// `<root>/.factory/policies/drafts`, alongside `policy::policies_dir`.

@@ -2310,6 +2310,21 @@ mod tests {
             ["cra/hw"]
         );
 
+        // `compliance.cra` / `open_controls.cra` at `projects` are this same
+        // aggregate rollup.
+        let ids = [
+            factory_core::metrics::MetricId::new("compliance.cra").unwrap(),
+            factory_core::metrics::MetricId::new("open_controls.cra").unwrap(),
+        ];
+        let metrics = engine.metrics_for(&ids, Utc::now(), Some("projects"), None).await.unwrap();
+        let value = |id: &str| metrics.values.iter().find(|v| v.id.as_str() == id).unwrap().value;
+        let counted = cra.counts.satisfied + cra.counts.attested + cra.counts.stale + cra.counts.open + cra.counts.not_applicable;
+        assert_eq!(value("open_controls.cra"), Some((cra.counts.open + cra.counts.stale) as f64));
+        assert_eq!(
+            value("compliance.cra"),
+            Some((cra.counts.satisfied + cra.counts.attested + cra.counts.not_applicable) as f64 / counted as f64)
+        );
+
         // `projects/factory` never aggregates the lookalike beside it.
         let factory = engine.policy_report(Some("projects/factory")).await.unwrap();
         assert_eq!(factory.rows.iter().map(|r| r.scope.as_str()).collect::<Vec<_>>(), ["factory"]);
@@ -2404,6 +2419,71 @@ mod tests {
         );
         let all = engine.policy_template("cra", None).await.unwrap();
         assert_eq!(all.scopes.len(), 3);
+    }
+
+    /// #390, through the daemon's own start sequence (`main.rs`'s `run`):
+    /// `Factory::load`, discovery, `validate` -- a config still carrying the
+    /// central `policies:` shapes starts, the root scope owns the root's
+    /// policy file, and every legacy block is a finding.
+    #[tokio::test]
+    async fn a_legacy_config_starts_through_the_real_loader_and_names_every_legacy_block() {
+        let root = std::env::temp_dir().join(format!("factory-policies-legacy-start-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
+        std::fs::write(
+            root.join(".factory/config.yaml"),
+            "version: 1\ninstance:\n  id: inst\n  name: inst\n\
+             scope:\n  id: company-id\n  name: company\n\
+             policies:\n  frameworks:\n    - name: cra\n      except: [finance]\n    - name: finance\n      scopes: [finance]\n  \
+             tighten:\n    cra/a: {max_age: 7d}\n  not_applicable:\n    - {control: cra/b, rationale: unused}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".factory/policies/cra.yaml"),
+            "framework: cra\ntitle: CRA\nkind: regulation\ncontrols: [{id: a, title: A, evidence: [{check: attestation}]}]\n",
+        )
+        .unwrap();
+        for (dir, yaml) in [
+            ("finance", "version: 1\nscope:\n  id: finance-id\n  name: finance\n  policies:\n    frameworks: [{name: gobd, except: [finance]}]\n"),
+            ("projects/web", "version: 1\nscope: {id: web-id, name: web}\npolicies:\n  frameworks: [cra]\n"),
+        ] {
+            std::fs::create_dir_all(root.join(dir).join(".factory")).unwrap();
+            std::fs::write(root.join(dir).join(".factory/config.yaml"), yaml).unwrap();
+        }
+
+        let mut factory = Factory::load(&root).unwrap();
+        crate::discovery::apply(&mut factory).unwrap();
+        factory.config.validate().unwrap();
+        crate::backup::validate_config(&factory).unwrap();
+        assert_eq!(
+            factory.config.scopes.iter().filter(|s| s.path == std::path::Path::new(".")).count(),
+            1,
+            "discovery places the root scope exactly once"
+        );
+
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        let engine = Arc::new(Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()));
+        let report = engine.policy_report(None).await.unwrap();
+        assert_eq!(
+            report.rows.iter().map(|r| r.scope.as_str()).collect::<Vec<_>>(),
+            ["company"],
+            "the root's own policy file is the root scope's"
+        );
+        let mut legacy: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind == policy::FindingKind::LegacyPolicies)
+            .map(|f| f.subject.as_str())
+            .collect();
+        legacy.sort();
+        assert_eq!(legacy, ["company", "finance", "web"], "{:?}", report.findings);
+        assert!(
+            report.findings.iter().all(|f| f.kind != policy::FindingKind::NoOwningScope),
+            "{:?}",
+            report.findings
+        );
+        assert_eq!(engine.policy_frameworks("company"), ["cra"]);
+        assert!(engine.policy_frameworks("web").is_empty(), "a legacy block binds nothing");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]

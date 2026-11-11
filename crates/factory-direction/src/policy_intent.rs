@@ -605,6 +605,22 @@ mod tests {
         assert!(unknown.contains("is not a control of \"work\"'s cra policy"), "{unknown}");
     }
 
+    #[tokio::test]
+    async fn a_control_plan_reads_the_runs_own_scope_and_never_an_ancestors_requires() {
+        let root = Root::new();
+        root.policy(
+            "projects/work",
+            "house",
+            "framework: house\ntitle: House\nkind: best-practice\ncontrols:\n  - id: tested\n    title: Tested\n    evidence: [{check: attestation}]\n    requires:\n      - {applies_to: [feature], step: tests, gate: cargo test}\n",
+        );
+        let authored = Authored::new(root.0.clone(), configuration());
+        let parent = authored.plan_input("work", "feature").await.unwrap();
+        assert_eq!(parent.policy.len(), 1);
+        assert_eq!(parent.policy[0].source, "house/tested");
+        let child = authored.plan_input("child", "feature").await.unwrap();
+        assert!(child.policy.is_empty(), "an ancestor's policy injects nothing into a child's plan");
+    }
+
     #[test]
     fn a_root_policy_with_no_root_scope_is_owned_by_nobody_and_said_so() {
         let root = Root::new();
