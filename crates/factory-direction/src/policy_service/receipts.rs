@@ -271,7 +271,10 @@ mod tests {
             let root =
                 std::env::temp_dir().join(format!("factory-clock-owner-{}", uuid::Uuid::new_v4()));
             // Both scopes own the same CRA policy (#390): nothing is inherited.
-            for dir in [policy::policies_dir(&root), policy::policies_dir(&root.join("projects/demo"))] {
+            for dir in [
+                policy::policies_dir(&root),
+                policy::policies_dir(&root.join("projects/demo")),
+            ] {
                 std::fs::create_dir_all(&dir).unwrap();
                 std::fs::write(dir.join("cra.yaml"), "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {id: art-14, title: Reporting, evidence: [{check: attestation}]}\n  - {id: manual, title: Manual, evidence: [{check: attestation}]}\n").unwrap();
             }

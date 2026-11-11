@@ -3,9 +3,9 @@
 use crate::{policy, policy_intent, policy_report::*, remediation::open_policy_label};
 use factory_assurance::{check_evaluation, checks::EvaluationSubject, evidence::BudgetIntent};
 use factory_kernel::{
-    resolve_scope, scope_subtree, Attestation, CheckEvaluationFact,
-    CheckObservation, ControlRef, FactoryError, Facts, KnowledgeTags, Provide, Result, ScopeNode,
-    TaskInventoryFact, TaskInventoryQuery, L6,
+    resolve_scope, scope_subtree, Attestation, CheckEvaluationFact, CheckObservation, ControlRef,
+    FactoryError, Facts, KnowledgeTags, Provide, Result, ScopeNode, TaskInventoryFact,
+    TaskInventoryQuery, L6,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -161,7 +161,9 @@ impl<'a> Service<'a> {
                 asked.is_none()
                     || in_subtree.contains(finding.subject.as_str())
                     || finding.subject.starts_with(".factory/policies/templates/")
-                    || targets.iter().any(|t| finding_is_in(&finding.subject, &t.path))
+                    || targets
+                        .iter()
+                        .any(|t| finding_is_in(&finding.subject, &t.path))
             })
             .cloned()
             .collect();
@@ -177,14 +179,15 @@ impl<'a> Service<'a> {
                     .entry(owned.framework.clone())
                     .or_default()
                     .push(target.name.clone());
-                let summary = summaries
-                    .entry(owned.framework.clone())
-                    .or_insert_with(|| CatalogueSummary {
-                        framework: owned.framework.clone(),
-                        title: owned.title.clone(),
-                        kind: owned.kind,
-                        controls: 0,
-                    });
+                let summary =
+                    summaries
+                        .entry(owned.framework.clone())
+                        .or_insert_with(|| CatalogueSummary {
+                            framework: owned.framework.clone(),
+                            title: owned.title.clone(),
+                            kind: owned.kind,
+                            controls: 0,
+                        });
                 summary.controls += owned.controls.len();
                 not_selected
                     .entry(target.name.clone())
@@ -360,9 +363,8 @@ impl<'a> Service<'a> {
                     .controls
                     .iter()
                     .map(|control| {
-                        let picked = own.and_then(|p| {
-                            p.controls.iter().find(|c| c.control.id == control.id)
-                        });
+                        let picked = own
+                            .and_then(|p| p.controls.iter().find(|c| c.control.id == control.id));
                         let (selection, rationale) = match picked {
                             Some(applied) => match &applied.not_applicable {
                                 Some(na) => (Selection::NotApplicable, Some(na.rationale.clone())),
@@ -895,7 +897,11 @@ mod tests {
     /// shares a name prefix with `projects/app` but is not below it.
     fn tree(fixture: &Fixture) -> Service<'_> {
         for path in [".", "projects/app"] {
-            std::fs::remove_dir_all(policy::scope_policies_dir(&fixture.root, std::path::Path::new(path))).unwrap();
+            std::fs::remove_dir_all(policy::scope_policies_dir(
+                &fixture.root,
+                std::path::Path::new(path),
+            ))
+            .unwrap();
         }
         std::fs::create_dir_all(policy::policies_dir(&fixture.root)).unwrap();
         let cra = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols: [{id: a, title: A, evidence: [{check: attestation}]}]\n";
@@ -913,8 +919,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_subtree_aggregate_counts_every_scope_and_one_open_child_makes_the_parent_non_compliant()
-    {
+    async fn the_subtree_aggregate_counts_every_scope_and_one_open_child_makes_the_parent_non_compliant(
+    ) {
         let fixture = Fixture::new();
         let service = tree(&fixture);
         let lower = Lower::default();
@@ -928,7 +934,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            projects.rows.iter().map(|r| r.scope.as_str()).collect::<Vec<_>>(),
+            projects
+                .rows
+                .iter()
+                .map(|r| r.scope.as_str())
+                .collect::<Vec<_>>(),
             ["app", "web", "lookalike"]
         );
         let cra = &projects.rollup[0];
@@ -938,7 +948,10 @@ mod tests {
             (2, 1),
             "every (scope, control) pair counts, not one status per control"
         );
-        assert!(!cra.compliant, "one child open: the parent is not compliant");
+        assert!(
+            !cra.compliant,
+            "one child open: the parent is not compliant"
+        );
         assert_eq!(
             projects.applicability,
             [FrameworkApplicability {
@@ -963,18 +976,35 @@ mod tests {
         assert!(app.applicability[0].no_policy.is_empty());
 
         // The whole instance is the root's view.
-        let whole = service.report(None, &lower, &lower, &inventory).await.unwrap();
+        let whole = service
+            .report(None, &lower, &lower, &inventory)
+            .await
+            .unwrap();
         assert_eq!(whole.rows.len(), 3);
-        assert!(whole.applicability[0].no_policy.contains(&"company".to_string()));
+        assert!(whole.applicability[0]
+            .no_policy
+            .contains(&"company".to_string()));
 
         // `detail` resolves in the owning scope only.
         let refused = service
-            .detail("cra/a".parse().unwrap(), "projects", &lower, &lower, &inventory)
+            .detail(
+                "cra/a".parse().unwrap(),
+                "projects",
+                &lower,
+                &lower,
+                &inventory,
+            )
             .await
             .unwrap_err()
             .to_string();
-        assert!(refused.contains("\"projects\" has no cra policy of its own"), "{refused}");
-        assert!(refused.contains("belongs to app, web, lookalike"), "{refused}");
+        assert!(
+            refused.contains("\"projects\" has no cra policy of its own"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("belongs to app, web, lookalike"),
+            "{refused}"
+        );
         assert!(service
             .detail("cra/a".parse().unwrap(), "web", &lower, &lower, &inventory)
             .await
@@ -1008,21 +1038,39 @@ mod tests {
             }]
         );
         assert_eq!(report.rollup[0].counts.satisfied, 1);
-        assert_eq!(report.rollup[0].counts.open, 0, "an unselected control is never counted");
+        assert_eq!(
+            report.rollup[0].counts.open, 0,
+            "an unselected control is never counted"
+        );
         assert_eq!(report.templates[0].used_by, ["web"]);
 
         let view = service.template("cra", Some("projects/web")).await.unwrap();
         assert_eq!(view.scopes.len(), 1);
         assert_eq!(view.scopes[0].framework.as_deref(), Some("cra"));
         assert_eq!(
-            view.scopes[0].controls.iter().map(|c| c.selection).collect::<Vec<_>>(),
+            view.scopes[0]
+                .controls
+                .iter()
+                .map(|c| c.selection)
+                .collect::<Vec<_>>(),
             [Selection::Selected, Selection::NotSelected]
         );
         let all = service.template("cra", None).await.unwrap();
-        assert_eq!(all.scopes.iter().map(|s| s.scope.as_str()).collect::<Vec<_>>(), ["web"]);
+        assert_eq!(
+            all.scopes
+                .iter()
+                .map(|s| s.scope.as_str())
+                .collect::<Vec<_>>(),
+            ["web"]
+        );
         let none = service.template("cra", Some("bare")).await.unwrap();
         assert!(none.scopes[0].framework.is_none());
-        assert!(service.template("nope", None).await.unwrap_err().to_string().contains("no template"));
+        assert!(service
+            .template("nope", None)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no template"));
 
         let mut legacy = policy_intent::Service::new(
             fixture.root.clone(),

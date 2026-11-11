@@ -319,7 +319,10 @@ mod tests {
         std::fs::write(root.join(".factory/goals/2026-q4.yaml"), GOALS_CYCLE_YAML).unwrap();
 
         let mut config = Config {
-            instance: Instance { id: "test".into(), name: "test".into() },
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
             ..Default::default()
         };
         config.scopes = vec![

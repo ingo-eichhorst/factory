@@ -1158,7 +1158,10 @@ mod tests {
         // #390: no chain is resolved anywhere; a scope's frameworks are its
         // own policy files, listed by the L6 owner.
         assert!(config.contains("factory_direction::policy::policy_frameworks("));
-        assert!(!config.contains("policy_chain_for_scope") && !config.contains("policy_intent::chain_for_scope"));
+        assert!(
+            !config.contains("policy_chain_for_scope")
+                && !config.contains("policy_intent::chain_for_scope")
+        );
         assert!(!config.contains("pub struct PolicyDeclaration"));
         let wiring = include_str!("../policies/mod.rs")
             .split("#[cfg(test)]\nmod tests")

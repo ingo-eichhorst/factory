@@ -94,7 +94,10 @@ impl Fixture {
     }
     fn catalogue(&self, step: &str) {
         // `demo` owns the policy (#390).
-        let directory = factory_direction::policy::scope_policies_dir(&self.root, std::path::Path::new("projects/demo"));
+        let directory = factory_direction::policy::scope_policies_dir(
+            &self.root,
+            std::path::Path::new("projects/demo"),
+        );
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("house.yaml"), format!(
             "framework: house\ntitle: House\nkind: best-practice\ncontrols:\n  - id: tested\n    title: Tested\n    requires:\n      - {{applies_to: [feature], step: {step}, gate: 'true'}}\n      - {{applies_to: [feature], step: review, by: independent}}\n")).unwrap();

@@ -4352,7 +4352,9 @@ async fn policy_cmd(json: bool, client: &Client, cmd: PolicyCmd) -> Result<()> {
             })
         }
 
-        PolicyCmd::Template { cmd: TemplateCmd::Show { name, scope } } => {
+        PolicyCmd::Template {
+            cmd: TemplateCmd::Show { name, scope },
+        } => {
             let payload = client.send(Request::PolicyTemplate { name, scope }).await?;
             print(&payload, json, |p| match p {
                 Payload::PolicyTemplate { view } => Some(policy_template_text(view)),
@@ -4360,12 +4362,18 @@ async fn policy_cmd(json: bool, client: &Client, cmd: PolicyCmd) -> Result<()> {
             })
         }
 
-        PolicyCmd::Template { cmd: TemplateCmd::Skeleton { name, framework } } => {
-            let payload = client.send(Request::PolicyTemplate { name, scope: None }).await?;
+        PolicyCmd::Template {
+            cmd: TemplateCmd::Skeleton { name, framework },
+        } => {
+            let payload = client
+                .send(Request::PolicyTemplate { name, scope: None })
+                .await?;
             print(&payload, json, |p| match p {
-                Payload::PolicyTemplate { view } => {
-                    Some(policy::skeleton(&view.template, framework.as_deref()).trim_end().to_string())
-                }
+                Payload::PolicyTemplate { view } => Some(
+                    policy::skeleton(&view.template, framework.as_deref())
+                        .trim_end()
+                        .to_string(),
+                ),
                 _ => None,
             })
         }
@@ -4511,7 +4519,12 @@ fn policy_status_text(report: &PolicyReport, framework: Option<&str>) -> String 
         }
         out.push_str(&format!("\n{label}\n"));
         for (scope, s) in matching {
-            out.push_str(&format!("  {:<16} {:<24} {}\n", scope, s.control.to_string(), s.title));
+            out.push_str(&format!(
+                "  {:<16} {:<24} {}\n",
+                scope,
+                s.control.to_string(),
+                s.title
+            ));
             for reason in s.status.reasons() {
                 out.push_str(&format!("      {reason}\n"));
             }
@@ -4523,13 +4536,22 @@ fn policy_status_text(report: &PolicyReport, framework: Option<&str>) -> String 
     let unselected: Vec<(&str, &factory_core::policy::NotSelected)> = report
         .rows
         .iter()
-        .flat_map(|row| row.not_selected.iter().map(move |c| (row.scope.as_str(), c)))
+        .flat_map(|row| {
+            row.not_selected
+                .iter()
+                .map(move |c| (row.scope.as_str(), c))
+        })
         .filter(|(_, c)| framework.is_none_or(|f| c.control.framework == f))
         .collect();
     if !unselected.is_empty() {
         out.push_str("\nNOT SELECTED (listed, never counted)\n");
         for (scope, c) in unselected {
-            out.push_str(&format!("  {:<16} {:<24} {}\n", scope, c.control.to_string(), c.title));
+            out.push_str(&format!(
+                "  {:<16} {:<24} {}\n",
+                scope,
+                c.control.to_string(),
+                c.title
+            ));
         }
     }
 
@@ -4586,15 +4608,17 @@ fn policy_template_text(view: &factory_core::protocol::TemplateView) -> String {
     for scope in &view.scopes {
         match &scope.framework {
             Some(framework) => out.push_str(&format!("\n{} (policy {framework})\n", scope.scope)),
-            None => out.push_str(&format!("\n{} (no policy from this template)\n", scope.scope)),
+            None => out.push_str(&format!(
+                "\n{} (no policy from this template)\n",
+                scope.scope
+            )),
         }
         for c in &scope.controls {
             let state = match c.selection {
                 Selection::Selected => "selected".to_string(),
-                Selection::NotApplicable => format!(
-                    "n/a: {}",
-                    c.rationale.as_deref().unwrap_or_default()
-                ),
+                Selection::NotApplicable => {
+                    format!("n/a: {}", c.rationale.as_deref().unwrap_or_default())
+                }
                 Selection::NotSelected => "not selected".to_string(),
             };
             out.push_str(&format!("  {:<20} {:<14} {}\n", c.id, state, c.title));
@@ -8322,19 +8346,51 @@ mod tests {
     #[test]
     fn policy_templates_and_template_show_and_skeleton_parse_and_render_the_selection() {
         let cli = Cli::try_parse_from(["factory", "policy", "templates"]).unwrap();
-        assert!(matches!(cli.command, Command::Policy { command: Some(PolicyCmd::Templates), .. }));
-        let cli = Cli::try_parse_from(["factory", "policy", "template", "show", "cra", "--scope", "irrlicht"]).unwrap();
-        let Command::Policy { command: Some(PolicyCmd::Template { cmd: TemplateCmd::Show { name, scope } }), .. } = cli.command
+        assert!(matches!(
+            cli.command,
+            Command::Policy {
+                command: Some(PolicyCmd::Templates),
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "factory", "policy", "template", "show", "cra", "--scope", "irrlicht",
+        ])
+        .unwrap();
+        let Command::Policy {
+            command:
+                Some(PolicyCmd::Template {
+                    cmd: TemplateCmd::Show { name, scope },
+                }),
+            ..
+        } = cli.command
         else {
             panic!("template show")
         };
         assert_eq!((name.as_str(), scope.as_deref()), ("cra", Some("irrlicht")));
-        let cli = Cli::try_parse_from(["factory", "policy", "template", "skeleton", "cra", "--framework", "cra-product"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "factory",
+            "policy",
+            "template",
+            "skeleton",
+            "cra",
+            "--framework",
+            "cra-product",
+        ])
+        .unwrap();
         assert!(matches!(
             cli.command,
-            Command::Policy { command: Some(PolicyCmd::Template { cmd: TemplateCmd::Skeleton { .. } }), .. }
+            Command::Policy {
+                command: Some(PolicyCmd::Template {
+                    cmd: TemplateCmd::Skeleton { .. }
+                }),
+                ..
+            }
         ));
-        assert!(Cli::try_parse_from(["factory", "policy", "template", "show"]).is_err(), "a name is required");
+        assert!(
+            Cli::try_parse_from(["factory", "policy", "template", "show"]).is_err(),
+            "a name is required"
+        );
 
         let templates: Vec<factory_core::protocol::TemplateSummary> = serde_json::from_value(serde_json::json!([
             {"template": "cra", "title": "Cyber Resilience Act", "kind": "regulation", "controls": 12, "used_by": ["irrlicht"]},
@@ -8342,9 +8398,15 @@ mod tests {
         ]))
         .unwrap();
         let text = policy_templates_text(&templates);
-        assert!(text.contains("cra") && text.contains("used by irrlicht"), "{text}");
+        assert!(
+            text.contains("cra") && text.contains("used by irrlicht"),
+            "{text}"
+        );
         assert!(text.contains("used by no scope"), "{text}");
-        assert_eq!(policy_templates_text(&[]), "no templates in .factory/policies/templates/");
+        assert_eq!(
+            policy_templates_text(&[]),
+            "no templates in .factory/policies/templates/"
+        );
 
         let view: factory_core::protocol::TemplateView = serde_json::from_value(serde_json::json!({
             "template": {"template": "cra", "title": "Cyber Resilience Act", "kind": "regulation",
@@ -8360,14 +8422,23 @@ mod tests {
         }))
         .unwrap();
         let text = policy_template_text(&view);
-        assert!(text.starts_with("cra  Cyber Resilience Act  [regulation]  3 control(s)"), "{text}");
+        assert!(
+            text.starts_with("cra  Cyber Resilience Act  [regulation]  3 control(s)"),
+            "{text}"
+        );
         assert!(text.contains("irrlicht (policy cra)"), "{text}");
         assert!(text.contains("sbom") && text.contains("selected"), "{text}");
         assert!(text.contains("n/a: No hardware ships"), "{text}");
         assert!(text.contains("not selected"), "{text}");
-        assert!(text.contains("projects (no policy from this template)"), "{text}");
+        assert!(
+            text.contains("projects (no policy from this template)"),
+            "{text}"
+        );
         let skeleton = policy::skeleton(&view.template, Some("cra-product"));
-        assert!(skeleton.contains("framework: cra-product\ntemplate: cra\n"), "{skeleton}");
+        assert!(
+            skeleton.contains("framework: cra-product\ntemplate: cra\n"),
+            "{skeleton}"
+        );
         assert!(skeleton.contains("  - id: hw "), "{skeleton}");
     }
 
@@ -9266,12 +9337,14 @@ mod tests {
 
     #[test]
     fn policy_status_labels_each_pair_with_its_scope_and_lists_no_policy_and_not_selected() {
-        let status = |scope: &str, kind: &str| serde_json::json!({
-            "scope": scope,
-            "statuses": [{"control": "cra/sbom", "title": "SBOM", "kind": "regulation", "status": kind, "reasons": ["why"]}],
-            "rollup": [],
-            "not_selected": [{"control": "cra/hw", "title": "Hardware"}],
-        });
+        let status = |scope: &str, kind: &str| {
+            serde_json::json!({
+                "scope": scope,
+                "statuses": [{"control": "cra/sbom", "title": "SBOM", "kind": "regulation", "status": kind, "reasons": ["why"]}],
+                "rollup": [],
+                "not_selected": [{"control": "cra/hw", "title": "Hardware"}],
+            })
+        };
         let report: PolicyReport = serde_json::from_value(serde_json::json!({
             "scope": "projects", "rows": [status("irrlicht", "open"), status("factory", "satisfied")],
             "rollup": [], "not_applicable": [], "findings": [], "catalogues": [],
@@ -9285,9 +9358,18 @@ mod tests {
             text.contains("  cra          policy at irrlicht, factory; no policy at projects"),
             "{text}"
         );
-        assert!(text.contains("\nOPEN\n  irrlicht         cra/sbom"), "{text}");
-        assert!(!text.contains("  factory          cra/sbom"), "a satisfied pair is not listed: {text}");
-        assert!(text.contains("NOT SELECTED (listed, never counted)"), "{text}");
+        assert!(
+            text.contains("\nOPEN\n  irrlicht         cra/sbom"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("  factory          cra/sbom"),
+            "a satisfied pair is not listed: {text}"
+        );
+        assert!(
+            text.contains("NOT SELECTED (listed, never counted)"),
+            "{text}"
+        );
         assert!(text.contains("  factory          cra/hw"), "{text}");
         assert!(!policy_status_text(&report, Some("dsgvo")).contains("cra/hw"));
 

@@ -3648,13 +3648,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_routes_resolve_in_the_owning_scope_and_list_templates_and_scopes_without_a_policy() {
+    async fn policy_routes_resolve_in_the_owning_scope_and_list_templates_and_scopes_without_a_policy(
+    ) {
         let engine = engine_with_scope_policies();
         let (status, json) =
             request(engine.clone(), "GET", "/api/policy?scope=finance", None).await;
         assert_eq!(status, 200, "{json}");
         let report = &json["data"]["report"];
-        assert_eq!(report["rows"], serde_json::json!([]), "nothing is inherited: {json}");
+        assert_eq!(
+            report["rows"],
+            serde_json::json!([]),
+            "nothing is inherited: {json}"
+        );
         assert_eq!(report["rollup"], serde_json::json!([]), "{json}");
         assert_eq!(report["findings"][0]["kind"], "legacy_policies", "{json}");
 
@@ -3662,17 +3667,30 @@ mod tests {
         let report = &json["data"]["report"];
         assert_eq!(report["rows"][0]["scope"], "company");
         assert_eq!(report["rows"][0]["not_selected"][0]["control"], "cra/c");
-        assert_eq!(report["applicability"][0]["covers"], serde_json::json!(["company"]));
-        assert_eq!(report["applicability"][0]["no_policy"], serde_json::json!(["finance"]));
-        assert_eq!(report["templates"][0]["used_by"], serde_json::json!(["company"]));
+        assert_eq!(
+            report["applicability"][0]["covers"],
+            serde_json::json!(["company"])
+        );
+        assert_eq!(
+            report["applicability"][0]["no_policy"],
+            serde_json::json!(["finance"])
+        );
+        assert_eq!(
+            report["templates"][0]["used_by"],
+            serde_json::json!(["company"])
+        );
 
-        let (status, json) =
-            request(engine.clone(), "GET", "/api/policy/templates", None).await;
+        let (status, json) = request(engine.clone(), "GET", "/api/policy/templates", None).await;
         assert_eq!(status, 200, "{json}");
         assert_eq!(json["data"]["kind"], "policy_templates", "{json}");
         assert_eq!(json["data"]["templates"][0]["template"], "cra");
-        let (status, json) =
-            request(engine.clone(), "GET", "/api/policy/templates/cra?scope=company", None).await;
+        let (status, json) = request(
+            engine.clone(),
+            "GET",
+            "/api/policy/templates/cra?scope=company",
+            None,
+        )
+        .await;
         assert_eq!(status, 200, "{json}");
         let controls = &json["data"]["view"]["scopes"][0]["controls"];
         assert_eq!(controls[0]["selection"], "selected", "{json}");
@@ -3683,7 +3701,10 @@ mod tests {
             request(engine.clone(), "POST", "/api/policy/remediate", Some(body)).await;
         assert_eq!(status, 400, "{json}");
         let message = json["message"].as_str().unwrap_or_default();
-        assert!(message.contains("\"finance\" has no cra policy of its own"), "{json}");
+        assert!(
+            message.contains("\"finance\" has no cra policy of its own"),
+            "{json}"
+        );
 
         let body = r#"{"control":"cra/b","scope":"company"}"#;
         let (status, json) = request(engine, "POST", "/api/policy/remediate", Some(body)).await;

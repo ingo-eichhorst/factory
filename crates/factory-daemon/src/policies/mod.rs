@@ -81,7 +81,9 @@ impl<'s> L6Service<'s> {
     /// Own catalogue read plus the L5 knowledge-tag port. Both filesystem
     /// walks stay off the async executor; providers own their fact reads.
     #[cfg(test)]
-    pub(crate) async fn load_policies_and_tags(&self) -> Result<(policy::Policies, BTreeSet<String>)> {
+    pub(crate) async fn load_policies_and_tags(
+        &self,
+    ) -> Result<(policy::Policies, BTreeSet<String>)> {
         let snapshot = self.wiring.snapshot();
         let provider = self.wiring.provider::<factory_kernel::KnowledgeTags>();
         self.policy_intent_service(&snapshot)
@@ -171,7 +173,9 @@ impl<'s> L6Service<'s> {
     }
 
     /// Every template on disk and who picks from it (#390).
-    pub(crate) async fn policy_templates(&self) -> Result<Vec<factory_core::protocol::TemplateSummary>> {
+    pub(crate) async fn policy_templates(
+        &self,
+    ) -> Result<Vec<factory_core::protocol::TemplateSummary>> {
         let snapshot = self.wiring.snapshot();
         self.policy_service(&snapshot).templates().await
     }
@@ -876,7 +880,11 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("is not a control of \"demo-app\"'s cra policy"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("is not a control of \"demo-app\"'s cra policy"),
+            "{err}"
+        );
 
         // `c` is marked not applicable at demo-app -- attesting it there is
         // refused too, even though the control itself exists and applies
@@ -1637,10 +1645,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_export_carries_each_owning_scopes_own_attestation_history_and_never_an_ancestors() {
+    async fn policy_export_carries_each_owning_scopes_own_attestation_history_and_never_an_ancestors(
+    ) {
         let engine = test_engine();
         let owner = Caller::Owner;
-        for (scope, evidence) in [("company", "https://example.com/company"), ("engineering", "https://example.com/engineering")] {
+        for (scope, evidence) in [
+            ("company", "https://example.com/company"),
+            ("engineering", "https://example.com/engineering"),
+        ] {
             engine
                 .policy_attest(
                     &owner,
@@ -1660,7 +1672,8 @@ mod tests {
         assert_eq!(export.scope.as_deref(), Some("engineering"));
         let engineering_atts = export.attestations.get("engineering").expect("engineering has an entry");
         assert!(
-            engineering_atts.iter().all(|a| a.scope == "engineering") && engineering_atts.len() == 1,
+            engineering_atts.iter().all(|a| a.scope == "engineering")
+                && engineering_atts.len() == 1,
             "only the owning scope's own history (#390): {engineering_atts:?}"
         );
         assert!(
@@ -1733,8 +1746,18 @@ mod tests {
         // root is no scope here, so `demo` owns a copy of it (#390).
         if let Ok(read) = std::fs::read_dir(root.join(".factory/policies")) {
             for entry in read.flatten().filter(|e| e.path().is_file()) {
-                let framework = entry.path().file_stem().unwrap().to_string_lossy().into_owned();
-                write_policy(root, "demo", &framework, &std::fs::read_to_string(entry.path()).unwrap());
+                let framework = entry
+                    .path()
+                    .file_stem()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                write_policy(
+                    root,
+                    "demo",
+                    &framework,
+                    &std::fs::read_to_string(entry.path()).unwrap(),
+                );
             }
         }
         let config = Config {
@@ -2187,7 +2210,8 @@ mod tests {
     /// marks `hw` n/a and also owns an ISO 27001 policy whose `a-8-8` the
     /// CRA control `maps_to`.
     fn projects_engine() -> Arc<Engine> {
-        let root = std::env::temp_dir().join(format!("factory-policies-390-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("factory-policies-390-{}", uuid::Uuid::new_v4()));
         let templates = factory_core::policy::templates_dir(&root);
         std::fs::create_dir_all(&templates).unwrap();
         std::fs::write(
@@ -2207,9 +2231,22 @@ mod tests {
                 "framework: cra\ntemplate: cra\ncontrols:\n  - {{id: sbom, evidence: [{{check: task, task: {task}}}]}}\n{hw}"
             )
         };
-        write_policy(&root, "projects/irrlicht", "cra", &cra("irrlicht-sbom", "  - {id: hw, not_applicable: No hardware ships}\n"));
+        write_policy(
+            &root,
+            "projects/irrlicht",
+            "cra",
+            &cra(
+                "irrlicht-sbom",
+                "  - {id: hw, not_applicable: No hardware ships}\n",
+            ),
+        );
         write_policy(&root, "projects/factory", "cra", &cra("factory-sbom", ""));
-        write_policy(&root, "projects/factory-other", "cra", &cra("factory-sbom", ""));
+        write_policy(
+            &root,
+            "projects/factory-other",
+            "cra",
+            &cra("factory-sbom", ""),
+        );
         write_policy(
             &root,
             "projects/irrlicht",
@@ -2217,7 +2254,10 @@ mod tests {
             "framework: iso27001\ntemplate: iso27001\ncontrols: [{id: a-8-8, evidence: [{check: attestation}]}]\n",
         );
         let mut config = Config {
-            instance: Instance { id: "test".into(), name: "test".into() },
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
             ..Default::default()
         };
         config.scopes = vec![
@@ -2225,11 +2265,22 @@ mod tests {
             scope_at("projects-id", "projects", "projects", ""),
             scope_at("irrlicht-id", "irrlicht", "projects/irrlicht", ""),
             scope_at("factory-id", "factory", "projects/factory", ""),
-            scope_at("factory-other-id", "factory-other", "projects/factory-other", ""),
+            scope_at(
+                "factory-other-id",
+                "factory-other",
+                "projects/factory-other",
+                "",
+            ),
         ];
         let factory = Factory { root, config };
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
-        Arc::new(Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
+        Arc::new(Engine::new(
+            factory,
+            Registry::with_builtins(),
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ))
     }
 
     /// A task titled `title` in `scope` whose only run finished `done` now.
@@ -2238,7 +2289,10 @@ mod tests {
             .l4
             .store
             .create(&task_from_new(
-                factory_core::task::NewTask { title: title.to_string(), ..Default::default() },
+                factory_core::task::NewTask {
+                    title: title.to_string(),
+                    ..Default::default()
+                },
                 scope.to_string(),
                 "assistant".to_string(),
                 "shell".to_string(),
@@ -2263,13 +2317,24 @@ mod tests {
         engine
             .l4
             .store
-            .update_run(&run.id, &RunPatch { status: Some(RunStatus::Done), ended_at: Some(Utc::now()), ..Default::default() })
+            .update_run(
+                &run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Done),
+                    ended_at: Some(Utc::now()),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         task.id
     }
 
-    fn status_in(report: &factory_core::protocol::PolicyReport, scope: &str, control: &str) -> StatusKind {
+    fn status_in(
+        report: &factory_core::protocol::PolicyReport,
+        scope: &str,
+        control: &str,
+    ) -> StatusKind {
         report
             .rows
             .iter()
@@ -2284,7 +2349,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_projects_bind_the_same_template_control_to_their_own_tasks_and_the_parent_aggregates() {
+    async fn two_projects_bind_the_same_template_control_to_their_own_tasks_and_the_parent_aggregates(
+    ) {
         let engine = projects_engine();
         let irrlicht_task = done_task(&engine, "irrlicht", "irrlicht-sbom").await;
         // `factory`'s task title, but in the wrong scope: never its evidence.
@@ -2292,21 +2358,56 @@ mod tests {
 
         let report = engine.policy_report(Some("projects")).await.unwrap();
         assert_eq!(
-            report.rows.iter().map(|r| r.scope.as_str()).collect::<Vec<_>>(),
+            report
+                .rows
+                .iter()
+                .map(|r| r.scope.as_str())
+                .collect::<Vec<_>>(),
             ["irrlicht", "factory", "factory-other"],
             "an organizational scope with no policy shows its children's aggregate"
         );
-        assert_eq!(status_in(&report, "irrlicht", "cra/sbom"), StatusKind::Satisfied);
-        assert!(report.rows[0].statuses.iter().any(|s| s.refs.iter().any(|r| r.id == irrlicht_task)));
+        assert_eq!(
+            status_in(&report, "irrlicht", "cra/sbom"),
+            StatusKind::Satisfied
+        );
+        assert!(report.rows[0]
+            .statuses
+            .iter()
+            .any(|s| s.refs.iter().any(|r| r.id == irrlicht_task)));
         assert_eq!(status_in(&report, "factory", "cra/sbom"), StatusKind::Open);
         let cra = report.rollup.iter().find(|r| r.framework == "cra").unwrap();
-        assert_eq!((cra.counts.satisfied, cra.counts.open, cra.counts.not_applicable), (1, 2, 1));
-        assert!(!cra.compliant, "one child open: the parent is not compliant");
-        let applicability = report.applicability.iter().find(|a| a.framework == "cra").unwrap();
-        assert_eq!(applicability.covers, ["irrlicht", "factory", "factory-other"]);
-        assert_eq!(applicability.no_policy, ["projects"], "listed, never counted");
         assert_eq!(
-            report.rows[1].not_selected.iter().map(|c| c.control.to_string()).collect::<Vec<_>>(),
+            (
+                cra.counts.satisfied,
+                cra.counts.open,
+                cra.counts.not_applicable
+            ),
+            (1, 2, 1)
+        );
+        assert!(
+            !cra.compliant,
+            "one child open: the parent is not compliant"
+        );
+        let applicability = report
+            .applicability
+            .iter()
+            .find(|a| a.framework == "cra")
+            .unwrap();
+        assert_eq!(
+            applicability.covers,
+            ["irrlicht", "factory", "factory-other"]
+        );
+        assert_eq!(
+            applicability.no_policy,
+            ["projects"],
+            "listed, never counted"
+        );
+        assert_eq!(
+            report.rows[1]
+                .not_selected
+                .iter()
+                .map(|c| c.control.to_string())
+                .collect::<Vec<_>>(),
             ["cra/hw"]
         );
 
@@ -2316,22 +2417,59 @@ mod tests {
             factory_core::metrics::MetricId::new("compliance.cra").unwrap(),
             factory_core::metrics::MetricId::new("open_controls.cra").unwrap(),
         ];
-        let metrics = engine.metrics_for(&ids, Utc::now(), Some("projects"), None).await.unwrap();
-        let value = |id: &str| metrics.values.iter().find(|v| v.id.as_str() == id).unwrap().value;
-        let counted = cra.counts.satisfied + cra.counts.attested + cra.counts.stale + cra.counts.open + cra.counts.not_applicable;
-        assert_eq!(value("open_controls.cra"), Some((cra.counts.open + cra.counts.stale) as f64));
+        let metrics = engine
+            .metrics_for(&ids, Utc::now(), Some("projects"), None)
+            .await
+            .unwrap();
+        let value = |id: &str| {
+            metrics
+                .values
+                .iter()
+                .find(|v| v.id.as_str() == id)
+                .unwrap()
+                .value
+        };
+        let counted = cra.counts.satisfied
+            + cra.counts.attested
+            + cra.counts.stale
+            + cra.counts.open
+            + cra.counts.not_applicable;
+        assert_eq!(
+            value("open_controls.cra"),
+            Some((cra.counts.open + cra.counts.stale) as f64)
+        );
         assert_eq!(
             value("compliance.cra"),
-            Some((cra.counts.satisfied + cra.counts.attested + cra.counts.not_applicable) as f64 / counted as f64)
+            Some(
+                (cra.counts.satisfied + cra.counts.attested + cra.counts.not_applicable) as f64
+                    / counted as f64
+            )
         );
 
         // `projects/factory` never aggregates the lookalike beside it.
-        let factory = engine.policy_report(Some("projects/factory")).await.unwrap();
-        assert_eq!(factory.rows.iter().map(|r| r.scope.as_str()).collect::<Vec<_>>(), ["factory"]);
+        let factory = engine
+            .policy_report(Some("projects/factory"))
+            .await
+            .unwrap();
+        assert_eq!(
+            factory
+                .rows
+                .iter()
+                .map(|r| r.scope.as_str())
+                .collect::<Vec<_>>(),
+            ["factory"]
+        );
 
         // `irrlicht` alone is compliant; its own metric agrees with its board.
         let irrlicht = engine.policy_report(Some("irrlicht")).await.unwrap();
-        assert!(irrlicht.rollup.iter().find(|r| r.framework == "cra").unwrap().compliant);
+        assert!(
+            irrlicht
+                .rollup
+                .iter()
+                .find(|r| r.framework == "cra")
+                .unwrap()
+                .compliant
+        );
 
         // The guide names a scope's own frameworks, never a descendant's.
         assert_eq!(engine.policy_frameworks("irrlicht"), ["cra", "iso27001"]);
@@ -2344,11 +2482,23 @@ mod tests {
         let owner = Caller::Owner;
         let expiry = Utc::now() + chrono::Duration::days(30);
         engine
-            .policy_attest(&owner, "iso27001/a-8-8".parse().unwrap(), "irrlicht".into(), "https://example.com/scan".into(), None, expiry, None, None)
+            .policy_attest(
+                &owner,
+                "iso27001/a-8-8".parse().unwrap(),
+                "irrlicht".into(),
+                "https://example.com/scan".into(),
+                None,
+                expiry,
+                None,
+                None,
+            )
             .await
             .unwrap();
         let report = engine.policy_report(Some("projects")).await.unwrap();
-        assert_eq!(status_in(&report, "irrlicht", "iso27001/a-8-8"), StatusKind::Attested);
+        assert_eq!(
+            status_in(&report, "irrlicht", "iso27001/a-8-8"),
+            StatusKind::Attested
+        );
         assert_eq!(
             status_in(&report, "irrlicht", "cra/sbom"),
             StatusKind::Attested,
@@ -2362,12 +2512,27 @@ mod tests {
 
         // An ancestor's attestation never covers a policy it does not own.
         let refused = engine
-            .policy_attest(&owner, "cra/sbom".parse().unwrap(), "projects".into(), "x".into(), None, expiry, None, None)
+            .policy_attest(
+                &owner,
+                "cra/sbom".parse().unwrap(),
+                "projects".into(),
+                "x".into(),
+                None,
+                expiry,
+                None,
+                None,
+            )
             .await
             .unwrap_err()
             .to_string();
-        assert!(refused.contains("\"projects\" has no cra policy of its own"), "{refused}");
-        assert!(refused.contains("belongs to irrlicht, factory, factory-other"), "{refused}");
+        assert!(
+            refused.contains("\"projects\" has no cra policy of its own"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("belongs to irrlicht, factory, factory-other"),
+            "{refused}"
+        );
     }
 
     #[tokio::test]
@@ -2378,8 +2543,14 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(refused.contains("belongs to irrlicht, factory, factory-other"), "{refused}");
-        let detail = engine.policy_control("cra/sbom".parse().unwrap(), "factory").await.unwrap();
+        assert!(
+            refused.contains("belongs to irrlicht, factory, factory-other"),
+            "{refused}"
+        );
+        let detail = engine
+            .policy_control("cra/sbom".parse().unwrap(), "factory")
+            .await
+            .unwrap();
         assert_eq!(detail.title, "SBOM", "the template's title");
         assert_eq!(detail.remediation.as_deref(), Some("Export an SBOM"));
         assert_eq!(detail.maps_to, ["iso27001/a-8-8".parse().unwrap()]);
@@ -2393,7 +2564,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(task.scope, "factory", "the task lands in the owning scope");
-        assert!(task.instructions.starts_with("Export an SBOM"), "{}", task.instructions);
+        assert!(
+            task.instructions.starts_with("Export an SBOM"),
+            "{}",
+            task.instructions
+        );
         assert!(engine
             .policy_remediate("cra/hw".parse().unwrap(), "factory".to_string(), None)
             .await
@@ -2401,17 +2576,33 @@ mod tests {
             .to_string()
             .contains("cra/hw is not selected at \"factory\""));
 
-        let (_, body) = engine.policy_export_render(Some("projects"), "md").await.unwrap();
+        let (_, body) = engine
+            .policy_export_render(Some("projects"), "md")
+            .await
+            .unwrap();
         let soa = &body[body.find("## Statement of Applicability").expect(&body)..];
         assert!(soa.contains("### irrlicht"), "{soa}");
-        assert!(soa.contains("- cra/hw -- Hardware: n/a -- No hardware ships"), "{soa}");
+        assert!(
+            soa.contains("- cra/hw -- Hardware: n/a -- No hardware ships"),
+            "{soa}"
+        );
         assert!(soa.contains("- cra/hw -- Hardware: not selected"), "{soa}");
         assert!(soa.contains("- cra/sbom -- SBOM: selected (open)"), "{soa}");
-        assert!(body.contains("policy at irrlicht, factory, factory-other; no policy at projects"), "{body}");
+        assert!(
+            body.contains("policy at irrlicht, factory, factory-other; no policy at projects"),
+            "{body}"
+        );
 
-        let view = engine.policy_template("cra", Some("irrlicht")).await.unwrap();
+        let view = engine
+            .policy_template("cra", Some("irrlicht"))
+            .await
+            .unwrap();
         assert_eq!(
-            view.scopes[0].controls.iter().map(|c| (c.id.as_str(), c.selection)).collect::<Vec<_>>(),
+            view.scopes[0]
+                .controls
+                .iter()
+                .map(|c| (c.id.as_str(), c.selection))
+                .collect::<Vec<_>>(),
             [
                 ("sbom", factory_core::protocol::Selection::Selected),
                 ("hw", factory_core::protocol::Selection::NotApplicable)
@@ -2427,7 +2618,10 @@ mod tests {
     /// policy file, and every legacy block is a finding.
     #[tokio::test]
     async fn a_legacy_config_starts_through_the_real_loader_and_names_every_legacy_block() {
-        let root = std::env::temp_dir().join(format!("factory-policies-legacy-start-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "factory-policies-legacy-start-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
         std::fs::write(
             root.join(".factory/config.yaml"),
@@ -2455,16 +2649,31 @@ mod tests {
         factory.config.validate().unwrap();
         crate::backup::validate_config(&factory).unwrap();
         assert_eq!(
-            factory.config.scopes.iter().filter(|s| s.path == std::path::Path::new(".")).count(),
+            factory
+                .config
+                .scopes
+                .iter()
+                .filter(|s| s.path == std::path::Path::new("."))
+                .count(),
             1,
             "discovery places the root scope exactly once"
         );
 
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
-        let engine = Arc::new(Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()));
+        let engine = Arc::new(Engine::new(
+            factory,
+            Registry::with_builtins(),
+            store,
+            PathBuf::from("factory"),
+            Vec::new(),
+        ));
         let report = engine.policy_report(None).await.unwrap();
         assert_eq!(
-            report.rows.iter().map(|r| r.scope.as_str()).collect::<Vec<_>>(),
+            report
+                .rows
+                .iter()
+                .map(|r| r.scope.as_str())
+                .collect::<Vec<_>>(),
             ["company"],
             "the root's own policy file is the root scope's"
         );
@@ -2475,14 +2684,25 @@ mod tests {
             .map(|f| f.subject.as_str())
             .collect();
         legacy.sort();
-        assert_eq!(legacy, ["company", "finance", "web"], "{:?}", report.findings);
+        assert_eq!(
+            legacy,
+            ["company", "finance", "web"],
+            "{:?}",
+            report.findings
+        );
         assert!(
-            report.findings.iter().all(|f| f.kind != policy::FindingKind::NoOwningScope),
+            report
+                .findings
+                .iter()
+                .all(|f| f.kind != policy::FindingKind::NoOwningScope),
             "{:?}",
             report.findings
         );
         assert_eq!(engine.policy_frameworks("company"), ["cra"]);
-        assert!(engine.policy_frameworks("web").is_empty(), "a legacy block binds nothing");
+        assert!(
+            engine.policy_frameworks("web").is_empty(),
+            "a legacy block binds nothing"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -2490,9 +2710,12 @@ mod tests {
     async fn a_legacy_policies_block_is_a_finding_and_every_policy_read_still_answers() {
         let base = projects_engine();
         let mut factory = base.factory_snapshot();
-        factory.config.policies =
-            serde_yaml_ng::from_str("frameworks: [{name: cra, except: [factory]}]\ntighten: {cra/sbom: {max_age: 1d}}\n").unwrap();
-        factory.config.scopes[3].policies = serde_yaml_ng::from_str("frameworks: [ai-act]").unwrap();
+        factory.config.policies = serde_yaml_ng::from_str(
+            "frameworks: [{name: cra, except: [factory]}]\ntighten: {cra/sbom: {max_age: 1d}}\n",
+        )
+        .unwrap();
+        factory.config.scopes[3].policies =
+            serde_yaml_ng::from_str("frameworks: [ai-act]").unwrap();
         let engine = Arc::new(Engine::new(
             factory,
             Registry::with_builtins(),
@@ -2515,7 +2738,10 @@ mod tests {
         );
         let subtree = engine.policy_report(Some("irrlicht")).await.unwrap();
         assert!(
-            subtree.findings.iter().all(|f| f.kind != policy::FindingKind::LegacyPolicies),
+            subtree
+                .findings
+                .iter()
+                .all(|f| f.kind != policy::FindingKind::LegacyPolicies),
             "a scope's own board names only the legacy blocks in its subtree"
         );
     }

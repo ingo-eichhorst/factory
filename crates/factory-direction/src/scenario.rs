@@ -901,7 +901,10 @@ pub fn policy_delta(baseline: &[ControlStatus], scenario: &[ControlStatus]) -> P
 /// Each framework's rollup before and after, over whatever statuses each
 /// side passes -- one scope's, or (#390) every (scope, control) pair of a
 /// subtree, so a scenario's subtree rollup agrees with the Policy board's.
-pub fn framework_deltas(baseline: &[ControlStatus], scenario: &[ControlStatus]) -> Vec<FrameworkDelta> {
+pub fn framework_deltas(
+    baseline: &[ControlStatus],
+    scenario: &[ControlStatus],
+) -> Vec<FrameworkDelta> {
     let before_rollup: BTreeMap<String, policy::FrameworkRollup> = policy::rollup(baseline)
         .into_iter()
         .map(|r| (r.framework.clone(), r))
@@ -2713,17 +2716,29 @@ mod tests {
         assert!(policy_findings.is_empty(), "{policy_findings:?}");
         assert!(findings.is_empty(), "{findings:?}");
         assert_eq!(
-            applied.iter().map(|a| a.control.to_string()).collect::<Vec<_>>(),
+            applied
+                .iter()
+                .map(|a| a.control.to_string())
+                .collect::<Vec<_>>(),
             ["ai-act/oversight", "cra/sbom", "iso27001/a-5-1"]
         );
-        let iso = applied.iter().find(|a| a.control.framework == "iso27001").unwrap();
-        assert!(iso.evidence.is_empty(), "a template adopted with no evidence of its own");
+        let iso = applied
+            .iter()
+            .find(|a| a.control.framework == "iso27001")
+            .unwrap();
+        assert!(
+            iso.evidence.is_empty(),
+            "a template adopted with no evidence of its own"
+        );
         let statuses = policy::evaluate(&applied, &Evidence::default(), dt(2026, 9, 25));
         assert_eq!(statuses[2].status.kind(), policy::StatusKind::Open);
 
         let unknown = scenario_with_policy("nope", overlay(&["nothing"]));
         let (_, policy_findings, _) = overlay_policies("root", &[&real], &[], &[], &unknown);
-        assert_eq!(policy_findings[0].kind, policy::FindingKind::UnknownFramework);
+        assert_eq!(
+            policy_findings[0].kind,
+            policy::FindingKind::UnknownFramework
+        );
         assert_eq!(policy_findings[0].subject, "scenario:nope");
     }
 
@@ -2767,7 +2782,10 @@ mod tests {
             Some(PDuration::from_hours(24 * 30)),
             "the original 30d must survive"
         );
-        assert_eq!(policy_findings[0].kind, policy::FindingKind::LooseningHasNoEffect);
+        assert_eq!(
+            policy_findings[0].kind,
+            policy::FindingKind::LooseningHasNoEffect
+        );
     }
 
     #[test]

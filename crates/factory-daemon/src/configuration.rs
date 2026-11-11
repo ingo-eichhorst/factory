@@ -6,8 +6,8 @@
 
 use factory_core::agent::Lifetime;
 use factory_core::config::{
-    refuse_bad_instances, refuse_misplaced_scope_roles, AgentRef, Config,
-    Scope, ScopeAgent, CONFIG_FILE, FACTORY_DIR,
+    refuse_bad_instances, refuse_misplaced_scope_roles, AgentRef, Config, Scope, ScopeAgent,
+    CONFIG_FILE, FACTORY_DIR,
 };
 use factory_core::dashboard::{DashboardConfig, Tile};
 use factory_core::error::{FactoryError, Result};

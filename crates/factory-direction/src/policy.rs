@@ -764,7 +764,10 @@ pub fn resolve(
                     picked.title.clone(),
                     picked.kind.unwrap_or(t.kind),
                     picked.maps_to.clone(),
-                    control.remediation.clone().or_else(|| picked.remediation.clone()),
+                    control
+                        .remediation
+                        .clone()
+                        .or_else(|| picked.remediation.clone()),
                 )
             }
             None => {
@@ -915,7 +918,11 @@ pub fn maps_to_findings(templates: &[Template], policies: &[OwnedPolicy]) -> Vec
     }
     for policy in policies {
         for applied in &policy.controls {
-            for target in applied.maps_to.iter().filter(|target| !known.contains(target)) {
+            for target in applied
+                .maps_to
+                .iter()
+                .filter(|target| !known.contains(target))
+            {
                 findings.push(Finding {
                     kind: FindingKind::UnknownMapsTo,
                     subject: policy.file.clone(),
@@ -1004,10 +1011,8 @@ pub fn policy_frameworks(root: &Path, scope_path: &Path) -> Vec<String> {
 }
 
 pub fn load(root: &Path, scopes: &[(String, PathBuf)]) -> Policies {
-    let (templates, mut findings) = load_templates(
-        &templates_dir(root),
-        ".factory/policies/templates/",
-    );
+    let (templates, mut findings) =
+        load_templates(&templates_dir(root), ".factory/policies/templates/");
     let mut owned = Vec::new();
     let mut seen_dirs: BTreeSet<String> = BTreeSet::new();
     for (name, path) in scopes {
@@ -1524,7 +1529,10 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/policies");
         let (templates, mut findings) = load_templates(&dir.join("templates"), "templates/");
         assert_eq!(
-            templates.iter().map(|t| t.template.as_str()).collect::<Vec<_>>(),
+            templates
+                .iter()
+                .map(|t| t.template.as_str())
+                .collect::<Vec<_>>(),
             ["ai-act", "cra", "dsgvo", "iso27001"]
         );
         let (policies, own) = load_dir(&dir, "", "demo", &templates);
@@ -1533,12 +1541,19 @@ mod tests {
         assert_eq!(findings, Vec::new(), "{findings:?}");
         assert_eq!(policies.len(), 1);
         let cra = &policies[0];
-        assert_eq!((cra.framework.as_str(), cra.template.as_deref()), ("cra", Some("cra")));
+        assert_eq!(
+            (cra.framework.as_str(), cra.template.as_deref()),
+            ("cra", Some("cra"))
+        );
         assert!(cra.controls.len() >= 6, "{:?}", cra.controls);
         assert!(cra.controls.iter().any(|c| c.not_applicable.is_some()));
-        assert!(!cra.not_selected.is_empty(), "the example leaves some controls unselected");
+        assert!(
+            !cra.not_selected.is_empty(),
+            "the example leaves some controls unselected"
+        );
         // The draft resolves against the same templates with no finding.
-        let draft = read_policy_file(&dir.join("drafts/ai-act.yaml"), "drafts/ai-act.yaml").unwrap();
+        let draft =
+            read_policy_file(&dir.join("drafts/ai-act.yaml"), "drafts/ai-act.yaml").unwrap();
         let (owned, draft_findings) = resolve(&draft, "demo", "drafts/ai-act.yaml", &templates);
         assert!(draft_findings.is_empty(), "{draft_findings:?}");
         assert_eq!(owned.controls.len(), 5);
@@ -1843,7 +1858,8 @@ mod tests {
 
     // -- templates and resolve (#390) ---------------------------------------
 
-    const TEMPLATE: &str = "template: cra\ntitle: Cyber Resilience Act\nkind: regulation\ncontrols:\n\
+    const TEMPLATE: &str =
+        "template: cra\ntitle: Cyber Resilience Act\nkind: regulation\ncontrols:\n\
         \x20 - {id: sbom, title: SBOM, maps_to: [iso27001/a-8-8], remediation: Generic guidance}\n\
         \x20 - {id: vulns, title: Vulnerabilities, kind: best-practice}\n\
         \x20 - {id: hw, title: Hardware}\n\
@@ -1875,7 +1891,10 @@ mod tests {
         );
         let (owned, findings) = resolve(&policy, "irrlicht", "cra.yaml", &templates());
         assert!(findings.is_empty(), "{findings:?}");
-        assert_eq!((owned.title.as_str(), owned.kind), ("Cyber Resilience Act", Kind::Regulation));
+        assert_eq!(
+            (owned.title.as_str(), owned.kind),
+            ("Cyber Resilience Act", Kind::Regulation)
+        );
         assert_eq!(owned.template.as_deref(), Some("cra"));
         let sbom = &owned.controls[0];
         assert_eq!(sbom.control, ControlRef::new("cra", "sbom"));
@@ -1885,10 +1904,22 @@ mod tests {
         assert_eq!(sbom.remediation.as_deref(), Some("Generic guidance"));
         assert_eq!(sbom.max_age, Some("30d".parse().unwrap()));
         let vulns = &owned.controls[1];
-        assert_eq!(vulns.kind, Kind::BestPractice, "the template control's own kind");
-        assert_eq!(vulns.remediation.as_deref(), Some("Run the scanner"), "the scope's own wins");
         assert_eq!(
-            owned.not_selected.iter().map(|c| c.control.to_string()).collect::<Vec<_>>(),
+            vulns.kind,
+            Kind::BestPractice,
+            "the template control's own kind"
+        );
+        assert_eq!(
+            vulns.remediation.as_deref(),
+            Some("Run the scanner"),
+            "the scope's own wins"
+        );
+        assert_eq!(
+            owned
+                .not_selected
+                .iter()
+                .map(|c| c.control.to_string())
+                .collect::<Vec<_>>(),
             ["cra/hw", "cra/left"],
             "every template control neither picked nor n/a, never a control"
         );
@@ -1914,7 +1945,10 @@ mod tests {
         .0;
         assert_eq!(a.controls[0].control, b.controls[0].control);
         assert_ne!(a.controls[0].evidence, b.controls[0].evidence);
-        assert_eq!((a.scope.as_str(), b.scope.as_str()), ("irrlicht", "factory"));
+        assert_eq!(
+            (a.scope.as_str(), b.scope.as_str()),
+            ("irrlicht", "factory")
+        );
     }
 
     #[test]
@@ -1923,7 +1957,10 @@ mod tests {
         let (owned, findings) = resolve(&unknown, "s", "cra.yaml", &templates());
         assert_eq!(kinds(&findings), [FindingKind::UnknownTemplate]);
         assert_eq!(owned.controls.len(), 1, "its controls still load");
-        assert_eq!(owned.controls[0].title, "sbom", "under its id, lacking a title");
+        assert_eq!(
+            owned.controls[0].title, "sbom",
+            "under its id, lacking a title"
+        );
         assert_eq!(owned.kind, Kind::Regulation);
 
         let typo = file("framework: cra\ntemplate: cra\ncontrols: [{id: sbomm, evidence: [{check: attestation}]}]\n");
@@ -1931,7 +1968,11 @@ mod tests {
         assert_eq!(kinds(&findings), [FindingKind::UnknownControl]);
         assert!(findings[0].detail.contains("cra/sbomm"), "{findings:?}");
         assert!(owned.controls.is_empty());
-        assert_eq!(owned.not_selected.len(), 4, "the real control is not selected");
+        assert_eq!(
+            owned.not_selected.len(),
+            4,
+            "the real control is not selected"
+        );
     }
 
     #[test]
@@ -1953,7 +1994,11 @@ mod tests {
         );
         let (owned, findings) = resolve(&policy, "irrlicht", "cra.yaml", &templates());
         assert_eq!(kinds(&findings), [FindingKind::EmptyRationale]);
-        let hw = owned.controls.iter().find(|c| c.control.id == "hw").unwrap();
+        let hw = owned
+            .controls
+            .iter()
+            .find(|c| c.control.id == "hw")
+            .unwrap();
         assert_eq!(
             hw.not_applicable,
             Some(AppliedNotApplicable {
@@ -1961,8 +2006,15 @@ mod tests {
                 rationale: "No hardware ships".into()
             })
         );
-        let sbom = owned.controls.iter().find(|c| c.control.id == "sbom").unwrap();
-        assert!(sbom.not_applicable.is_none(), "an empty rationale leaves it applicable");
+        let sbom = owned
+            .controls
+            .iter()
+            .find(|c| c.control.id == "sbom")
+            .unwrap();
+        assert!(
+            sbom.not_applicable.is_none(),
+            "an empty rationale leaves it applicable"
+        );
         assert!(
             !owned.not_selected.iter().any(|c| c.control.id == "hw"),
             "an n/a control is accounted for, not unselected"
@@ -1979,18 +2031,33 @@ mod tests {
         );
         let (owned, findings) = resolve(&finance, "finance", "finance.yaml", &[]);
         assert!(findings.is_empty(), "{findings:?}");
-        assert_eq!((owned.title.as_str(), owned.kind), ("Finance", Kind::BestPractice));
+        assert_eq!(
+            (owned.title.as_str(), owned.kind),
+            ("Finance", Kind::BestPractice)
+        );
         assert!(owned.not_selected.is_empty());
         let belege = &owned.controls[0];
         assert_eq!(belege.title, "Every booking has its receipt");
         assert_eq!(belege.kind, Kind::Regulation);
-        assert_eq!(belege.max_age, Some("35d".parse().unwrap()), "the minimum of control and checks");
-        assert_eq!(owned.controls[1].kind, Kind::BestPractice, "the policy's own kind");
+        assert_eq!(
+            belege.max_age,
+            Some("35d".parse().unwrap()),
+            "the minimum of control and checks"
+        );
+        assert_eq!(
+            owned.controls[1].kind,
+            Kind::BestPractice,
+            "the policy's own kind"
+        );
 
-        let bare = file("framework: house\ncontrols: [{id: a, evidence: [{check: attestation}]}]\n");
+        let bare =
+            file("framework: house\ncontrols: [{id: a, evidence: [{check: attestation}]}]\n");
         let (owned, findings) = resolve(&bare, "s", "house.yaml", &[]);
         assert_eq!(kinds(&findings), [FindingKind::MissingField; 3]);
-        assert_eq!((owned.title.as_str(), owned.kind), ("house", Kind::Regulation));
+        assert_eq!(
+            (owned.title.as_str(), owned.kind),
+            ("house", Kind::Regulation)
+        );
         assert_eq!(owned.controls[0].title, "a");
     }
 
@@ -2016,11 +2083,18 @@ mod tests {
             "template: cra\ntitle: CRA\nkind: regulation\ncontrols:\n\
              \x20 - {id: sbom, title: SBOM, evidence: [{check: task, task: sbom-export}]}\n",
         );
-        write(&dir, "iso.yaml", "template: iso27001\ntitle: ISO\nkind: standard\n");
+        write(
+            &dir,
+            "iso.yaml",
+            "template: iso27001\ntitle: ISO\nkind: standard\n",
+        );
         let (templates, findings) = load_templates(&dir, ".factory/policies/templates/");
         assert_eq!(
             kinds(&findings),
-            [FindingKind::TemplateEvidence, FindingKind::FrameworkMismatch]
+            [
+                FindingKind::TemplateEvidence,
+                FindingKind::FrameworkMismatch
+            ]
         );
         assert_eq!(findings[0].subject, ".factory/policies/templates/cra.yaml");
         assert_eq!(templates.len(), 1);
@@ -2031,13 +2105,24 @@ mod tests {
     #[test]
     fn templates_and_drafts_beneath_a_policies_dir_are_never_policies() {
         let dir = tempdir("subdirs");
-        write(&dir, "house.yaml", "framework: house\ntitle: House\nkind: best-practice\n");
+        write(
+            &dir,
+            "house.yaml",
+            "framework: house\ntitle: House\nkind: best-practice\n",
+        );
         write(&dir.join("templates"), "cra.yaml", TEMPLATE);
-        write(&dir.join("drafts"), "next.yaml", "framework: next\ntitle: Next\nkind: regulation\n");
+        write(
+            &dir.join("drafts"),
+            "next.yaml",
+            "framework: next\ntitle: Next\nkind: regulation\n",
+        );
         let (policies, findings) = load_all(&dir);
         assert!(findings.is_empty(), "{findings:?}");
         assert_eq!(
-            policies.iter().map(|p| p.framework.as_str()).collect::<Vec<_>>(),
+            policies
+                .iter()
+                .map(|p| p.framework.as_str())
+                .collect::<Vec<_>>(),
             ["house"]
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -2051,7 +2136,11 @@ mod tests {
         assert_eq!(parsed.template.as_deref(), Some("cra"));
         assert_eq!(parsed.controls.len(), 4);
         let (owned, findings) = resolve(&parsed, "s", "cra.yaml", &templates);
-        assert_eq!(kinds(&findings), [FindingKind::NoEvidence; 4], "every control still needs its evidence");
+        assert_eq!(
+            kinds(&findings),
+            [FindingKind::NoEvidence; 4],
+            "every control still needs its evidence"
+        );
         assert!(owned.not_selected.is_empty());
     }
 

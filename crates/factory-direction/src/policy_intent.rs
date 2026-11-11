@@ -535,23 +535,36 @@ mod tests {
             assert_eq!(serde_json::from_value::<PolicyDeclaration>(json).unwrap(), parsed);
         }
         assert!(declaration("~").is_empty());
-        assert_eq!(serde_json::to_value(PolicyDeclaration::default()).unwrap(), serde_json::Value::Null);
+        assert_eq!(
+            serde_json::to_value(PolicyDeclaration::default()).unwrap(),
+            serde_json::Value::Null
+        );
 
         let mut config = configuration();
         config.root_policies = declaration("frameworks: [cra]");
         config.scopes[2].policies = declaration("tighten: {cra/a: {max_age: 7d}}");
         let findings = config.legacy_findings();
         assert_eq!(
-            findings.iter().map(|f| (f.kind, f.subject.as_str())).collect::<Vec<_>>(),
+            findings
+                .iter()
+                .map(|f| (f.kind, f.subject.as_str()))
+                .collect::<Vec<_>>(),
             [
                 (policy::FindingKind::LegacyPolicies, "company"),
                 (policy::FindingKind::LegacyPolicies, "child"),
             ]
         );
         assert!(findings[0].detail.contains("`policies:`"), "{findings:?}");
-        assert!(findings[0].detail.contains(".factory/policies/<framework>.yaml"), "{findings:?}");
         assert!(
-            findings[1].detail.contains("projects/work/demo/.factory/policies/<framework>.yaml"),
+            findings[0]
+                .detail
+                .contains(".factory/policies/<framework>.yaml"),
+            "{findings:?}"
+        );
+        assert!(
+            findings[1]
+                .detail
+                .contains("projects/work/demo/.factory/policies/<framework>.yaml"),
             "{findings:?}"
         );
         let mut unnamed = config.clone();
@@ -567,17 +580,31 @@ mod tests {
         std::fs::write(policy::policies_dir(&root.0).join("house.yaml"), "framework: house\ntitle: House\nkind: best-practice\ncontrols: [{id: h, title: H, evidence: [{check: attestation}]}]\n").unwrap();
         root.policy("projects/work", "cra", CATALOGUE);
         // A lookalike path beside `work` is not below it.
-        root.policy("projects/work-other", "cra", &CATALOGUE.replace("title: A", "title: Side"));
+        root.policy(
+            "projects/work-other",
+            "cra",
+            &CATALOGUE.replace("title: A", "title: Side"),
+        );
         // `templates/` and `drafts/` are never policies.
-        root.template("cra", "template: cra\ntitle: CRA\nkind: regulation\ncontrols: [{id: a, title: A}]\n");
+        root.template(
+            "cra",
+            "template: cra\ntitle: CRA\nkind: regulation\ncontrols: [{id: a, title: A}]\n",
+        );
         std::fs::create_dir_all(policy::policies_dir(&root.0).join("drafts")).unwrap();
-        std::fs::write(policy::policies_dir(&root.0).join("drafts/next.yaml"), "framework: next\ntitle: Next\nkind: regulation\n").unwrap();
+        std::fs::write(
+            policy::policies_dir(&root.0).join("drafts/next.yaml"),
+            "framework: next\ntitle: Next\nkind: regulation\n",
+        )
+        .unwrap();
         let config = configuration();
         let policies = config.load_policies(&root.0);
         assert!(policies.findings.is_empty(), "{:?}", policies.findings);
         assert_eq!(policies.frameworks("company"), ["house"]);
         assert_eq!(policies.frameworks("work"), ["cra"]);
-        assert!(policies.frameworks("child").is_empty(), "nothing is inherited down the tree");
+        assert!(
+            policies.frameworks("child").is_empty(),
+            "nothing is inherited down the tree"
+        );
         assert_eq!(policies.applied("work/side")[0].title, "Side");
         assert_eq!(policies.templates.len(), 1);
         assert_eq!(
@@ -594,15 +621,25 @@ mod tests {
         );
 
         let cra_a: policy::ControlRef = "cra/a".parse().unwrap();
-        let refused = config.not_owned(&policies, &cra_a, &config.scopes[0]).to_string();
-        assert!(refused.contains("\"company\" has no cra policy of its own"), "{refused}");
+        let refused = config
+            .not_owned(&policies, &cra_a, &config.scopes[0])
+            .to_string();
+        assert!(
+            refused.contains("\"company\" has no cra policy of its own"),
+            "{refused}"
+        );
         assert!(refused.contains("belongs to work, work/side"), "{refused}");
-        let below = config.not_owned(&policies, &cra_a, &config.scopes[2]).to_string();
+        let below = config
+            .not_owned(&policies, &cra_a, &config.scopes[2])
+            .to_string();
         assert!(below.contains("does not apply there"), "{below}");
         let unknown = config
             .not_owned(&policies, &"cra/zz".parse().unwrap(), &config.scopes[1])
             .to_string();
-        assert!(unknown.contains("is not a control of \"work\"'s cra policy"), "{unknown}");
+        assert!(
+            unknown.contains("is not a control of \"work\"'s cra policy"),
+            "{unknown}"
+        );
     }
 
     #[tokio::test]
@@ -618,7 +655,10 @@ mod tests {
         assert_eq!(parent.policy.len(), 1);
         assert_eq!(parent.policy[0].source, "house/tested");
         let child = authored.plan_input("child", "feature").await.unwrap();
-        assert!(child.policy.is_empty(), "an ancestor's policy injects nothing into a child's plan");
+        assert!(
+            child.policy.is_empty(),
+            "an ancestor's policy injects nothing into a child's plan"
+        );
     }
 
     #[test]
@@ -630,7 +670,10 @@ mod tests {
         let policies = config.load_policies(&root.0);
         assert!(policies.owned.is_empty());
         assert_eq!(policies.findings.len(), 1, "{:?}", policies.findings);
-        assert_eq!(policies.findings[0].kind, policy::FindingKind::NoOwningScope);
+        assert_eq!(
+            policies.findings[0].kind,
+            policy::FindingKind::NoOwningScope
+        );
         assert_eq!(policies.findings[0].subject, ".factory/policies/cra.yaml");
     }
 
@@ -645,7 +688,10 @@ mod tests {
         let refused = config
             .not_owned(&policies, &"cra/b".parse().unwrap(), &config.scopes[1])
             .to_string();
-        assert!(refused.contains("cra/b is not selected at \"work\""), "{refused}");
+        assert!(
+            refused.contains("cra/b is not selected at \"work\""),
+            "{refused}"
+        );
         assert!(refused.contains("template \"cra\""), "{refused}");
     }
 
@@ -654,7 +700,11 @@ mod tests {
         let root = Root::new();
         root.catalogue(CATALOGUE);
         root.policy("projects/work/demo", "practices", "framework: practices\ntitle: Practices\nkind: best-practice\ncontrols: [{id: b, title: B}]\n");
-        root.policy(".", "house", "framework: house\ntitle: House\nkind: regulation\ncontrols: [{id: h, title: H}]\n");
+        root.policy(
+            ".",
+            "house",
+            "framework: house\ntitle: House\nkind: regulation\ncontrols: [{id: h, title: H}]\n",
+        );
         let store = PolicyStore::in_memory().unwrap();
         let owner = Service::new(root.0.clone(), configuration(), &store);
         let first = owner.metric_inputs(Some("demo")).await.unwrap();
@@ -713,7 +763,11 @@ mod tests {
             ["company", "child"],
             "only the scopes that own a policy, each with its own"
         );
-        assert_eq!(whole.scopes[0].subjects.len(), 1, "the root's own policy only");
+        assert_eq!(
+            whole.scopes[0].subjects.len(),
+            1,
+            "the root's own policy only"
+        );
     }
 
     #[tokio::test]

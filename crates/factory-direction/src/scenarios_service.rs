@@ -518,10 +518,8 @@ fn deltas_from_statuses(
         &policy::worst_across_scopes(&baseline_all),
         &policy::worst_across_scopes(&scenario_all),
     );
-    subtree.per_framework = scenario::framework_deltas(
-        &baseline_all.concat(),
-        &scenario_all.concat(),
-    );
+    subtree.per_framework =
+        scenario::framework_deltas(&baseline_all.concat(), &scenario_all.concat());
     (per_scope, subtree)
 }
 
@@ -870,7 +868,11 @@ impl<'a> Service<'a> {
         policy_findings.extend(baseline_policy_findings);
         // Every (scope, control) pair (#390), the same as the Policy board.
         let baseline_rollup = policy::rollup(
-            &baseline_statuses.values().flatten().cloned().collect::<Vec<_>>(),
+            &baseline_statuses
+                .values()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>(),
         );
 
         let target_names: BTreeSet<&str> = target_scopes.iter().map(|s| s.name.as_str()).collect();
@@ -1277,7 +1279,12 @@ mod tests {
                 std::fs::create_dir_all(dir).unwrap();
             }
             // Every scope owns the same house policy (#390): nothing is inherited.
-            for path in [".", "projects/work", "projects/work/deep", "projects/work-other"] {
+            for path in [
+                ".",
+                "projects/work",
+                "projects/work/deep",
+                "projects/work-other",
+            ] {
                 let dir = policy::scope_policies_dir(&root, std::path::Path::new(path));
                 std::fs::create_dir_all(&dir).unwrap();
                 std::fs::write(dir.join("house.yaml"),

@@ -157,7 +157,10 @@ mod test_forwarders {
         }
         pub(crate) async fn load_policies_and_tags(
             &self,
-        ) -> Result<(factory_core::policy::Policies, std::collections::BTreeSet<String>)> {
+        ) -> Result<(
+            factory_core::policy::Policies,
+            std::collections::BTreeSet<String>,
+        )> {
             self.l6_service().load_policies_and_tags().await
         }
         pub(crate) async fn policy_template(

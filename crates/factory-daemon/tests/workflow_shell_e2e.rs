@@ -603,7 +603,8 @@ fn task_inventory_links_follow_real_shell_completion_and_restart() {
     let mut daemon = provision();
     daemon.sigterm();
     let path = daemon.root.join(".factory/config.yaml");
-    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     config["quality"] = serde_yaml_ng::to_value(json!(["inventory"])).unwrap();
     std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
     std::fs::create_dir_all(daemon.root.join(".factory/policies")).unwrap();
@@ -1484,8 +1485,12 @@ fn promotion_is_pinned_policy_gated_owner_approved_and_verified_after_restart() 
     let marker = daemon.root.join(".factory/promoted");
     let permit = daemon.root.join(".factory/gate-allowed");
     let config_path = daemon.root.join(".factory/config.yaml");
-    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    config["scope"]["agents"] = serde_yaml_ng::from_str("[{ name: releaser, harness: shell, lifetime: task, role: foreman, max_sessions: 1 }]").unwrap();
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["scope"]["agents"] = serde_yaml_ng::from_str(
+        "[{ name: releaser, harness: shell, lifetime: task, role: foreman, max_sessions: 1 }]",
+    )
+    .unwrap();
     config["scope"]["environments"] = serde_yaml_ng::to_value(json!([
         { "name": "staging", "promotes_to": "production", "checks": [{ "name": "source", "kind": "command", "command": "true", "every": "5s", "timeout": "2s" }] },
         { "name": "production", "checks": [{ "name": "installed", "kind": "command", "command": format!("test -f '{}'", marker.display()), "every": "5s", "timeout": "2s" }],
@@ -3169,7 +3174,8 @@ fn workflow_preview_owners_read_live_requirements_but_dispatch_freezes_its_own_p
     if missing_prerequisites() { return; }
     let mut daemon = provision(); daemon.sigterm();
     let path = daemon.root.join(".factory/config.yaml");
-    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     config["quality"] = serde_yaml_ng::from_str("[base]").unwrap();
     config["scope"]["agents"] = serde_yaml_ng::from_str("[{name: critic, harness: shell, lifetime: task}]").unwrap();
     std::fs::write(path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();

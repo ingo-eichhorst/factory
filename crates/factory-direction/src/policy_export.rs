@@ -226,12 +226,14 @@ pub fn export_markdown(export: &PolicyExport) -> String {
                     .find(|na| na.control == status.control && na.scope == row.scope)
                     .map(|na| na.rationale.clone());
                 match (status.status.kind(), rationale) {
-                    (crate::policy::StatusKind::NotApplicable, rationale) => out.push_str(&format!(
-                        "- {} -- {}: n/a -- {}\n",
-                        status.control,
-                        status.title,
-                        rationale.unwrap_or_else(|| status.status.reasons().join("; "))
-                    )),
+                    (crate::policy::StatusKind::NotApplicable, rationale) => {
+                        out.push_str(&format!(
+                            "- {} -- {}: n/a -- {}\n",
+                            status.control,
+                            status.title,
+                            rationale.unwrap_or_else(|| status.status.reasons().join("; "))
+                        ))
+                    }
                     (kind, _) => out.push_str(&format!(
                         "- {} -- {}: selected ({})\n",
                         status.control,
@@ -471,7 +473,10 @@ mod tests {
             soa.contains("- cra/annex-i-2-2 -- Hardware: n/a -- we ship no hardware"),
             "{soa}"
         );
-        assert!(soa.contains("- cra/annex-i-2-4 -- Unpicked: not selected"), "{soa}");
+        assert!(
+            soa.contains("- cra/annex-i-2-4 -- Unpicked: not selected"),
+            "{soa}"
+        );
     }
 
     #[test]

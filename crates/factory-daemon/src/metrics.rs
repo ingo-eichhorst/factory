@@ -315,7 +315,12 @@ mod tests {
         // open at the root and the sibling.
         let cra = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: a\n    title: A\n    evidence:\n      - check: attestation\n";
         let na = cra.replace("    title: A\n", "    title: A\n    not_applicable: test\n");
-        for (path, policy) in [(".", cra), ("projects/side", cra), ("projects/work", &na), ("projects/work/nested", &na)] {
+        for (path, policy) in [
+            (".", cra),
+            ("projects/side", cra),
+            ("projects/work", &na),
+            ("projects/work/nested", &na),
+        ] {
             let dir = factory_core::policy::scope_policies_dir(&root, std::path::Path::new(path));
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("cra.yaml"), policy).unwrap();

@@ -155,11 +155,18 @@ mod tests {
     /// a file block or a service block -- with `fava` declared as its
     /// dependency service at `endpoints`.
     fn engine(source: &str, endpoints: &[String], quality: bool) -> (Arc<Engine>, PathBuf) {
-        let root = std::env::temp_dir().join(format!("factory-metrics-page-test-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "factory-metrics-page-test-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(root.join(".factory/quality")).unwrap();
         // The finance scope's own policy (#390), in its own directory.
         std::fs::create_dir_all(root.join("projects/finance/.factory/policies")).unwrap();
-        std::fs::write(root.join("projects/finance/.factory/policies/gobd.yaml"), GOBD).unwrap();
+        std::fs::write(
+            root.join("projects/finance/.factory/policies/gobd.yaml"),
+            GOBD,
+        )
+        .unwrap();
         std::fs::write(
             root.join(".factory/quality/books.yaml"),
             "attributes:\n  - id: functional-suitability.functional-correctness\n    importance: H\n    difficulty: M\n    scenarios:\n\

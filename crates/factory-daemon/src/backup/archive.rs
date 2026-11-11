@@ -322,7 +322,14 @@ pub fn take(plan: &Plan, destination: &Path, name: &str, at: DateTime<Utc>) -> R
         walk(&plan.root, dir.trim_end_matches('/'), *group, &mut entries, &mut excluded, &mut seen);
     }
     for dir in &plan.scope_policies {
-        walk(&plan.root, dir.trim_end_matches('/'), Group::Policies, &mut entries, &mut excluded, &mut seen);
+        walk(
+            &plan.root,
+            dir.trim_end_matches('/'),
+            Group::Policies,
+            &mut entries,
+            &mut excluded,
+            &mut seen,
+        );
     }
 
     // `#279`: every scope's own declared `backup.include`, resolved and
@@ -1062,7 +1069,8 @@ fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
     // The root scope's own policies, the templates and the drafts (#390);
     // every other scope's policy files are checked by their checksums.
     let (policies, findings) = policy::load_all(&policy::policies_dir(root));
-    let (templates, template_findings) = policy::load_templates(&policy::templates_dir(root), "templates/");
+    let (templates, template_findings) =
+        policy::load_templates(&policy::templates_dir(root), "templates/");
     let (drafts, draft_findings) = scenario::load_drafts(&scenario::drafts_dir(root));
     let unparsed = findings
         .iter()
@@ -1406,7 +1414,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            manifest.files.iter().find(|f| f.path == "projects/demo/.factory/policies/cra.yaml").map(|f| f.group),
+            manifest
+                .files
+                .iter()
+                .find(|f| f.path == "projects/demo/.factory/policies/cra.yaml")
+                .map(|f| f.group),
             Some(Group::Policies),
             "#390: a scope's own policies are backed up with the root's"
         );
@@ -1442,7 +1454,10 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(left.len(), 1, "{left:?}");
-        assert_eq!(taken.files, 9, "a scope's own policy file is backed up too (#390)");
+        assert_eq!(
+            taken.files, 9,
+            "a scope's own policy file is backed up too (#390)"
+        );
     }
 
     #[test]

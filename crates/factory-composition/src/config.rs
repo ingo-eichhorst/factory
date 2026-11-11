@@ -2987,9 +2987,16 @@ mod tests {
             std::fs::create_dir_all(root.join(dir)).unwrap();
             std::fs::write(root.join(dir).join(file), "x").unwrap();
         }
-        let mut f = factory_with(vec![scope_at("company", "."), scope_at("demo", "projects/demo")]);
+        let mut f = factory_with(vec![
+            scope_at("company", "."),
+            scope_at("demo", "projects/demo"),
+        ]);
         f.root = root.clone();
-        assert_eq!(f.policy_frameworks("demo"), ["cra"], "never the root's, never a template");
+        assert_eq!(
+            f.policy_frameworks("demo"),
+            ["cra"],
+            "never the root's, never a template"
+        );
         assert_eq!(f.policy_frameworks("company"), ["house"]);
         assert!(f.policy_frameworks("vanished").is_empty());
         std::fs::remove_dir_all(root).unwrap();
