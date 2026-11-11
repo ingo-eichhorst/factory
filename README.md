@@ -6892,8 +6892,8 @@ Only the small shared slug/identifier validator moves from dataset to L0;
 no task, run, intake, workflow, plan compilation or usage accounting enters
 the kernel.
 
-L6's `factory-direction` now owns authored policy catalogues, applicability,
-classification/rollups, goals scoring, scenario overlays/forecasts, budget
+L6's `factory-direction` now owns authored policy templates and scope
+policies, their subtree aggregate (#390), classification/rollups, goals scoring, scenario overlays/forecasts, budget
 intent and reporting-clock arithmetic. It depends only on L0 and L5, with no
 Core/facade, skipped-level or plugin dev dependency. Declaration projection
 into L5 plan sources belongs to L6, and the sole plan compiler stays in L5.
@@ -7044,13 +7044,13 @@ request-local L5 read-phase diagnostic preserves their error priority; it is
 never evidence, a cached metric/status, or something a level reader uses.
 Goal label execution goes through the same ladder.
 
-L6's live policy-intent service now owns authored catalogue reads, current
-policy receipts, applicability and raw budget inputs for metrics, Goals,
+L6's live policy-intent service now owns template and scope-policy reads
+(#390), current policy receipts and raw budget inputs for metrics, Goals,
 Signposts, Policy, Quality and Scenarios. Its knowledge-tag read uses the
 actual L5 capability through `Facts<L6>`. Policy configuration canonically
-re-exports L6's declaration type and uses the same L6 path-chain algorithm;
-the service receives fresh raw scope declarations, never a resolved chain or
-Policy report. It rereads limits only when a check or Quality plan needs them,
+re-exports L6's declaration type, now only an opaque legacy block reported
+as a finding; the service receives fresh raw scope identities, never
+resolved policies or a Policy report. It rereads limits only when a check or Quality plan needs them,
 preserving invalid authored intent as error data for the L5 evaluator. No
 spend or compliance judgement is computed in this input service.
 
