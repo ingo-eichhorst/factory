@@ -244,16 +244,20 @@ something impossible.
   and outcomes belong to the run. The task mirrors its newest run so lists stay
   cheap -- if you add a field to that mirror, clear it too, or a successful
   retry will show the previous attempt's error.
-- A scope owns only its `.factory/config.yaml`. Runtime state stays in the
-  instance root's `.factory/`; never put the database, socket, worktrees, or
-  other daemon-owned state inside a scope. `.factory/knowledge/`,
-  `.factory/datasets/`, `.factory/policies/` (including its `drafts/`
-  subdirectory), `.factory/goals/`, `.factory/scenarios/`,
+- A scope owns only its `.factory/config.yaml` and its own authored
+  policies, `<scope>/.factory/policies/<framework>.yaml` (#390): a policy
+  belongs to the scope it is written in, nothing is inherited down the
+  tree, and Factory reads those files but never writes them. Runtime state
+  stays in the instance root's `.factory/`; never put the database, socket,
+  worktrees, or other daemon-owned state inside a scope.
+  `.factory/knowledge/`, `.factory/datasets/`, `.factory/policies/` (the
+  root scope's own policies, plus its `templates/` and `drafts/`
+  subdirectories), `.factory/goals/`, `.factory/scenarios/`,
   `.factory/quality/`, `.factory/vex/`, `.factory/intake/` and
   `.factory/budgets/` are the one
   exception: authored
   content -- pages,
-  dataset YAML, policy catalogues (real and draft), the goals
+  dataset YAML, policy templates and policies (real and draft), the goals
   direction/cycle files, scenario files, quality profiles, VEX judgments and
   per-scope definitions of ready and monthly budget limits a person or an agent wrote by hand -- that
   nothing in Factory ever deletes
@@ -380,15 +384,19 @@ something impossible.
   request-local provider read-phase diagnostic may sequence those errors but
   is never metric evidence/status or a level reader's channel. Goal label
   execution still needs its adjacent command migration.
-  L6's live policy-intent service owns authored catalogue and receipt reads,
-  applicability, lazy raw budget resolution and Quality's selected budget
-  inputs. It reads the actual KnowledgeTags port through Facts<L6> and never
-  accepts computed tags or an Engine callback. PolicyDeclaration and the
-  additive path-chain algorithm are canonical L6, re-exported/called by the
-  outside configuration owner. Constructors capture fresh raw declarations,
-  not resolved chains or flat caches; preserve aliases, first-match precedence,
-  vanished-scope root fallback and independent ancestor caps. Invalid limits
-  stay raw error inputs, not absent defaults or L6 compliance verdicts.
+  L6's live policy-intent service owns template, scope-policy and receipt
+  reads, lazy raw budget resolution and Quality's selected budget inputs. It
+  reads the actual KnowledgeTags port through Facts<L6> and never accepts
+  computed tags or an Engine callback. A policy belongs to one scope (#390):
+  `policy::load` reads every scope's own `.factory/policies/` fresh, a scope's
+  controls are only its own (nothing is inherited), and a parent's view is
+  the subtree aggregate over the L0 scope tree by whole path components,
+  counting every (scope, control) pair. PolicyDeclaration is canonical L6 but
+  only an opaque legacy `policies:` block, kept verbatim and reported as a
+  `legacy_policies` finding, never resolved or refused. Constructors capture
+  fresh raw scope identities, not resolved policies or flat caches; preserve
+  independent ancestor budget caps. Invalid limits stay raw error inputs,
+  not absent defaults or L6 compliance verdicts.
   L6's physical Policy report/detail service reads CheckEvaluationFact and
   process inventory through Facts<L6>, owning its declarations, receipt
   history, classification, rollups, findings and remediation links. The
@@ -449,7 +457,8 @@ something impossible.
   task/watchdog tick. Keep immediate startup, cadence, no overlapping sweeps,
   missed-tick delay and shutdown behavior. L5 reaches L4 only through
   the L5 to L4 command port and L4 facts, and its timer goes through `L5Spawner`.
-- L6's `factory-direction` owns authored policy applicability/rollups, goals,
+- L6's `factory-direction` owns authored policy templates, scope policies and
+  their subtree aggregate (#390), goals,
   scenarios, budget intent and reporting-clock arithmetic. It depends only on
   L0 and L5, including in tests. It projects declarations to L5 evaluation
   subjects and plan sources; never import an L4 task or compiler API there.

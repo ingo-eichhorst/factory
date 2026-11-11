@@ -1,9 +1,10 @@
 # A small, realistic policy + drivers + signposts scenario. Loads with zero
 # findings -- see `examples_scenarios_load_with_zero_findings` in
-# `scenario.rs`. `add_frameworks: [ai-act]` names the draft catalogue at
-# `../policies/drafts/ai-act.yaml`; `scenario::overlay_chain`/`load_drafts`
-# are what actually resolve it against a policy chain, which this loader
-# does not need to know exists to load the file itself without findings.
+# `scenario.rs`. `add_frameworks: [ai-act]` names the draft policy at
+# `../policies/drafts/ai-act.yaml` (or, with no draft, the `ai-act`
+# template); `scenario::overlay_policies` resolves it per scope as a
+# what-if, which this loader does not need to know exists to load the file
+# itself without findings.
 name: ai-act-2027
 title: EU AI Act applies to our agents from 2027
 kind: [policy, drivers]

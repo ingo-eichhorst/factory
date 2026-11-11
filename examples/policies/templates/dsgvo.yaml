@@ -1,0 +1,41 @@
+# A starter template for the GDPR (DSGVO) (#390): the obligations a company
+# processing personal data most often has to evidence, by article. Titles
+# are our own wording of the public regulation. A scope picks what applies
+# to it in its own `<scope>/.factory/policies/dsgvo.yaml` (`template:
+# dsgvo`) and names its own evidence; a control that does not apply is
+# marked `not_applicable` with a rationale. Copy this file to
+# `<root>/.factory/policies/templates/dsgvo.yaml` to use it.
+template: dsgvo
+title: Datenschutz-Grundverordnung (GDPR)
+kind: regulation
+controls:
+  - id: art-5
+    title: Personal data is processed lawfully, for a stated purpose and no longer than needed (Art. 5)
+  - id: art-6
+    title: Every processing has a legal basis (Art. 6)
+  - id: art-13
+    title: People are told what is processed about them and why (Art. 13, 14)
+  - id: art-15
+    title: Access, rectification, erasure and portability requests are answered (Art. 15-20)
+  - id: art-25
+    title: Data protection by design and by default (Art. 25)
+  - id: art-28
+    title: Every processor works under a signed processing agreement (Art. 28)
+  - id: art-30
+    title: A record of processing activities is kept (Art. 30)
+  - id: art-32
+    title: Security of processing is appropriate to the risk (Art. 32(1))
+    maps_to: [iso27001/a-5-34]
+  - id: art-32-restore
+    title: Availability of personal data can be restored in time, and restoring is tested (Art. 32(1)(c),(d))
+    maps_to: [iso27001/a-8-13]
+  - id: art-33
+    title: A personal data breach is notified to the authority within 72 hours (Art. 33)
+  - id: art-34
+    title: People affected by a high-risk breach are told (Art. 34)
+  - id: art-35
+    title: A data protection impact assessment exists where processing is high-risk (Art. 35)
+  - id: art-37
+    title: A data protection officer is designated where required (Art. 37)
+  - id: art-44
+    title: Transfers outside the EU rest on an adequacy decision or safeguards (Art. 44-49)

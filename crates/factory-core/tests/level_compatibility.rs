@@ -151,8 +151,8 @@ fn config_and_page_projection_paths_are_canonical_outside_stack_types() {
 
 #[test]
 fn direction_domains_and_goals_store_keep_their_canonical_core_paths() {
-    let policy: Option<factory_core::policy::Catalogue> = None;
-    let _: Option<factory_direction::policy::Catalogue> = policy;
+    let policy: Option<factory_core::policy::PolicyFile> = None;
+    let _: Option<factory_direction::policy::PolicyFile> = policy;
     let cycle: Option<factory_core::goals::Cycle> = None;
     let _: Option<factory_direction::goals::Cycle> = cycle;
     let scenario: Option<factory_core::scenario::Scenario> = None;
@@ -496,28 +496,27 @@ fn metric_identity_values_and_goals_views_are_canonical_with_the_original_wire_s
 }
 
 #[test]
-fn policy_declaration_is_canonical_l6_data_with_the_original_config_json() {
+fn policy_declaration_is_canonical_l6_data_kept_verbatim_as_a_legacy_block() {
+    // #390: Factory reads no policy block any more; whatever is written is
+    // kept verbatim (so a config round-trips) and reported as a finding.
+    let written = json!({
+        "frameworks": ["cra", {"name": "dsgvo", "except": ["finance"]}],
+        "tighten": {"cra/a": {"max_age": "7d"}},
+        "not_applicable": [{"control": "cra/b", "rationale": "not used"}]
+    });
     let owned: factory_direction::policy_intent::PolicyDeclaration =
-        serde_json::from_value(json!({
-            "frameworks": ["cra"], "tighten": {"cra/a": {"max_age": "7d"}},
-            "not_applicable": [{"control": "cra/b", "rationale": "not used"}]
-        }))
-        .unwrap();
+        serde_json::from_value(written.clone()).unwrap();
     let legacy: factory_core::config::PolicyDeclaration = owned.clone();
     let outside: factory_composition::config::PolicyDeclaration = legacy;
     assert_eq!(outside, owned);
-    assert_eq!(
-        serde_json::to_value(outside).unwrap(),
-        json!({
-            "frameworks": ["cra"], "tighten": {"cra/a": {"max_age": "1w"}},
-            "not_applicable": [{"control": "cra/b", "rationale": "not used"}]
-        })
-    );
+    assert!(!outside.is_empty());
+    assert_eq!(serde_json::to_value(outside).unwrap(), written);
     assert!(
         serde_json::from_value::<factory_core::config::PolicyDeclaration>(
             json!({"framework": ["cra"]})
         )
-        .is_err()
+        .is_ok(),
+        "a typo is no longer refused: the block is a finding, never a refused start"
     );
 }
 

@@ -356,6 +356,10 @@ impl Engine {
             | Request::PolicyClock { .. }
             | Request::PolicyControl { .. }
             | Request::PolicyExport { .. }
+            // #390: authored templates and each scope's selection from
+            // them, read fresh -- open like `Policy`.
+            | Request::PolicyTemplates
+            | Request::PolicyTemplate { .. }
             | Request::Metrics { .. }
             // The dashboard's resolved layout (`#159`): a projection over
             // config already readable through the roster/config views, the

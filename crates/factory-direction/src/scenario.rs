@@ -17,7 +17,7 @@
 //! Three different kinds of answer live in this module, and they are never
 //! combined into one number (the issue's own guardrail):
 //!
-//! - **Exact:** [`overlay_chain`] and [`policy_delta`] reuse `policy.rs`'s
+//! - **Exact:** [`overlay_policies`] and [`policy_delta`] reuse `policy.rs`'s
 //!   own pure evaluator -- a control is open or it is not, deterministically,
 //!   the same as the real report.
 //! - **Probabilistic:** [`forecast_completion`], [`tornado`] and
@@ -54,13 +54,13 @@
 //! `name`, is a [`Finding`] naming it, and every other file still loads. A
 //! missing directory is empty, not an error.
 //!
-//! Draft policy catalogues -- a framework not yet real enough for
+//! Draft policies -- a policy not yet real enough for any scope's
 //! `.factory/policies/`, only for playing out a what-if -- live at
-//! `<root>/.factory/policies/drafts/*.yaml`. [`load_drafts`] reads them with
-//! `policy::load_all`'s own semantics; a test in this module pins that
-//! `policy::load_all` on the real `policies/` directory never recurses into
-//! `drafts/`, so a draft can never leak into the real compliance report by
-//! accident.
+//! `<root>/.factory/policies/drafts/*.yaml`. [`load_drafts`] reads them as
+//! policy files, resolved per scope by [`overlay_policies`]; a test in this
+//! module pins that `policy::load_all` on the real `policies/` directory
+//! never recurses into `drafts/`, so a draft can never leak into the real
+//! compliance report by accident.
 //!
 //! ## Deviations from the issue's sketch (read before assuming a shape)
 //!
@@ -78,15 +78,16 @@
 //!    every scenario the moment a worktree is cut. `from` unset means
 //!    staleness is simply never checked for that scenario (see
 //!    [`stale_findings`]).
-//! 2. **`overlay_chain` takes `&Scenario`, not `&PolicyOverlay`, and returns
-//!    findings.** The issue's own sketch is
-//!    `overlay_chain(chain, overlay) -> Vec<PolicyLayer>`. A scenario's
+//! 2. **`overlay_policies` takes `&Scenario`, not `&PolicyOverlay`, and
+//!    returns findings.** The issue's own sketch overlaid a policy chain;
+//!    since #390 there is none, and the overlay applies to each scope's own
+//!    resolved policies instead. A scenario's
 //!    `policy:` section is optional (only a `kind: [policy, ...]` scenario
 //!    authors one), so taking the whole `Scenario` lets "no policy overlay"
 //!    be a clean no-op instead of forcing every caller to unwrap
 //!    `scenario.policy` first. The synthetic layer's scope is
 //!    `scenario:<name>` -- the issue offers "or the leaf scope's" as an
-//!    alternative, rejected because `policy::applicable`'s own findings
+//!    alternative, rejected because the overlay's own policy findings
 //!    (`UnknownFramework`, `LooseningHasNoEffect`, ...) name `layer.scope`
 //!    as their subject, and attributing a scenario author's own mistake to
 //!    the real scope it was evaluated against would point a person at the
@@ -131,7 +132,7 @@
 //! since neither `policy.rs` nor `goals.rs` imports anything from this one.
 
 use crate::goals::KrRef;
-use crate::policy::{self, ControlRef, ControlStatus, PolicyLayer};
+use crate::policy::{self, ControlRef, ControlStatus};
 use chrono::{DateTime, NaiveDate, Utc};
 use factory_assurance::metrics::{self, MetricError, MetricId, MetricSeries};
 #[cfg(test)]
@@ -266,22 +267,20 @@ impl Scenario {
     }
 }
 
-/// An overlay on the real policy chain -- add frameworks, tighten a
-/// control's freshness window, or say a control marked not-applicable no
-/// longer is. Never loosens anything: see [`overlay_chain`].
+/// An overlay on each scope's own policies (#390) -- add frameworks, tighten
+/// a control's freshness window, or say a control marked not-applicable no
+/// longer is. Never loosens anything: see [`overlay_policies`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyOverlay {
     #[serde(default)]
     pub add_frameworks: Vec<String>,
-    /// Reuses `policy::Tighten` verbatim -- the same `{max_age}` shape a
-    /// real scope's own `tighten:` config already writes, so
-    /// `policy::applicable`'s add-or-tighten-only arithmetic applies to a
-    /// scenario's tighten exactly the way it applies to a real one.
+    /// `{max_age}` per control: [`overlay_policies`] applies it only where
+    /// it shortens the scope's own window.
     #[serde(default)]
     pub tighten: BTreeMap<ControlRef, policy::Tighten>,
-    /// Controls to strip a `not_applicable` declaration from, in the chain
-    /// copy [`overlay_chain`] builds -- "what if this control's n/a
+    /// Controls to strip a `not_applicable` declaration from, in the copy
+    /// of a scope's policies [`overlay_policies`] builds -- "what if this control's n/a
     /// rationale no longer holds".
     #[serde(default)]
     pub drop_not_applicable: Vec<ControlRef>,
@@ -343,7 +342,7 @@ pub struct Narrative {
 
 // ================================================================ findings
 
-/// One of the things [`load`] (or [`stale_findings`], or [`overlay_chain`])
+/// One of the things [`load`] (or [`stale_findings`], or [`overlay_policies`])
 /// checks for. Never stops another file, or another part of the same file,
 /// from loading -- exactly `policy::Finding`'s and `goals::Finding`'s own
 /// promise.
@@ -382,7 +381,7 @@ pub enum FindingKind {
     Stale,
     /// A policy overlay's `drop_not_applicable` names a control that was
     /// never marked not-applicable anywhere in the chain it was applied to
-    /// -- see [`overlay_chain`], deviation 2 in the module doc comment.
+    /// -- see [`overlay_policies`], deviation 2 in the module doc comment.
     DropNotApplicableHasNoEffect,
     /// A draft catalogue in `.factory/policies/drafts/` names the same
     /// `framework` as an already-loaded real one -- see [`merge_catalogues`].
@@ -659,71 +658,136 @@ pub fn stale_findings(scenarios: &[Scenario], now: DateTime<Utc>) -> Vec<Finding
 
 // ============================================================ policy delta
 
-/// Build the chain [`policy::applicable`] should evaluate for `scenario`'s
-/// what-if, from the real chain a caller already resolved for some scope.
-/// `scenario.policy` unset is a no-op (`chain` returned unchanged). See
-/// deviation 2 in the module doc comment for why this takes `&Scenario`
-/// rather than the issue's own `&PolicyOverlay`, and why the synthetic
-/// layer's scope is `scenario:<name>`.
+/// The controls `scenario`'s what-if evaluates at `scope` (#390): that
+/// scope's own resolved controls (`real`, its own policies -- nothing is
+/// inherited), changed by the overlay. `scenario.policy` unset is a no-op.
 ///
-/// `drop_not_applicable` strips a `not_applicable` declaration for the named
-/// control from every layer of the chain copy (layers otherwise keep their
-/// own original scope names) -- "what if this control's rationale no longer
-/// holds". A control named that was not marked not-applicable anywhere in
-/// the chain is a [`FindingKind::DropNotApplicableHasNoEffect`] finding,
-/// parallel to `policy::FindingKind::LooseningHasNoEffect`.
+/// - `drop_not_applicable` strips the `n/a` from each named control -- "what
+///   if this control's rationale no longer holds". A control not marked
+///   `n/a` in the scope's own policies is a
+///   [`FindingKind::DropNotApplicableHasNoEffect`] finding.
+/// - `add_frameworks` adds, for each framework the scope has no policy for,
+///   the draft policy of that name (`drafts/<framework>.yaml`, resolved for
+///   this scope against `templates`), or else every control of the template
+///   of that name with no evidence -- "what if this scope adopted it". A
+///   framework the scope already has keeps its real policy
+///   ([`FindingKind::DraftCollidesWithReal`] when a draft names it too); one
+///   with neither a draft nor a template is a policy finding.
+/// - `tighten` lowers a control's `max_age`; one that would not shorten it
+///   has no effect and is a `LooseningHasNoEffect` finding, so the overlay
+///   never loosens anything.
 ///
-/// Never loosens anything, by construction: the synthetic layer can only
-/// add frameworks (a union, same as every other layer) and tighten (whose
-/// own add-or-tighten-only arithmetic is `policy::applicable`'s, reused
-/// unchanged here, not reimplemented) -- see the "overlay never loosens"
-/// tests below, which feed this straight into `policy::applicable` and
-/// check the result, not this function's own bookkeeping.
-pub fn overlay_chain(
-    chain: &[PolicyLayer],
+/// Policy findings name `scenario:<name>` as their subject (deviation 2 in
+/// the module doc comment), never the real scope.
+pub fn overlay_policies(
+    scope: &str,
+    real: &[&policy::OwnedPolicy],
+    drafts: &[policy::PolicyFile],
+    templates: &[policy::Template],
     scenario: &Scenario,
-) -> (Vec<PolicyLayer>, Vec<Finding>) {
+) -> (Vec<policy::Applied>, Vec<policy::Finding>, Vec<Finding>) {
+    let mut applied: Vec<policy::Applied> = real
+        .iter()
+        .flat_map(|p| p.controls.iter().cloned())
+        .collect();
+    let mut policy_findings = Vec::new();
     let mut findings = Vec::new();
     let Some(overlay) = &scenario.policy else {
-        return (chain.to_vec(), findings);
+        applied.sort_by(|a, b| a.control.cmp(&b.control));
+        return (applied, policy_findings, findings);
     };
-
-    let mut dropped: BTreeSet<ControlRef> = BTreeSet::new();
-    let mut new_chain: Vec<PolicyLayer> = chain
-        .iter()
-        .map(|layer| {
-            let mut layer = layer.clone();
-            layer.not_applicable.retain(|na| {
-                if overlay.drop_not_applicable.contains(&na.control) {
-                    dropped.insert(na.control.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            layer
-        })
-        .collect();
-
     let subject = format!("{}.yaml", scenario.name);
+    let layer = format!("scenario:{}", scenario.name);
+
     for control in &overlay.drop_not_applicable {
-        if !dropped.contains(control) {
+        let dropped = applied
+            .iter_mut()
+            .filter(|a| &a.control == control && a.not_applicable.is_some())
+            .map(|a| a.not_applicable = None)
+            .count();
+        if dropped == 0 {
             findings.push(finding(
                 FindingKind::DropNotApplicableHasNoEffect,
                 &subject,
-                format!("drop_not_applicable names {control}, which is not marked not applicable anywhere in the chain"),
+                format!(
+                    "drop_not_applicable names {control}, which is not marked not applicable in the scope's own policies"
+                ),
             ));
         }
     }
 
-    new_chain.push(PolicyLayer {
-        scope: format!("scenario:{}", scenario.name),
-        frameworks: overlay.add_frameworks.clone(),
-        tighten: overlay.tighten.clone(),
-        not_applicable: Vec::new(),
-    });
+    for framework in &overlay.add_frameworks {
+        let draft = drafts.iter().find(|d| &d.framework == framework);
+        if real.iter().any(|p| &p.framework == framework) {
+            if draft.is_some() {
+                findings.push(finding(
+                    FindingKind::DraftCollidesWithReal,
+                    format!("{framework}.yaml"),
+                    format!(
+                        "draft policy {framework:?} names a framework {scope:?} already has a real policy for; \
+                         the real policy is used there"
+                    ),
+                ));
+            }
+            continue;
+        }
+        if let Some(draft) = draft {
+            let (owned, own) = policy::resolve(
+                draft,
+                scope,
+                &format!(".factory/policies/drafts/{framework}.yaml"),
+                templates,
+            );
+            policy_findings.extend(own);
+            applied.extend(owned.controls);
+        } else if let Some(template) = templates.iter().find(|t| &t.template == framework) {
+            applied.extend(template.controls.iter().map(|c| policy::Applied {
+                control: ControlRef::new(framework.clone(), c.id.clone()),
+                title: c.title.clone(),
+                kind: c.kind.unwrap_or(template.kind),
+                maps_to: c.maps_to.clone(),
+                evidence: Vec::new(),
+                max_age: None,
+                not_applicable: None,
+                remediation: c.remediation.clone(),
+                requires: Vec::new(),
+            }));
+        } else {
+            policy_findings.push(policy::Finding {
+                kind: policy::FindingKind::UnknownFramework,
+                subject: layer.clone(),
+                detail: format!(
+                    "adds framework {framework:?}, which has no draft in .factory/policies/drafts/ and no template"
+                ),
+            });
+        }
+    }
 
-    (new_chain, findings)
+    for (control, tighten) in &overlay.tighten {
+        let Some(new_age) = tighten.max_age else {
+            continue;
+        };
+        match applied.iter_mut().find(|a| &a.control == control) {
+            None => policy_findings.push(policy::Finding {
+                kind: policy::FindingKind::UnknownControl,
+                subject: layer.clone(),
+                detail: format!("tightens {control}, which is not a control of the scope's own policies"),
+            }),
+            Some(a) => match a.max_age {
+                Some(current) if new_age >= current => policy_findings.push(policy::Finding {
+                    kind: policy::FindingKind::LooseningHasNoEffect,
+                    subject: layer.clone(),
+                    detail: format!(
+                        "tightens {control} to {new_age}, which is not shorter than the existing {current}"
+                    ),
+                }),
+                _ => a.max_age = Some(new_age),
+            },
+        }
+    }
+
+    applied.sort_by(|a, b| a.control.cmp(&b.control));
+    (applied, policy_findings, findings)
 }
 
 /// One framework's rollup before and after a scenario -- `None` on either
@@ -822,6 +886,25 @@ pub fn policy_delta(baseline: &[ControlStatus], scenario: &[ControlStatus]) -> P
     newly_applicable_but_covered.sort();
     missing_from_scenario.sort();
 
+    let per_framework = framework_deltas(baseline, scenario);
+
+    PolicyDelta {
+        newly_open,
+        newly_stale,
+        newly_applicable_but_covered,
+        unchanged,
+        missing_from_scenario,
+        per_framework,
+    }
+}
+
+/// Each framework's rollup before and after, over whatever statuses each
+/// side passes -- one scope's, or (#390) every (scope, control) pair of a
+/// subtree, so a scenario's subtree rollup agrees with the Policy board's.
+pub fn framework_deltas(
+    baseline: &[ControlStatus],
+    scenario: &[ControlStatus],
+) -> Vec<FrameworkDelta> {
     let before_rollup: BTreeMap<String, policy::FrameworkRollup> = policy::rollup(baseline)
         .into_iter()
         .map(|r| (r.framework.clone(), r))
@@ -835,23 +918,14 @@ pub fn policy_delta(baseline: &[ControlStatus], scenario: &[ControlStatus]) -> P
         .chain(after_rollup.keys())
         .cloned()
         .collect();
-    let per_framework = frameworks
+    frameworks
         .into_iter()
         .map(|fw| FrameworkDelta {
             before: before_rollup.get(&fw).cloned(),
             after: after_rollup.get(&fw).cloned(),
             framework: fw,
         })
-        .collect();
-
-    PolicyDelta {
-        newly_open,
-        newly_stale,
-        newly_applicable_but_covered,
-        unchanged,
-        missing_from_scenario,
-        per_framework,
-    }
+        .collect()
 }
 
 /// `<root>/.factory/policies/drafts`, alongside `policy::policies_dir`.
@@ -859,54 +933,35 @@ pub fn drafts_dir(root: &Path) -> PathBuf {
     policy::policies_dir(root).join("drafts")
 }
 
-/// Read draft catalogues with `policy::load_all`'s own semantics -- a draft
-/// is a framework not yet real enough for `.factory/policies/`, only for a
-/// scenario's `add_frameworks` to name. See the module doc comment: a test
-/// below pins that `policy::load_all` on the real `policies/` directory
-/// never recurses into `drafts/`, so this is the only way a draft is ever
-/// read.
-pub fn load_drafts(dir: &Path) -> (Vec<policy::Catalogue>, Vec<policy::Finding>) {
-    policy::load_all(dir)
-}
-
-/// `real` plus every `draft` whose `framework` names none of `real`'s own --
-/// what a scenario's `add_frameworks` resolves against (see the "Storage"
-/// section of the module doc comment), since a draft is a framework not yet
-/// real enough for `.factory/policies/`, never a second, competing
-/// definition of one that already is. A draft colliding with a real
-/// catalogue is dropped whole, not merged control-by-control -- there is no
-/// principled way to decide which of two same-named frameworks' controls
-/// "wins" per control, and a scenario author who meant to extend the real
-/// one should edit it directly, not shadow it from `drafts/`. Reported as
-/// [`FindingKind::DraftCollidesWithReal`] rather than silently dropped.
-/// `real` is never mutated or reordered by this -- the collision check is
-/// one-directional, and `policy_report`'s own real-only evaluation is
-/// unaffected by anything under `drafts/` (a test in this module pins that
-/// too, see [`load_drafts`]'s own doc comment).
-pub fn merge_catalogues(
-    real: &[policy::Catalogue],
-    drafts: Vec<policy::Catalogue>,
-) -> (Vec<policy::Catalogue>, Vec<Finding>) {
-    let real_names: BTreeSet<&str> = real.iter().map(|c| c.framework.as_str()).collect();
+/// Read draft policies (#390): each `drafts/<framework>.yaml` is a policy
+/// file -- with or without a `template:` -- not yet real enough for any
+/// scope's `.factory/policies/`, only for a scenario's `add_frameworks` to
+/// name. Read raw here and resolved per scope by [`overlay_policies`]. No
+/// policy loader ever recurses into `drafts/`, so this is the only way a
+/// draft is ever read.
+pub fn load_drafts(dir: &Path) -> (Vec<policy::PolicyFile>, Vec<policy::Finding>) {
+    let mut drafts = Vec::new();
     let mut findings = Vec::new();
-    let mut merged: Vec<policy::Catalogue> = real.to_vec();
-    for draft in drafts {
-        if real_names.contains(draft.framework.as_str()) {
-            findings.push(finding(
-                FindingKind::DraftCollidesWithReal,
-                format!("{}.yaml", draft.framework),
-                format!(
-                    "draft catalogue {:?} names the same framework as an already-loaded real one; \
-                     the real catalogue is used and this draft is dropped from the merge",
-                    draft.framework
-                ),
-            ));
-            continue;
+    let mut paths: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(read) => read
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("yaml"))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    paths.sort();
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match policy::read_policy_file(&path, &format!(".factory/policies/drafts/{name}")) {
+            Ok(draft) => drafts.push(draft),
+            Err(finding) => findings.push(finding),
         }
-        merged.push(draft);
     }
-    sort_findings(&mut findings);
-    (merged, findings)
+    (drafts, findings)
 }
 
 // ============================================================== forecast
@@ -1661,9 +1716,7 @@ pub use factory_assurance::signposts::{SignpostState, SignpostStatus, evaluate_s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{
-        Catalogue, Check, Control, Duration as PDuration, Evidence, Kind, NotApplicable, Tighten,
-    };
+    use crate::policy::{Duration as PDuration, Evidence, Kind, Tighten};
 
     fn write(dir: &Path, name: &str, text: &str) {
         std::fs::create_dir_all(dir).unwrap();
@@ -2583,40 +2636,44 @@ mod tests {
         assert_eq!(drafts[0].framework, "ai-act");
     }
 
-    // -- overlay_chain / policy_delta ---------------------------------------
+    // -- overlay_policies / policy_delta (#390) ------------------------------
 
-    fn cra_catalogue() -> Catalogue {
-        Catalogue {
-            framework: "cra".to_string(),
-            title: "CRA".to_string(),
-            kind: Kind::Regulation,
-            controls: vec![Control {
-                id: "sbom".to_string(),
-                title: "SBOM".to_string(),
-                kind: None,
-                max_age: Some(PDuration::from_hours(24 * 30)),
-                maps_to: Vec::new(),
-                remediation: None,
-                evidence: vec![Check::Knowledge { tag: None }],
-                requires: Vec::new(),
-            }],
-        }
+    fn file(raw: &str) -> policy::PolicyFile {
+        serde_yaml_ng::from_str(raw).unwrap()
     }
 
-    fn ai_act_catalogue() -> Catalogue {
-        Catalogue {
-            framework: "ai-act".to_string(),
-            title: "AI Act (draft)".to_string(),
-            kind: Kind::Regulation,
-            controls: vec![Control {
-                id: "oversight".to_string(),
-                title: "Human oversight".to_string(),
+    /// The scope's own CRA policy: `sbom`, 30d, knowledge evidence --
+    /// optionally marked n/a.
+    fn cra_owned(not_applicable: Option<&str>) -> policy::OwnedPolicy {
+        let na = not_applicable
+            .map(|r| format!(", not_applicable: {r}"))
+            .unwrap_or_default();
+        policy::resolve(
+            &file(&format!(
+                "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {{id: sbom, title: SBOM, max_age: 30d, evidence: [{{check: knowledge}}]{na}}}\n"
+            )),
+            "root",
+            "cra.yaml",
+            &[],
+        )
+        .0
+    }
+
+    fn ai_act_draft() -> policy::PolicyFile {
+        file("framework: ai-act\ntitle: AI Act (draft)\nkind: regulation\ncontrols:\n  - {id: oversight, title: Human oversight, evidence: [{check: attestation}]}\n")
+    }
+
+    fn template(name: &str) -> policy::Template {
+        policy::Template {
+            template: name.to_string(),
+            title: name.to_string(),
+            kind: Kind::Standard,
+            controls: vec![policy::TemplateControl {
+                id: "a-5-1".to_string(),
+                title: "Policies for information security".to_string(),
                 kind: None,
-                max_age: None,
                 maps_to: Vec::new(),
                 remediation: None,
-                evidence: vec![Check::Attestation],
-                requires: Vec::new(),
             }],
         }
     }
@@ -2627,141 +2684,131 @@ mod tests {
         s
     }
 
-    #[test]
-    fn overlay_chain_is_a_no_op_without_a_policy_section() {
-        let chain = vec![PolicyLayer {
-            scope: "root".to_string(),
-            frameworks: vec!["cra".to_string()],
-            tighten: BTreeMap::new(),
-            not_applicable: Vec::new(),
-        }];
-        let scenario = scenario_with("no-policy", None, 26);
-        let (out, findings) = overlay_chain(&chain, &scenario);
-        assert_eq!(out, chain);
-        assert!(findings.is_empty());
-    }
-
-    #[test]
-    fn overlay_chain_adds_a_synthetic_scenario_scoped_layer() {
-        let chain = vec![PolicyLayer {
-            scope: "root".to_string(),
-            frameworks: vec!["cra".to_string()],
-            tighten: BTreeMap::new(),
-            not_applicable: Vec::new(),
-        }];
-        let overlay = PolicyOverlay {
-            add_frameworks: vec!["ai-act".to_string()],
+    fn overlay(add: &[&str]) -> PolicyOverlay {
+        PolicyOverlay {
+            add_frameworks: add.iter().map(|s| s.to_string()).collect(),
             tighten: BTreeMap::new(),
             drop_not_applicable: Vec::new(),
-        };
-        let scenario = scenario_with_policy("ai-act-2027", overlay);
-        let (out, findings) = overlay_chain(&chain, &scenario);
-        assert!(findings.is_empty());
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[1].scope, "scenario:ai-act-2027");
-        assert_eq!(out[1].frameworks, vec!["ai-act".to_string()]);
+        }
     }
 
     #[test]
-    fn overlay_chain_never_loosens_a_tighten_even_if_the_scenario_asks_for_a_longer_max_age() {
-        let chain = vec![PolicyLayer {
-            scope: "root".to_string(),
-            frameworks: vec!["cra".to_string()],
-            tighten: BTreeMap::new(),
-            not_applicable: Vec::new(),
-        }];
-        let catalogues = vec![cra_catalogue()];
+    fn overlay_policies_is_the_scopes_own_controls_without_a_policy_section() {
+        let real = cra_owned(None);
+        let scenario = scenario_with("no-policy", None, 26);
+        let (applied, policy_findings, findings) =
+            overlay_policies("root", &[&real], &[ai_act_draft()], &[], &scenario);
+        assert_eq!(applied, real.controls);
+        assert!(policy_findings.is_empty() && findings.is_empty());
+    }
 
-        // A genuine tighten: 30d -> 14d.
-        let tightened = PolicyOverlay {
+    #[test]
+    fn overlay_policies_adds_a_draft_or_a_template_the_scope_has_no_policy_for() {
+        let real = cra_owned(None);
+        let scenario = scenario_with_policy("adopt", overlay(&["ai-act", "iso27001"]));
+        let (applied, policy_findings, findings) = overlay_policies(
+            "root",
+            &[&real],
+            &[ai_act_draft()],
+            &[template("iso27001")],
+            &scenario,
+        );
+        assert!(policy_findings.is_empty(), "{policy_findings:?}");
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(
+            applied
+                .iter()
+                .map(|a| a.control.to_string())
+                .collect::<Vec<_>>(),
+            ["ai-act/oversight", "cra/sbom", "iso27001/a-5-1"]
+        );
+        let iso = applied
+            .iter()
+            .find(|a| a.control.framework == "iso27001")
+            .unwrap();
+        assert!(
+            iso.evidence.is_empty(),
+            "a template adopted with no evidence of its own"
+        );
+        let statuses = policy::evaluate(&applied, &Evidence::default(), dt(2026, 9, 25));
+        assert_eq!(statuses[2].status.kind(), policy::StatusKind::Open);
+
+        let unknown = scenario_with_policy("nope", overlay(&["nothing"]));
+        let (_, policy_findings, _) = overlay_policies("root", &[&real], &[], &[], &unknown);
+        assert_eq!(
+            policy_findings[0].kind,
+            policy::FindingKind::UnknownFramework
+        );
+        assert_eq!(policy_findings[0].subject, "scenario:nope");
+    }
+
+    #[test]
+    fn a_draft_never_shadows_a_policy_the_scope_already_has() {
+        let real = cra_owned(None);
+        let mut shadow = ai_act_draft();
+        shadow.framework = "cra".to_string();
+        let scenario = scenario_with_policy("shadow", overlay(&["cra"]));
+        let (applied, _, findings) = overlay_policies("root", &[&real], &[shadow], &[], &scenario);
+        assert_eq!(applied, real.controls, "the real policy is used");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::DraftCollidesWithReal);
+        assert_eq!(findings[0].subject, "cra.yaml");
+    }
+
+    #[test]
+    fn overlay_policies_never_loosens_a_tighten_even_if_the_scenario_asks_for_a_longer_max_age() {
+        let real = cra_owned(None);
+        let tighten = |days: u64| PolicyOverlay {
             add_frameworks: Vec::new(),
             tighten: [(
                 ControlRef::new("cra", "sbom"),
                 Tighten {
-                    max_age: Some(PDuration::from_hours(24 * 14)),
+                    max_age: Some(PDuration::from_hours(24 * days)),
                 },
             )]
             .into_iter()
             .collect(),
             drop_not_applicable: Vec::new(),
         };
-        let scenario = scenario_with_policy("tighten", tightened);
-        let (new_chain, ov_findings) = overlay_chain(&chain, &scenario);
-        assert!(ov_findings.is_empty());
-        let (applied, applic_findings) = policy::applicable(&catalogues, &new_chain);
-        assert!(applic_findings.is_empty());
+        let scenario = scenario_with_policy("tighten", tighten(14));
+        let (applied, policy_findings, _) = overlay_policies("root", &[&real], &[], &[], &scenario);
+        assert!(policy_findings.is_empty());
         assert_eq!(applied[0].max_age, Some(PDuration::from_hours(24 * 14)));
 
-        // An attempted loosening: 30d -> 60d must not win, and must be
-        // reported by policy::applicable's own LooseningHasNoEffect finding
-        // -- this scenario module reuses that machinery rather than
-        // reimplementing it.
-        let loosened = PolicyOverlay {
-            add_frameworks: Vec::new(),
-            tighten: [(
-                ControlRef::new("cra", "sbom"),
-                Tighten {
-                    max_age: Some(PDuration::from_hours(24 * 60)),
-                },
-            )]
-            .into_iter()
-            .collect(),
-            drop_not_applicable: Vec::new(),
-        };
-        let scenario = scenario_with_policy("loosen", loosened);
-        let (new_chain, _) = overlay_chain(&chain, &scenario);
-        let (applied, applic_findings) = policy::applicable(&catalogues, &new_chain);
+        let scenario = scenario_with_policy("loosen", tighten(60));
+        let (applied, policy_findings, _) = overlay_policies("root", &[&real], &[], &[], &scenario);
         assert_eq!(
             applied[0].max_age,
             Some(PDuration::from_hours(24 * 30)),
             "the original 30d must survive"
         );
-        assert!(applic_findings
-            .iter()
-            .any(|f| f.kind == policy::FindingKind::LooseningHasNoEffect));
+        assert_eq!(
+            policy_findings[0].kind,
+            policy::FindingKind::LooseningHasNoEffect
+        );
     }
 
     #[test]
     fn drop_not_applicable_clears_an_existing_na_and_flags_a_no_op() {
-        let chain = vec![PolicyLayer {
-            scope: "root".to_string(),
-            frameworks: vec!["cra".to_string()],
-            tighten: BTreeMap::new(),
-            not_applicable: vec![NotApplicable {
-                control: ControlRef::new("cra", "sbom"),
-                rationale: "not built yet".to_string(),
-            }],
-        }];
-        let catalogues = vec![cra_catalogue()];
-
-        // Baseline: n/a.
-        let (baseline_applied, _) = policy::applicable(&catalogues, &chain);
-        assert!(baseline_applied[0].not_applicable.is_some());
-
-        // Drop it: applicable again.
-        let overlay = PolicyOverlay {
+        let real = cra_owned(Some("not built yet"));
+        assert!(real.controls[0].not_applicable.is_some());
+        let drop = |control: &str| PolicyOverlay {
             add_frameworks: Vec::new(),
             tighten: BTreeMap::new(),
-            drop_not_applicable: vec![ControlRef::new("cra", "sbom")],
+            drop_not_applicable: vec![ControlRef::new("cra", control)],
         };
-        let scenario = scenario_with_policy("drop-na", overlay);
-        let (new_chain, findings) = overlay_chain(&chain, &scenario);
+        let scenario = scenario_with_policy("drop-na", drop("sbom"));
+        let (applied, _, findings) = overlay_policies("root", &[&real], &[], &[], &scenario);
         assert!(findings.is_empty());
-        let (applied, _) = policy::applicable(&catalogues, &new_chain);
         assert!(applied[0].not_applicable.is_none());
 
-        // Dropping a control that was never n/a anywhere is a no-op finding.
-        let overlay = PolicyOverlay {
-            add_frameworks: Vec::new(),
-            tighten: BTreeMap::new(),
-            drop_not_applicable: vec![ControlRef::new("cra", "does-not-exist")],
-        };
-        let scenario = scenario_with_policy("drop-nothing", overlay);
-        let (_, findings) = overlay_chain(&chain, &scenario);
+        let scenario = scenario_with_policy("drop-nothing", drop("does-not-exist"));
+        let (_, _, findings) = overlay_policies("root", &[&real], &[], &[], &scenario);
         assert!(findings
             .iter()
             .any(|f| f.kind == FindingKind::DropNotApplicableHasNoEffect));
     }
+
 
     #[test]
     fn policy_delta_classifies_every_kind_of_change() {
@@ -2854,69 +2901,6 @@ mod tests {
             "ai-act had no baseline statuses at all"
         );
         assert!(ai_act_rollup.after.is_some());
-    }
-
-    #[test]
-    fn ai_act_catalogue_helper_is_a_valid_catalogue() {
-        // A cheap smoke test on the fixture itself -- `applicable` refuses
-        // nothing about it.
-        let catalogues = vec![ai_act_catalogue()];
-        let chain = vec![PolicyLayer {
-            scope: "root".to_string(),
-            frameworks: vec!["ai-act".to_string()],
-            tighten: BTreeMap::new(),
-            not_applicable: Vec::new(),
-        }];
-        let (applied, findings) = policy::applicable(&catalogues, &chain);
-        assert!(findings.is_empty());
-        assert_eq!(applied.len(), 1);
-        let statuses = policy::evaluate(&applied, &Evidence::default(), dt(2026, 9, 25));
-        assert_eq!(statuses[0].status.kind(), policy::StatusKind::Open);
-    }
-
-    // -- merge_catalogues ----------------------------------------------------
-
-    #[test]
-    fn merge_catalogues_adds_a_non_colliding_draft() {
-        let (merged, findings) = merge_catalogues(&[cra_catalogue()], vec![ai_act_catalogue()]);
-        assert!(findings.is_empty());
-        let names: Vec<&str> = merged.iter().map(|c| c.framework.as_str()).collect();
-        assert_eq!(names, vec!["cra", "ai-act"]);
-    }
-
-    #[test]
-    fn merge_catalogues_drops_a_colliding_draft_and_reports_it_the_real_one_wins() {
-        let mut fake_cra_draft = cra_catalogue();
-        fake_cra_draft.title = "A draft pretending to be the real CRA".to_string();
-        let (merged, findings) =
-            merge_catalogues(&[cra_catalogue()], vec![fake_cra_draft, ai_act_catalogue()]);
-
-        assert_eq!(
-            merged.len(),
-            2,
-            "{:?}",
-            merged.iter().map(|c| &c.framework).collect::<Vec<_>>()
-        );
-        let cra = merged.iter().find(|c| c.framework == "cra").unwrap();
-        assert_eq!(
-            cra.title, "CRA",
-            "the real catalogue's own title, not the draft's"
-        );
-        assert!(
-            merged.iter().any(|c| c.framework == "ai-act"),
-            "a non-colliding draft still merges in"
-        );
-
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].kind, FindingKind::DraftCollidesWithReal);
-        assert_eq!(findings[0].subject, "cra.yaml");
-    }
-
-    #[test]
-    fn merge_catalogues_with_no_drafts_is_the_real_set_unchanged() {
-        let (merged, findings) = merge_catalogues(&[cra_catalogue()], Vec::new());
-        assert_eq!(merged, vec![cra_catalogue()]);
-        assert!(findings.is_empty());
     }
 
     // -- Everything Serialize: a smoke test over the computed report types --

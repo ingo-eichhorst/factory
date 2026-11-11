@@ -3,7 +3,7 @@
 //! supplies raw authored L6 subjects/limits, never reports or computed values.
 use crate::{
     checks::{self, EvaluationSubject},
-    evaluation_rollup::{self, StatusCounts},
+    evaluation_rollup::StatusCounts,
     evidence::{self, BudgetIntent},
     metrics::{
         self, MetricDef, MetricDefView, MetricError, MetricId, MetricSeries, MetricValue,
@@ -565,8 +565,11 @@ impl<'a, P: Ports> Service<'a, P> {
                 .await?;
             per_scope.push(checks::evaluate(&scope.subjects, &evidence, now));
         }
+        // #390: a policy belongs to one scope, so the subtree's figure is
+        // the aggregate of every (scope, control) pair -- the Policy board's
+        // own rollup -- never one worst status per control id.
         let mut frameworks: BTreeMap<String, StatusCounts> = BTreeMap::new();
-        for status in evaluation_rollup::worst_across_scopes(&per_scope) {
+        for status in per_scope.into_iter().flatten() {
             let counts = frameworks
                 .entry(status.control.framework.clone())
                 .or_default();

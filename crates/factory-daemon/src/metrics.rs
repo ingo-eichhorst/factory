@@ -81,7 +81,8 @@ impl Engine {
             .collect();
 
         let snapshot = self.factory_snapshot();
-        let policies_dir = snapshot.policies_dir();
+        let policy_root = snapshot.root.clone();
+        let policy_configuration = crate::intent::policy_configuration(&snapshot);
         let goals_dir = factory_core::goals::goals_dir(&snapshot.root);
         let quality_dir = snapshot.quality_dir();
         let (frameworks, catalogue, characteristics, attested_categories): (
@@ -90,14 +91,15 @@ impl Engine {
             BTreeSet<String>,
             BTreeSet<String>,
         ) = tokio::task::spawn_blocking(move || {
-            let (catalogues, _findings) = factory_core::policy::load_all(&policies_dir);
+            // #390: every scope's own policies, not only the root's.
+            let policies = policy_configuration.load_policies(&policy_root);
             // `#158`: every literal category (`*` skipped -- it names no
-            // one category) any loaded catalogue's `requires:` names, the
+            // one category) any loaded policy's `requires:` names, the
             // `conformance_rate.<category>` twin of `compliance.<framework>`
             // above.
             let mut attested_categories: BTreeSet<String> = BTreeSet::new();
-            for cat in &catalogues {
-                for control in &cat.controls {
+            for policy in &policies.owned {
+                for control in &policy.controls {
                     for requirement in &control.requires {
                         attested_categories.extend(
                             requirement
@@ -109,7 +111,13 @@ impl Engine {
                     }
                 }
             }
-            let frameworks = catalogues.into_iter().map(|c| c.framework).collect();
+            let frameworks: Vec<String> = policies
+                .owned
+                .into_iter()
+                .map(|p| p.framework)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
             let catalogue = factory_core::goals::load(&goals_dir);
             let quality_catalogue = factory_core::quality::load(&quality_dir);
             // Every characteristic any loaded profile declares an
@@ -260,7 +268,7 @@ mod tests {
     use crate::intake::TRIAGE_VERDICT_KIND;
     use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, Factory, Instance, PolicyDeclaration, Scope};
+    use factory_core::config::{Config, Factory, Instance, Scope};
     use factory_core::run::{NewRun, Run, RunPatch, RunStatus, Trigger};
     use factory_core::task::{NewTask, TaskEntry, TaskPatch, TaskStatus};
     use factory_core::usage::{RunUsage, TokenCounts, UsageState};
@@ -274,11 +282,12 @@ mod tests {
         scope
     }
 
-    /// A one-scope instance, with `frameworks` (if any) committed at the
-    /// root the same way `policies:` at the instance root always does. The
-    /// root scope is declared (`config.scope`), so `goals.checkin`-shaped
+    /// A one-scope instance whose root scope (`.`) owns whatever policy a
+    /// test writes to `<root>/.factory/policies/` (#390); `_frameworks`
+    /// names what a caller means to write, for the reader. The root scope
+    /// is declared (`config.scope`), so `goals.checkin`-shaped
     /// authorization checks in other modules' tests can reuse this too.
-    fn test_engine(frameworks: Vec<String>) -> Arc<Engine> {
+    fn test_engine(_frameworks: Vec<String>) -> Arc<Engine> {
         let root = std::env::temp_dir().join(format!("factory-metrics-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let root_scope = scope_at("root-id", "root", ".");
@@ -286,7 +295,6 @@ mod tests {
             instance: Instance { id: "test".into(), name: "test".into() },
             scope: Some(root_scope.clone()),
             scopes: vec![root_scope],
-            policies: PolicyDeclaration { frameworks, ..Default::default() },
             ..Default::default()
         };
         let factory = Factory { root, config };
@@ -303,11 +311,20 @@ mod tests {
         let root = std::env::temp_dir().join(format!("factory-scoped-metrics-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
         std::fs::create_dir_all(root.join(".factory/quality")).unwrap();
-        std::fs::write(
-            root.join(".factory/policies/cra.yaml"),
-            "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: a\n    title: A\n    evidence:\n      - check: attestation\n",
-        )
-        .unwrap();
+        // Each scope owns its CRA policy (#390): n/a in the work subtree,
+        // open at the root and the sibling.
+        let cra = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: a\n    title: A\n    evidence:\n      - check: attestation\n";
+        let na = cra.replace("    title: A\n", "    title: A\n    not_applicable: test\n");
+        for (path, policy) in [
+            (".", cra),
+            ("projects/side", cra),
+            ("projects/work", &na),
+            ("projects/work/nested", &na),
+        ] {
+            let dir = factory_core::policy::scope_policies_dir(&root, std::path::Path::new(path));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("cra.yaml"), policy).unwrap();
+        }
         std::fs::write(
             root.join(".factory/quality/baseline.yaml"),
             "attributes:\n  - id: reliability\n    importance: H\n    difficulty: M\n    scenarios:\n      - { id: sandboxed, measure: { check: sandbox } }\n",
@@ -317,7 +334,7 @@ mod tests {
         let mut root_scope: Scope = serde_yaml_ng::from_str("id: root-id\nname: company\n").unwrap();
         root_scope.path = PathBuf::from(".");
         let mut work: Scope = serde_yaml_ng::from_str(
-            "id: work-id\nname: work\nagents:\n  - { name: worker, harness: shell, sandbox: docker }\npolicies:\n  not_applicable:\n    - { control: cra/a, rationale: test }\n\
+            "id: work-id\nname: work\nagents:\n  - { name: worker, harness: shell, sandbox: docker }\n\
              metrics:\n  source: { id: demo, file: ../../data/demo/metrics.json }\n  declare:\n    - { id: x, title: Demo X, unit: ratio, better: higher }\n    - { id: y, title: Demo Y, unit: count, better: lower }\n",
         )
         .unwrap();
@@ -337,7 +354,6 @@ mod tests {
             instance: Instance { id: "test".into(), name: "test".into() },
             scope: Some(root_scope.clone()),
             scopes: vec![root_scope, work, nested, side],
-            policies: PolicyDeclaration { frameworks: vec!["cra".into()], ..Default::default() },
             quality: vec!["baseline".into()],
             ..Default::default()
         };
@@ -664,7 +680,11 @@ mod tests {
             "all cost divided by the two done units"
         );
         assert!(metric(&all, "compliance.cra").value.unwrap() < 1.0);
-        assert_eq!(metric(&all, "open_controls.cra").value, Some(1.0));
+        assert_eq!(
+            metric(&all, "open_controls.cra").value,
+            Some(2.0),
+            "every (scope, control) pair counts (#390): the root's and side's own cra/a are both open"
+        );
         assert!(metric(&all, "quality.reliability").value.unwrap() < 1.0);
         assert_eq!(metric(&all, "agent_hours").value, Some(3.5));
         assert_eq!(metric(&all, "blocked_hours").value, Some(1.75));
@@ -1388,10 +1408,6 @@ mod tests {
             },
             scope: Some(finance.clone()),
             scopes: vec![finance],
-            policies: PolicyDeclaration {
-                frameworks: vec!["gobd".to_string()],
-                ..Default::default()
-            },
             ..Default::default()
         };
         let registry = Registry::with_builtins();
@@ -1918,7 +1934,8 @@ mod tests {
         std::fs::create_dir_all(snapshot.root.join(".factory/budgets")).unwrap();
         let catalogue = snapshot.root.join(".factory/budgets/limits.yaml");
         std::fs::write(&catalogue, "version: 1\nscopes:\n  root-id: {monthly_usd: 5}\n  work-id: {monthly_usd: 50}\n").unwrap();
-        std::fs::write(snapshot.root.join(".factory/policies/cra.yaml"), "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: budget\n    title: Budget\n    evidence:\n      - check: budget_within\n").unwrap();
+        // `work` owns the budget control it is asked about (#390).
+        std::fs::write(snapshot.root.join("projects/work/.factory/policies/cra.yaml"), "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: budget\n    title: Budget\n    evidence:\n      - check: budget_within\n").unwrap();
         let now = Utc::now();
         for (scope, usd) in [("work", 2.0), ("side", 10.0)] {
             timed_run(&engine, &database, scope, scope, RunStatus::Done, now - chrono::Duration::hours(1), Some(now - chrono::Duration::minutes(30)), Some(measured(usd, 100))).await;

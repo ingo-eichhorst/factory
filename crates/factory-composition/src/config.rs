@@ -4,9 +4,6 @@ use factory_agents::role::{RoleSpec, Roles};
 #[cfg(test)]
 use factory_agents::role::{Role, RoleOrigin};
 use factory_assurance::quality::QualityLayer;
-use factory_direction::policy::PolicyLayer;
-#[cfg(test)]
-use factory_direction::policy::ControlRef;
 use factory_kernel::{FactoryError, Result};
 use factory_process::ready::IntakeLayer;
 use serde::{Deserialize, Serialize};
@@ -25,26 +22,12 @@ pub use factory_environment::declarations::{
     DependencyTransport,
 };
 
-/// What one config file -- the instance root's top-level `policies:`, or a
-/// scope's own `scope.policies` -- declares about which frameworks apply.
-/// The same shape as `policy::PolicyLayer` minus `scope`: that field names
-/// which layer in a resolved chain a declaration came from, and is filled in
-/// only when a declaration becomes a layer (`into_layer`, the one place this
-/// conversion happens -- see `Config::policy_chain_for_scope`).
-///
-/// Unlike `RoleSpec`, this is additive only: a scope may name more
-/// frameworks and tighten or mark a control `n/a`, never drop or loosen what
-/// an ancestor already committed the company to. That rule lives in
-/// `policy::applicable`, which folds a chain of these; nothing here enforces
-/// it on its own. The one narrowing is the root's (`#332`): its
-/// `frameworks` entries may carry `scopes`/`except`, resolved per scope by
-/// `policy_intent::chain_for_scope`; a nested scope's never may
-/// (`refuse_scope_applicability`).
-///
-/// `deny_unknown_fields`: a typo here -- `framework:` for `frameworks:` --
-/// would otherwise commit the company to nothing while parsing clean. For a
-/// regulatory declaration that is worth refusing loudly rather than quietly
-/// applying zero frameworks.
+/// A `policies:` block -- the instance root's top-level one, or a scope's
+/// own `scope.policies` -- in the shape Factory no longer reads (#390). A
+/// policy now belongs to one scope, in `<scope>/.factory/policies/`; the
+/// block is kept verbatim, whatever its shape, so the daemon still starts
+/// and a roster rewrite never drops it, and the Policy board reports it as a
+/// finding naming the migration.
 pub use factory_direction::policy_intent::PolicyDeclaration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,12 +61,9 @@ pub struct Config {
     /// deliberate "show nothing" -- see `DashboardConfig`'s own doc comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard: Option<DashboardConfig>,
-    /// Which frameworks this instance commits to, plus any tightening or
-    /// `n/a` declared at the root -- the top of every chain
-    /// `policy_chain_for_scope` builds, mirroring `roles` above except
-    /// additive-only. A nested scope adds its own under `scope.policies`;
-    /// the root refuses that block the same way it refuses `scope.roles`
-    /// (`refuse_root_scope_policies`).
+    /// The legacy root `policies:` block (#390): read by nothing, reported
+    /// as a finding. The root scope's own policies are the files in
+    /// `<root>/.factory/policies/`.
     #[serde(default, skip_serializing_if = "PolicyDeclaration::is_empty")]
     pub policies: PolicyDeclaration,
     /// Which quality profiles (`.factory/quality/<profile>.yaml`) hold
@@ -340,63 +320,10 @@ impl Config {
         out
     }
 
-    /// The name the instance root's own policy layer carries -- the top of
-    /// every chain `policy_chain_for_scope` builds. Its own configured
-    /// scope's name when it has one -- the root refuses to also write
-    /// `scope.policies` (`refuse_root_scope_policies`), so `self.policies`
-    /// *is* that scope's layer -- or the instance name, for an instance that
-    /// never opted its root into being a scope at all.
-    fn root_policy_name(&self) -> &str {
-        factory_direction::policy_intent::root_name(
-            self.scope.as_ref().map(|scope| scope.name.as_str()),
-            &self.instance.name,
-        )
-    }
-
-    /// The instance root's own policy layer alone, as it applies at the
-    /// root itself: what `Factory::policy_chain` falls back to for a scope
-    /// that no longer exists, and so has nowhere in the tree to stand.
-    fn root_policy_chain(&self) -> Vec<PolicyLayer> {
-        factory_direction::policy_intent::root_chain(
-            &self.policies,
-            self.root_policy_name(),
-            &self.scopes,
-        )
-    }
-
-    /// Every policy layer that applies to `scope`, root first: the instance
-    /// root's own top-level `policies:`, then each ancestor's own
-    /// `scope.policies` down to `scope` itself -- the same chain
-    /// `roles_for_scope` walks (`ancestors_of`, by `Scope.path`, never by
-    /// name). Unlike roles, nothing here *replaces* what came before: a
-    /// policy layer only ever adds a framework or tightens a control, and
-    /// folding that is `policy::applicable`'s job, not this method's -- this
-    /// just resolves which layers exist, root to leaf, from the live config,
-    /// keeping no second copy of the chain anywhere.
-    ///
-    /// Discovery may also have placed the root's own `Scope` (path `.`) in
-    /// `self.scopes`, which then surfaces as an "ancestor" of everything;
-    /// its `policies` is always empty (the same guard that keeps the
-    /// top-level `policies:` the sole way the root's commitments enter the
-    /// chain), so skipping empty layers below -- exactly as
-    /// `roles_for_scope` already does -- keeps it from ever appearing twice.
-    ///
-    /// The root's layer is narrowed to what applies at `scope` (#332): a
-    /// framework whose `scopes`/`except` leave `scope` out is not in it.
-    /// Only the root decides that; every layer below is taken whole.
-    pub fn policy_chain_for_scope(&self, scope: &Scope) -> Vec<PolicyLayer> {
-        factory_direction::policy_intent::chain_for_scope(
-            &self.policies,
-            self.root_policy_name(),
-            &self.scopes,
-            scope,
-        )
-    }
-
     /// The instance root's own quality layer, if it binds any profile --
-    /// named exactly as `root_policy_name` names the root's policy layer,
-    /// and for the same reason (`refuse_root_scope_quality` keeps
-    /// `self.quality` the root scope's only layer).
+    /// named after the root's configured scope, or the instance for a root
+    /// that is no scope (`refuse_root_scope_quality` keeps `self.quality`
+    /// the root scope's only layer).
     fn root_quality_layer(&self) -> Option<QualityLayer> {
         if self.quality.is_empty() {
             return None;
@@ -431,7 +358,7 @@ impl Config {
 
     /// Every quality layer that applies to `scope`, root first: the root's
     /// top-level `quality:`, then each ancestor's own `scope.quality` down to
-    /// `scope` itself -- `policy_chain_for_scope`'s walk exactly (ancestry by
+    /// `scope` itself -- `roles_for_scope`'s walk (ancestry by
     /// `Scope.path`, never by name; empty layers skipped, so the root's own
     /// `Scope` entry in `self.scopes` never appears twice). Folding the
     /// chain -- add or tighten only -- is `quality::applicable`'s job, not
@@ -493,7 +420,6 @@ impl Config {
         factory_infrastructure::renewals::validate(&self.renewals, self.renewals_notify.as_ref())?;
         self.roles()?;
         self.refuse_root_scope_roles()?;
-        self.refuse_root_scope_policies()?;
         self.refuse_root_scope_quality()?;
         self.refuse_root_scope_intake()?;
         self.refuse_root_scope_dashboard()?;
@@ -537,7 +463,6 @@ impl Config {
             scope.validate_dependencies()?;
             refuse_zero_max_sessions(scope)?;
             refuse_bad_instances(scope)?;
-            refuse_scope_applicability(scope)?;
             let roles = self.roles_for_scope(scope)?;
             for agent in scope.declared_agents() {
                 refuse_shell_args(scope, &agent)?;
@@ -665,7 +590,6 @@ impl Config {
         self.validate_memory(self.scope.iter())?;
         let roles = self.roles()?;
         self.refuse_root_scope_roles()?;
-        self.refuse_root_scope_policies()?;
         self.refuse_root_scope_quality()?;
         self.refuse_root_scope_intake()?;
         self.refuse_root_scope_dashboard()?;
@@ -715,24 +639,9 @@ impl Config {
         }
     }
 
-    /// The instance root already has a policy layer, its top-level
-    /// `policies:`. One file with two would leave a person guessing which
-    /// one wins -- the same reasoning as `refuse_root_scope_roles`, for
-    /// policies instead.
-    fn refuse_root_scope_policies(&self) -> Result<()> {
-        match &self.scope {
-            Some(scope) if !scope.policies.is_empty() => Err(FactoryError::BadRequest(format!(
-                "the instance root's config gives its scope {:?} a `scope.policies` block. \
-                 The root's policies belong in its top-level `policies:`; move them there",
-                scope.name,
-            ))),
-            _ => Ok(()),
-        }
-    }
-
     /// The instance root already has a quality layer, its top-level
-    /// `quality:` -- `refuse_root_scope_policies`'s reasoning, for quality
-    /// profiles instead.
+    /// `quality:`. One file with two would leave a person guessing which
+    /// one wins -- the same reasoning as `refuse_root_scope_roles`.
     fn refuse_root_scope_quality(&self) -> Result<()> {
         match &self.scope {
             Some(scope) if !scope.quality.is_empty() => Err(FactoryError::BadRequest(format!(
@@ -746,7 +655,7 @@ impl Config {
     }
 
     /// The instance root already has a dashboard layer, its top-level
-    /// `dashboard:` -- `refuse_root_scope_policies`'s reasoning, for the
+    /// `dashboard:` -- `refuse_root_scope_quality`'s reasoning, for the
     /// dashboard layout instead (`#159`).
     fn refuse_root_scope_dashboard(&self) -> Result<()> {
         match &self.scope {
@@ -1049,45 +958,23 @@ pub fn refuse_misplaced_scope_roles(document: &serde_yaml_ng::Value, path: &Path
     Ok(())
 }
 
-/// Refuse `scopes:`/`except:` on a framework in a nested scope's own
-/// `scope.policies` (#332). Only the instance root decides where a framework
-/// applies; a nested layer may add a framework or tighten one, never exclude
-/// a subtree from anything -- or a child project could opt itself out of the
-/// GDPR, the very thing additive-only layering exists to prevent. Refused
-/// loudly, like a typo in the block, rather than quietly ignored.
-fn refuse_scope_applicability(scope: &Scope) -> Result<()> {
-    match scope.policies.applicability.keys().next() {
-        Some(framework) => Err(FactoryError::BadRequest(format!(
-            "scope {:?} gives the framework {framework:?} `scopes` or `except` in its `scope.policies`. \
-             Only the instance root's top-level `policies.frameworks` decides where a framework applies; \
-             a nested scope may only add a framework (`- {framework}`) or tighten one",
-            scope.name,
-        ))),
-        None => Ok(()),
-    }
-}
-
-/// Refuse a `policies:` block written at the top of a nested scope's own
-/// config, the same mistake `refuse_misplaced_scope_roles` guards against:
-/// only the `scope:` block of that file is Factory's, so serde would drop a
-/// top-level `policies:` without a word -- and a commitment that silently
-/// does not apply is far worse to find late than a role.
-pub fn refuse_misplaced_scope_policies(document: &serde_yaml_ng::Value, path: &Path) -> Result<()> {
-    let misplaced = document
-        .as_mapping()
-        .is_some_and(|root| root.contains_key(serde_yaml_ng::Value::String("policies".into())));
-    if misplaced {
-        return Err(FactoryError::BadRequest(format!(
-            "scope config {} has a top-level `policies:` block, which a scope's own file does not read. \
-             Move it under `scope.policies`",
-            path.display()
-        )));
-    }
-    Ok(())
+/// A `policies:` block written at the top of a nested scope's own config,
+/// where nothing reads it. Factory reads no policy block at all any more
+/// (#390): discovery carries this one into the scope's legacy
+/// `scope.policies`, so the Policy board names the migration rather than
+/// the block vanishing without a word -- never a refused start.
+pub fn misplaced_scope_policies(document: &serde_yaml_ng::Value) -> PolicyDeclaration {
+    PolicyDeclaration(
+        document
+            .as_mapping()
+            .and_then(|root| root.get(serde_yaml_ng::Value::String("policies".into())))
+            .filter(|value| !value.is_null())
+            .cloned(),
+    )
 }
 
 /// Refuse a `quality:` block written at the top of a nested scope's own
-/// config -- `refuse_misplaced_scope_policies`'s mistake, for quality
+/// config -- the mistake `refuse_misplaced_scope_roles` guards against, for quality
 /// profiles: serde would drop it without a word, and a scope would then be
 /// held to nothing while its author believes otherwise.
 pub fn refuse_misplaced_scope_quality(document: &serde_yaml_ng::Value, path: &Path) -> Result<()> {
@@ -1801,11 +1688,9 @@ pub struct Scope {
     /// `tiles: []` is refused at validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dashboard: Option<DashboardConfig>,
-    /// This scope's own policy declarations, layered under the root's
-    /// `policies:` and every ancestor's own `scope.policies` -- see
-    /// `Config::policy_chain_for_scope`. Only a nested scope writes these:
-    /// the instance root uses its top-level `policies:` instead, and
-    /// refuses this block, exactly like `roles` above.
+    /// The legacy `scope.policies` block (#390): read by nothing, reported
+    /// as a finding naming the migration. This scope's own policies are the
+    /// files in its `.factory/policies/`.
     #[serde(default, skip_serializing_if = "PolicyDeclaration::is_empty")]
     pub policies: PolicyDeclaration,
     /// Quality profiles this scope binds for itself and every scope below it
@@ -2242,23 +2127,20 @@ impl Factory {
             .collect()
     }
 
-    /// Every policy layer that applies to the scope a name resolves to, root
-    /// first. A name that resolves to no scope -- a caller whose scope has
-    /// since gone -- gets only the root layer, the same fallback `roles_for`
-    /// makes for roles. Nothing here can fail the way `Roles::resolve` can
-    /// (a policy layer is only ever folded by `policy::applicable`, never
-    /// validated against a catalogue here), so unlike `roles_for` this
-    /// returns the chain directly rather than a `Result`.
-    pub fn policy_chain(&self, scope: &str) -> Vec<PolicyLayer> {
+    /// The frameworks the scope a name resolves to has a policy file for
+    /// (#390) -- a plain listing of its own `.factory/policies/`, never an
+    /// ancestor's and never a parse. What the agent guide names. A name
+    /// that resolves to no scope has none.
+    pub fn policy_frameworks(&self, scope: &str) -> Vec<String> {
         match self.scope(scope) {
-            Ok(found) => self.config.policy_chain_for_scope(found),
-            Err(_) => self.config.root_policy_chain(),
+            Ok(found) => factory_direction::policy::policy_frameworks(&self.root, &found.path),
+            Err(_) => Vec::new(),
         }
     }
 
     /// Every quality layer that applies to the scope a name resolves to,
-    /// root first -- `policy_chain`'s fallback exactly: a name that resolves
-    /// to no scope gets only the root's layer.
+    /// root first. A name that resolves to no scope gets only the root's
+    /// layer.
     pub fn quality_chain(&self, scope: &str) -> Vec<QualityLayer> {
         match self.scope(scope) {
             Ok(found) => self.config.quality_chain_for_scope(found),
@@ -3035,256 +2917,38 @@ mod tests {
         assert_eq!(tiles.unwrap().tiles.len(), 1);
     }
 
-    // -- policy_chain_for_scope ---------------------------------------------
-
-    /// A scope at `path` named `name`, declaring `policies` inline, mirroring
-    /// `scope_with_roles` above -- names and paths deliberately differ, since
-    /// inheritance must follow the path, never the name.
-    fn scope_with_policies(name: &str, path: &str, policies: &str) -> Scope {
-        let mut yaml = format!("id: {name}-id\nname: {name}\n");
-        if !policies.is_empty() {
-            yaml.push_str(&format!("policies:\n{policies}"));
-        }
-        let mut scope: Scope = serde_yaml_ng::from_str(&yaml).unwrap();
-        scope.path = PathBuf::from(path);
-        scope
-    }
-
-    /// The same shape as `tree()`, for policies instead of roles: the root
-    /// commits to `cra`, `engineering` (`projects`) adds `gdpr`, and
-    /// `demo-app` (`projects/demo`) tightens one of `cra`'s controls -- plus
-    /// the same lookalike and sideways scopes `tree()` uses to prove
-    /// inheritance follows the path and nothing else.
-    fn policy_tree() -> Config {
-        let mut c = config_with("policies:\n  frameworks: [cra]\n");
-        c.scopes = vec![
-            scope_with_policies("company", ".", ""),
-            scope_with_policies("engineering", "projects", "  frameworks: [gdpr]\n"),
-            scope_with_policies(
-                "demo-app",
-                "projects/demo",
-                "  tighten:\n    cra/annex-i-2-1:\n      max_age: 7d\n",
-            ),
-            scope_with_policies("engineering/tools", "projects/tools", ""),
-            // A name that reads as a child of `engineering` but is not below
-            // `projects` on disk, and a path that shares a prefix string.
-            scope_with_policies("engineering/other", "elsewhere", ""),
-            scope_with_policies("lookalike", "projects-x", ""),
-        ];
-        c
-    }
+    // -- legacy policy blocks (#390) ----------------------------------------
 
     #[test]
-    fn the_policy_chain_is_root_first_then_each_ancestor_down_to_the_scope_itself() {
-        let c = policy_tree();
-        let chain = c.policy_chain_for_scope(scope_named(&c, "demo-app"));
-        let scopes: Vec<&str> = chain.iter().map(|l| l.scope.as_str()).collect();
-        // The root layer is named from the instance (`config_with` gives it
-        // no `scope:` of its own), then each ancestor by its own scope name.
-        assert_eq!(scopes, vec!["n", "engineering", "demo-app"], "{scopes:?}");
-        assert_eq!(chain[0].frameworks, vec!["cra".to_string()]);
-        assert_eq!(chain[1].frameworks, vec!["gdpr".to_string()]);
-        assert!(chain[2]
-            .tighten
-            .contains_key(&ControlRef::new("cra", "annex-i-2-1")));
-    }
-
-    #[test]
-    fn a_nested_scope_inherits_ancestors_layers_down_the_path_tree_and_never_up_or_sideways() {
-        let c = policy_tree();
-
-        let tools = c.policy_chain_for_scope(scope_named(&c, "engineering/tools"));
-        let scopes: Vec<&str> = tools.iter().map(|l| l.scope.as_str()).collect();
-        assert_eq!(
-            scopes,
-            vec!["n", "engineering"],
-            "projects/tools is below projects, but not below projects/demo"
-        );
-
-        for elsewhere in ["company", "engineering/other", "lookalike"] {
-            let chain = c.policy_chain_for_scope(scope_named(&c, elsewhere));
-            let scopes: Vec<&str> = chain.iter().map(|l| l.scope.as_str()).collect();
+    fn a_legacy_policies_block_of_any_shape_loads_validates_and_round_trips() {
+        // Every shape #332 and before accepted, plus ones it refused at load:
+        // the daemon starts on all of them, and the board names the migration.
+        for root in [
+            "policies:\n  frameworks:\n    - name: cra\n      except: [finance]\n    - dsgvo\n  tighten:\n    cra/annex-i-2-1: {max_age: 14d}\n",
+            "policies:\n  framework: [cra]\n",
+            "policies:\n  frameworks: [cra, {name: cra, scopes: [x]}]\n",
+            "policies: not even a mapping\n",
+        ] {
+            let c = config_with(&format!(
+                "scope:\n  name: company\n  policies:\n    frameworks: [{{name: x, scopes: [y]}}]\n{root}"
+            ));
+            assert!(!c.policies.is_empty(), "{root}");
+            assert!(!c.scope.as_ref().unwrap().policies.is_empty());
+            c.validate_instance().unwrap();
+            c.validate().unwrap();
+            let rendered = serde_yaml_ng::to_string(&c).unwrap();
+            let reparsed: Config = serde_yaml_ng::from_str(&rendered).unwrap();
+            assert_eq!(reparsed.policies, c.policies, "kept verbatim: {root}");
             assert_eq!(
-                scopes,
-                vec!["n"],
-                "{elsewhere} is not below projects by path, whatever its name says"
+                reparsed.scope.unwrap().policies,
+                c.scope.as_ref().unwrap().policies
             );
         }
-    }
-
-    #[test]
-    fn the_root_layer_is_named_from_its_own_registered_scope_and_never_appears_twice() {
-        // The common shape on a real instance: the root opts into being a
-        // scope, and discovery then places that same `Scope` (path `.`) in
-        // `self.scopes`, where it would otherwise surface as a second,
-        // empty "root" ancestor of everything below it.
-        let mut c = config_with("policies:\n  frameworks: [cra]\n");
-        let root_scope: Scope =
-            serde_yaml_ng::from_str("id: root-id\nname: company\npath: .\n").unwrap();
-        c.scope = Some(root_scope.clone());
-        c.scopes = vec![
-            root_scope,
-            scope_with_policies("demo", "projects/demo", "  frameworks: [gdpr]\n"),
-        ];
-
-        let chain = c.policy_chain_for_scope(scope_named(&c, "demo"));
-        let scopes: Vec<&str> = chain.iter().map(|l| l.scope.as_str()).collect();
-        assert_eq!(
-            chain.len(),
-            2,
-            "the root's own Scope entry in `self.scopes` contributes nothing beyond the root layer: {scopes:?}"
+        let nested = config_with(
+            "scopes:\n  - name: demo\n    path: projects/demo\n    policies:\n      frameworks:\n        - {name: ai-act, except: [demo]}\n",
         );
-        assert_eq!(scopes, vec!["company", "demo"]);
-        assert_eq!(
-            chain[0].frameworks,
-            vec!["cra".to_string()],
-            "the root layer is named from its configured scope, not the instance name"
-        );
-    }
-
-    #[test]
-    fn factory_policy_chain_matches_config_policy_chain_for_scope_and_falls_back_for_an_unknown_name(
-    ) {
-        let mut f = factory_with(vec![scope_with_policies(
-            "demo",
-            "demo",
-            "  frameworks: [gdpr]\n",
-        )]);
-        f.config.policies = PolicyDeclaration {
-            frameworks: vec!["cra".to_string()],
-            ..Default::default()
-        };
-
-        let expected = f.config.policy_chain_for_scope(f.scope("demo").unwrap());
-        assert_eq!(f.policy_chain("demo"), expected);
-
-        // A name that resolves to no scope -- a caller whose scope has since
-        // gone -- gets only the root layer, the same fallback `roles_for`
-        // makes for roles.
-        let root_only = f.policy_chain("gone");
-        assert_eq!(root_only.len(), 1);
-        assert_eq!(root_only[0].frameworks, vec!["cra".to_string()]);
-    }
-
-    /// `#332`: the root decides per framework where it applies; the rest of
-    /// the tree is `policy_tree()`'s shape, with a `finance` beside it.
-    fn applicability_tree() -> Config {
-        let mut c = config_with(
-            "scope:\n  name: company\npolicies:\n  frameworks:\n    - name: cra\n      except: [finance]\n    \
-             - dsgvo\n    - name: finance\n      scopes: [finance]\n",
-        );
-        c.scopes = vec![
-            scope_with_policies("company", ".", ""),
-            scope_with_policies("finance", "finance", ""),
-            scope_with_policies("ledger", "finance/ledger", "  frameworks: [cra]\n"),
-            scope_with_policies("demo-app", "projects/demo", ""),
-        ];
-        c
-    }
-
-    #[test]
-    fn root_frameworks_take_strings_and_objects_and_the_chain_narrows_per_scope() {
-        let c = applicability_tree();
-        c.validate().unwrap();
-        let root_frameworks = |name: &str| {
-            c.policy_chain_for_scope(scope_named(&c, name))
-                .first()
-                .filter(|layer| layer.scope == "company")
-                .map(|layer| layer.frameworks.clone())
-                .unwrap_or_default()
-        };
-        assert_eq!(root_frameworks("company"), ["cra", "dsgvo"]);
-        assert_eq!(root_frameworks("demo-app"), ["cra", "dsgvo"]);
-        assert_eq!(root_frameworks("finance"), ["dsgvo", "finance"]);
-        assert_eq!(root_frameworks("ledger"), ["dsgvo", "finance"]);
-        let ledger = c.policy_chain_for_scope(scope_named(&c, "ledger"));
-        assert_eq!(
-            ledger[1].frameworks,
-            ["cra"],
-            "a nested scope still binds back what the root left out for it"
-        );
-
-        let mut f = factory_with(c.scopes.clone());
-        f.config = c;
-        assert_eq!(
-            f.policy_chain("finance"),
-            f.config.policy_chain_for_scope(f.scope("finance").unwrap())
-        );
-        assert_eq!(
-            f.policy_chain("gone")[0].frameworks,
-            ["cra", "dsgvo"],
-            "a vanished scope gets the root layer as it applies at the root itself"
-        );
-    }
-
-    #[test]
-    fn a_nested_scope_cannot_restrict_where_a_framework_applies() {
-        let mut c = applicability_tree();
-        c.scopes[1] = scope_with_policies(
-            "finance",
-            "finance",
-            "  frameworks:\n    - name: cra\n      except: [ledger]\n",
-        );
-        let e = c.validate().unwrap_err().to_string();
-        assert!(e.contains("scope \"finance\""), "{e}");
-        assert!(
-            e.contains("Only the instance root's top-level `policies.frameworks`"),
-            "{e}"
-        );
-        c.scopes[1] = scope_with_policies(
-            "finance",
-            "finance",
-            "  frameworks:\n    - name: cra\n      scopes: [finance]\n",
-        );
-        assert!(
-            c.validate().is_err(),
-            "`scopes` narrows as surely as `except`"
-        );
-        c.scopes[1] = scope_with_policies("finance", "finance", "  frameworks:\n    - name: cra\n");
-        c.validate().unwrap();
-    }
-
-    #[test]
-    fn a_restricted_root_declaration_round_trips_through_yaml_and_a_string_stays_a_string() {
-        let c = applicability_tree();
-        let rendered = serde_yaml_ng::to_string(&c).unwrap();
-        assert!(rendered.contains("- dsgvo\n"), "{rendered}");
-        assert!(rendered.contains("- name: cra\n"), "{rendered}");
-        let reparsed: Config = serde_yaml_ng::from_str(&rendered).unwrap();
-        assert_eq!(reparsed.policies, c.policies);
-        assert_eq!(c.policies.frameworks, ["cra", "dsgvo", "finance"]);
-    }
-
-    #[test]
-    fn a_populated_policy_declaration_round_trips_through_yaml() {
-        // `tighten` is keyed by `ControlRef`, which #75 only ever exercised
-        // through JSON and in-code construction -- confirm it also works as
-        // a YAML mapping key, exactly as the issue's own example writes it.
-        let yaml = "instance:\n  id: i\n  name: n\n\
-                     policies:\n  frameworks: [cra, dsgvo]\n  tighten:\n    cra/annex-i-2-1:\n      max_age: 14d\n  \
-                     not_applicable:\n    - control: dsgvo/art-37\n      rationale: fewer than 20 people process personal data\n";
-        let c: Config = serde_yaml_ng::from_str(yaml).unwrap();
-        assert_eq!(
-            c.policies.frameworks,
-            vec!["cra".to_string(), "dsgvo".to_string()]
-        );
-        let tighten = c
-            .policies
-            .tighten
-            .get(&ControlRef::new("cra", "annex-i-2-1"))
-            .unwrap();
-        assert_eq!(tighten.max_age, Some("14d".parse().unwrap()));
-        assert_eq!(
-            c.policies.not_applicable[0].control,
-            ControlRef::new("dsgvo", "art-37")
-        );
-
-        let rendered = serde_yaml_ng::to_string(&c).unwrap();
-        let reparsed: Config = serde_yaml_ng::from_str(&rendered).unwrap();
-        assert_eq!(
-            reparsed.policies, c.policies,
-            "round-trips through its own rendered YAML"
-        );
+        nested.validate().unwrap();
+        assert!(!nested.scopes[0].policies.is_empty());
     }
 
     #[test]
@@ -3297,39 +2961,45 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_field_in_a_policy_declaration_is_refused_not_silently_dropped() {
-        let yaml = "instance:\n  id: i\n  name: n\npolicies:\n  framework: [cra]\n";
-        let err = serde_yaml_ng::from_str::<Config>(yaml).unwrap_err();
-        assert!(err.to_string().contains("framework"), "{err}");
-    }
-
-    #[test]
-    fn the_root_config_refuses_scope_policies_and_points_at_its_own_policies() {
-        let c = config_with("scope:\n  name: company\n  policies:\n    frameworks: [cra]\n");
-        let e = c.validate_instance().unwrap_err().to_string();
-        assert!(e.contains("scope.policies"), "{e}");
-        assert!(e.contains("top-level `policies:`"), "{e}");
-        assert!(c.validate().is_err(), "validate() calls the same guard");
-    }
-
-    #[test]
-    fn a_top_level_policies_block_in_a_nested_scope_file_is_refused() {
+    fn a_top_level_policies_block_in_a_nested_scope_file_is_carried_into_the_legacy_block() {
         let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(
             "scope:\n  id: s\n  name: demo\npolicies:\n  frameworks: [cra]\n",
         )
         .unwrap();
-        let e = refuse_misplaced_scope_policies(
-            &document,
-            Path::new("/x/projects/demo/.factory/config.yaml"),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(e.contains("scope.policies"), "{e}");
-        assert!(e.contains("projects/demo"), "{e}");
-
+        assert!(!misplaced_scope_policies(&document).is_empty());
         let fine: serde_yaml_ng::Value =
-            serde_yaml_ng::from_str("scope:\n  id: s\n  name: demo\n  policies: {}\n").unwrap();
-        refuse_misplaced_scope_policies(&fine, Path::new("x")).unwrap();
+            serde_yaml_ng::from_str("scope:\n  id: s\n  name: demo\npolicies:\n").unwrap();
+        assert!(misplaced_scope_policies(&fine).is_empty());
+    }
+
+    #[test]
+    fn policy_frameworks_lists_the_scopes_own_policy_files_only() {
+        let root = std::env::temp_dir().join(format!(
+            "factory-config-policies-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        for (dir, file) in [
+            (".factory/policies", "house.yaml"),
+            ("projects/demo/.factory/policies", "cra.yaml"),
+            ("projects/demo/.factory/policies/templates", "dsgvo.yaml"),
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join(file), "x").unwrap();
+        }
+        let mut f = factory_with(vec![
+            scope_at("company", "."),
+            scope_at("demo", "projects/demo"),
+        ]);
+        f.root = root.clone();
+        assert_eq!(
+            f.policy_frameworks("demo"),
+            ["cra"],
+            "never the root's, never a template"
+        );
+        assert_eq!(f.policy_frameworks("company"), ["house"]);
+        assert!(f.policy_frameworks("vanished").is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4643,12 +4313,6 @@ impl factory_kernel::ScopeIdentity for Scope {
     }
     fn scope_path(&self) -> &Path {
         &self.path
-    }
-}
-
-impl factory_direction::policy_intent::ScopePolicies for Scope {
-    fn policy_declaration(&self) -> &PolicyDeclaration {
-        &self.policies
     }
 }
 

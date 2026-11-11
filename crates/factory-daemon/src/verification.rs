@@ -1358,7 +1358,7 @@ mod tests {
     use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::{AgentRuntime, StartRequest};
     use factory_core::bench::BenchOrigin;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
+    use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
     use factory_core::operations::{ExceptionKind, HealthWindow};
     use factory_core::run::{NewRun, Trigger};
     use factory_core::task::{NewTask, SessionRef, TaskReport};
@@ -1438,10 +1438,12 @@ mod tests {
         let base = std::env::temp_dir().join(format!("factory-verify-test-{}", uuid::Uuid::new_v4()));
         let at = |dir: &str| if dir.is_empty() { base.clone() } else { base.join(dir) };
         let (root, work) = (at(instance), at(scope));
-        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
-        std::fs::create_dir_all(&work).unwrap();
+        // `demo` owns the policy (#390): `requires:` resolves against the
+        // run's own scope, never the instance root's.
+        std::fs::create_dir_all(root.join(".factory")).unwrap();
+        std::fs::create_dir_all(work.join(".factory/policies")).unwrap();
         std::fs::write(
-            root.join(".factory/policies/house.yaml"),
+            work.join(".factory/policies/house.yaml"),
             format!(
                 "framework: house\ntitle: House rules\nkind: best-practice\ncontrols:\n  - id: tested\n    title: Changes are tested\n    requires:\n{requires}\n"
             ),
@@ -1466,7 +1468,6 @@ mod tests {
                 },
                 ..DaemonConfig::default()
             },
-            policies: PolicyDeclaration { frameworks: vec!["house".into()], ..Default::default() },
             scopes: vec![Scope {
                 id: "demo-id".into(),
                 name: "demo".into(),

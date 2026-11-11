@@ -105,9 +105,9 @@ impl<'a, L: Level> Wiring<'a, L> {
     pub(crate) fn roles_for(&self, scope: &str) -> factory_core::role::Roles {
         self.engine.roles_for(scope)
     }
-    /// Every policy layer in effect for `scope` (config; the guide names its frameworks).
-    pub(crate) fn policy_chain(&self, scope: &str) -> Vec<factory_core::policy::PolicyLayer> {
-        self.engine.policy_chain(scope)
+    /// The frameworks `scope` has its own policy for (the guide names them).
+    pub(crate) fn policy_frameworks(&self, scope: &str) -> Vec<String> {
+        self.engine.policy_frameworks(scope)
     }
     /// When this daemon came up (instance-wide).
     pub(crate) fn booted_at(&self) -> chrono::DateTime<chrono::Utc> {
@@ -977,7 +977,8 @@ mod tests {
             "reporting_clock::compute(",
             ".receipts.append_attestation(",
             ".receipts.append_withdrawal(",
-            "self.intent.catalogues_with_tags(knowledge)",
+            "self.intent.policies_with_tags(knowledge)",
+            "self.intent.config.not_owned(",
         ] {
             assert!(
                 compact.contains(required),
@@ -1122,10 +1123,10 @@ mod tests {
         let compact: String = owner.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(compact.contains("Facts::<L6>::new().get::<KnowledgeTags,_>"));
         for required in [
-            "policy::load_all",
+            "policy::load(",
             "self.receipts.all()",
             "budget::load",
-            "policy::applicable",
+            "policies.applied(",
             "policy::metric_subject",
             "scope_ancestors",
             "scope_subtree",
@@ -1154,7 +1155,13 @@ mod tests {
         }
         let config = include_str!("../../../factory-composition/src/config.rs");
         assert!(config.contains("pub use factory_direction::policy_intent::PolicyDeclaration"));
-        assert!(config.contains("factory_direction::policy_intent::chain_for_scope("));
+        // #390: no chain is resolved anywhere; a scope's frameworks are its
+        // own policy files, listed by the L6 owner.
+        assert!(config.contains("factory_direction::policy::policy_frameworks("));
+        assert!(
+            !config.contains("policy_chain_for_scope")
+                && !config.contains("policy_intent::chain_for_scope")
+        );
         assert!(!config.contains("pub struct PolicyDeclaration"));
         let wiring = include_str!("../policies/mod.rs")
             .split("#[cfg(test)]\nmod tests")
@@ -1173,8 +1180,8 @@ mod tests {
             .collect();
         assert!(compact_input.contains("policy_intent_service(snapshot).metric_inputs(scope)"));
         for forbidden in [
+            "policy::load(",
             "policy::load_all",
-            "policy::applicable",
             "self.policies.all",
             "check_budget_intent",
         ] {
@@ -1443,7 +1450,7 @@ mod tests {
         }
         for operation in [
             "scenario::load(&dir)",
-            "scenario::overlay_chain(",
+            "scenario::overlay_policies(",
             "scenario::policy_delta(",
             "scenario::forecast_completion(",
             "scenario::goal_probability(",
@@ -1609,7 +1616,8 @@ mod tests {
             assert!(!evidence.contains(forbidden), "owner acquired an outside callback/backedge: {forbidden}");
         }
         assert!(compact.contains("quality::evaluate(scope.tree,values,&evidence,now)"));
-        assert!(compact.contains("self.scopes.ancestors_of(scope)"));
+        // #390: an attestation counts only in the scope that owns it.
+        assert!(compact.contains(".filter(|att|att.scope==scope.name)"));
         let policy = include_str!("../policies/mod.rs").split("\nmod tests").next().unwrap();
         for fact in ["TaskFact", "WorkflowFact", "AgentFact", "DaemonConfigFact", "SecretsPresence", "DependenciesFact", "BackupFact", "AttestedRun"] {
             assert!(!policy.contains(&format!("get::<{fact}>")), "second gathering path in policy: {fact}");

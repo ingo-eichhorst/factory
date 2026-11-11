@@ -377,7 +377,7 @@ impl L3Service<'_> {
         // nothing about one -- but it still gets the guide to Factory itself,
         // including which frameworks its scope is committed to (a permanent
         // agent gets this exactly once, at start, the same as its role).
-        let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.wiring.policy_chain(scope));
+        let policy_frameworks = self.wiring.policy_frameworks(scope);
         let ctx = AgentContext {
             scope: scope.to_string(),
             agent_name: name.to_string(),

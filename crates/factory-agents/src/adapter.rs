@@ -345,10 +345,10 @@ pub struct AgentContext {
     /// role the agent was given -- `access.rs` then refuses every grant, so
     /// the guide says so too rather than describing one that would be denied.
     pub role: Option<RoleDef>,
-    /// The frameworks this agent's scope is committed to: the union of every
-    /// layer's `frameworks` in `Engine::policy_chain(scope)`, resolved once
-    /// at launch the same way `role` is -- never re-read once the guide is
-    /// built. Empty for a scope with no `policies:` anywhere in its chain,
+    /// The frameworks this agent's scope has its own policy for (#390): the
+    /// files in its `.factory/policies/` (`Engine::policy_frameworks`),
+    /// resolved once at launch the same way `role` is -- never re-read once
+    /// the guide is built. Empty for a scope with no policy of its own,
     /// which is the common case and not an error; `factory_guide` then says
     /// nothing about policy at all rather than naming an empty list.
     pub policy_frameworks: Vec<String>,
@@ -823,8 +823,10 @@ impl AgentContext {
         out.push_str(
             "Your reach stops where the boundary above says it does. Never \
              write anything of Factory's own -- like this guide -- into a \
-             scope; a scope owns only its own config.yaml, and everything \
-             else Factory keeps stays under the instance root's .factory/.",
+             scope; a scope owns only its own config.yaml and the \
+             policies a person authored in its .factory/policies/, and \
+             everything else Factory keeps stays under the instance root's \
+             .factory/.",
         );
 
         out
