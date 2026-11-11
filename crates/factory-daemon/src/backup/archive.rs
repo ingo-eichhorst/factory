@@ -1442,7 +1442,7 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(left.len(), 1, "{left:?}");
-        assert_eq!(taken.files, 8);
+        assert_eq!(taken.files, 9, "a scope's own policy file is backed up too (#390)");
     }
 
     #[test]
@@ -1533,7 +1533,7 @@ mod tests {
         let into = base.join("restored");
         let restored = restore(&taken.path, "inst-1", &instance.root, &into, None).unwrap();
         assert_eq!(restored.into, into.canonicalize().unwrap());
-        assert_eq!(restored.files, 8);
+        assert_eq!(restored.files, 9);
         assert_eq!(fs::read(into.join(".factory/budgets/limits.yaml")).unwrap(), fs::read(instance.root.join(".factory/budgets/limits.yaml")).unwrap());
         assert!(!restored.checks.iter().any(|c| c.status == CheckStatus::Fail));
         assert!(factory_core::config::Factory::load(&into).is_ok());

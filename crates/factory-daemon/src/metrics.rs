@@ -675,7 +675,11 @@ mod tests {
             "all cost divided by the two done units"
         );
         assert!(metric(&all, "compliance.cra").value.unwrap() < 1.0);
-        assert_eq!(metric(&all, "open_controls.cra").value, Some(1.0));
+        assert_eq!(
+            metric(&all, "open_controls.cra").value,
+            Some(2.0),
+            "every (scope, control) pair counts (#390): the root's and side's own cra/a are both open"
+        );
         assert!(metric(&all, "quality.reliability").value.unwrap() < 1.0);
         assert_eq!(metric(&all, "agent_hours").value, Some(3.5));
         assert_eq!(metric(&all, "blocked_hours").value, Some(1.75));
@@ -1925,7 +1929,8 @@ mod tests {
         std::fs::create_dir_all(snapshot.root.join(".factory/budgets")).unwrap();
         let catalogue = snapshot.root.join(".factory/budgets/limits.yaml");
         std::fs::write(&catalogue, "version: 1\nscopes:\n  root-id: {monthly_usd: 5}\n  work-id: {monthly_usd: 50}\n").unwrap();
-        std::fs::write(snapshot.root.join(".factory/policies/cra.yaml"), "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: budget\n    title: Budget\n    evidence:\n      - check: budget_within\n").unwrap();
+        // `work` owns the budget control it is asked about (#390).
+        std::fs::write(snapshot.root.join("projects/work/.factory/policies/cra.yaml"), "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: budget\n    title: Budget\n    evidence:\n      - check: budget_within\n").unwrap();
         let now = Utc::now();
         for (scope, usd) in [("work", 2.0), ("side", 10.0)] {
             timed_run(&engine, &database, scope, scope, RunStatus::Done, now - chrono::Duration::hours(1), Some(now - chrono::Duration::minutes(30)), Some(measured(usd, 100))).await;

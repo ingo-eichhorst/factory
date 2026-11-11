@@ -109,6 +109,6 @@ mod tests {
                 assert!(seen.insert(name.clone()), "{name} has arms in two routers");
             }
         }
-        assert_eq!(seen.len(), 169);
+        assert_eq!(seen.len(), 171);
     }
 }

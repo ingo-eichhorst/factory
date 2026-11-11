@@ -156,10 +156,10 @@ mod tests {
     /// dependency service at `endpoints`.
     fn engine(source: &str, endpoints: &[String], quality: bool) -> (Arc<Engine>, PathBuf) {
         let root = std::env::temp_dir().join(format!("factory-metrics-page-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
         std::fs::create_dir_all(root.join(".factory/quality")).unwrap();
-        std::fs::create_dir_all(root.join("projects/finance")).unwrap();
-        std::fs::write(root.join(".factory/policies/gobd.yaml"), GOBD).unwrap();
+        // The finance scope's own policy (#390), in its own directory.
+        std::fs::create_dir_all(root.join("projects/finance/.factory/policies")).unwrap();
+        std::fs::write(root.join("projects/finance/.factory/policies/gobd.yaml"), GOBD).unwrap();
         std::fs::write(
             root.join(".factory/quality/books.yaml"),
             "attributes:\n  - id: functional-suitability.functional-correctness\n    importance: H\n    difficulty: M\n    scenarios:\n\
@@ -171,7 +171,7 @@ mod tests {
         let company = scope("id: company-id\nname: company\n", ".");
         let finance = scope(
             &format!(
-                "id: finance-id\nname: finance\npolicies: {{ frameworks: [gobd] }}\nquality: [{quality}]\n\
+                "id: finance-id\nname: finance\nquality: [{quality}]\n\
                  dependencies:\n  services:\n    - {{ name: fava, transport: network, endpoints: [{endpoints}] }}\n\
                  metrics:\n  source: {source}\n  declare:\n\
                  \x20\x20\x20\x20- {{ id: bookings_without_beleg, title: Bookings without Beleg, unit: count, better: lower }}\n"

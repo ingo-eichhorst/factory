@@ -876,7 +876,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("does not apply"), "{err}");
+        assert!(err.to_string().contains("is not a control of \"demo-app\"'s cra policy"), "{err}");
 
         // `c` is marked not applicable at demo-app -- attesting it there is
         // refused too, even though the control itself exists and applies
@@ -1637,37 +1637,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_export_carries_a_controls_full_attestation_history_including_an_ancestors() {
+    async fn policy_export_carries_each_owning_scopes_own_attestation_history_and_never_an_ancestors() {
         let engine = test_engine();
         let owner = Caller::Owner;
-        engine
-            .policy_attest(
-                &owner,
-                "cra/b".parse().unwrap(),
-                "company".to_string(),
-                "https://example.com/company".to_string(),
-                None,
-                Utc::now() + chrono::Duration::days(30),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
+        for (scope, evidence) in [("company", "https://example.com/company"), ("engineering", "https://example.com/engineering")] {
+            engine
+                .policy_attest(
+                    &owner,
+                    "cra/b".parse().unwrap(),
+                    scope.to_string(),
+                    evidence.to_string(),
+                    None,
+                    Utc::now() + chrono::Duration::days(30),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
 
         let export = engine.policy_export(Some("engineering")).await.unwrap();
         assert_eq!(export.scope.as_deref(), Some("engineering"));
         let engineering_atts = export.attestations.get("engineering").expect("engineering has an entry");
         assert!(
-            engineering_atts
-                .iter()
-                .any(|a| a.control == "cra/b".parse().unwrap() && a.scope == "company"),
-            "an ancestor's attestation is included in a descendant's own list: {engineering_atts:?}"
+            engineering_atts.iter().all(|a| a.scope == "engineering") && engineering_atts.len() == 1,
+            "only the owning scope's own history (#390): {engineering_atts:?}"
+        );
+        assert!(
+            export.attestations.get("demo-app").unwrap().is_empty(),
+            "nothing is inherited down the tree"
         );
 
         let (filename, body) = engine.policy_export_render(Some("engineering"), "md").await.unwrap();
         assert!(filename.starts_with("policy-engineering-"), "{filename}");
         assert!(body.contains("cra/b"), "{body}");
-        assert!(body.contains("https://example.com/company"), "{body}");
+        assert!(body.contains("https://example.com/engineering"), "{body}");
+        assert!(!body.contains("https://example.com/company"), "{body}");
 
         let (_, json) = engine.policy_export_render(Some("engineering"), "json").await.unwrap();
         assert!(json.contains("\"instance\""), "{json}");

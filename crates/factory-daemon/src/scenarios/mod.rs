@@ -381,13 +381,19 @@ mod tests {
     async fn a_draft_that_collides_with_a_real_framework_is_dropped_and_reported() {
         let engine = test_engine();
         // A second draft, alongside `drafts/ai-act.yaml`, whose own
-        // `framework` collides with the real `cra` catalogue -- its file
-        // stem has to match its own `framework` (`policy::load_all`'s own
-        // rule, which `load_drafts` shares) for it to load at all.
+        // `framework` collides with the real `cra` policy every scope owns
+        // -- its file stem has to match its own `framework` for it to load
+        // at all -- and a scenario that adds it (#390: a draft is resolved
+        // per scope, so the collision shows where a scope already has one).
         let snapshot = engine.factory_snapshot();
         std::fs::write(
             snapshot.root.join(".factory/policies/drafts/cra.yaml"),
             "framework: cra\ntitle: Fake CRA\nkind: regulation\ncontrols: []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            snapshot.root.join(".factory/scenarios/shadow.yaml"),
+            "name: shadow\ntitle: Shadow\nkind: [policy]\npolicy: {add_frameworks: [cra]}\n",
         )
         .unwrap();
 

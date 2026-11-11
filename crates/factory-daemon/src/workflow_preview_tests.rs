@@ -47,7 +47,7 @@ impl Fixture {
                     id: "demo-id".into(),
                     name: "demo".into(),
                     path: "projects/demo".into(),
-                    policies: serde_yaml_ng::from_str("frameworks: [house]").unwrap(),
+                    policies: Default::default(),
                 }],
                 root_policies: Default::default(),
                 root_name: None,
@@ -93,7 +93,8 @@ impl Fixture {
         )
     }
     fn catalogue(&self, step: &str) {
-        let directory = factory_direction::policy::policies_dir(&self.root);
+        // `demo` owns the policy (#390).
+        let directory = factory_direction::policy::scope_policies_dir(&self.root, std::path::Path::new("projects/demo"));
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("house.yaml"), format!(
             "framework: house\ntitle: House\nkind: best-practice\ncontrols:\n  - id: tested\n    title: Tested\n    requires:\n      - {{applies_to: [feature], step: {step}, gate: 'true'}}\n      - {{applies_to: [feature], step: review, by: independent}}\n")).unwrap();
