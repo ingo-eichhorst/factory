@@ -265,6 +265,14 @@ impl L1Service<'_> {
                     }
                 })
                 .collect(),
+            scope_policies: factory
+                .config
+                .scopes
+                .iter()
+                .map(|s| s.path.to_string_lossy().replace('\\', "/"))
+                .filter(|dir| !dir.is_empty() && dir != "." && !dir.starts_with('/'))
+                .map(|dir| format!("{}/{FACTORY_DIR}/policies", dir.trim_end_matches('/')))
+                .collect(),
             include_logs: config.include_logs,
             encrypt_to: config.encrypt_to.clone(),
             scope_includes: factory.config.backup_includes(),

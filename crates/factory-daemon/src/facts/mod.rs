@@ -105,9 +105,9 @@ impl<'a, L: Level> Wiring<'a, L> {
     pub(crate) fn roles_for(&self, scope: &str) -> factory_core::role::Roles {
         self.engine.roles_for(scope)
     }
-    /// Every policy layer in effect for `scope` (config; the guide names its frameworks).
-    pub(crate) fn policy_chain(&self, scope: &str) -> Vec<factory_core::policy::PolicyLayer> {
-        self.engine.policy_chain(scope)
+    /// The frameworks `scope` has its own policy for (the guide names them).
+    pub(crate) fn policy_frameworks(&self, scope: &str) -> Vec<String> {
+        self.engine.policy_frameworks(scope)
     }
     /// When this daemon came up (instance-wide).
     pub(crate) fn booted_at(&self) -> chrono::DateTime<chrono::Utc> {

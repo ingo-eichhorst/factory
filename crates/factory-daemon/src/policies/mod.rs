@@ -13,7 +13,9 @@ mod clock;
 mod store;
 pub use store::PolicyStore;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 use chrono::Utc;
 use factory_core::config::Factory;
@@ -79,17 +81,11 @@ impl<'s> L6Service<'s> {
     /// Own catalogue read plus the L5 knowledge-tag port. Both filesystem
     /// walks stay off the async executor; providers own their fact reads.
     #[cfg(test)]
-    pub(crate) async fn load_catalogues_and_tags(
-        &self,
-    ) -> Result<(
-        Vec<policy::Catalogue>,
-        Vec<policy::Finding>,
-        BTreeSet<String>,
-    )> {
+    pub(crate) async fn load_policies_and_tags(&self) -> Result<(policy::Policies, BTreeSet<String>)> {
         let snapshot = self.wiring.snapshot();
         let provider = self.wiring.provider::<factory_kernel::KnowledgeTags>();
         self.policy_intent_service(&snapshot)
-            .catalogues_with_tags(&provider)
+            .policies_with_tags(&provider)
             .await
     }
 
@@ -172,6 +168,22 @@ impl<'s> L6Service<'s> {
             .policy_service(&snapshot)
             .report_with_workflows(scope, &knowledge, &checks, &inventory, &blueprints, &preview)
             .await
+    }
+
+    /// Every template on disk and who picks from it (#390).
+    pub(crate) async fn policy_templates(&self) -> Result<Vec<factory_core::protocol::TemplateSummary>> {
+        let snapshot = self.wiring.snapshot();
+        self.policy_service(&snapshot).templates().await
+    }
+
+    /// One template and each asked scope's selection from it (#390).
+    pub(crate) async fn policy_template(
+        &self,
+        name: &str,
+        scope: Option<&str>,
+    ) -> Result<factory_core::protocol::TemplateView> {
+        let snapshot = self.wiring.snapshot();
+        self.policy_service(&snapshot).template(name, scope).await
     }
 
     pub(crate) async fn policy_control(
@@ -291,10 +303,9 @@ impl<'s> L6Service<'s> {
     }
 
     /// `Request::PolicyExport`'s data: `policy_report(scope)` plus, per row,
-    /// every attestation recorded at that row's own scope or an ancestor of
-    /// it -- the same "scope or ancestor" rule this module's own `Evidence`
-    /// assembly already applies per scope, kept here rather than folded
-    /// into a status and discarded. An audit wants a control's *whole*
+    /// every attestation recorded at that row's own scope -- the scope that
+    /// owns the controls (#390), the same exact-scope rule the evaluation
+    /// applies, kept here rather than folded into a status and discarded. An audit wants a control's *whole*
     /// attestation history at a scope (withdrawn and expired included), not
     /// only whichever one currently decides its status the way
     /// `ControlStatus.refs` does.
@@ -305,16 +316,9 @@ impl<'s> L6Service<'s> {
 
         let mut attestations: BTreeMap<String, Vec<Attestation>> = BTreeMap::new();
         for row in &report.rows {
-            let scope_obj = snapshot.scope(&row.scope)?.clone();
-            let ancestor_names: BTreeSet<&str> = snapshot
-                .config
-                .ancestors_of(&scope_obj)
-                .iter()
-                .map(|ancestor| ancestor.name.as_str())
-                .collect();
             let relevant: Vec<Attestation> = all_attestations
                 .iter()
-                .filter(|att| att.scope == row.scope || ancestor_names.contains(att.scope.as_str()))
+                .filter(|att| att.scope == row.scope)
                 .cloned()
                 .collect();
             attestations.insert(row.scope.clone(), relevant);

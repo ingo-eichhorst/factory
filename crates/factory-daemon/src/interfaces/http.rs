@@ -166,6 +166,10 @@ fn router(engine: Arc<Engine>) -> Router {
         )
         .route("/api/policy/remediate", post(policy_remediate))
         .route("/api/policy/export", get(policy_export))
+        // #390: the templates a scope picks its policy from, and each
+        // scope's selection from one.
+        .route("/api/policy/templates", get(policy_templates))
+        .route("/api/policy/templates/{name}", get(policy_template))
         .route("/api/metrics", get(metrics))
         .route("/api/dashboard", get(dashboard).put(dashboard_set).delete(dashboard_reset))
         .route("/api/costs", get(costs))
@@ -746,6 +750,30 @@ async fn policy_clock(State(engine): State<Arc<Engine>>, Query(q): Query<PolicyQ
     run(
         &engine,
         Request::PolicyClock {
+            scope: q.scope.filter(|s| !s.trim().is_empty()),
+        },
+    )
+    .await
+}
+
+/// `GET /api/policy/templates` -- every template on disk and the scopes
+/// whose policies pick from it (#390).
+async fn policy_templates(State(engine): State<Arc<Engine>>) -> AxumResponse {
+    run(&engine, Request::PolicyTemplates).await
+}
+
+/// `GET /api/policy/templates/{name}?scope=` -- one template and each
+/// scope's selection from it: `scope` alone, or every scope picking from
+/// it when `scope` is empty or absent (#390).
+async fn policy_template(
+    State(engine): State<Arc<Engine>>,
+    Path(name): Path<String>,
+    Query(q): Query<PolicyQuery>,
+) -> AxumResponse {
+    run(
+        &engine,
+        Request::PolicyTemplate {
+            name,
             scope: q.scope.filter(|s| !s.trim().is_empty()),
         },
     )

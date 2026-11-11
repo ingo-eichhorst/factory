@@ -1044,8 +1044,18 @@ enum PolicyCmd {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// The catalogues on disk and their control counts.
+    /// Every framework some scope has a policy for, with its title, kind
+    /// and how many (scope, control) pairs it has.
     Frameworks,
+    /// The templates in `.factory/policies/templates/` -- lists of possible
+    /// controls (the CRA, ISO 27001, ...) a scope picks its policy from --
+    /// and which scopes pick from each.
+    Templates,
+    /// One template: show each scope's selection, or print a skeleton.
+    Template {
+        #[command(subcommand)]
+        cmd: TemplateCmd,
+    },
     /// Close a gap: create the task that carries the control's own
     /// `remediation:` guidance and its current missing evidence, in
     /// `--scope`. Needs `task.create` there, under the same rule
@@ -1073,6 +1083,28 @@ enum PolicyCmd {
         scope: Option<String>,
         #[arg(long, default_value = "md")]
         format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TemplateCmd {
+    /// Each control of the template and whether `--scope` has selected it,
+    /// marked it n/a, or not selected it -- every scope picking from it
+    /// when `--scope` is absent.
+    Show {
+        name: String,
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Print a skeleton policy picking every control of the template, to
+    /// stdout -- Factory never writes a policy itself. Save it as
+    /// `<scope>/.factory/policies/<framework>.yaml` and give each control
+    /// that scope's own evidence.
+    Skeleton {
+        name: String,
+        /// The framework name for the policy file (default: the template's).
+        #[arg(long)]
+        framework: Option<String>,
     },
 }
 
@@ -4312,11 +4344,37 @@ async fn policy_cmd(json: bool, client: &Client, cmd: PolicyCmd) -> Result<()> {
             })
         }
 
+        PolicyCmd::Templates => {
+            let payload = client.send(Request::PolicyTemplates).await?;
+            print(&payload, json, |p| match p {
+                Payload::PolicyTemplates { templates } => Some(policy_templates_text(templates)),
+                _ => None,
+            })
+        }
+
+        PolicyCmd::Template { cmd: TemplateCmd::Show { name, scope } } => {
+            let payload = client.send(Request::PolicyTemplate { name, scope }).await?;
+            print(&payload, json, |p| match p {
+                Payload::PolicyTemplate { view } => Some(policy_template_text(view)),
+                _ => None,
+            })
+        }
+
+        PolicyCmd::Template { cmd: TemplateCmd::Skeleton { name, framework } } => {
+            let payload = client.send(Request::PolicyTemplate { name, scope: None }).await?;
+            print(&payload, json, |p| match p {
+                Payload::PolicyTemplate { view } => {
+                    Some(policy::skeleton(&view.template, framework.as_deref()).trim_end().to_string())
+                }
+                _ => None,
+            })
+        }
+
         PolicyCmd::Frameworks => {
             let payload = client.send(Request::Policy { scope: None }).await?;
             print(&payload, json, |p| match p {
                 Payload::Policy { report } => Some(if report.catalogues.is_empty() {
-                    "no catalogues on disk".to_string()
+                    "no policies on disk".to_string()
                 } else {
                     report
                         .catalogues
@@ -4420,14 +4478,14 @@ fn policy_status_text(report: &PolicyReport, framework: Option<&str>) -> String 
     }
     out.push_str("\n\"compliant\" means the evidence is complete -- not that anything is certified.\n");
 
-    // Only once the root restricts where a framework applies (#332) is there
-    // anything to say beyond the rollup: then every framework says where it
-    // applies, and one excluded at the asked scope -- absent from the
-    // rollup above -- is named here rather than silently missing.
+    // #390: a policy belongs to one scope, so the aggregate says which
+    // scopes own one for each framework -- and every scope in the subtree
+    // that has none, listed rather than counted -- whenever there is more
+    // than the one asked scope to speak of.
     if report
         .applicability
         .iter()
-        .any(|a| a.restricted_by.is_some())
+        .any(|a| !a.no_policy.is_empty() || a.covers.len() > 1)
     {
         out.push_str("\nAPPLICABILITY\n");
         for a in report
@@ -4439,21 +4497,21 @@ fn policy_status_text(report: &PolicyReport, framework: Option<&str>) -> String 
         }
     }
 
-    let per_scope: Vec<Vec<factory_core::policy::ControlStatus>> =
-        report.rows.iter().map(|r| r.statuses.clone()).collect();
-    let mut worst = factory_core::policy::worst_across_scopes(&per_scope);
-    worst.retain(|s| framework.is_none_or(|f| s.control.framework == f));
-    worst.sort_by(|a, b| a.control.cmp(&b.control));
-
+    // Every (scope, control) pair, labelled with the scope that owns it.
     let mut section = |label: &str, kind: factory_core::policy::StatusKind| {
-        let matching: Vec<&factory_core::policy::ControlStatus> =
-            worst.iter().filter(|s| s.status.kind() == kind).collect();
+        let matching: Vec<(&str, &factory_core::policy::ControlStatus)> = report
+            .rows
+            .iter()
+            .flat_map(|row| row.statuses.iter().map(move |s| (row.scope.as_str(), s)))
+            .filter(|(_, s)| s.status.kind() == kind)
+            .filter(|(_, s)| framework.is_none_or(|f| s.control.framework == f))
+            .collect();
         if matching.is_empty() {
             return;
         }
         out.push_str(&format!("\n{label}\n"));
-        for s in matching {
-            out.push_str(&format!("  {:<24} {}\n", s.control.to_string(), s.title));
+        for (scope, s) in matching {
+            out.push_str(&format!("  {:<16} {:<24} {}\n", scope, s.control.to_string(), s.title));
             for reason in s.status.reasons() {
                 out.push_str(&format!("      {reason}\n"));
             }
@@ -4462,6 +4520,19 @@ fn policy_status_text(report: &PolicyReport, framework: Option<&str>) -> String 
     section("OPEN", factory_core::policy::StatusKind::Open);
     section("STALE", factory_core::policy::StatusKind::Stale);
 
+    let unselected: Vec<(&str, &factory_core::policy::NotSelected)> = report
+        .rows
+        .iter()
+        .flat_map(|row| row.not_selected.iter().map(move |c| (row.scope.as_str(), c)))
+        .filter(|(_, c)| framework.is_none_or(|f| c.control.framework == f))
+        .collect();
+    if !unselected.is_empty() {
+        out.push_str("\nNOT SELECTED (listed, never counted)\n");
+        for (scope, c) in unselected {
+            out.push_str(&format!("  {:<16} {:<24} {}\n", scope, c.control.to_string(), c.title));
+        }
+    }
+
     if !report.findings.is_empty() {
         out.push_str("\nFINDINGS\n");
         for f in &report.findings {
@@ -4469,6 +4540,66 @@ fn policy_status_text(report: &PolicyReport, framework: Option<&str>) -> String 
         }
     }
 
+    out.trim_end().to_string()
+}
+
+fn policy_templates_text(templates: &[factory_core::protocol::TemplateSummary]) -> String {
+    if templates.is_empty() {
+        return "no templates in .factory/policies/templates/".to_string();
+    }
+    templates
+        .iter()
+        .map(|t| {
+            format!(
+                "{:<12} {:<14} {:<40} {:>3} control(s)  {}",
+                t.template,
+                policy_kind_str(t.kind),
+                t.title,
+                t.controls,
+                if t.used_by.is_empty() {
+                    "used by no scope".to_string()
+                } else {
+                    format!("used by {}", t.used_by.join(", "))
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn policy_template_text(view: &factory_core::protocol::TemplateView) -> String {
+    use factory_core::protocol::Selection;
+    let t = &view.template;
+    let mut out = format!(
+        "{}  {}  [{}]  {} control(s)\n",
+        t.template,
+        t.title,
+        policy_kind_str(t.kind),
+        t.controls.len()
+    );
+    if view.scopes.is_empty() {
+        out.push_str("\nno scope picks from it yet -- `factory policy template skeleton` prints a policy to start from\n");
+        for c in &t.controls {
+            out.push_str(&format!("  {:<20} {}\n", c.id, c.title));
+        }
+    }
+    for scope in &view.scopes {
+        match &scope.framework {
+            Some(framework) => out.push_str(&format!("\n{} (policy {framework})\n", scope.scope)),
+            None => out.push_str(&format!("\n{} (no policy from this template)\n", scope.scope)),
+        }
+        for c in &scope.controls {
+            let state = match c.selection {
+                Selection::Selected => "selected".to_string(),
+                Selection::NotApplicable => format!(
+                    "n/a: {}",
+                    c.rationale.as_deref().unwrap_or_default()
+                ),
+                Selection::NotSelected => "not selected".to_string(),
+            };
+            out.push_str(&format!("  {:<20} {:<14} {}\n", c.id, state, c.title));
+        }
+    }
     out.trim_end().to_string()
 }
 
@@ -9082,39 +9213,40 @@ mod tests {
     }
 
     #[test]
-    fn policy_status_names_a_framework_the_root_excluded_at_the_asked_scope() {
+    fn policy_status_labels_each_pair_with_its_scope_and_lists_no_policy_and_not_selected() {
+        let status = |scope: &str, kind: &str| serde_json::json!({
+            "scope": scope,
+            "statuses": [{"control": "cra/sbom", "title": "SBOM", "kind": "regulation", "status": kind, "reasons": ["why"]}],
+            "rollup": [],
+            "not_selected": [{"control": "cra/hw", "title": "Hardware"}],
+        });
         let report: PolicyReport = serde_json::from_value(serde_json::json!({
-            "scope": "finance", "rows": [], "rollup": [], "not_applicable": [], "findings": [], "catalogues": [],
+            "scope": "projects", "rows": [status("irrlicht", "open"), status("factory", "satisfied")],
+            "rollup": [], "not_applicable": [], "findings": [], "catalogues": [],
             "applicability": [
-                {"framework": "cra", "bound_by": [], "covers": [], "restricted_by": "company",
-                 "except": ["finance"], "excluded": ["finance"]},
-                {"framework": "finance", "bound_by": ["company"], "covers": ["finance"], "restricted_by": "company",
-                 "scopes": ["finance"]}
+                {"framework": "cra", "covers": ["irrlicht", "factory"], "no_policy": ["projects"]}
             ]
         })).unwrap();
         let text = policy_status_text(&report, None);
-        assert!(
-            text.contains("no applicable frameworks"),
-            "cra has no rollup at finance: {text}"
-        );
         assert!(text.contains("\nAPPLICABILITY\n"), "{text}");
-        assert!(text.contains(
-            "  cra          the instance root (company) binds it to the whole tree minus the finance subtree(s) \
-             -- applies at no scope here; excluded at finance"
-        ), "{text}");
-        assert!(text.contains(
-            "  finance      the instance root (company) binds it to only the finance subtree(s) -- applies at finance"
-        ), "{text}");
-        assert!(!policy_status_text(&report, Some("finance")).contains("  cra "));
+        assert!(
+            text.contains("  cra          policy at irrlicht, factory; no policy at projects"),
+            "{text}"
+        );
+        assert!(text.contains("\nOPEN\n  irrlicht         cra/sbom"), "{text}");
+        assert!(!text.contains("  factory          cra/sbom"), "a satisfied pair is not listed: {text}");
+        assert!(text.contains("NOT SELECTED (listed, never counted)"), "{text}");
+        assert!(text.contains("  factory          cra/hw"), "{text}");
+        assert!(!policy_status_text(&report, Some("dsgvo")).contains("cra/hw"));
 
-        let unrestricted: PolicyReport = serde_json::from_value(serde_json::json!({
+        let alone: PolicyReport = serde_json::from_value(serde_json::json!({
             "rows": [], "rollup": [], "not_applicable": [], "findings": [], "catalogues": [],
-            "applicability": [{"framework": "cra", "bound_by": ["company"], "covers": ["company"]}]
+            "applicability": [{"framework": "cra", "covers": ["company"]}]
         }))
         .unwrap();
         assert!(
-            !policy_status_text(&unrestricted, None).contains("APPLICABILITY"),
-            "nothing restricted, nothing to add"
+            !policy_status_text(&alone, None).contains("APPLICABILITY"),
+            "one scope with its own policy, nothing to add"
         );
     }
 

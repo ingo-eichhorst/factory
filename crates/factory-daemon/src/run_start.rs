@@ -279,7 +279,7 @@ impl L4Service<'_> {
 
         let role_name = self.effective_role(&task.scope, &agent_name).await;
         let role = self.wiring.roles_for(&task.scope).get(&role_name).cloned();
-        let policy_frameworks = factory_core::policy::frameworks_in_chain(&self.wiring.policy_chain(&task.scope));
+        let policy_frameworks = self.wiring.policy_frameworks(&task.scope);
         let goal = self.wiring.intent().goal_context(task.labels.get("goal").cloned()).await;
         let quality = self.above.quality_block(&task.scope).await;
         let probe = agent.health_probe();
@@ -672,9 +672,8 @@ impl L4Service<'_> {
         let agent_exits = self.agent_exit_context(&task).await;
         let knowledge = self.knowledge_hints(&task, &run.id).await;
         let memory = self.memory_handout(&task, &run.id).await;
-        // Same chain the L6 tab and `policy attest` fold against
-        // (`Engine::policy_chain`), reduced to just the names the guide
-        // names -- see `factory_core::policy::frameworks_in_chain`.
+        // The frameworks the scope owns a policy for (`Engine::policy_frameworks`,
+        // #390) -- the names the guide names.
         // The one sentence the guide says about a `goal=` label -- resolved
         // once here, the same as `policy_frameworks`, never re-read once the
         // guide is built.

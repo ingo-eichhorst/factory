@@ -81,7 +81,8 @@ impl Engine {
             .collect();
 
         let snapshot = self.factory_snapshot();
-        let policies_dir = snapshot.policies_dir();
+        let policy_root = snapshot.root.clone();
+        let policy_configuration = crate::intent::policy_configuration(&snapshot);
         let goals_dir = factory_core::goals::goals_dir(&snapshot.root);
         let quality_dir = snapshot.quality_dir();
         let (frameworks, catalogue, characteristics, attested_categories): (
@@ -90,14 +91,15 @@ impl Engine {
             BTreeSet<String>,
             BTreeSet<String>,
         ) = tokio::task::spawn_blocking(move || {
-            let (catalogues, _findings) = factory_core::policy::load_all(&policies_dir);
+            // #390: every scope's own policies, not only the root's.
+            let policies = policy_configuration.load_policies(&policy_root);
             // `#158`: every literal category (`*` skipped -- it names no
-            // one category) any loaded catalogue's `requires:` names, the
+            // one category) any loaded policy's `requires:` names, the
             // `conformance_rate.<category>` twin of `compliance.<framework>`
             // above.
             let mut attested_categories: BTreeSet<String> = BTreeSet::new();
-            for cat in &catalogues {
-                for control in &cat.controls {
+            for policy in &policies.owned {
+                for control in &policy.controls {
                     for requirement in &control.requires {
                         attested_categories.extend(
                             requirement
@@ -109,7 +111,13 @@ impl Engine {
                     }
                 }
             }
-            let frameworks = catalogues.into_iter().map(|c| c.framework).collect();
+            let frameworks: Vec<String> = policies
+                .owned
+                .into_iter()
+                .map(|p| p.framework)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
             let catalogue = factory_core::goals::load(&goals_dir);
             let quality_catalogue = factory_core::quality::load(&quality_dir);
             // Every characteristic any loaded profile declares an

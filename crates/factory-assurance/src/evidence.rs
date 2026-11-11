@@ -421,12 +421,6 @@ impl<'a, P: Ports> Service<'a, P> {
         metrics: &BTreeMap<crate::metrics::MetricId, crate::metrics::MetricValue>,
         now: DateTime<Utc>,
     ) -> Result<Evidence> {
-        let ancestors: BTreeSet<&str> = self
-            .scopes
-            .ancestors_of(scope)
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect();
         let (tasks, workflows) = self.named(&scope.name, applied).await?;
         let facts = Facts::<L5>::new();
         let agents = if needs_agent_facts(applied) {
@@ -467,9 +461,11 @@ impl<'a, P: Ports> Service<'a, P> {
         };
         Ok(Evidence {
             tags: tags.clone(),
+            // #390: an attestation speaks for the scope it was recorded at,
+            // the scope that owns the control -- never inherited down.
             attestations: attestations
                 .iter()
-                .filter(|att| att.scope == scope.name || ancestors.contains(att.scope.as_str()))
+                .filter(|att| att.scope == scope.name)
                 .cloned()
                 .collect(),
             tasks,
@@ -1597,11 +1593,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attestation_filter_is_path_ancestry_not_name_prefix_and_preserves_order() {
+    async fn attestation_filter_is_the_exact_owning_scope_never_an_ancestor_or_a_name_prefix() {
         let recorder = Arc::new(Recorder::default());
         let bench = BenchStore::in_memory().unwrap();
         let service = service(&recorder, &bench);
-        let receipts: Vec<Attestation> = ["parent", "child/fake", "child"].into_iter().map(|scope| serde_json::from_value(serde_json::json!({
+        let receipts: Vec<Attestation> = ["parent", "child/fake", "child", "child"].into_iter().map(|scope| serde_json::from_value(serde_json::json!({
             "id": scope, "control": "test/check", "scope": scope, "evidence": "doc", "attested_by": "person",
             "attested_at": time(), "expires_at": time() + chrono::Duration::days(1),
         })).unwrap()).collect();
@@ -1624,7 +1620,8 @@ mod tests {
                 .iter()
                 .map(|a| a.scope.as_str())
                 .collect::<Vec<_>>(),
-            ["parent", "child"]
+            ["child", "child"],
+            "#390: an ancestor's attestation never covers a policy it does not own"
         );
     }
 

@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use factory_core::config::{
-    refuse_misplaced_scope_dashboard, refuse_misplaced_scope_infrastructure, refuse_misplaced_scope_policies,
+    refuse_misplaced_scope_dashboard, refuse_misplaced_scope_infrastructure,
     refuse_misplaced_scope_quality, refuse_misplaced_scope_roles, refuse_misplaced_scope_secrets, Factory, Scope, CONFIG_FILE, FACTORY_DIR,
 };
 use factory_core::error::{FactoryError, Result};
@@ -139,8 +139,10 @@ fn read_scope(path: &Path) -> Result<Scope> {
     // without a word. Refuse it here, with the file named, before the daemon
     // starts on a role set somebody believes is different.
     refuse_misplaced_scope_roles(&document, path)?;
-    // Same failure mode, for a top-level `policies:` block.
-    refuse_misplaced_scope_policies(&document, path)?;
+    // A top-level `policies:` block is read by nothing (#390) -- carried
+    // into the scope's legacy block below, so the Policy board names the
+    // migration instead of refusing the start or dropping it silently.
+    let misplaced_policies = factory_core::config::misplaced_scope_policies(&document);
     // And for a top-level `quality:` block. Deliberately not also in
     // `configuration.rs`'s `read_document`, which reads the instance root's
     // own file too -- where a top-level `quality:` is exactly right.
@@ -163,7 +165,10 @@ fn read_scope(path: &Path) -> Result<Scope> {
     factory_core::config::refuse_misplaced_scope_channels(&document, path)?;
     // And a top-level `memory:`/`skills:` (#339), which belong under `scope:`.
     factory_core::config::refuse_misplaced_memory(&document, path)?;
-    let file: ScopeFile = serde_yaml_ng::from_value(document).map_err(parsing)?;
+    let mut file: ScopeFile = serde_yaml_ng::from_value(document).map_err(parsing)?;
+    if file.scope.policies.is_empty() {
+        file.scope.policies = misplaced_policies;
+    }
     Ok(file.scope)
 }
 
