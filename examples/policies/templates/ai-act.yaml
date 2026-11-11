@@ -1,0 +1,29 @@
+# A starter template for the EU AI Act (#390): the obligations for a
+# high-risk AI system (Art. 9-15) plus the two that reach every provider or
+# deployer (Art. 4, Art. 50). Titles are our own wording of the public
+# regulation. Copy this file to
+# `<root>/.factory/policies/templates/ai-act.yaml` to use it; a scenario may
+# also adopt it as a what-if (`policy.add_frameworks: [ai-act]`).
+template: ai-act
+title: EU AI Act
+kind: regulation
+controls:
+  - id: art-4
+    title: People working with the AI systems have sufficient AI literacy (Art. 4)
+  - id: art-9
+    title: A risk management system is documented and kept current (Art. 9)
+  - id: art-10
+    title: Training, validation and testing data quality is governed (Art. 10)
+  - id: art-11
+    title: Technical documentation is maintained (Art. 11)
+  - id: art-12
+    title: The system's operation is logged automatically (Art. 12)
+    maps_to: [iso27001/a-8-15]
+  - id: art-13
+    title: Deployers get the information they need to use the system properly (Art. 13)
+  - id: art-14
+    title: Human oversight measures are in place (Art. 14)
+  - id: art-15
+    title: Accuracy, robustness and cybersecurity are appropriate (Art. 15)
+  - id: art-50
+    title: People know when they interact with an AI system or AI-generated content (Art. 50)

@@ -1520,17 +1520,28 @@ mod tests {
     }
 
     #[test]
-    fn examples_policies_cra_loads_with_no_findings() {
+    fn the_shipped_templates_and_example_scope_policy_load_with_no_findings() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/policies");
-        let (catalogues, findings) = load_all(&dir);
-        assert_eq!(findings, Vec::new(), "{findings:?}");
-        assert_eq!(catalogues.len(), 1);
-        assert_eq!(catalogues[0].framework, "cra");
-        assert!(
-            catalogues[0].controls.len() >= 3,
-            "{:?}",
-            catalogues[0].controls
+        let (templates, mut findings) = load_templates(&dir.join("templates"), "templates/");
+        assert_eq!(
+            templates.iter().map(|t| t.template.as_str()).collect::<Vec<_>>(),
+            ["ai-act", "cra", "dsgvo", "iso27001"]
         );
+        let (policies, own) = load_dir(&dir, "", "demo", &templates);
+        findings.extend(own);
+        findings.extend(maps_to_findings(&templates, &policies));
+        assert_eq!(findings, Vec::new(), "{findings:?}");
+        assert_eq!(policies.len(), 1);
+        let cra = &policies[0];
+        assert_eq!((cra.framework.as_str(), cra.template.as_deref()), ("cra", Some("cra")));
+        assert!(cra.controls.len() >= 6, "{:?}", cra.controls);
+        assert!(cra.controls.iter().any(|c| c.not_applicable.is_some()));
+        assert!(!cra.not_selected.is_empty(), "the example leaves some controls unselected");
+        // The draft resolves against the same templates with no finding.
+        let draft = read_policy_file(&dir.join("drafts/ai-act.yaml"), "drafts/ai-act.yaml").unwrap();
+        let (owned, draft_findings) = resolve(&draft, "demo", "drafts/ai-act.yaml", &templates);
+        assert!(draft_findings.is_empty(), "{draft_findings:?}");
+        assert_eq!(owned.controls.len(), 5);
     }
 
     #[test]
