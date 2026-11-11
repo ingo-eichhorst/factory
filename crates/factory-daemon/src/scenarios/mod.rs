@@ -218,7 +218,7 @@ mod tests {
 
     use super::*;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, Instance, PolicyDeclaration};
+    use factory_core::config::{Config, Instance};
     use factory_plugins::{Registry, SqliteStore};
     use std::path::PathBuf;
 
@@ -301,7 +301,12 @@ mod tests {
     fn test_engine() -> Arc<Engine> {
         let root = std::env::temp_dir().join(format!("factory-scenarios-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".factory/policies/drafts")).unwrap();
-        std::fs::write(root.join(".factory/policies/cra.yaml"), CRA_YAML).unwrap();
+        // Every scope owns the same CRA policy (#390): nothing is inherited.
+        for path in [".", "projects", "projects/demo", "other"] {
+            let dir = factory_core::policy::scope_policies_dir(&root, std::path::Path::new(path));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("cra.yaml"), CRA_YAML).unwrap();
+        }
         std::fs::write(root.join(".factory/policies/drafts/ai-act.yaml"), AI_ACT_DRAFT_YAML).unwrap();
 
         std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
@@ -315,7 +320,6 @@ mod tests {
 
         let mut config = Config {
             instance: Instance { id: "test".into(), name: "test".into() },
-            policies: PolicyDeclaration { frameworks: vec!["cra".to_string()], ..Default::default() },
             ..Default::default()
         };
         config.scopes = vec![

@@ -2944,7 +2944,7 @@ mod tests {
 
     use super::*;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance, PolicyDeclaration, Scope};
+    use factory_core::config::{Config, DaemonConfig, Factory, Instance, Scope};
     use factory_plugins::{Registry, SqliteStore};
     use std::path::PathBuf;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3601,23 +3601,31 @@ mod tests {
         assert!(json["message"].as_str().unwrap_or_default().contains("already met"), "{json}");
     }
 
-    /// `#332`: the root binds `cra` to every scope but the `finance`
-    /// subtree; `cra/b` is open wherever it applies.
-    fn engine_with_excluded_scope() -> Arc<Engine> {
+    /// #390: the root scope (`company`) owns a CRA policy picked from a
+    /// template; `finance` below it owns none, and still carries a legacy
+    /// `scope.policies` block.
+    fn engine_with_scope_policies() -> Arc<Engine> {
         let root = std::env::temp_dir().join(format!("factory-http-test-{}", uuid::Uuid::new_v4()));
         let dir = root.join(".factory").join("policies");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("templates")).unwrap();
+        std::fs::write(
+            dir.join("templates/cra.yaml"),
+            "template: cra\ntitle: Cyber Resilience Act\nkind: regulation\ncontrols:\n\
+             \x20 - { id: b, title: Control B }\n\x20 - { id: c, title: Control C }\n",
+        )
+        .unwrap();
         std::fs::write(
             dir.join("cra.yaml"),
-            "framework: cra\ntitle: Cyber Resilience Act\nkind: regulation\ncontrols:\n\
-             \x20 - { id: b, title: Control B, evidence: [{ check: attestation }] }\n",
+            "framework: cra\ntemplate: cra\ncontrols:\n  - { id: b, evidence: [{ check: attestation }] }\n",
         )
         .unwrap();
         let mut company: Scope =
             serde_yaml_ng::from_str("id: company-id\nname: company\n").unwrap();
         company.path = PathBuf::from(".");
-        let mut finance: Scope =
-            serde_yaml_ng::from_str("id: finance-id\nname: finance\n").unwrap();
+        let mut finance: Scope = serde_yaml_ng::from_str(
+            "id: finance-id\nname: finance\npolicies:\n  frameworks: [{name: cra, except: [finance]}]\n",
+        )
+        .unwrap();
         finance.path = PathBuf::from("finance");
         let config = Config {
             instance: Instance {
@@ -3626,10 +3634,6 @@ mod tests {
             },
             scope: Some(company.clone()),
             scopes: vec![company, finance],
-            policies: serde_yaml_ng::from_str::<PolicyDeclaration>(
-                "frameworks: [{name: cra, except: [finance]}]",
-            )
-            .unwrap(),
             ..Default::default()
         };
         let store: Arc<dyn factory_core::adapter::TaskStore> =
@@ -3644,53 +3648,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_routes_leave_a_root_excluded_framework_out_of_that_scope_and_name_the_exclusion(
-    ) {
-        let engine = engine_with_excluded_scope();
+    async fn policy_routes_resolve_in_the_owning_scope_and_list_templates_and_scopes_without_a_policy() {
+        let engine = engine_with_scope_policies();
         let (status, json) =
             request(engine.clone(), "GET", "/api/policy?scope=finance", None).await;
         assert_eq!(status, 200, "{json}");
         let report = &json["data"]["report"];
-        assert_eq!(report["rows"], serde_json::json!([]), "{json}");
+        assert_eq!(report["rows"], serde_json::json!([]), "nothing is inherited: {json}");
         assert_eq!(report["rollup"], serde_json::json!([]), "{json}");
-        assert_eq!(report["applicability"][0]["framework"], "cra");
-        assert_eq!(report["applicability"][0]["restricted_by"], "company");
-        assert_eq!(
-            report["applicability"][0]["excluded"],
-            serde_json::json!(["finance"])
-        );
+        assert_eq!(report["findings"][0]["kind"], "legacy_policies", "{json}");
 
         let (_, json) = request(engine.clone(), "GET", "/api/policy", None).await;
-        assert_eq!(
-            json["data"]["report"]["applicability"][0]["covers"],
-            serde_json::json!(["company"])
-        );
-        assert_eq!(json["data"]["report"]["rows"][0]["scope"], "company");
+        let report = &json["data"]["report"];
+        assert_eq!(report["rows"][0]["scope"], "company");
+        assert_eq!(report["rows"][0]["not_selected"][0]["control"], "cra/c");
+        assert_eq!(report["applicability"][0]["covers"], serde_json::json!(["company"]));
+        assert_eq!(report["applicability"][0]["no_policy"], serde_json::json!(["finance"]));
+        assert_eq!(report["templates"][0]["used_by"], serde_json::json!(["company"]));
 
-        let (status, json) = request(
-            engine.clone(),
-            "GET",
-            "/api/policy/export?scope=finance&format=json",
-            None,
-        )
-        .await;
+        let (status, json) =
+            request(engine.clone(), "GET", "/api/policy/templates", None).await;
         assert_eq!(status, 200, "{json}");
-        assert_eq!(
-            json["report"]["applicability"][0]["except"],
-            serde_json::json!(["finance"])
-        );
+        assert_eq!(json["data"]["kind"], "policy_templates", "{json}");
+        assert_eq!(json["data"]["templates"][0]["template"], "cra");
+        let (status, json) =
+            request(engine.clone(), "GET", "/api/policy/templates/cra?scope=company", None).await;
+        assert_eq!(status, 200, "{json}");
+        let controls = &json["data"]["view"]["scopes"][0]["controls"];
+        assert_eq!(controls[0]["selection"], "selected", "{json}");
+        assert_eq!(controls[1]["selection"], "not_selected", "{json}");
 
         let body = r#"{"control":"cra/b","scope":"finance"}"#;
         let (status, json) =
             request(engine.clone(), "POST", "/api/policy/remediate", Some(body)).await;
         assert_eq!(status, 400, "{json}");
         let message = json["message"].as_str().unwrap_or_default();
-        assert!(message.contains("does not apply at \"finance\""), "{json}");
-        assert!(message.contains("except: [finance]"), "{json}");
+        assert!(message.contains("\"finance\" has no cra policy of its own"), "{json}");
 
         let body = r#"{"control":"cra/b","scope":"company"}"#;
         let (status, json) = request(engine, "POST", "/api/policy/remediate", Some(body)).await;
-        assert_eq!(status, 200, "cra still applies at the root: {json}");
+        assert_eq!(status, 200, "the owning scope remediates: {json}");
     }
 
     fn engine_with_dashboard() -> Arc<Engine> {

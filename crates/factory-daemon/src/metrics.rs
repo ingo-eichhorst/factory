@@ -268,7 +268,7 @@ mod tests {
     use crate::intake::TRIAGE_VERDICT_KIND;
     use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, Factory, Instance, PolicyDeclaration, Scope};
+    use factory_core::config::{Config, Factory, Instance, Scope};
     use factory_core::run::{NewRun, Run, RunPatch, RunStatus, Trigger};
     use factory_core::task::{NewTask, TaskEntry, TaskPatch, TaskStatus};
     use factory_core::usage::{RunUsage, TokenCounts, UsageState};
@@ -282,11 +282,12 @@ mod tests {
         scope
     }
 
-    /// A one-scope instance, with `frameworks` (if any) committed at the
-    /// root the same way `policies:` at the instance root always does. The
-    /// root scope is declared (`config.scope`), so `goals.checkin`-shaped
+    /// A one-scope instance whose root scope (`.`) owns whatever policy a
+    /// test writes to `<root>/.factory/policies/` (#390); `_frameworks`
+    /// names what a caller means to write, for the reader. The root scope
+    /// is declared (`config.scope`), so `goals.checkin`-shaped
     /// authorization checks in other modules' tests can reuse this too.
-    fn test_engine(frameworks: Vec<String>) -> Arc<Engine> {
+    fn test_engine(_frameworks: Vec<String>) -> Arc<Engine> {
         let root = std::env::temp_dir().join(format!("factory-metrics-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let root_scope = scope_at("root-id", "root", ".");
@@ -294,7 +295,6 @@ mod tests {
             instance: Instance { id: "test".into(), name: "test".into() },
             scope: Some(root_scope.clone()),
             scopes: vec![root_scope],
-            policies: PolicyDeclaration { frameworks, ..Default::default() },
             ..Default::default()
         };
         let factory = Factory { root, config };
@@ -311,11 +311,15 @@ mod tests {
         let root = std::env::temp_dir().join(format!("factory-scoped-metrics-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
         std::fs::create_dir_all(root.join(".factory/quality")).unwrap();
-        std::fs::write(
-            root.join(".factory/policies/cra.yaml"),
-            "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: a\n    title: A\n    evidence:\n      - check: attestation\n",
-        )
-        .unwrap();
+        // Each scope owns its CRA policy (#390): n/a in the work subtree,
+        // open at the root and the sibling.
+        let cra = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: a\n    title: A\n    evidence:\n      - check: attestation\n";
+        let na = cra.replace("    title: A\n", "    title: A\n    not_applicable: test\n");
+        for (path, policy) in [(".", cra), ("projects/side", cra), ("projects/work", &na), ("projects/work/nested", &na)] {
+            let dir = factory_core::policy::scope_policies_dir(&root, std::path::Path::new(path));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("cra.yaml"), policy).unwrap();
+        }
         std::fs::write(
             root.join(".factory/quality/baseline.yaml"),
             "attributes:\n  - id: reliability\n    importance: H\n    difficulty: M\n    scenarios:\n      - { id: sandboxed, measure: { check: sandbox } }\n",
@@ -325,7 +329,7 @@ mod tests {
         let mut root_scope: Scope = serde_yaml_ng::from_str("id: root-id\nname: company\n").unwrap();
         root_scope.path = PathBuf::from(".");
         let mut work: Scope = serde_yaml_ng::from_str(
-            "id: work-id\nname: work\nagents:\n  - { name: worker, harness: shell, sandbox: docker }\npolicies:\n  not_applicable:\n    - { control: cra/a, rationale: test }\n\
+            "id: work-id\nname: work\nagents:\n  - { name: worker, harness: shell, sandbox: docker }\n\
              metrics:\n  source: { id: demo, file: ../../data/demo/metrics.json }\n  declare:\n    - { id: x, title: Demo X, unit: ratio, better: higher }\n    - { id: y, title: Demo Y, unit: count, better: lower }\n",
         )
         .unwrap();
@@ -345,7 +349,6 @@ mod tests {
             instance: Instance { id: "test".into(), name: "test".into() },
             scope: Some(root_scope.clone()),
             scopes: vec![root_scope, work, nested, side],
-            policies: PolicyDeclaration { frameworks: vec!["cra".into()], ..Default::default() },
             quality: vec!["baseline".into()],
             ..Default::default()
         };
@@ -1396,10 +1399,6 @@ mod tests {
             },
             scope: Some(finance.clone()),
             scopes: vec![finance],
-            policies: PolicyDeclaration {
-                frameworks: vec!["gobd".to_string()],
-                ..Default::default()
-            },
             ..Default::default()
         };
         let registry = Registry::with_builtins();

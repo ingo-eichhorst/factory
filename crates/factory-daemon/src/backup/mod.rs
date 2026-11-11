@@ -1272,7 +1272,7 @@ mod tests {
     /// report to prove the lazy evidence wiring end to end, not just
     /// `resolve_backup_fact` on its own.
     fn engine_backing_up_with_backup_policy(keep: &str, destination: &str) -> (Arc<Engine>, PathBuf) {
-        use factory_core::config::{Config, Instance, PolicyDeclaration};
+        use factory_core::config::{Config, Instance};
         use factory_plugins::{Registry, SqliteStore};
         let base = std::env::temp_dir().join(format!("factory-backup-policy-engine-{}", uuid::Uuid::new_v4()));
         let root = base.join("instance");
@@ -1300,7 +1300,6 @@ mod tests {
             instance: Instance { id: "test".into(), name: "test".into() },
             scope: Some(company.clone()),
             scopes: vec![company],
-            policies: PolicyDeclaration { frameworks: vec!["dsgvo".to_string()], ..Default::default() },
             infrastructure: serde_yaml_ng::from_str(&format!(
                 "backup:\n  destination: {}\n  keep: {keep}\n",
                 destination.display()

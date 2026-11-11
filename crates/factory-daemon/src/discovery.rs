@@ -651,32 +651,35 @@ mod tests {
         );
     }
 
+    /// #390: no policy block is read any more, so a misplaced one is
+    /// never a refused start -- discovery carries it into the scope's
+    /// legacy block, where the Policy board names the migration.
     #[test]
-    fn a_policies_block_beside_the_scope_block_is_refused_with_the_file_named() {
+    fn a_policies_block_beside_the_scope_block_is_carried_never_refused() {
         let s = Scratch::new("misplaced-policies");
-        let path = s.write_scope(
+        s.write_scope(
             "projects",
             "scope: { id: p-id, name: projects }\npolicies:\n  frameworks: [cra]\n",
         );
         let mut f = factory(&s.path(), None);
 
-        let error = apply(&mut f).unwrap_err().to_string();
-        assert!(error.contains("scope.policies"), "{error}");
-        assert!(error.contains(&path.display().to_string()), "{error}");
+        apply(&mut f).unwrap();
+        f.config.validate().unwrap();
+        assert!(!f.config.scopes[0].policies.is_empty());
     }
 
     #[test]
-    fn scope_policies_are_read_from_a_nested_scope_file() {
+    fn a_legacy_scope_policies_block_of_any_shape_still_starts() {
         let s = Scratch::new("scope-policies");
         s.write_scope(
             "projects",
-            "scope:\n  id: p-id\n  name: projects\n  policies:\n    frameworks: [iso27001]\n",
+            "scope:\n  id: p-id\n  name: projects\n  policies:\n    frameworks: [{name: iso27001, except: [projects]}]\n",
         );
         let mut f = factory(&s.path(), None);
 
         apply(&mut f).unwrap();
-
-        assert_eq!(f.config.scopes[0].policies.frameworks, vec!["iso27001".to_string()]);
+        f.config.validate().unwrap();
+        assert!(!f.config.scopes[0].policies.is_empty());
     }
 
     #[test]

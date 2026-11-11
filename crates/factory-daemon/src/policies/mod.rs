@@ -390,7 +390,7 @@ mod tests {
     use chrono::DateTime;
     use factory_core::adapter::store::task_from_new;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, DaemonConfig, Factory, Instance, InterfaceConfig, PolicyDeclaration, Scope};
+    use factory_core::config::{Config, DaemonConfig, Factory, Instance, InterfaceConfig, Scope};
     use factory_core::control_plan::{
         AttestationVerdict, RequiredStep, StepAttestation, StepKind, GATE_ACTOR,
     };
@@ -418,6 +418,15 @@ mod tests {
         scope
     }
 
+    /// `<root>/<scope_path>/.factory/policies/<framework>.yaml` -- a scope's
+    /// own policy (#390). Nothing is inherited, so a fixture that wants a
+    /// framework in several scopes writes it into each.
+    fn write_policy(root: &std::path::Path, scope_path: &str, framework: &str, yaml: &str) {
+        let dir = factory_core::policy::scope_policies_dir(root, std::path::Path::new(scope_path));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{framework}.yaml")), yaml).unwrap();
+    }
+
     /// `company` (`.`) is root and commits the instance to `cra` for every
     /// scope, via the top-level `policies:` every chain always prepends.
     /// `engineering` (`projects`) adds nothing of its own; `demo-app`
@@ -435,10 +444,7 @@ mod tests {
     /// too -- see the tests below, which create one in the real store).
     fn test_engine() -> Arc<Engine> {
         let root = std::env::temp_dir().join(format!("factory-policies-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(root.join(".factory/policies")).unwrap();
-        std::fs::write(
-            root.join(".factory/policies/cra.yaml"),
-            "framework: cra\n\
+        let cra = "framework: cra\n\
              title: Cyber Resilience Act\n\
              kind: regulation\n\
              controls:\n\
@@ -447,9 +453,21 @@ mod tests {
              \x20\x20- id: c\n\x20\x20\x20\x20title: Control C\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: knowledge\n\
              \x20\x20- id: d\n\x20\x20\x20\x20title: Control D\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: task\n\x20\x20\x20\x20\x20\x20\x20\x20task: sbom export\n\x20\x20\x20\x20\x20\x20\x20\x20max_age: 7d\n\
              \x20\x20- id: e\n\x20\x20\x20\x20title: Control E\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: workflow\n\x20\x20\x20\x20\x20\x20\x20\x20workflow: release train\n\x20\x20\x20\x20\x20\x20\x20\x20max_age: 7d\n\
-             \x20\x20- id: f\n\x20\x20\x20\x20title: Control F\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: gate\n\x20\x20\x20\x20\x20\x20\x20\x20dataset: smoke\n\x20\x20\x20\x20\x20\x20\x20\x20max_age: 7d\n",
-        )
-        .unwrap();
+             \x20\x20- id: f\n\x20\x20\x20\x20title: Control F\n\x20\x20\x20\x20evidence:\n\x20\x20\x20\x20\x20\x20- check: gate\n\x20\x20\x20\x20\x20\x20\x20\x20dataset: smoke\n\x20\x20\x20\x20\x20\x20\x20\x20max_age: 7d\n";
+        // Every scope owns the same CRA policy (#390); `demo-app`'s marks
+        // `c` not applicable in its own file.
+        for path in [".", "projects", "other"] {
+            write_policy(&root, path, "cra", cra);
+        }
+        write_policy(
+            &root,
+            "projects/demo",
+            "cra",
+            &cra.replace(
+                "\x20\x20- id: c\n",
+                "\x20\x20- id: c\n\x20\x20\x20\x20not_applicable: \"we ship no hardware\"\n",
+            ),
+        );
 
         std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
         std::fs::write(
@@ -463,21 +481,12 @@ mod tests {
                 id: "test".into(),
                 name: "test".into(),
             },
-            policies: PolicyDeclaration {
-                frameworks: vec!["cra".to_string()],
-                ..Default::default()
-            },
             ..Default::default()
         };
         config.scopes = vec![
             scope_at("company-id", "company", ".", ""),
             scope_at("engineering-id", "engineering", "projects", ""),
-            scope_at(
-                "demo-app-id",
-                "demo-app",
-                "projects/demo",
-                "  not_applicable:\n    - control: cra/c\n      rationale: \"we ship no hardware\"\n",
-            ),
+            scope_at("demo-app-id", "demo-app", "projects/demo", ""),
             scope_at("sibling-id", "sibling", "other", ""),
         ];
 
@@ -537,10 +546,6 @@ mod tests {
             },
             scope: Some(finance.clone()),
             scopes: vec![finance],
-            policies: PolicyDeclaration {
-                frameworks: vec!["gobd".to_string()],
-                ..Default::default()
-            },
             ..Default::default()
         };
         let registry = Registry::with_builtins();
@@ -663,12 +668,13 @@ mod tests {
             },
             scope: Some(company.clone()),
             scopes: vec![company, finance, sibling],
-            policies: PolicyDeclaration {
-                frameworks: vec!["gobd".to_string()],
-                ..Default::default()
-            },
             ..Default::default()
         };
+        // Each scope owns the same policy naming finance's metric (#390).
+        let gobd = std::fs::read_to_string(root.join(".factory/policies/gobd.yaml")).unwrap();
+        for path in ["finance", "sibling"] {
+            write_policy(&root, path, "gobd", &gobd);
+        }
         let registry = Registry::with_builtins();
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
         let engine = Arc::new(Engine::new(
@@ -1136,9 +1142,10 @@ mod tests {
                 foreman: ForemanConfig { enabled: true, ..ForemanConfig::default() },
                 ..DaemonConfig::default()
             },
-            policies: PolicyDeclaration { frameworks: vec!["house".to_string()], ..Default::default() },
             ..Default::default()
         };
+        let house = std::fs::read_to_string(root.join(".factory/policies/house.yaml")).unwrap();
+        write_policy(&root, "projects/team", "house", &house);
         let root_scope = scope_at("root-id", "root", ".", "");
         let mut team_scope: Scope = serde_yaml_ng::from_str(
             "id: team-id\nname: team\nagents:\n  - name: worker\n    harness: shell\n    role: worker\n    sandbox: docker\n",
@@ -1434,9 +1441,8 @@ mod tests {
     async fn dataset_level_facts_never_gathers_the_backup_fact_when_no_check_names_one() {
         let engine = l123_test_engine();
         let snapshot = engine.factory_snapshot();
-        let (catalogues, _findings, _tags) = engine.load_catalogues_and_tags().await.unwrap();
-        let chain = engine.policy_chain("root");
-        let (applied, _cf) = policy::applicable(&catalogues, &chain);
+        let (policies, _tags) = engine.load_policies_and_tags().await.unwrap();
+        let applied = policies.applied("root");
         assert!(!needs_backup_facts(&applied), "house.yaml names no backup_* fact");
 
         let root_scope = snapshot.config.scopes.iter().find(|s| s.name == "root").unwrap();
@@ -1718,10 +1724,17 @@ mod tests {
     /// built over the same `root`/`db` is what a restart looks like, the
     /// same pattern `intake.rs`'s own restart test uses.
     fn clock_engine(root: &std::path::Path, db: &std::path::Path) -> Arc<Engine> {
+        // The tests author the CRA policy at the root's own directory; the
+        // root is no scope here, so `demo` owns a copy of it (#390).
+        if let Ok(read) = std::fs::read_dir(root.join(".factory/policies")) {
+            for entry in read.flatten().filter(|e| e.path().is_file()) {
+                let framework = entry.path().file_stem().unwrap().to_string_lossy().into_owned();
+                write_policy(root, "demo", &framework, &std::fs::read_to_string(entry.path()).unwrap());
+            }
+        }
         let config = Config {
             instance: Instance { id: "test".into(), name: "test".into() },
             scopes: vec![scope_at("demo-id", "demo", "demo", "")],
-            policies: PolicyDeclaration { frameworks: vec!["cra".to_string()], ..Default::default() },
             ..Default::default()
         };
         let factory = Factory { root: root.to_path_buf(), config };
@@ -1931,9 +1944,8 @@ mod tests {
     #[tokio::test]
     async fn needs_attested_facts_is_false_for_a_catalogue_with_no_attested_check() {
         let engine = test_engine();
-        let (catalogues, _findings, _tags) = engine.load_catalogues_and_tags().await.unwrap();
-        let chain = engine.policy_chain("company");
-        let (applied, _findings) = policy::applicable(&catalogues, &chain);
+        let (policies, _tags) = engine.load_policies_and_tags().await.unwrap();
+        let applied = policies.applied("company");
         assert!(
             !needs_attested_facts(&applied),
             "cra.yaml here names no attested check"
@@ -1968,10 +1980,6 @@ mod tests {
                 name: "test".into(),
             },
             scopes: vec![scope_at("demo-id", "demo", ".", "")],
-            policies: PolicyDeclaration {
-                frameworks: vec!["house".to_string()],
-                ..Default::default()
-            },
             ..Default::default()
         };
         let factory = Factory { root, config };
@@ -2165,118 +2173,266 @@ mod tests {
         assert_eq!(detail.status.kind(), StatusKind::Open);
     }
 
-    /// `test_engine`'s tree and store, with the root binding `cra` to every
-    /// scope but the `engineering` subtree (#332).
-    fn excluded_test_engine() -> Arc<Engine> {
-        let base = test_engine();
+    // -- scope-owned policies and the subtree aggregate (#390) -------------
+
+    /// `projects` (organizational: no policy, no agent) groups `irrlicht`,
+    /// `factory` and `factory-other` -- the last a lookalike path beside
+    /// `projects/factory`, never below it. Each project picks the CRA
+    /// template's `sbom` control and binds it to its own task; `irrlicht`
+    /// marks `hw` n/a and also owns an ISO 27001 policy whose `a-8-8` the
+    /// CRA control `maps_to`.
+    fn projects_engine() -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("factory-policies-390-{}", uuid::Uuid::new_v4()));
+        let templates = factory_core::policy::templates_dir(&root);
+        std::fs::create_dir_all(&templates).unwrap();
+        std::fs::write(
+            templates.join("cra.yaml"),
+            "template: cra\ntitle: Cyber Resilience Act\nkind: regulation\ncontrols:\n\
+             \x20 - {id: sbom, title: SBOM, maps_to: [iso27001/a-8-8], remediation: Export an SBOM}\n\
+             \x20 - {id: hw, title: Hardware}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            templates.join("iso27001.yaml"),
+            "template: iso27001\ntitle: ISO/IEC 27001\nkind: standard\ncontrols:\n  - {id: a-8-8, title: Technical vulnerabilities}\n",
+        )
+        .unwrap();
+        let cra = |task: &str, hw: &str| {
+            format!(
+                "framework: cra\ntemplate: cra\ncontrols:\n  - {{id: sbom, evidence: [{{check: task, task: {task}}}]}}\n{hw}"
+            )
+        };
+        write_policy(&root, "projects/irrlicht", "cra", &cra("irrlicht-sbom", "  - {id: hw, not_applicable: No hardware ships}\n"));
+        write_policy(&root, "projects/factory", "cra", &cra("factory-sbom", ""));
+        write_policy(&root, "projects/factory-other", "cra", &cra("factory-sbom", ""));
+        write_policy(
+            &root,
+            "projects/irrlicht",
+            "iso27001",
+            "framework: iso27001\ntemplate: iso27001\ncontrols: [{id: a-8-8, evidence: [{check: attestation}]}]\n",
+        );
+        let mut config = Config {
+            instance: Instance { id: "test".into(), name: "test".into() },
+            ..Default::default()
+        };
+        config.scopes = vec![
+            scope_at("company-id", "company", ".", ""),
+            scope_at("projects-id", "projects", "projects", ""),
+            scope_at("irrlicht-id", "irrlicht", "projects/irrlicht", ""),
+            scope_at("factory-id", "factory", "projects/factory", ""),
+            scope_at("factory-other-id", "factory-other", "projects/factory-other", ""),
+        ];
+        let factory = Factory { root, config };
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::in_memory().unwrap());
+        Arc::new(Engine::new(factory, Registry::with_builtins(), store, PathBuf::from("factory"), Vec::new()))
+    }
+
+    /// A task titled `title` in `scope` whose only run finished `done` now.
+    async fn done_task(engine: &Engine, scope: &str, title: &str) -> String {
+        let task = engine
+            .l4
+            .store
+            .create(&task_from_new(
+                factory_core::task::NewTask { title: title.to_string(), ..Default::default() },
+                scope.to_string(),
+                "assistant".to_string(),
+                "shell".to_string(),
+            ))
+            .await
+            .unwrap();
+        let run = engine
+            .l4
+            .store
+            .create_run(&NewRun {
+                task_id: task.id.clone(),
+                trigger: Trigger::Manual,
+                agent: "assistant".to_string(),
+                adapter: "shell".to_string(),
+                runtime: "shell".to_string(),
+                token: format!("token-{title}-{scope}"),
+                queued_at: None,
+                scheduled_for: None,
+            })
+            .await
+            .unwrap();
+        engine
+            .l4
+            .store
+            .update_run(&run.id, &RunPatch { status: Some(RunStatus::Done), ended_at: Some(Utc::now()), ..Default::default() })
+            .await
+            .unwrap();
+        task.id
+    }
+
+    fn status_in(report: &factory_core::protocol::PolicyReport, scope: &str, control: &str) -> StatusKind {
+        report
+            .rows
+            .iter()
+            .find(|r| r.scope == scope)
+            .unwrap_or_else(|| panic!("no row for {scope}: {:?}", report.rows))
+            .statuses
+            .iter()
+            .find(|s| s.control.to_string() == control)
+            .unwrap_or_else(|| panic!("no {control} at {scope}"))
+            .status
+            .kind()
+    }
+
+    #[tokio::test]
+    async fn two_projects_bind_the_same_template_control_to_their_own_tasks_and_the_parent_aggregates() {
+        let engine = projects_engine();
+        let irrlicht_task = done_task(&engine, "irrlicht", "irrlicht-sbom").await;
+        // `factory`'s task title, but in the wrong scope: never its evidence.
+        done_task(&engine, "irrlicht", "factory-sbom").await;
+
+        let report = engine.policy_report(Some("projects")).await.unwrap();
+        assert_eq!(
+            report.rows.iter().map(|r| r.scope.as_str()).collect::<Vec<_>>(),
+            ["irrlicht", "factory", "factory-other"],
+            "an organizational scope with no policy shows its children's aggregate"
+        );
+        assert_eq!(status_in(&report, "irrlicht", "cra/sbom"), StatusKind::Satisfied);
+        assert!(report.rows[0].statuses.iter().any(|s| s.refs.iter().any(|r| r.id == irrlicht_task)));
+        assert_eq!(status_in(&report, "factory", "cra/sbom"), StatusKind::Open);
+        let cra = report.rollup.iter().find(|r| r.framework == "cra").unwrap();
+        assert_eq!((cra.counts.satisfied, cra.counts.open, cra.counts.not_applicable), (1, 2, 1));
+        assert!(!cra.compliant, "one child open: the parent is not compliant");
+        let applicability = report.applicability.iter().find(|a| a.framework == "cra").unwrap();
+        assert_eq!(applicability.covers, ["irrlicht", "factory", "factory-other"]);
+        assert_eq!(applicability.no_policy, ["projects"], "listed, never counted");
+        assert_eq!(
+            report.rows[1].not_selected.iter().map(|c| c.control.to_string()).collect::<Vec<_>>(),
+            ["cra/hw"]
+        );
+
+        // `projects/factory` never aggregates the lookalike beside it.
+        let factory = engine.policy_report(Some("projects/factory")).await.unwrap();
+        assert_eq!(factory.rows.iter().map(|r| r.scope.as_str()).collect::<Vec<_>>(), ["factory"]);
+
+        // `irrlicht` alone is compliant; its own metric agrees with its board.
+        let irrlicht = engine.policy_report(Some("irrlicht")).await.unwrap();
+        assert!(irrlicht.rollup.iter().find(|r| r.framework == "cra").unwrap().compliant);
+
+        // The guide names a scope's own frameworks, never a descendant's.
+        assert_eq!(engine.policy_frameworks("irrlicht"), ["cra", "iso27001"]);
+        assert!(engine.policy_frameworks("projects").is_empty());
+    }
+
+    #[tokio::test]
+    async fn maps_to_evidence_counts_within_its_scope_and_never_across_scopes() {
+        let engine = projects_engine();
+        let owner = Caller::Owner;
+        let expiry = Utc::now() + chrono::Duration::days(30);
+        engine
+            .policy_attest(&owner, "iso27001/a-8-8".parse().unwrap(), "irrlicht".into(), "https://example.com/scan".into(), None, expiry, None, None)
+            .await
+            .unwrap();
+        let report = engine.policy_report(Some("projects")).await.unwrap();
+        assert_eq!(status_in(&report, "irrlicht", "iso27001/a-8-8"), StatusKind::Attested);
+        assert_eq!(
+            status_in(&report, "irrlicht", "cra/sbom"),
+            StatusKind::Attested,
+            "iso27001/a-8-8 in irrlicht satisfies cra/sbom in irrlicht"
+        );
+        assert_eq!(
+            status_in(&report, "factory", "cra/sbom"),
+            StatusKind::Open,
+            "and never cra/sbom in factory"
+        );
+
+        // An ancestor's attestation never covers a policy it does not own.
+        let refused = engine
+            .policy_attest(&owner, "cra/sbom".parse().unwrap(), "projects".into(), "x".into(), None, expiry, None, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("\"projects\" has no cra policy of its own"), "{refused}");
+        assert!(refused.contains("belongs to irrlicht, factory, factory-other"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn show_remediate_export_and_templates_resolve_in_the_owning_scope() {
+        let engine = projects_engine();
+        let refused = engine
+            .policy_control("cra/sbom".parse().unwrap(), "projects")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("belongs to irrlicht, factory, factory-other"), "{refused}");
+        let detail = engine.policy_control("cra/sbom".parse().unwrap(), "factory").await.unwrap();
+        assert_eq!(detail.title, "SBOM", "the template's title");
+        assert_eq!(detail.remediation.as_deref(), Some("Export an SBOM"));
+        assert_eq!(detail.maps_to, ["iso27001/a-8-8".parse().unwrap()]);
+
+        assert!(engine
+            .policy_remediate("cra/sbom".parse().unwrap(), "projects".to_string(), None)
+            .await
+            .is_err());
+        let task = engine
+            .policy_remediate("cra/sbom".parse().unwrap(), "factory".to_string(), None)
+            .await
+            .unwrap();
+        assert_eq!(task.scope, "factory", "the task lands in the owning scope");
+        assert!(task.instructions.starts_with("Export an SBOM"), "{}", task.instructions);
+        assert!(engine
+            .policy_remediate("cra/hw".parse().unwrap(), "factory".to_string(), None)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cra/hw is not selected at \"factory\""));
+
+        let (_, body) = engine.policy_export_render(Some("projects"), "md").await.unwrap();
+        let soa = &body[body.find("## Statement of Applicability").expect(&body)..];
+        assert!(soa.contains("### irrlicht"), "{soa}");
+        assert!(soa.contains("- cra/hw -- Hardware: n/a -- No hardware ships"), "{soa}");
+        assert!(soa.contains("- cra/hw -- Hardware: not selected"), "{soa}");
+        assert!(soa.contains("- cra/sbom -- SBOM: selected (open)"), "{soa}");
+        assert!(body.contains("policy at irrlicht, factory, factory-other; no policy at projects"), "{body}");
+
+        let view = engine.policy_template("cra", Some("irrlicht")).await.unwrap();
+        assert_eq!(
+            view.scopes[0].controls.iter().map(|c| (c.id.as_str(), c.selection)).collect::<Vec<_>>(),
+            [
+                ("sbom", factory_core::protocol::Selection::Selected),
+                ("hw", factory_core::protocol::Selection::NotApplicable)
+            ]
+        );
+        let all = engine.policy_template("cra", None).await.unwrap();
+        assert_eq!(all.scopes.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_policies_block_is_a_finding_and_every_policy_read_still_answers() {
+        let base = projects_engine();
         let mut factory = base.factory_snapshot();
         factory.config.policies =
-            serde_yaml_ng::from_str("frameworks: [{name: cra, except: [engineering]}]").unwrap();
-        Arc::new(Engine::new(
+            serde_yaml_ng::from_str("frameworks: [{name: cra, except: [factory]}]\ntighten: {cra/sbom: {max_age: 1d}}\n").unwrap();
+        factory.config.scopes[3].policies = serde_yaml_ng::from_str("frameworks: [ai-act]").unwrap();
+        let engine = Arc::new(Engine::new(
             factory,
             Registry::with_builtins(),
             base.l4.store.clone(),
             PathBuf::from("factory"),
             Vec::new(),
-        ))
-    }
-
-    #[tokio::test]
-    async fn a_root_exclusion_leaves_the_framework_off_that_subtrees_board_guide_export_attest_and_remediate(
-    ) {
-        let engine = excluded_test_engine();
-        let owner = Caller::Owner;
-
-        let subtree = engine.policy_report(Some("engineering")).await.unwrap();
-        assert!(
-            subtree.rows.is_empty(),
-            "cra applies nowhere below engineering: {:?}",
-            subtree.rows
-        );
-        assert!(subtree.rollup.is_empty());
-        let cra = &subtree.applicability[0];
+        ));
+        let report = engine.policy_report(None).await.unwrap();
+        let legacy: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind == policy::FindingKind::LegacyPolicies)
+            .map(|f| f.subject.as_str())
+            .collect();
+        assert_eq!(legacy, ["factory", "test"], "{:?}", report.findings);
         assert_eq!(
-            (cra.framework.as_str(), cra.restricted_by.as_deref()),
-            ("cra", Some("test"))
+            status_in(&report, "factory", "cra/sbom"),
+            StatusKind::Open,
+            "a legacy exclusion excludes nothing"
         );
-        assert!(cra.covers.is_empty());
-        assert_eq!(cra.excluded, ["engineering", "demo-app"]);
-
-        let whole = engine.policy_report(None).await.unwrap();
-        assert_eq!(
-            whole
-                .rows
-                .iter()
-                .map(|r| r.scope.as_str())
-                .collect::<Vec<_>>(),
-            ["company", "sibling"]
-        );
-        assert_eq!(whole.applicability[0].covers, ["company", "sibling"]);
-
+        let subtree = engine.policy_report(Some("irrlicht")).await.unwrap();
         assert!(
-            factory_core::policy::frameworks_in_chain(&engine.policy_chain("demo-app")).is_empty()
+            subtree.findings.iter().all(|f| f.kind != policy::FindingKind::LegacyPolicies),
+            "a scope's own board names only the legacy blocks in its subtree"
         );
-        assert_eq!(
-            factory_core::policy::frameworks_in_chain(&engine.policy_chain("sibling")),
-            ["cra"]
-        );
-
-        let refused = engine
-            .policy_remediate("cra/b".parse().unwrap(), "demo-app".to_string(), None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            refused.contains("cra/b does not apply at \"demo-app\""),
-            "{refused}"
-        );
-        assert!(
-            refused.contains("excludes cra from the \"engineering\" subtree"),
-            "{refused}"
-        );
-        let refused = engine
-            .policy_attest(
-                &owner,
-                "cra/b".parse().unwrap(),
-                "engineering".to_string(),
-                "https://example.com/evidence".to_string(),
-                None,
-                Utc::now() + chrono::Duration::days(1),
-                None,
-                None,
-            )
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(refused.contains("except: [engineering]"), "{refused}");
-        let task = engine
-            .policy_remediate("cra/b".parse().unwrap(), "sibling".to_string(), None)
-            .await
-            .unwrap();
-        assert_eq!(
-            task.scope, "sibling",
-            "cra still applies, and remediates, outside the exclusion"
-        );
-
-        let (_, body) = engine.policy_export_render(None, "md").await.unwrap();
-        assert!(body.contains("## Applicability"), "{body}");
-        assert!(
-            body.contains(
-                "- Cyber Resilience Act (cra): the instance root (test) binds it to the whole tree minus the \
-                 engineering subtree(s) -- applies at company, sibling; excluded at engineering, demo-app"
-            ),
-            "{body}"
-        );
-        let (_, json) = engine
-            .policy_export_render(Some("engineering"), "json")
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            json["report"]["applicability"][0]["except"],
-            serde_json::json!(["engineering"])
-        );
-        assert_eq!(json["report"]["rows"], serde_json::json!([]));
     }
 
     #[tokio::test]
@@ -2299,13 +2455,14 @@ mod tests {
             let mut child = engine.factory_snapshot().scope("demo-app").unwrap().clone();
             child.name = "renamed".into();
             child.path = "elsewhere/demo".into();
-            child.policies.frameworks = vec!["cra".into()];
-            child.policies.not_applicable.clear();
-            child.policies.tighten.insert(
-                "cra/a".parse().unwrap(),
-                factory_core::policy::Tighten {
-                    max_age: Some("3d".parse().unwrap()),
-                },
+            // The moved scope's own policy is whatever its new directory
+            // holds (#390): a 3d window on `a`, no `n/a`.
+            let root = engine.factory_snapshot().root.clone();
+            write_policy(
+                &root,
+                "elsewhere/demo",
+                "cra",
+                "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {id: a, title: A, max_age: 3d, evidence: [{check: knowledge}]}\n  - {id: c, title: C, evidence: [{check: knowledge}]}\n",
             );
             engine.replace_scope("demo-app-id", child);
         }
@@ -2342,8 +2499,8 @@ mod tests {
             "moved child must no longer appear under the old parent"
         );
         assert_eq!(parent.scopes[0].scope.name, "engineering");
-        let (catalogues, _, tags) = engine.load_catalogues_and_tags().await.unwrap();
+        let (policies, tags) = engine.load_policies_and_tags().await.unwrap();
         assert!(tags.contains("control/cra/a"));
-        assert_eq!(catalogues[0].controls.len(), 6);
+        assert_eq!(policies.applied("company").len(), 6);
     }
 }
