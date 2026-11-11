@@ -113,10 +113,10 @@ pub struct ReportPlan {
     now: DateTime<Utc>,
     scenarios: Vec<Scenario>,
     scenario_findings: Vec<scenario::Finding>,
-    real_catalogues: Vec<policy::Catalogue>,
+    policies: policy::Policies,
     policy_findings: Vec<policy::Finding>,
     tags: BTreeSet<String>,
-    catalogues_with_drafts: Vec<policy::Catalogue>,
+    drafts: Vec<policy::PolicyFile>,
     goals_catalogue: goals::GoalsCatalogue,
     checkins: Vec<goals::CheckIn>,
     asked: Option<Scope>,
@@ -631,7 +631,7 @@ impl<'a> Service<'a> {
         &self,
         checks: &C,
         targets: &[Scope],
-        catalogues: &[policy::Catalogue],
+        policies: &policy::Policies,
         tags: &BTreeSet<String>,
         receipts: &[Attestation],
         now: DateTime<Utc>,
@@ -640,14 +640,10 @@ impl<'a> Service<'a> {
         Vec<policy::Finding>,
     )> {
         let mut findings = Vec::new();
+        // Each scope's own policies only (#390).
         let applied: Vec<_> = targets
             .iter()
-            .map(|scope| {
-                let (subjects, own) =
-                    policy::applicable(catalogues, &self.intent.config.chain(&scope.name));
-                findings.extend(own);
-                (scope, subjects)
-            })
+            .map(|scope| (scope, policies.applied(&scope.name)))
             .collect();
         let (statuses, evidence_findings) = self
             .evaluate_applied(checks, &applied, tags, receipts, now)
@@ -661,7 +657,8 @@ impl<'a> Service<'a> {
         checks: &C,
         targets: &[Scope],
         scenario_obj: &Scenario,
-        catalogues: &[policy::Catalogue],
+        policies: &policy::Policies,
+        drafts: &[policy::PolicyFile],
         tags: &BTreeSet<String>,
         receipts: &[Attestation],
         now: DateTime<Utc>,
@@ -675,11 +672,16 @@ impl<'a> Service<'a> {
         let applied: Vec<_> = targets
             .iter()
             .map(|scope| {
-                let (chain, own) =
-                    scenario::overlay_chain(&self.intent.config.chain(&scope.name), scenario_obj);
+                let real: Vec<_> = policies.of(&scope.name).collect();
+                let (subjects, own_policy, own) = scenario::overlay_policies(
+                    &scope.name,
+                    &real,
+                    drafts,
+                    &policies.templates,
+                    scenario_obj,
+                );
                 scenario_findings.extend(own);
-                let (subjects, own) = policy::applicable(catalogues, &chain);
-                policy_findings.extend(own);
+                policy_findings.extend(own_policy);
                 (scope, subjects)
             })
             .collect();
@@ -727,9 +729,9 @@ impl<'a> Service<'a> {
         };
         scenario_findings.extend(scenario::stale_findings(&scenarios, now));
 
-        let (real_catalogues, mut policy_findings, tags) =
-            self.intent.catalogues_with_tags(knowledge).await?;
-        let (draft_catalogues, draft_findings) = {
+        let (policies, tags) = self.intent.policies_with_tags(knowledge).await?;
+        let mut policy_findings = policies.findings.clone();
+        let (drafts, draft_findings) = {
             let dir = scenario::drafts_dir(&self.intent.root);
             tokio::task::spawn_blocking(move || scenario::load_drafts(&dir))
                 .await
@@ -738,9 +740,6 @@ impl<'a> Service<'a> {
                 })?
         };
         policy_findings.extend(draft_findings);
-        let (catalogues_with_drafts, merge_findings) =
-            scenario::merge_catalogues(&real_catalogues, draft_catalogues);
-        scenario_findings.extend(merge_findings);
 
         let goals_catalogue = {
             let dir = goals::goals_dir(&self.intent.root);
@@ -802,10 +801,10 @@ impl<'a> Service<'a> {
             now,
             scenarios,
             scenario_findings,
-            real_catalogues,
+            policies,
             policy_findings,
             tags,
-            catalogues_with_drafts,
+            drafts,
             goals_catalogue,
             checkins,
             asked,
@@ -830,10 +829,10 @@ impl<'a> Service<'a> {
             now,
             scenarios,
             mut scenario_findings,
-            real_catalogues,
+            policies,
             mut policy_findings,
             tags,
-            catalogues_with_drafts,
+            drafts,
             goals_catalogue,
             checkins,
             asked,
@@ -855,16 +854,17 @@ impl<'a> Service<'a> {
             .evaluate_baseline_over_scopes(
                 checks,
                 &target_scopes,
-                &real_catalogues,
+                &policies,
                 &tags,
                 &all_attestations,
                 now,
             )
             .await?;
         policy_findings.extend(baseline_policy_findings);
-        let baseline_rollup = policy::rollup(&policy::worst_across_scopes(
-            &baseline_statuses.values().cloned().collect::<Vec<_>>(),
-        ));
+        // Every (scope, control) pair (#390), the same as the Policy board.
+        let baseline_rollup = policy::rollup(
+            &baseline_statuses.values().flatten().cloned().collect::<Vec<_>>(),
+        );
 
         let target_names: BTreeSet<&str> = target_scopes.iter().map(|s| s.name.as_str()).collect();
         let baseline_backlog = open_backlog(&tasks, &target_names);
@@ -894,7 +894,8 @@ impl<'a> Service<'a> {
                     checks,
                     &target_scopes,
                     s,
-                    &catalogues_with_drafts,
+                    &policies,
+                    &drafts,
                     &tags,
                     &all_attestations,
                     now,
@@ -1030,8 +1031,8 @@ impl<'a> Service<'a> {
             overrides = s.driver_overrides();
             horizon_weeks = s.horizon.weeks();
 
-            let (real_catalogues, _pf, tags) = self.intent.catalogues_with_tags(knowledge).await?;
-            let (draft_catalogues, _df) = {
+            let (policies, tags) = self.intent.policies_with_tags(knowledge).await?;
+            let (drafts, _df) = {
                 let dir = scenario::drafts_dir(&self.intent.root);
                 tokio::task::spawn_blocking(move || scenario::load_drafts(&dir))
                     .await
@@ -1039,8 +1040,6 @@ impl<'a> Service<'a> {
                         FactoryError::Other(anyhow::anyhow!("draft policy directory walk: {e}"))
                     })?
             };
-            let (catalogues_with_drafts, _mf) =
-                scenario::merge_catalogues(&real_catalogues, draft_catalogues);
             let all_attestations = self.intent.receipts.all().await?;
             let all_scopes = &target_scopes;
 
@@ -1048,7 +1047,7 @@ impl<'a> Service<'a> {
                 .evaluate_baseline_over_scopes(
                     checks,
                     &all_scopes,
-                    &real_catalogues,
+                    &policies,
                     &tags,
                     &all_attestations,
                     now,
@@ -1059,7 +1058,8 @@ impl<'a> Service<'a> {
                     checks,
                     &all_scopes,
                     &s,
-                    &catalogues_with_drafts,
+                    &policies,
+                    &drafts,
                     &tags,
                     &all_attestations,
                     now,
@@ -1188,8 +1188,8 @@ impl<'a> Service<'a> {
             .ok_or_else(|| {
                 FactoryError::BadRequest(format!("no such scenario: {scenario_name:?}"))
             })?;
-        let (real_catalogues, _pf, tags) = self.intent.catalogues_with_tags(knowledge).await?;
-        let (draft_catalogues, _df) = {
+        let (policies, tags) = self.intent.policies_with_tags(knowledge).await?;
+        let (drafts, _df) = {
             let dir = scenario::drafts_dir(&self.intent.root);
             tokio::task::spawn_blocking(move || scenario::load_drafts(&dir))
                 .await
@@ -1197,12 +1197,11 @@ impl<'a> Service<'a> {
                     FactoryError::Other(anyhow::anyhow!("draft policy directory walk: {e}"))
                 })?
         };
-        let (catalogues_with_drafts, _mf) =
-            scenario::merge_catalogues(&real_catalogues, draft_catalogues);
-        let base_chain = self.intent.config.chain(&scope_obj.name);
-        let (baseline_applied, _cf1) = policy::applicable(&real_catalogues, &base_chain);
-        let (overlaid_chain, _of) = scenario::overlay_chain(&base_chain, &s);
-        let (scenario_applied, _cf2) = policy::applicable(&catalogues_with_drafts, &overlaid_chain);
+        // The scope's own policies (#390), and the same with the overlay.
+        let baseline_applied = policies.applied(&scope_obj.name);
+        let real: Vec<_> = policies.of(&scope_obj.name).collect();
+        let (scenario_applied, _pf, _of) =
+            scenario::overlay_policies(&scope_obj.name, &real, &drafts, &policies.templates, &s);
         let all_attestations = self.intent.receipts.all().await?;
         let primary = vec![(&scope_obj, scenario_applied.clone())];
         let alternative = vec![(&scope_obj, baseline_applied.clone())];
@@ -1270,8 +1269,13 @@ mod tests {
             ] {
                 std::fs::create_dir_all(dir).unwrap();
             }
-            std::fs::write(policy::policies_dir(&root).join("house.yaml"),
-                "framework: house\ntitle: House\nkind: regulation\ncontrols:\n  - {id: base, title: Base, evidence: [{check: attestation}]}\n").unwrap();
+            // Every scope owns the same house policy (#390): nothing is inherited.
+            for path in [".", "projects/work", "projects/work/deep", "projects/work-other"] {
+                let dir = policy::scope_policies_dir(&root, std::path::Path::new(path));
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("house.yaml"),
+                    "framework: house\ntitle: House\nkind: regulation\ncontrols:\n  - {id: base, title: Base, evidence: [{check: attestation}]}\n").unwrap();
+            }
             std::fs::write(scenario::drafts_dir(&root).join("next.yaml"),
                 "framework: next\ntitle: Next\nkind: regulation\ncontrols:\n  - {id: new, title: New, evidence: [{check: attestation}]}\n").unwrap();
             let fixture = Self {
@@ -1302,7 +1306,7 @@ mod tests {
                     policies: Default::default(),
                 })
                 .collect(),
-                root_policies: serde_yaml_ng::from_str("frameworks: [house]").unwrap(),
+                root_policies: Default::default(),
                 root_name: Some("root".into()),
                 instance_name: "example".into(),
             };

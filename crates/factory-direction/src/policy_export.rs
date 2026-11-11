@@ -36,12 +36,11 @@ pub struct PolicyExport {
     pub scope: Option<String>,
     pub produced_at: DateTime<Utc>,
     pub report: PolicyReport,
-    /// Every attestation recorded at a row's own scope or an ancestor of it
-    /// -- keyed by `ScopePolicy.scope`, the same "scope or ancestor" rule
-    /// `Engine::policy_report`'s own `Evidence` assembly already applies per
-    /// scope (`factory-daemon/src/policies/mod.rs`), just kept here rather
-    /// than folded into a status and discarded. A control's *whole* history
-    /// at that scope, the same as `PolicyControlDetail.attestations` --
+    /// Every attestation recorded at a row's own scope -- keyed by
+    /// `ScopePolicy.scope`, the scope that owns the control (#390), the same
+    /// exact-scope rule the evaluation applies, just kept here rather than
+    /// folded into a status and discarded. A control's *whole* history at
+    /// that scope, the same as `PolicyControlDetail.attestations` --
     /// `export_markdown` filters each scope's list down to one control by
     /// `Attestation::control` as it renders.
     #[serde(default)]
@@ -123,10 +122,12 @@ fn control_section(
 /// The whole export as markdown: an instance/scope/produced-at header and
 /// the "compliant means evidence complete" sentence ADR 0004 asks every
 /// view of this to carry, then each framework's applicability -- the
-/// layers binding it, the scopes it covers and every subtree the root
-/// excluded -- then per framework its rollup and, scope by scope, every
-/// control that framework applies to there, then every `n/a` declaration
-/// with its rationale and declaring scope, then every finding.
+/// scopes with a policy for it and every scope in the subtree without one
+/// -- then per framework its rollup and, scope by scope, every control that
+/// scope's own policy selects, then the Statement of Applicability per
+/// scope (#390): every control selected, `n/a` with its rationale, or not
+/// selected from its template, then every `n/a` declaration with its
+/// rationale and declaring scope, then every finding.
 /// No page text anywhere in it -- every pointer is an id
 /// (`EvidenceRef`/`Attestation.evidence`), never a knowledge page's own
 /// content, exactly the issue's own "no page text, only pointers" rule.
@@ -214,6 +215,40 @@ pub fn export_markdown(export: &PolicyExport) -> String {
         }
     }
 
+    if !report.rows.is_empty() {
+        out.push_str("\n## Statement of Applicability\n");
+        for row in &report.rows {
+            out.push_str(&format!("\n### {}\n\n", row.scope));
+            for status in &row.statuses {
+                let rationale = report
+                    .not_applicable
+                    .iter()
+                    .find(|na| na.control == status.control && na.scope == row.scope)
+                    .map(|na| na.rationale.clone());
+                match (status.status.kind(), rationale) {
+                    (crate::policy::StatusKind::NotApplicable, rationale) => out.push_str(&format!(
+                        "- {} -- {}: n/a -- {}\n",
+                        status.control,
+                        status.title,
+                        rationale.unwrap_or_else(|| status.status.reasons().join("; "))
+                    )),
+                    (kind, _) => out.push_str(&format!(
+                        "- {} -- {}: selected ({})\n",
+                        status.control,
+                        status.title,
+                        kind.as_str()
+                    )),
+                }
+            }
+            for unselected in &row.not_selected {
+                out.push_str(&format!(
+                    "- {} -- {}: not selected\n",
+                    unselected.control, unselected.title
+                ));
+            }
+        }
+    }
+
     if !report.not_applicable.is_empty() {
         out.push_str("\n## Not applicable\n\n");
         for na in &report.not_applicable {
@@ -284,6 +319,10 @@ mod tests {
                 scope: "demo".to_string(),
                 statuses: vec![status],
                 rollup: vec![],
+                not_selected: vec![crate::policy::NotSelected {
+                    control: ControlRef::new("cra", "annex-i-2-4"),
+                    title: "Unpicked".to_string(),
+                }],
                 open_tasks: Default::default(),
             }],
             rollup: vec![FrameworkRollup {
@@ -314,6 +353,7 @@ mod tests {
                 kind: Kind::Regulation,
                 controls: 3,
             }],
+            templates: vec![],
         };
         let mut attestations = BTreeMap::new();
         attestations.insert("demo".to_string(), vec![attestation]);
@@ -385,36 +425,53 @@ mod tests {
     }
 
     #[test]
-    fn export_markdown_lists_each_frameworks_scope_set_and_every_root_exclusion() {
+    fn export_markdown_lists_each_frameworks_owners_and_every_scope_without_a_policy() {
         assert!(!export_markdown(&sample()).contains("## Applicability"));
         let mut export = sample();
         export.report.applicability = vec![crate::policy_report::FrameworkApplicability {
             framework: "cra".to_string(),
-            bound_by: vec!["company".to_string()],
-            covers: vec!["company".to_string(), "demo".to_string()],
-            restricted_by: Some("company".to_string()),
-            scopes: None,
-            except: vec!["finance".to_string()],
-            excluded: vec!["finance".to_string(), "finance/ledger".to_string()],
+            covers: vec!["demo".to_string(), "irrlicht".to_string()],
+            no_policy: vec!["projects".to_string()],
         }];
         let text = export_markdown(&export);
         assert!(text.contains("## Applicability"), "{text}");
         assert!(
             text.contains(
-                "- Cyber Resilience Act (cra): the instance root (company) binds it to the whole tree \
-                 minus the finance subtree(s) -- applies at company, demo; excluded at finance, finance/ledger"
+                "- Cyber Resilience Act (cra): policy at demo, irrlicht; no policy at projects"
             ),
             "{text}"
         );
         let json = serde_json::to_value(&export).unwrap();
         assert_eq!(
-            json["report"]["applicability"][0]["excluded"],
-            serde_json::json!(["finance", "finance/ledger"])
+            json["report"]["applicability"][0]["no_policy"],
+            serde_json::json!(["projects"])
         );
-        assert_eq!(
-            json["report"]["applicability"][0]["restricted_by"],
-            "company"
+    }
+
+    #[test]
+    fn export_markdown_carries_a_statement_of_applicability_per_scope() {
+        let mut export = sample();
+        export.report.rows[0].statuses.push(ControlStatus {
+            control: ControlRef::new("cra", "annex-i-2-2"),
+            title: "Hardware".to_string(),
+            kind: Kind::Regulation,
+            refs: vec![],
+            status: Status::NotApplicable {
+                reasons: vec!["marked not applicable at demo: we ship no hardware".to_string()],
+            },
+        });
+        let text = export_markdown(&export);
+        let soa = &text[text.find("## Statement of Applicability").expect(&text)..];
+        assert!(soa.contains("### demo"), "{soa}");
+        assert!(
+            soa.contains("- cra/annex-i-2-1 -- Identify and document components: selected (open)"),
+            "{soa}"
         );
+        assert!(
+            soa.contains("- cra/annex-i-2-2 -- Hardware: n/a -- we ship no hardware"),
+            "{soa}"
+        );
+        assert!(soa.contains("- cra/annex-i-2-4 -- Unpicked: not selected"), "{soa}");
     }
 
     #[test]

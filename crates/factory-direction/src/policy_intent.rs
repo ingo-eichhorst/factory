@@ -1,6 +1,7 @@
-//! Live L6 authored policy inputs. This owner reads its own catalogues,
-//! receipts and monthly limits, then projects raw declarations to L5.
-//! It never supplies a compliance report, spend or precomputed verdict.
+//! Live L6 authored policy inputs. This owner reads its own templates and
+//! every scope's own policies (#390), receipts and monthly limits, then
+//! projects raw declarations to L5. It never supplies a compliance report,
+//! spend or precomputed verdict.
 use crate::{budget, policy, policy_store::PolicyStore};
 use factory_assurance::{
     checks::CheckSource,
@@ -8,435 +9,55 @@ use factory_assurance::{
     metrics_service::{PolicyInputs, PolicyScope, QualityBudgets},
 };
 use factory_kernel::{
-    resolve_scope, scope_ancestors, scope_subtree, FactoryError, Facts, KnowledgeTags, Provide,
-    Result, ScopeIdentity, ScopeNode, L6,
+    scope_ancestors, scope_subtree, FactoryError, Facts, KnowledgeTags, Provide, Result,
+    ScopeIdentity, ScopeNode, L6,
 };
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
 };
 
-/// One authored config declaration, before any catalogue is resolved.
-/// The legacy configuration path re-exports this exact type.
-///
-/// A `frameworks` entry is a name or, at the instance root only (#332),
-/// `{name, scopes?, except?}`. Either way the name lands in `frameworks`, in
-/// the order written, and only a real restriction lands in `applicability`,
-/// so a plain string -- or an object with neither key -- still means the
-/// whole tree. A nested scope's restriction is refused by the configuration
-/// owner, and `into_layer` drops it besides: a child can never exclude.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "RawDeclaration", into = "RawDeclaration")]
-pub struct PolicyDeclaration {
-    pub frameworks: Vec<String>,
-    /// Where a root-bound framework applies, by framework name. A framework
-    /// absent here applies to the whole tree.
-    pub applicability: BTreeMap<String, Applicability>,
-    pub tighten: BTreeMap<policy::ControlRef, policy::Tighten>,
-    pub not_applicable: Vec<policy::NotApplicable>,
-}
+/// A `policies:` block -- the instance root's top-level one, or a nested
+/// scope's `scope.policies` -- in the shape Factory no longer reads (#390):
+/// `frameworks` with `scopes`/`except`, `tighten` and `not_applicable`. A
+/// policy now belongs to one scope, in that scope's own
+/// `.factory/policies/`. The block is kept verbatim, whatever its shape, so
+/// the daemon still starts and a roster rewrite never deletes it, and every
+/// read reports it as a [`policy::FindingKind::LegacyPolicies`] finding
+/// naming the migration -- the same rule as an unknown scope name: a config
+/// mistake is a finding, never a daemon that refuses to start.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PolicyDeclaration(pub Option<serde_yaml_ng::Value>);
 impl PolicyDeclaration {
+    /// No block at all (or an empty `policies:`).
     pub fn is_empty(&self) -> bool {
-        self.frameworks.is_empty()
-            && self.applicability.is_empty()
-            && self.tighten.is_empty()
-            && self.not_applicable.is_empty()
-    }
-    pub fn into_layer(self, scope: impl Into<String>) -> policy::PolicyLayer {
-        policy::PolicyLayer {
-            scope: scope.into(),
-            frameworks: self.frameworks,
-            tighten: self.tighten,
-            not_applicable: self.not_applicable,
-        }
+        self.0.is_none()
     }
 }
 
-/// The subtrees one root-bound framework applies to (#332): each scope named
-/// in `scopes` and everything below it -- the whole tree when `scopes` is
-/// absent -- minus each `except` subtree, applied after `scopes`. Names are
-/// configured scope names, never a path or a leaf alias. A name no scope
-/// carries counts as absent and is a finding (`applicability_findings`),
-/// never a load failure: a renamed scope must not stop the daemon.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Applicability {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scopes: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub except: Vec<String>,
-}
-impl Applicability {
-    fn is_whole_tree(&self) -> bool {
-        self.scopes.is_none() && self.except.is_empty()
-    }
-
-    /// The rule that leaves its framework out at `target` (`None`: the root
-    /// itself), or `None` when the framework applies there.
-    fn excludes<S: ScopeIdentity>(
-        &self,
-        scopes: &[S],
-        target: Option<&S>,
-    ) -> Option<ExclusionRule> {
-        let known = |names: &[String]| -> Vec<String> {
-            names
-                .iter()
-                .filter(|name| named(scopes, name).is_some())
-                .cloned()
-                .collect()
-        };
-        let covers =
-            |name: &String| named(scopes, name).is_some_and(|top| within(scopes, target, top));
-        if let Some(limited) = &self.scopes {
-            if !limited.iter().any(covers) {
-                return Some(ExclusionRule::Scopes(known(limited)));
-            }
-        }
-        self.except
-            .iter()
-            .find(|name| covers(name))
-            .cloned()
-            .map(ExclusionRule::Except)
+/// The finding a legacy `policies:` block raises at `subject` (a scope's
+/// name), naming where its frameworks now belong.
+pub fn legacy_finding(subject: &str, block: &str, policies_dir: &str) -> policy::Finding {
+    policy::Finding {
+        kind: policy::FindingKind::LegacyPolicies,
+        subject: subject.to_owned(),
+        detail: format!(
+            "has a `{block}` block, which Factory no longer reads: a policy now belongs to one scope (#390). \
+             Move each framework this scope commits to into {policies_dir}<framework>.yaml -- picking \
+             controls from a template in .factory/policies/templates/ and giving each one this scope's own \
+             evidence -- and delete the block. See the README's \"Policies\" section"
+        ),
     }
 }
 
-/// Why a framework the root binds does not apply at one scope (#332). Only
-/// the root's own layer may restrict where a framework applies, so `layer`
-/// is always the root's name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Exclusion {
-    pub framework: String,
-    pub layer: String,
-    pub rule: ExclusionRule,
-}
-/// Which half of a root restriction left a scope out.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExclusionRule {
-    /// Outside every `scopes` subtree -- the known names it was limited to.
-    Scopes(Vec<String>),
-    /// Inside this `except` subtree.
-    Except(String),
-}
-impl std::fmt::Display for Exclusion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (framework, layer) = (&self.framework, &self.layer);
-        match &self.rule {
-            ExclusionRule::Except(top) => write!(
-                f,
-                "the instance root ({layer:?}) excludes {framework} from the {top:?} subtree (except: [{top}])"
-            ),
-            ExclusionRule::Scopes(limited) => write!(
-                f,
-                "the instance root ({layer:?}) applies {framework} only to {} (scopes: [{}])",
-                if limited.is_empty() {
-                    "no configured scope".to_owned()
-                } else {
-                    format!("the {} subtree(s)", limited.join(", "))
-                },
-                limited.join(", ")
-            ),
-        }
-    }
-}
-
-/// The configured scope a root applicability name means: by its configured
-/// name only. Names are unique across the tree (discovery refuses a
-/// duplicate), so this never has to choose.
-fn named<'a, S: ScopeIdentity>(scopes: &'a [S], name: &str) -> Option<&'a S> {
-    scopes.iter().find(|scope| scope.scope_name() == name)
-}
-
-/// `target` is `top` or below it -- `scope_subtree`'s own membership rule,
-/// by whole path components, never a name prefix. `None` is the root
-/// itself, which only a scope configured at the root's own path covers.
-fn within<S: ScopeIdentity>(scopes: &[S], target: Option<&S>, top: &S) -> bool {
-    match target {
-        Some(target) => {
-            target.scope_name() == top.scope_name()
-                || scope_ancestors(scopes, target)
-                    .iter()
-                    .any(|ancestor| ancestor.scope_path() == top.scope_path())
-        }
-        None => top
-            .scope_path()
-            .components()
-            .all(|component| matches!(component, Component::CurDir)),
-    }
-}
-
-/// Every framework the root binds that its own restriction leaves out at
-/// `target` (`None`: the root itself), with the rule that did -- the one
-/// resolver the chain, the board's coverage and every refusal share.
-pub fn exclusions<S: ScopeIdentity>(
-    root: &PolicyDeclaration,
-    root_name: &str,
-    scopes: &[S],
-    target: Option<&S>,
-) -> Vec<Exclusion> {
-    root.applicability
-        .iter()
-        .filter_map(|(framework, applicability)| {
-            applicability
-                .excludes(scopes, target)
-                .map(|rule| Exclusion {
-                    framework: framework.clone(),
-                    layer: root_name.to_owned(),
-                    rule,
-                })
-        })
-        .collect()
-}
-
-/// Each root `scopes`/`except` name no configured scope carries, as a
-/// finding on the root's own layer. The framework applies as if the name
-/// were absent -- which, for a `scopes` list of nothing but unknown names,
-/// is nowhere, and the board says so rather than guessing a whole tree.
-pub fn applicability_findings<S: ScopeIdentity>(
-    root: &PolicyDeclaration,
-    root_name: &str,
-    scopes: &[S],
-) -> Vec<policy::Finding> {
-    let mut findings = Vec::new();
-    for (framework, applicability) in &root.applicability {
-        let written = applicability
-            .scopes
-            .iter()
-            .flatten()
-            .map(|name| ("scopes", name))
-            .chain(applicability.except.iter().map(|name| ("except", name)));
-        for (key, name) in written {
-            if named(scopes, name).is_none() {
-                findings.push(policy::Finding {
-                    kind: policy::FindingKind::UnknownScope,
-                    subject: root_name.to_owned(),
-                    detail: format!(
-                        "{framework}'s `{key}` names {name:?}, which is no configured scope's name; \
-                         {framework} applies as if it were absent"
-                    ),
-                });
-            }
-        }
-    }
-    findings
-}
-
-/// Plain declarations, not a resolved chain or policy/status cache.
-pub trait ScopePolicies: ScopeIdentity {
-    fn policy_declaration(&self) -> &PolicyDeclaration;
-}
-
-/// The name the root's own layer carries: its configured scope's, or the
-/// instance's for a root that never opted into being a scope.
-pub fn root_name<'a>(root_name: Option<&'a str>, instance_name: &'a str) -> &'a str {
-    root_name.unwrap_or(instance_name)
-}
-
-/// The root's own layer as it applies under `excluded`: every excluded
-/// framework is gone from it, and so is the root's tightening and `n/a` for
-/// one -- unless a layer `below` binds that framework again, which adding
-/// always may, and then the root's tightening holds there as it would
-/// anywhere the framework applies. Nothing left means no layer at all.
-fn narrowed_root(
-    root: &PolicyDeclaration,
-    root_name: &str,
-    excluded: &[Exclusion],
-    below: &[policy::PolicyLayer],
-) -> Option<policy::PolicyLayer> {
-    let gone: BTreeSet<&str> = excluded.iter().map(|e| e.framework.as_str()).collect();
-    let rebound = |framework: &str| {
-        below
-            .iter()
-            .any(|layer| layer.frameworks.iter().any(|f| f == framework))
-    };
-    let mut layer = root.clone().into_layer(root_name);
-    layer.frameworks.retain(|f| !gone.contains(f.as_str()));
-    layer.tighten.retain(|control, _| {
-        !gone.contains(control.framework.as_str()) || rebound(&control.framework)
-    });
-    layer.not_applicable.retain(|na| {
-        !gone.contains(na.control.framework.as_str()) || rebound(&na.control.framework)
-    });
-    let empty =
-        layer.frameworks.is_empty() && layer.tighten.is_empty() && layer.not_applicable.is_empty();
-    (!empty).then_some(layer)
-}
-
-/// The single policy ancestry algorithm for both configuration compatibility
-/// and the physical service. Names never define ancestry; empty layers add
-/// nothing and discovery's empty root cannot double the root declaration.
-/// The root's layer is narrowed to what applies at `scope` (#332); every
-/// layer below is taken whole, since only the root decides applicability.
-pub fn chain_for_scope<S: ScopePolicies>(
-    root: &PolicyDeclaration,
-    root_name: &str,
-    scopes: &[S],
-    scope: &S,
-) -> Vec<policy::PolicyLayer> {
-    let below: Vec<_> = scope_ancestors(scopes, scope)
-        .into_iter()
-        .chain(std::iter::once(scope))
-        .filter(|layer| !layer.policy_declaration().is_empty())
-        .map(|layer| {
-            layer
-                .policy_declaration()
-                .clone()
-                .into_layer(layer.scope_name())
-        })
-        .collect();
-    let excluded = exclusions(root, root_name, scopes, Some(scope));
-    narrowed_root(root, root_name, &excluded, &below)
-        .into_iter()
-        .chain(below)
-        .collect()
-}
-
-/// The chain for a scope that resolves to nothing -- a caller whose scope
-/// has since gone: the root's layer alone, narrowed as it applies at the
-/// root itself, since a vanished scope has no place in the tree to stand.
-pub fn root_chain<S: ScopeIdentity>(
-    root: &PolicyDeclaration,
-    root_name: &str,
-    scopes: &[S],
-) -> Vec<policy::PolicyLayer> {
-    narrowed_root(
-        root,
-        root_name,
-        &exclusions(root, root_name, scopes, None),
-        &[],
-    )
-    .into_iter()
-    .collect()
-}
-
-/// The serialized form: `frameworks` entries as written, a name or
-/// `{name, scopes?, except?}`. `deny_unknown_fields`: a typo here --
-/// `framework:` for `frameworks:` -- would otherwise commit the company to
-/// nothing while parsing clean.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawDeclaration {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    frameworks: Vec<FrameworkEntry>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    tighten: BTreeMap<policy::ControlRef, policy::Tighten>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    not_applicable: Vec<policy::NotApplicable>,
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-enum FrameworkEntry {
-    Name(String),
-    Restricted(RestrictedFramework),
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RestrictedFramework {
-    name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    scopes: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    except: Vec<String>,
-}
-
-/// By hand rather than `untagged`, so a typo inside the object form
-/// (`exept:`) is refused by name instead of as "matched no variant".
-impl<'de> Deserialize<'de> for FrameworkEntry {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        struct Entry;
-        impl<'de> serde::de::Visitor<'de> for Entry {
-            type Value = FrameworkEntry;
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a framework name, or {name, scopes, except}")
-            }
-            fn visit_str<E: serde::de::Error>(
-                self,
-                name: &str,
-            ) -> std::result::Result<FrameworkEntry, E> {
-                Ok(FrameworkEntry::Name(name.to_owned()))
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                map: A,
-            ) -> std::result::Result<FrameworkEntry, A::Error> {
-                RestrictedFramework::deserialize(serde::de::value::MapAccessDeserializer::new(map))
-                    .map(FrameworkEntry::Restricted)
-            }
-        }
-        deserializer.deserialize_any(Entry)
-    }
-}
-
-impl TryFrom<RawDeclaration> for PolicyDeclaration {
-    type Error = String;
-    fn try_from(raw: RawDeclaration) -> std::result::Result<Self, String> {
-        let mut frameworks: Vec<String> = Vec::new();
-        let mut applicability = BTreeMap::new();
-        for entry in raw.frameworks {
-            let (name, restriction) = match entry {
-                FrameworkEntry::Name(name) => (name, None),
-                FrameworkEntry::Restricted(entry) => {
-                    let restriction = Applicability {
-                        scopes: entry.scopes,
-                        except: entry.except,
-                    };
-                    (
-                        entry.name,
-                        (!restriction.is_whole_tree()).then_some(restriction),
-                    )
-                }
-            };
-            // Two entries for one framework, either restricted, would leave
-            // a person guessing which one decides where it applies.
-            let listed = frameworks.contains(&name);
-            if listed && (restriction.is_some() || applicability.contains_key(&name)) {
-                return Err(format!(
-                    "framework {name:?} is listed more than once, with `scopes` or `except` on one of them; \
-                     give it a single entry"
-                ));
-            }
-            if let Some(restriction) = restriction {
-                applicability.insert(name.clone(), restriction);
-            }
-            frameworks.push(name);
-        }
-        Ok(Self {
-            frameworks,
-            applicability,
-            tighten: raw.tighten,
-            not_applicable: raw.not_applicable,
-        })
-    }
-}
-
-impl From<PolicyDeclaration> for RawDeclaration {
-    fn from(declaration: PolicyDeclaration) -> Self {
-        let mut applicability = declaration.applicability;
-        Self {
-            frameworks: declaration
-                .frameworks
-                .into_iter()
-                .map(|name| match applicability.remove(&name) {
-                    Some(restriction) => FrameworkEntry::Restricted(RestrictedFramework {
-                        name,
-                        scopes: restriction.scopes,
-                        except: restriction.except,
-                    }),
-                    None => FrameworkEntry::Name(name),
-                })
-                .collect(),
-            tighten: declaration.tighten,
-            not_applicable: declaration.not_applicable,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Scope {
     pub id: String,
     pub name: String,
     pub path: PathBuf,
+    /// Only ever reported: see [`PolicyDeclaration`].
     pub policies: PolicyDeclaration,
 }
 impl ScopeIdentity for Scope {
@@ -447,14 +68,17 @@ impl ScopeIdentity for Scope {
         &self.path
     }
 }
-impl ScopePolicies for Scope {
-    fn policy_declaration(&self) -> &PolicyDeclaration {
-        &self.policies
-    }
+
+/// The name the root carries in a finding: its configured scope's, or the
+/// instance's for a root that never opted into being a scope.
+pub fn root_name<'a>(root_name: Option<&'a str>, instance_name: &'a str) -> &'a str {
+    root_name.unwrap_or(instance_name)
 }
+
 #[derive(Debug, Clone)]
 pub struct Configuration {
     pub scopes: Vec<Scope>,
+    /// The root's top-level `policies:`, only ever reported.
     pub root_policies: PolicyDeclaration,
     pub root_name: Option<String>,
     pub instance_name: String,
@@ -463,68 +87,118 @@ impl Configuration {
     pub fn root_name(&self) -> &str {
         root_name(self.root_name.as_deref(), &self.instance_name)
     }
-    pub fn chain_for_scope(&self, scope: &Scope) -> Vec<policy::PolicyLayer> {
-        chain_for_scope(&self.root_policies, self.root_name(), &self.scopes, scope)
-    }
-    /// Name/path/leaf resolution keeps the same first-match and vanished-
-    /// scope root fallback as the public configuration compatibility path.
-    pub fn chain(&self, name: &str) -> Vec<policy::PolicyLayer> {
-        match resolve_scope(&self.scopes, name) {
-            Ok(scope) => self.chain_for_scope(scope),
-            Err(_) => root_chain(&self.root_policies, self.root_name(), &self.scopes),
-        }
-    }
-    /// Every framework the root's own restriction leaves out at `scope`.
-    pub fn exclusions(&self, scope: &Scope) -> Vec<Exclusion> {
-        exclusions(
-            &self.root_policies,
-            self.root_name(),
-            &self.scopes,
-            Some(scope),
-        )
-    }
-    /// The root's restriction on `framework` with every unknown name left
-    /// out -- what the Statement of Applicability prints -- or `None` when
-    /// it applies to the whole tree.
-    pub fn restriction(&self, framework: &str) -> Option<Applicability> {
-        let known = |names: &[String]| -> Vec<String> {
-            names
-                .iter()
-                .filter(|name| named(&self.scopes, name).is_some())
-                .cloned()
-                .collect()
+
+    /// One finding per legacy `policies:` block still in the config.
+    pub fn legacy_findings(&self) -> Vec<policy::Finding> {
+        let dir = |path: &Path| {
+            let label = path
+                .components()
+                .filter(|c| !matches!(c, Component::CurDir))
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            if label.is_empty() {
+                ".factory/policies/".to_owned()
+            } else {
+                format!("{label}/.factory/policies/")
+            }
         };
-        self.root_policies
-            .applicability
-            .get(framework)
-            .map(|restriction| Applicability {
-                scopes: restriction.scopes.as_deref().map(known),
-                except: known(&restriction.except),
-            })
-    }
-    pub fn applicability_findings(&self) -> Vec<policy::Finding> {
-        applicability_findings(&self.root_policies, self.root_name(), &self.scopes)
-    }
-    /// The refusal for `control` not applying at `scope`: it names the
-    /// root's exclusion when that is why -- and nothing below binds the
-    /// framework back -- rather than leaving a person to guess.
-    pub fn not_applying(&self, control: &policy::ControlRef, scope: &Scope) -> FactoryError {
-        let bound = policy::frameworks_in_chain(&self.chain_for_scope(scope));
-        match self
-            .exclusions(scope)
-            .into_iter()
-            .find(|e| e.framework == control.framework && !bound.contains(&e.framework))
-        {
-            Some(exclusion) => FactoryError::BadRequest(format!(
-                "{control} does not apply at {:?}: {exclusion}",
-                scope.name
-            )),
-            None => FactoryError::BadRequest(format!(
-                "{control} does not apply at {:?}, or is not a control any loaded catalogue defines",
-                scope.name
-            )),
+        let mut findings = Vec::new();
+        if !self.root_policies.is_empty() {
+            findings.push(legacy_finding(
+                self.root_name(),
+                "policies:",
+                ".factory/policies/",
+            ));
         }
+        for scope in self.scopes.iter().filter(|s| !s.policies.is_empty()) {
+            findings.push(legacy_finding(
+                &scope.name,
+                "scope.policies",
+                &dir(&scope.path),
+            ));
+        }
+        findings
     }
+
+    /// Every template and every scope's own policies, read fresh off disk,
+    /// with the legacy-block findings folded in. Blocking: call it off the
+    /// executor.
+    pub fn load_policies(&self, root: &Path) -> policy::Policies {
+        let scopes: Vec<(String, PathBuf)> = self
+            .scopes
+            .iter()
+            .map(|scope| (scope.name.clone(), scope.path.clone()))
+            .collect();
+        let mut policies = policy::load(root, &scopes);
+        policies.findings.extend(self.legacy_findings());
+        policies.findings.sort_by(|a, b| {
+            a.subject
+                .cmp(&b.subject)
+                .then(a.kind.cmp(&b.kind))
+                .then(a.detail.cmp(&b.detail))
+        });
+        policies
+    }
+
+    /// The refusal for `control` when `scope` does not own it (#390): it
+    /// says whether the scope has no policy for the framework -- and which
+    /// scopes below it do own the control -- or whether its own policy left
+    /// the control unselected, rather than leaving a person to guess.
+    pub fn not_owned(
+        &self,
+        policies: &policy::Policies,
+        control: &policy::ControlRef,
+        scope: &Scope,
+    ) -> FactoryError {
+        let own = policies
+            .of(&scope.name)
+            .find(|p| p.framework == control.framework);
+        let detail = match own {
+            Some(policy) => match policy.not_selected.iter().find(|c| &c.control == control) {
+                Some(_) => format!(
+                    "{control} is not selected at {:?}: its {} policy ({}) does not pick it from template {:?}",
+                    scope.name,
+                    policy.framework,
+                    policy.file,
+                    policy.template.as_deref().unwrap_or_default()
+                ),
+                None => format!(
+                    "{control} is not a control of {:?}'s {} policy ({})",
+                    scope.name, policy.framework, policy.file
+                ),
+            },
+            None => {
+                let owners: Vec<&str> = match scope_subtree(&self.scopes, Some(&scope.name)) {
+                    Ok((_, targets)) => targets
+                        .into_iter()
+                        .filter(|target| {
+                            policies
+                                .of(&target.name)
+                                .any(|p| p.controls.iter().any(|c| &c.control == control))
+                        })
+                        .map(|target| target.name.as_str())
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+                if owners.is_empty() {
+                    format!(
+                        "{:?} has no {} policy of its own, so {control} does not apply there",
+                        scope.name, control.framework
+                    )
+                } else {
+                    format!(
+                        "{:?} has no {} policy of its own; {control} belongs to {} -- name the scope that owns it",
+                        scope.name,
+                        control.framework,
+                        owners.join(", ")
+                    )
+                }
+            }
+        };
+        FactoryError::BadRequest(detail)
+    }
+
     pub fn budget_intent(&self, scope: &Scope, config: &budget::PolicyConfig) -> BudgetIntent {
         budget::check_intent(
             config,
@@ -566,11 +240,14 @@ impl Authored {
         })
     }
 
-    pub async fn catalogues(&self) -> Result<(Vec<policy::Catalogue>, Vec<policy::Finding>)> {
-        let directory = policy::policies_dir(&self.root);
-        tokio::task::spawn_blocking(move || policy::load_all(&directory))
+    /// Every template and scope policy, read fresh -- see
+    /// [`Configuration::load_policies`].
+    pub async fn policies(&self) -> Result<policy::Policies> {
+        let root = self.root.clone();
+        let config = self.config.clone();
+        tokio::task::spawn_blocking(move || config.load_policies(&root))
             .await
-            .map_err(|error| FactoryError::Other(anyhow::anyhow!("policy catalogue walk: {error}")))
+            .map_err(|error| FactoryError::Other(anyhow::anyhow!("policy directory walk: {error}")))
     }
 
     /// Select current authored requirements in L6, then read the actual L5
@@ -595,8 +272,8 @@ impl Authored {
     pub async fn plan_input(&self, scope: &str, category: &str) -> Result<factory_assurance::plan_service::Read> {
         factory_kernel::check_category(category).map_err(FactoryError::BadRequest)?;
         let scope = factory_kernel::resolve_scope(&self.config.scopes, scope)?.name.clone();
-        let (catalogues, _) = self.catalogues().await?;
-        let (applied, _) = policy::applicable(&catalogues, &self.config.chain(&scope));
+        // The run's own scope's policies only: nothing is inherited (#390).
+        let applied = self.policies().await?.applied(&scope);
         Ok(factory_assurance::plan_service::Read {
             scope,
             category: category.to_owned(),
@@ -650,8 +327,8 @@ impl<'a> Service<'a> {
         Authored::new(self.root.clone(), self.config.clone())
     }
 
-    pub async fn catalogues(&self) -> Result<(Vec<policy::Catalogue>, Vec<policy::Finding>)> {
-        self.authored().catalogues().await
+    pub async fn policies(&self) -> Result<policy::Policies> {
+        self.authored().policies().await
     }
 
     /// Select current authored requirements in L6, then read the actual L5
@@ -676,23 +353,19 @@ impl<'a> Service<'a> {
 
     /// Same-level authored read followed by the actual L5 fact capability.
     /// A failed fact read remains a failure; nothing is cached or published.
-    pub async fn catalogues_with_tags<P>(
+    pub async fn policies_with_tags<P>(
         &self,
         provider: &P,
-    ) -> Result<(
-        Vec<policy::Catalogue>,
-        Vec<policy::Finding>,
-        BTreeSet<String>,
-    )>
+    ) -> Result<(policy::Policies, BTreeSet<String>)>
     where
         P: Provide<KnowledgeTags, Query = (), Value = KnowledgeTags, Error = FactoryError>,
     {
-        let (catalogues, findings) = self.catalogues().await?;
+        let policies = self.policies().await?;
         let tags = Facts::<L6>::new()
             .get::<KnowledgeTags, _>(provider, &())
             .await?
             .tags;
-        Ok((catalogues, findings, tags))
+        Ok((policies, tags))
     }
 
     /// Preserve invalid authored limits as raw configuration error data.
@@ -712,12 +385,14 @@ impl<'a> Service<'a> {
     /// metric service. Whole-instance store receipt order is unchanged;
     /// L5's evidence service filters applicability at the live read.
     pub async fn metric_inputs(&self, scope: Option<&str>) -> Result<PolicyInputs> {
-        let (catalogues, _) = self.catalogues().await?;
+        let policies = self.policies().await?;
         let (_, targets) = scope_subtree(&self.config.scopes, scope)?;
         let attestations = self.receipts.all().await?;
         let mut applied = Vec::new();
+        // Every scope in the subtree with a policy of its own (#390): the
+        // metric is the aggregate over every (scope, control) pair.
         for target in targets {
-            let (subjects, _) = policy::applicable(&catalogues, &self.config.chain(&target.name));
+            let subjects = policies.applied(&target.name);
             if !subjects.is_empty() {
                 applied.push((target, subjects));
             }
@@ -776,8 +451,19 @@ mod tests {
             std::fs::create_dir_all(budget::budgets_dir(&root)).unwrap();
             Self(root)
         }
+        /// `cra.yaml` in the `child` scope's own policies directory.
         fn catalogue(&self, raw: &str) {
-            std::fs::write(policy::policies_dir(&self.0).join("cra.yaml"), raw).unwrap();
+            self.policy("projects/work/demo", "cra", raw);
+        }
+        fn policy(&self, scope_path: &str, framework: &str, raw: &str) {
+            let dir = policy::scope_policies_dir(&self.0, Path::new(scope_path));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{framework}.yaml")), raw).unwrap();
+        }
+        fn template(&self, name: &str, raw: &str) {
+            let dir = policy::templates_dir(&self.0);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{name}.yaml")), raw).unwrap();
         }
         fn limits(&self, raw: &str) {
             std::fs::write(budget::catalogue_path(&self.0), raw).unwrap();
@@ -794,35 +480,25 @@ mod tests {
     fn configuration() -> Configuration {
         Configuration {
             scopes: [
-                ("root-id", "company", ".", "{}"),
-                (
-                    "parent-id",
-                    "work",
-                    "projects/work",
-                    "frameworks: [practices]",
-                ),
-                (
-                    "child-id",
-                    "child",
-                    "projects/work/demo",
-                    "tighten: {cra/a: {max_age: 7d}}",
-                ),
-                ("side-id", "work/side", "projects/work-other", "{}"),
+                ("root-id", "company", "."),
+                ("parent-id", "work", "projects/work"),
+                ("child-id", "child", "projects/work/demo"),
+                ("side-id", "work/side", "projects/work-other"),
             ]
             .into_iter()
-            .map(|(id, name, path, raw)| Scope {
+            .map(|(id, name, path)| Scope {
                 id: id.into(),
                 name: name.into(),
                 path: path.into(),
-                policies: declaration(raw),
+                policies: PolicyDeclaration::default(),
             })
             .collect(),
-            root_policies: declaration("frameworks: [cra]"),
+            root_policies: PolicyDeclaration::default(),
             root_name: Some("company".into()),
             instance_name: "instance".into(),
         }
     }
-    const CATALOGUE: &str = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: a\n    title: A\n    max_age: 30d\n    evidence: [{check: attestation}]\n";
+    const CATALOGUE: &str = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: a\n    title: A\n    max_age: 7d\n    evidence: [{check: attestation}]\n";
     fn receipt(id: &str, scope: &str) -> Attestation {
         let now = Utc::now();
         Attestation {
@@ -840,394 +516,129 @@ mod tests {
         }
     }
 
+    // -- legacy blocks (#390) --------------------------------------------
+
     #[test]
-    fn declaration_is_plain_strict_serde_and_the_chain_uses_paths_once() {
-        let config = configuration();
-        let chain = config.chain("projects/work/demo");
-        assert_eq!(
-            chain.iter().map(|l| l.scope.as_str()).collect::<Vec<_>>(),
-            ["company", "work", "child"]
-        );
-        assert_eq!(
-            chain[2].tighten[&"cra/a".parse().unwrap()].max_age,
-            Some("7d".parse().unwrap())
-        );
-        assert_eq!(config.chain("work/side").len(), 1);
-        assert_eq!(config.chain("vanished").len(), 1);
-        let mut duplicate = configuration();
-        let mut second = duplicate.scopes[1].clone();
-        second.path = "elsewhere/work".into();
-        second.policies = declaration("frameworks: [other]");
-        duplicate.scopes.push(second);
-        assert_eq!(
-            duplicate.chain("work")[1].frameworks,
-            ["practices"],
-            "configured-name lookup keeps the first declaration, even in a duplicated fixture"
-        );
-        let mut ambiguous = configuration();
-        let mut second = ambiguous.scopes[2].clone();
-        second.name = "other-demo".into();
-        second.path = "elsewhere/demo".into();
-        ambiguous.scopes.push(second);
-        assert_eq!(
-            ambiguous.chain("demo").len(),
-            1,
-            "ambiguous legacy leaf keeps the compatibility root fallback"
-        );
-        let mut unnamed = configuration();
-        unnamed.root_name = None;
-        assert_eq!(unnamed.chain("child")[0].scope, "instance");
-        let original = declaration("frameworks: [cra]\ntighten: {cra/a: {max_age: 7d}}\nnot_applicable: [{control: cra/b, rationale: unused}]\n");
-        let json = serde_json::to_value(&original).unwrap();
-        assert_eq!(
-            serde_json::from_value::<PolicyDeclaration>(json.clone()).unwrap(),
-            original
-        );
-        assert_eq!(json["tighten"]["cra/a"]["max_age"], "1w");
-        assert!(serde_yaml_ng::from_str::<PolicyDeclaration>("framework: [cra]").is_err());
-        assert_eq!(
-            serde_json::to_value(PolicyDeclaration::default()).unwrap(),
-            serde_json::json!({})
-        );
-    }
+    fn a_legacy_block_of_any_shape_parses_round_trips_and_is_a_finding_naming_the_migration() {
+        for raw in [
+            "frameworks: [{name: cra, except: [finance]}, dsgvo]\ntighten: {cra/a: {max_age: 7d}}\n",
+            // Refused at load before #390; now only reported.
+            "frameworks: [{name: cra, exept: [finance]}, cra, {name: cra, scopes: [x]}]\n",
+            "frameworks: [7]\n",
+            "not even a mapping",
+        ] {
+            let parsed = declaration(raw);
+            assert!(!parsed.is_empty(), "{raw}");
+            let yaml = serde_yaml_ng::to_string(&parsed).unwrap();
+            assert_eq!(declaration(&yaml), parsed, "a rewrite keeps the block verbatim");
+            let json = serde_json::to_value(&parsed).unwrap();
+            assert_eq!(serde_json::from_value::<PolicyDeclaration>(json).unwrap(), parsed);
+        }
+        assert!(declaration("~").is_empty());
+        assert_eq!(serde_json::to_value(PolicyDeclaration::default()).unwrap(), serde_json::Value::Null);
 
-    // -- applicability per framework (#332) ------------------------------
-
-    /// The tree every applicability test reads: the root is a scope at `.`,
-    /// `finance` sits beside `work`, and `ledger` and `demo` sit one level
-    /// below each -- plus a lookalike whose path shares `finance`'s prefix
-    /// string but is not below it.
-    fn applicability(root: &str) -> Configuration {
-        Configuration {
-            scopes: [
-                ("root-id", "company", ".", "{}"),
-                ("finance-id", "finance", "finance", "{}"),
-                ("ledger-id", "ledger", "finance/ledger", "{}"),
-                ("work-id", "work", "projects/work", "{}"),
-                ("demo-id", "demo", "projects/work/demo", "{}"),
-                ("lookalike-id", "lookalike", "finance-archive", "{}"),
+        let mut config = configuration();
+        config.root_policies = declaration("frameworks: [cra]");
+        config.scopes[2].policies = declaration("tighten: {cra/a: {max_age: 7d}}");
+        let findings = config.legacy_findings();
+        assert_eq!(
+            findings.iter().map(|f| (f.kind, f.subject.as_str())).collect::<Vec<_>>(),
+            [
+                (policy::FindingKind::LegacyPolicies, "company"),
+                (policy::FindingKind::LegacyPolicies, "child"),
             ]
-            .into_iter()
-            .map(|(id, name, path, raw)| Scope {
-                id: id.into(),
-                name: name.into(),
-                path: path.into(),
-                policies: declaration(raw),
-            })
-            .collect(),
-            root_policies: declaration(root),
-            root_name: Some("company".into()),
-            instance_name: "instance".into(),
-        }
-    }
-    /// Which scopes `framework` reaches, by every scope's own chain.
-    fn reaches(config: &Configuration, framework: &str) -> Vec<String> {
-        config
-            .scopes
-            .iter()
-            .filter(|scope| {
-                policy::frameworks_in_chain(&config.chain_for_scope(scope))
-                    .iter()
-                    .any(|f| f == framework)
-            })
-            .map(|scope| scope.name.clone())
-            .collect()
-    }
-    const EVERYWHERE: [&str; 6] = ["company", "finance", "ledger", "work", "demo", "lookalike"];
-
-    #[test]
-    fn a_plain_string_binds_the_whole_tree_and_parses_into_the_same_layer_as_before() {
-        let config = applicability(
-            "frameworks: [cra, dsgvo]
-tighten: {cra/a: {max_age: 7d}}
-",
         );
-        assert_eq!(reaches(&config, "cra"), EVERYWHERE);
-        assert!(config.root_policies.applicability.is_empty());
-        for scope in &config.scopes {
-            assert_eq!(
-                config.chain_for_scope(scope)[0],
-                config.root_policies.clone().into_layer("company"),
-                "an unrestricted root layer is exactly today's at {}",
-                scope.name
-            );
-        }
-        assert!(config.applicability_findings().is_empty());
-        assert!(config.exclusions(&config.scopes[1]).is_empty());
-        let object = declaration("frameworks: [{name: cra}, dsgvo]");
-        assert_eq!(
-            object,
-            declaration("frameworks: [cra, dsgvo]"),
-            "an object with neither key is a string"
-        );
-        assert_eq!(
-            serde_yaml_ng::to_string(&object).unwrap(),
-            "frameworks:\n- cra\n- dsgvo\n"
-        );
-    }
-
-    #[test]
-    fn scopes_limits_a_framework_to_the_named_subtrees() {
-        let config = applicability("frameworks: [dsgvo, {name: finance, scopes: [finance]}]");
-        assert_eq!(
-            reaches(&config, "finance"),
-            ["finance", "ledger"],
-            "the subtree, never the lookalike path"
-        );
-        assert_eq!(reaches(&config, "dsgvo"), EVERYWHERE);
-        let work = &config.scopes[3];
-        assert_eq!(config.chain_for_scope(work)[0].frameworks, ["dsgvo"]);
-        assert_eq!(
-            config.exclusions(work),
-            [Exclusion {
-                framework: "finance".into(),
-                layer: "company".into(),
-                rule: ExclusionRule::Scopes(vec!["finance".into()]),
-            }]
-        );
-        assert_eq!(
-            config.exclusions(work)[0].to_string(),
-            "the instance root (\"company\") applies finance only to the finance subtree(s) (scopes: [finance])"
-        );
-    }
-
-    #[test]
-    fn except_removes_subtrees_from_the_whole_tree() {
-        let config = applicability(
-            "frameworks: [{name: cra, except: [finance]}, {name: dsgvo, except: [finance]}]",
-        );
-        assert_eq!(
-            reaches(&config, "cra"),
-            ["company", "work", "demo", "lookalike"]
-        );
-        assert_eq!(
-            reaches(&config, "dsgvo"),
-            ["company", "work", "demo", "lookalike"]
-        );
-        let ledger = &config.scopes[2];
+        assert!(findings[0].detail.contains("`policies:`"), "{findings:?}");
+        assert!(findings[0].detail.contains(".factory/policies/<framework>.yaml"), "{findings:?}");
         assert!(
-            config.chain_for_scope(ledger).is_empty(),
-            "nothing is left of the root layer below finance"
+            findings[1].detail.contains("projects/work/demo/.factory/policies/<framework>.yaml"),
+            "{findings:?}"
         );
-        assert_eq!(
-            config.exclusions(ledger)[0].rule,
-            ExclusionRule::Except("finance".into()),
-            "a scope below an except subtree names the subtree that excluded it"
-        );
-        assert_eq!(
-            config.exclusions(ledger)[0].to_string(),
-            "the instance root (\"company\") excludes cra from the \"finance\" subtree (except: [finance])"
-        );
+        let mut unnamed = config.clone();
+        unnamed.root_name = None;
+        assert_eq!(unnamed.legacy_findings()[0].subject, "instance");
     }
 
-    #[test]
-    fn scopes_and_except_together_apply_except_after_scopes() {
-        let config = applicability(
-            "frameworks: [{name: cra, scopes: [work, finance], except: [demo, ledger]}]",
-        );
-        assert_eq!(reaches(&config, "cra"), ["finance", "work"]);
-        // Outside `scopes` is the reason reported first, `scopes` being applied first.
-        assert!(matches!(
-            config.exclusions(&config.scopes[0])[0].rule,
-            ExclusionRule::Scopes(_)
-        ));
-        assert!(matches!(
-            config.exclusions(&config.scopes[4])[0].rule,
-            ExclusionRule::Except(_)
-        ));
-    }
+    // -- ownership (#390) ------------------------------------------------
 
     #[test]
-    fn the_root_scope_itself_is_a_subtree_covering_everything() {
-        let whole = applicability("frameworks: [{name: cra, scopes: [company]}]");
-        assert_eq!(reaches(&whole, "cra"), EVERYWHERE);
-        let nowhere = applicability("frameworks: [{name: cra, except: [company]}]");
-        assert!(reaches(&nowhere, "cra").is_empty());
-    }
-
-    #[test]
-    fn a_nested_scope_may_bind_a_framework_back_after_a_root_exclusion_and_never_drop_one() {
-        let mut config = applicability(
-            "frameworks: [{name: cra, except: [finance]}]\ntighten: {cra/a: {max_age: 7d}}\n",
-        );
-        config.scopes[2].policies = declaration("frameworks: [cra]");
-        // A child that tries to exclude anything is refused at load by the
-        // configuration owner; here it simply never enters a layer.
-        config.scopes[3].policies = declaration("frameworks: [{name: practices, except: [demo]}]");
+    fn a_policy_applies_to_the_scope_that_owns_it_only() {
+        let root = Root::new();
+        std::fs::write(policy::policies_dir(&root.0).join("house.yaml"), "framework: house\ntitle: House\nkind: best-practice\ncontrols: [{id: h, title: H, evidence: [{check: attestation}]}]\n").unwrap();
+        root.policy("projects/work", "cra", CATALOGUE);
+        // A lookalike path beside `work` is not below it.
+        root.policy("projects/work-other", "cra", &CATALOGUE.replace("title: A", "title: Side"));
+        // `templates/` and `drafts/` are never policies.
+        root.template("cra", "template: cra\ntitle: CRA\nkind: regulation\ncontrols: [{id: a, title: A}]\n");
+        std::fs::create_dir_all(policy::policies_dir(&root.0).join("drafts")).unwrap();
+        std::fs::write(policy::policies_dir(&root.0).join("drafts/next.yaml"), "framework: next\ntitle: Next\nkind: regulation\n").unwrap();
+        let config = configuration();
+        let policies = config.load_policies(&root.0);
+        assert!(policies.findings.is_empty(), "{:?}", policies.findings);
+        assert_eq!(policies.frameworks("company"), ["house"]);
+        assert_eq!(policies.frameworks("work"), ["cra"]);
+        assert!(policies.frameworks("child").is_empty(), "nothing is inherited down the tree");
+        assert_eq!(policies.applied("work/side")[0].title, "Side");
+        assert_eq!(policies.templates.len(), 1);
         assert_eq!(
-            reaches(&config, "cra"),
-            ["company", "ledger", "work", "demo", "lookalike"]
-        );
-        assert_eq!(
-            reaches(&config, "practices"),
-            ["work", "demo"],
-            "a nested restriction excludes nothing"
-        );
-
-        let catalogues = vec![serde_yaml_ng::from_str::<policy::Catalogue>(CATALOGUE).unwrap()];
-        let ledger = config.chain_for_scope(&config.scopes[2]);
-        assert_eq!(
-            ledger.iter().map(|l| l.scope.as_str()).collect::<Vec<_>>(),
-            ["company", "ledger"]
-        );
-        assert!(
-            ledger[0].frameworks.is_empty(),
-            "the root still excludes cra at ledger itself"
-        );
-        let (applied, findings) = policy::applicable(&catalogues, &ledger);
-        assert!(findings.is_empty(), "{findings:?}");
-        assert_eq!(
-            applied[0].max_age,
-            Some("7d".parse().unwrap()),
-            "the root's tightening holds wherever the framework is bound back"
-        );
-        let finance = config.chain_for_scope(&config.scopes[1]);
-        assert!(
-            finance.is_empty(),
-            "the root's tightening of an excluded framework is not carried in"
+            policies.of("work").next().unwrap().file,
+            "projects/work/.factory/policies/cra.yaml"
         );
         assert_eq!(
-            policy::applicable(&catalogues, &finance),
-            (vec![], vec![]),
-            "and so is no finding"
+            policies.of("company").next().unwrap().file,
+            ".factory/policies/house.yaml"
+        );
+        assert_eq!(
+            policy::policy_frameworks(&root.0, Path::new("projects/work")),
+            ["cra"]
         );
 
         let cra_a: policy::ControlRef = "cra/a".parse().unwrap();
-        let rebound = config
-            .not_applying(&"cra/zz".parse().unwrap(), &config.scopes[2])
+        let refused = config.not_owned(&policies, &cra_a, &config.scopes[0]).to_string();
+        assert!(refused.contains("\"company\" has no cra policy of its own"), "{refused}");
+        assert!(refused.contains("belongs to work, work/side"), "{refused}");
+        let below = config.not_owned(&policies, &cra_a, &config.scopes[2]).to_string();
+        assert!(below.contains("does not apply there"), "{below}");
+        let unknown = config
+            .not_owned(&policies, &"cra/zz".parse().unwrap(), &config.scopes[1])
             .to_string();
-        assert!(
-            rebound.contains("is not a control any loaded catalogue defines"),
-            "{rebound}"
-        );
-        let excluded = config.not_applying(&cra_a, &config.scopes[1]).to_string();
-        assert!(
-            excluded.contains("cra/a does not apply at \"finance\""),
-            "{excluded}"
-        );
-        assert!(excluded.contains("except: [finance]"), "{excluded}");
+        assert!(unknown.contains("is not a control of \"work\"'s cra policy"), "{unknown}");
     }
 
     #[test]
-    fn an_unknown_scope_name_is_a_finding_and_counts_as_absent() {
-        let config = applicability(
-            "frameworks: [{name: cra, except: [fiannce]}, {name: gobd, scopes: [finance, nope]}, {name: x, scopes: [gone]}]",
-        );
-        assert_eq!(
-            reaches(&config, "cra"),
-            EVERYWHERE,
-            "an unknown except removes nothing"
-        );
-        assert_eq!(
-            reaches(&config, "gobd"),
-            ["finance", "ledger"],
-            "the known name still holds"
-        );
-        assert!(
-            reaches(&config, "x").is_empty(),
-            "scopes of nothing but unknown names is nowhere"
-        );
-        let findings = config.applicability_findings();
-        assert_eq!(
-            findings
-                .iter()
-                .map(|f| (f.kind, f.subject.as_str()))
-                .collect::<Vec<_>>(),
-            [(policy::FindingKind::UnknownScope, "company"); 3]
-        );
-        assert!(
-            findings[0]
-                .detail
-                .contains("cra's `except` names \"fiannce\""),
-            "{findings:?}"
-        );
-        assert!(
-            findings[1]
-                .detail
-                .contains("gobd's `scopes` names \"nope\""),
-            "{findings:?}"
-        );
-        assert_eq!(
-            config.restriction("gobd").unwrap().scopes,
-            Some(vec!["finance".to_string()])
-        );
-        assert_eq!(
-            config.restriction("cra").unwrap().except,
-            Vec::<String>::new()
-        );
-        assert!(config.restriction("dsgvo").is_none());
-        // A leaf alias or a path is not a scope name.
-        let aliased = applicability("frameworks: [{name: cra, except: [finance/ledger]}]");
-        assert_eq!(reaches(&aliased, "cra"), EVERYWHERE);
-        assert_eq!(aliased.applicability_findings().len(), 1);
+    fn a_root_policy_with_no_root_scope_is_owned_by_nobody_and_said_so() {
+        let root = Root::new();
+        std::fs::write(policy::policies_dir(&root.0).join("cra.yaml"), CATALOGUE).unwrap();
+        let mut config = configuration();
+        config.scopes.remove(0);
+        let policies = config.load_policies(&root.0);
+        assert!(policies.owned.is_empty());
+        assert_eq!(policies.findings.len(), 1, "{:?}", policies.findings);
+        assert_eq!(policies.findings[0].kind, policy::FindingKind::NoOwningScope);
+        assert_eq!(policies.findings[0].subject, ".factory/policies/cra.yaml");
     }
 
     #[test]
-    fn a_vanished_scope_gets_the_root_layer_as_it_applies_at_the_root() {
-        let config = applicability(
-            "frameworks: [{name: cra, except: [finance]}, {name: finance, scopes: [finance]}, dsgvo]",
-        );
-        assert_eq!(config.chain("vanished")[0].frameworks, ["cra", "dsgvo"]);
-        let mut unscoped = config.clone();
-        unscoped.scopes.remove(0);
-        unscoped.root_name = None;
-        let chain = unscoped.chain("vanished");
-        assert_eq!(chain[0].scope, "instance");
-        assert_eq!(
-            chain[0].frameworks,
-            ["cra", "dsgvo"],
-            "no root scope still means the root position"
-        );
-    }
-
-    #[test]
-    fn the_object_form_round_trips_refuses_a_typo_and_a_second_entry_for_a_restricted_framework() {
-        let raw = "frameworks:\n- name: cra\n  except:\n  - finance\n- dsgvo\n- name: finance\n  scopes:\n  - finance\n";
-        let parsed = declaration(raw);
-        assert_eq!(parsed.frameworks, ["cra", "dsgvo", "finance"]);
-        assert_eq!(parsed.applicability["cra"].except, ["finance"]);
-        assert_eq!(
-            parsed.applicability["finance"].scopes,
-            Some(vec!["finance".to_string()])
-        );
-        assert_eq!(serde_yaml_ng::to_string(&parsed).unwrap(), raw);
-        let json = serde_json::to_value(&parsed).unwrap();
-        assert_eq!(
-            json["frameworks"][0],
-            serde_json::json!({"name": "cra", "except": ["finance"]})
-        );
-        assert_eq!(
-            serde_json::from_value::<PolicyDeclaration>(json).unwrap(),
-            parsed
-        );
-
-        let typo = serde_yaml_ng::from_str::<PolicyDeclaration>(
-            "frameworks: [{name: cra, exept: [finance]}]",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(typo.contains("exept"), "{typo}");
-        for twice in [
-            "frameworks: [cra, {name: cra, except: [finance]}]",
-            "frameworks: [{name: cra, except: [finance]}, cra]",
-        ] {
-            let error = serde_yaml_ng::from_str::<PolicyDeclaration>(twice)
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("listed more than once"), "{twice}: {error}");
-        }
-        assert_eq!(
-            declaration("frameworks: [cra, cra]").frameworks,
-            ["cra", "cra"]
-        );
-        assert!(serde_yaml_ng::from_str::<PolicyDeclaration>("frameworks: [7]").is_err());
+    fn an_unselected_template_control_is_named_in_the_refusal() {
+        let root = Root::new();
+        root.template("cra", "template: cra\ntitle: CRA\nkind: regulation\ncontrols: [{id: a, title: A}, {id: b, title: B}]\n");
+        root.policy("projects/work", "cra", "framework: cra\ntemplate: cra\ncontrols: [{id: a, evidence: [{check: attestation}]}]\n");
+        let config = configuration();
+        let policies = config.load_policies(&root.0);
+        assert!(policies.findings.is_empty(), "{:?}", policies.findings);
+        let refused = config
+            .not_owned(&policies, &"cra/b".parse().unwrap(), &config.scopes[1])
+            .to_string();
+        assert!(refused.contains("cra/b is not selected at \"work\""), "{refused}");
+        assert!(refused.contains("template \"cra\""), "{refused}");
     }
 
     #[tokio::test]
     async fn metric_inputs_reread_catalogues_receipts_and_withdrawals_without_a_verdict() {
         let root = Root::new();
         root.catalogue(CATALOGUE);
-        std::fs::write(policy::policies_dir(&root.0).join("practices.yaml"), "framework: practices\ntitle: Practices\nkind: best-practice\ncontrols: [{id: b, title: B}]\n").unwrap();
+        root.policy("projects/work/demo", "practices", "framework: practices\ntitle: Practices\nkind: best-practice\ncontrols: [{id: b, title: B}]\n");
+        root.policy(".", "house", "framework: house\ntitle: House\nkind: regulation\ncontrols: [{id: h, title: H}]\n");
         let store = PolicyStore::in_memory().unwrap();
         let owner = Service::new(root.0.clone(), configuration(), &store);
         let first = owner.metric_inputs(Some("demo")).await.unwrap();
@@ -1283,8 +694,10 @@ tighten: {cra/a: {max_age: 7d}}
                 .iter()
                 .map(|s| s.scope.name.as_str())
                 .collect::<Vec<_>>(),
-            ["company", "work", "child", "work/side"]
+            ["company", "child"],
+            "only the scopes that own a policy, each with its own"
         );
+        assert_eq!(whole.scopes[0].subjects.len(), 1, "the root's own policy only");
     }
 
     #[tokio::test]
@@ -1415,9 +828,9 @@ tighten: {cra/a: {max_age: 7d}}
         let owner = Service::new(root.0.clone(), configuration(), &store);
         let tags = Tags::default();
         tags.tags.lock().unwrap().insert("control/cra/a".into());
-        let (catalogues, findings, first) = owner.catalogues_with_tags(&tags).await.unwrap();
-        assert_eq!(catalogues[0].controls[0].title, "A");
-        assert!(findings.is_empty());
+        let (policies, first) = owner.policies_with_tags(&tags).await.unwrap();
+        assert_eq!(policies.applied("child")[0].title, "A");
+        assert!(policies.findings.is_empty());
         assert!(first.contains("control/cra/a"));
         root.catalogue(&CATALOGUE.replace("title: A", "title: Updated"));
         std::fs::write(
@@ -1426,19 +839,19 @@ tighten: {cra/a: {max_age: 7d}}
         )
         .unwrap();
         tags.tags.lock().unwrap().clear();
-        let (catalogues, findings, next) = owner.catalogues_with_tags(&tags).await.unwrap();
-        assert_eq!(catalogues[0].controls[0].title, "Updated");
-        assert!(!findings.is_empty());
+        let (policies, next) = owner.policies_with_tags(&tags).await.unwrap();
+        assert_eq!(policies.applied("child")[0].title, "Updated");
+        assert!(!policies.findings.is_empty());
         assert!(next.is_empty());
         tags.fail.store(true, Ordering::SeqCst);
         assert!(owner
-            .catalogues_with_tags(&tags)
+            .policies_with_tags(&tags)
             .await
             .unwrap_err()
             .to_string()
             .contains("unavailable"));
         tags.fail.store(false, Ordering::SeqCst);
-        assert!(owner.catalogues_with_tags(&tags).await.is_ok());
+        assert!(owner.policies_with_tags(&tags).await.is_ok());
         assert_eq!(tags.calls.load(Ordering::SeqCst), 4);
     }
 }
