@@ -5,7 +5,9 @@
 //! The fake's "stall" is an extended attribute on it: it hangs while the
 //! attribute is there, and the script's fresh copy (`cp -X`) does not carry
 //! it -- the same shape as the incident, where the same bytes in a fresh
-//! folder started at once. The signature is a stub `codesign` on `PATH`, so
+//! folder started at once. A companion beside it, `codex-code-mode-host`,
+//! stalls the same way: the harness answering `--version` is not enough.
+//! The signature is a stub `codesign` on `PATH`, so
 //! the script's own decisions -- refuse on a bad signature, refuse on the
 //! wrong team -- are what is tested; one case uses the real `codesign` to
 //! show an unsigned folder is refused by the real thing too.
@@ -48,6 +50,14 @@ impl Fixture {
                 "#!/bin/sh\nif xattr -p {STUCK_ATTR} \"$0\" >/dev/null 2>&1; then sleep 30; fi\necho 'codex-cli 0.157.0'\n"
             ),
         );
+        // A companion codex starts from beside itself, which stalls the same
+        // way and answers `--help` rather than `--version`.
+        write_exe(
+            &folder.join("bin/codex-code-mode-host"),
+            &format!(
+                "#!/bin/sh\nif xattr -p {STUCK_ATTR} \"$0\" >/dev/null 2>&1; then sleep 30; fi\n[ \"$1\" = --help ] || exit 2\necho 'Usage: codex-code-mode-host [OPTIONS]'\n"
+            ),
+        );
         std::fs::write(folder.join("codex-package.json"), "{}").unwrap();
         let bin_dir = dir.join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -66,9 +76,13 @@ impl Fixture {
     }
 
     fn stick(&self) {
+        self.stick_one("bin/codex");
+    }
+
+    fn stick_one(&self, inside: &str) {
         let status = Command::new("xattr")
             .args(["-w", STUCK_ATTR, "1"])
-            .arg(self.folder.join("bin/codex"))
+            .arg(self.folder.join(inside))
             .status()
             .unwrap();
         assert!(status.success());
@@ -133,6 +147,42 @@ fn a_stuck_install_is_swapped_for_a_fresh_copy_and_the_old_one_is_kept() {
     assert!(kept.join("codex-package.json").exists());
     let attr = Command::new("xattr").args(["-p", STUCK_ATTR]).arg(kept.join("bin/codex")).output().unwrap();
     assert!(attr.status.success(), "the old folder is kept exactly as it was");
+}
+
+#[test]
+fn a_stuck_companion_is_repaired_though_the_harness_answers_its_version() {
+    let f = Fixture::new("companion");
+    f.stick_one("bin/codex-code-mode-host");
+    let out = f.run(&["codex"], true, &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    let said = text(&out);
+    assert!(said.contains("codex-code-mode-host --help: did not answer"), "{said}");
+    assert!(said.contains("repaired"), "{said}");
+    assert_eq!(f.versions(), vec!["0.157.0", "0.157.0.stuck"]);
+    let host = Command::new(f.folder.join("bin/codex-code-mode-host")).arg("--help").output().unwrap();
+    assert!(host.status.success(), "the companion in place starts");
+}
+
+#[test]
+fn a_companion_from_another_team_is_refused_and_nothing_changes() {
+    let f = Fixture::new("companion-team");
+    f.stick_one("bin/codex-code-mode-host");
+    // The stub answers by path: the companion alone names another team.
+    write_exe(
+        &f.stub_dir.join("codesign"),
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --verify) exit 0 ;;\n\
+           -dv) case \"$3\" in *code-mode-host) t=ABCDE12345 ;; *) t=2DC432GLL2 ;; esac\n\
+                echo \"TeamIdentifier=$t\" >&2; exit 0 ;;\n\
+         esac\n\
+         exit 1\n",
+    );
+    let out = f.run(&["codex"], true, &[]);
+    assert!(!out.status.success());
+    let said = text(&out);
+    assert!(said.contains("refusing") && said.contains("codex-code-mode-host") && said.contains("ABCDE12345"), "{said}");
+    assert_eq!(f.versions(), vec!["0.157.0"]);
 }
 
 #[test]
