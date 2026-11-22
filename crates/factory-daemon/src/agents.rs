@@ -6,7 +6,7 @@
 //! is still there.
 
 use chrono::Utc;
-use factory_core::adapter::agent::{Agent, AgentContext};
+use factory_core::adapter::agent::{Agent, AgentContext, LiveConversation};
 use factory_core::adapter::runtime::{AgentRuntime, RuntimeStatus, Screen, StartRequest};
 use factory_core::agent::{
     AgentSession, AgentState, AttachTarget, KeptInstance, KeptUp, Lifetime, Restarted, ScaleReport, StopCheck,
@@ -143,6 +143,16 @@ fn runtime_name(scope: &str, name: &str, instance: u32) -> String {
 struct Resume {
     args: Vec<String>,
     conversation: String,
+}
+
+/// The conversation a restart found an instance in (`conversation_of`).
+enum Found {
+    /// This one.
+    In(String),
+    /// This one, with nothing said in it yet (`LiveConversation::Empty`).
+    Empty(String),
+    /// None; what was asked and what answered.
+    Unknown(String),
 }
 
 /// How long a restart waits for the session it stopped to be gone before it
@@ -545,10 +555,11 @@ impl L3Service<'_> {
                     asker.by,
                     r.previous_session,
                     r.agent.session.as_ref().map(|s| s.handle.as_str()).unwrap_or("none"),
-                    match (&r.conversation, &r.left) {
-                        (Some(conversation), _) => format!("resumed conversation {conversation}"),
-                        (None, Some(left)) => format!("fresh conversation, leaving {left}"),
-                        (None, None) => "fresh conversation, none was known".to_string(),
+                    match (&r.conversation, &r.left, &r.empty) {
+                        (Some(conversation), _, _) => format!("resumed conversation {conversation}"),
+                        (None, Some(left), _) => format!("fresh conversation, leaving {left}"),
+                        (None, None, Some(empty)) => format!("fresh conversation, {empty} had nothing said in it"),
+                        (None, None, None) => "fresh conversation, none was known".to_string(),
                     }
                 ),
             ),
@@ -640,15 +651,19 @@ impl L3Service<'_> {
         }
 
         // Which conversation it is in, written down before anything stops.
-        let (conversation, unknown) = self.conversation_of(&agent, &decl.harness, &session, runtime.as_ref(), adapter.as_ref()).await;
+        let found = self.conversation_of(&agent, &decl.harness, &session, runtime.as_ref(), adapter.as_ref()).await;
+        let conversation = match &found {
+            Found::In(conversation) => Some(conversation.clone()),
+            Found::Empty(_) | Found::Unknown(_) => None,
+        };
         if conversation.is_some() && agent.conversation != conversation {
             agent.conversation = conversation.clone();
             self.state.agents.put_agent(&agent).await?;
             self.wiring.bus().publish(Event::AgentUpdated { agent: agent.clone() });
         }
-        let resume = match (&conversation, fresh) {
+        let resume = match (&found, fresh) {
             (_, true) => None,
-            (Some(conversation), false) => match adapter.resume_spec(conversation) {
+            (Found::In(conversation), false) => match adapter.resume_spec(conversation) {
                 Some(spec) => Some(Resume { args: spec.args, conversation: conversation.clone() }),
                 None => {
                     return Err(FactoryError::BadRequest(format!(
@@ -658,13 +673,20 @@ impl L3Service<'_> {
                     )))
                 }
             },
-            (None, false) => {
+            // Nothing said in it, so nothing a resume could open and nothing
+            // a fresh start loses.
+            (Found::Empty(_), false) => None,
+            (Found::Unknown(unknown), false) => {
                 return Err(FactoryError::BadRequest(format!(
                     "no conversation is known for {} ({unknown}); nothing was stopped. \
                      `factory agent restart {quoted} --fresh` restarts it on a new conversation",
                     agent.id
                 )))
             }
+        };
+        let empty = match found {
+            Found::Empty(conversation) => Some(conversation),
+            Found::In(_) | Found::Unknown(_) => None,
         };
 
         // Down, and confirmed down: two processes on one conversation is the
@@ -720,6 +742,7 @@ impl L3Service<'_> {
             agent: started.redacted(),
             left: if resumed.is_none() { conversation } else { None },
             conversation: resumed,
+            empty,
             previous_session: session.handle,
         })
     }
@@ -736,31 +759,30 @@ impl L3Service<'_> {
         session: &SessionRef,
         runtime: &dyn AgentRuntime,
         adapter: &dyn Agent,
-    ) -> (Option<String>, String) {
+    ) -> Found {
         // A conversation of the harness it is running is not one the harness
         // it is declared with now could open.
         if agent.agent != harness {
-            return (None, format!("it is running {}, and its declaration now names {harness}", agent.agent));
+            return Found::Unknown(format!("it is running {}, and its declaration now names {harness}", agent.agent));
         }
         let mut unknown = Vec::new();
         match runtime.usage(session).await {
             Ok(Some(usage)) => match usage.session_for_adapter(harness) {
-                Some(id) => return (Some(id.to_string()), String::new()),
+                Some(id) => return Found::In(id.to_string()),
                 None => unknown.push(format!("the runtime's usage names no {harness} session")),
             },
             Ok(None) => unknown.push("the runtime reports no usage".to_string()),
             Err(e) => unknown.push(format!("its usage could not be read: {e}")),
         }
         match runtime.processes(session).await {
-            Ok(processes) => {
-                if let Some(id) = processes.iter().find_map(|p| adapter.live_conversation(p.pid)) {
-                    return (Some(id), String::new());
-                }
-                unknown.push(format!("no process in its session names a {harness} conversation"));
-            }
+            Ok(processes) => match processes.iter().find_map(|p| adapter.live_conversation(p.pid)) {
+                Some(LiveConversation::In(id)) => return Found::In(id),
+                Some(LiveConversation::Empty(id)) => return Found::Empty(id),
+                None => unknown.push(format!("no process in its session names a {harness} conversation")),
+            },
             Err(e) => unknown.push(format!("its processes could not be read: {e}")),
         }
-        (None, unknown.join("; "))
+        Found::Unknown(unknown.join("; "))
     }
 
     /// Whether a session the runtime was asked to stop is gone, asked until
@@ -2199,7 +2221,8 @@ pub(crate) mod tests {
     }
 
     /// A harness that keeps its conversation by process id, as Claude Code
-    /// does in `~/.claude/sessions/<pid>.json`: pid 4242 is in `by-pid`.
+    /// does in `~/.claude/sessions/<pid>.json`: pid 4242 is in `by-pid`, and
+    /// pid 5150 in `unsaid`, which nothing has been said in yet.
     struct ByPid {
         name: &'static str,
         resumes: bool,
@@ -2224,8 +2247,12 @@ pub(crate) mod tests {
         fn resume_spec(&self, session_id: &str) -> Option<factory_core::adapter::agent::ResumeSpec> {
             self.resumes.then(|| factory_core::adapter::agent::ResumeSpec { args: vec!["--session".into(), session_id.into()] })
         }
-        fn live_conversation(&self, pid: u32) -> Option<String> {
-            (pid == 4242).then(|| "by-pid".to_string())
+        fn live_conversation(&self, pid: u32) -> Option<LiveConversation> {
+            match pid {
+                4242 => Some(LiveConversation::In("by-pid".to_string())),
+                5150 => Some(LiveConversation::Empty("unsaid".to_string())),
+                _ => None,
+            }
         }
     }
 
@@ -2382,6 +2409,33 @@ pub(crate) mod tests {
         let starts = stub.starts.lock().unwrap().clone();
         let last = starts.last().unwrap();
         assert_eq!((last.id.as_str(), &last.launch.args[..2]), ("demo/one", &["--session".to_string(), "by-pid".to_string()][..]));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_conversation_nothing_was_said_in_is_restarted_fresh_without_asking_for_fresh() {
+        let (engine, stub, root) =
+            recording_engine("name: demo\npath: .\nruntime: stub\nagents:\n  - name: one\n    harness: bypid\n    lifetime: permanent\n");
+        engine.l3_service().reconcile_agents().await;
+        stub.set_status("demo/one", RuntimeStatus::Idle);
+        stub.set_processes("demo/one", &[17, 5150]);
+
+        let restarted = restart(&engine, "demo/one", false).await.unwrap();
+        assert_eq!(
+            (restarted.conversation.as_deref(), restarted.left.as_deref(), restarted.empty.as_deref()),
+            (None, None, Some("unsaid"))
+        );
+        assert_eq!(restarted.summary(), "demo/one restarted fresh: nothing had been said in conversation unsaid");
+        let starts = stub.starts.lock().unwrap().clone();
+        assert_eq!(starts.len(), 2, "the first start, then the restart's");
+        assert!(!starts[1].launch.args.iter().any(|a| a == "--session"), "{:?}", starts[1].launch.args);
+        assert_eq!(instance(&engine, "demo/one").await.conversation, None, "nothing worth writing down");
+        let journal = journal(&engine).await;
+        assert!(
+            journal.iter().any(|(_, kind, message)| kind == "agent_restarted"
+                && message.ends_with("fresh conversation, unsaid had nothing said in it")),
+            "{journal:#?}"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 

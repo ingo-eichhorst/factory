@@ -431,6 +431,10 @@ pub struct Restarted {
     /// left it behind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub left: Option<String>,
+    /// The conversation it was in before, when nothing had been said in it:
+    /// there was nothing to resume, so it started fresh without `--fresh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty: Option<String>,
     /// The runtime's handle for the session that was stopped.
     pub previous_session: String,
 }
@@ -439,10 +443,13 @@ impl Restarted {
     /// `"demo/watcher resumed conversation 59edd824-…"`, or what a fresh one
     /// started on.
     pub fn summary(&self) -> String {
-        match (&self.conversation, &self.left) {
-            (Some(conversation), _) => format!("{} resumed conversation {conversation}", self.agent.id),
-            (None, Some(left)) => format!("{} restarted fresh, leaving conversation {left}", self.agent.id),
-            (None, None) => format!("{} restarted fresh", self.agent.id),
+        match (&self.conversation, &self.left, &self.empty) {
+            (Some(conversation), _, _) => format!("{} resumed conversation {conversation}", self.agent.id),
+            (None, Some(left), _) => format!("{} restarted fresh, leaving conversation {left}", self.agent.id),
+            (None, None, Some(empty)) => {
+                format!("{} restarted fresh: nothing had been said in conversation {empty}", self.agent.id)
+            }
+            (None, None, None) => format!("{} restarted fresh", self.agent.id),
         }
     }
 }
