@@ -9,14 +9,24 @@
 #
 #   1. resolve the harness's binary to its install folder -- a Homebrew
 #      cask's `<prefix>/Caskroom/<cask>/<version>`;
-#   2. verify the binary's code signature, and that it was signed by the
-#      developer team this harness is expected to come from (OpenAI for
-#      codex, Anthropic for Claude Code) -- refuse on any mismatch;
-#   3. copy the folder beside itself, without extended attributes, and
-#      verify the copy's signature the same way;
-#   4. check the copy answers `--version` in time;
+#   2. verify the binary's code signature, and that of every companion
+#      program the harness starts from beside it, and that each was signed
+#      by the developer team this harness is expected to come from (OpenAI
+#      for codex, Anthropic for Claude Code) -- refuse on any mismatch;
+#   3. copy the folder beside itself, without extended attributes, clear
+#      the quarantine flag on the copy before it is ever run, and verify
+#      the copy's signatures the same way;
+#   4. check the copy answers `--version`, and each companion `--help`, in
+#      time;
 #   5. swap it in by rename, keeping the old folder as `<version>.stuck`;
-#   6. check the harness answers `--version` from where it always was.
+#   6. check the harness answers `--version` from where it always was, and
+#      its companions `--help` from the folder in place.
+#
+# The companions matter because the harness can answer `--version` while
+# one of them is the program macOS holds: codex runs every tool call through
+# `codex-code-mode-host`, and on 2026-11-20 a held host left codex starting,
+# answering, and unable to run a single command -- 575 runs that never
+# acknowledged their task, while `codex --version` said all was well.
 #
 # Nothing of the install is ever deleted: a failed copy is left where it is, named, and the
 # old folder is kept beside the new one. It overrides a decision macOS is
@@ -28,7 +38,8 @@
 #   --dry-run    say what would be done, change nothing
 #
 # Environment (for a person, or a test):
-#   REPAIR_HARNESS_TIMEOUT   seconds `--version` may take (default 10)
+#   REPAIR_HARNESS_TIMEOUT   seconds `--version` (or a companion's `--help`)
+#                            may take (default 10)
 #
 # Supported in v1: a harness installed as a Homebrew cask with a Developer ID
 # signature from the team in the table below. Anything else -- Claude Code's
@@ -58,17 +69,20 @@ done
 say() { echo "repair-harness: $*"; }
 refuse() { echo "repair-harness: refusing: $*" >&2; exit 1; }
 
-# The binary a harness goes by, and the developer team its signature must
-# name. A harness not in this table is refused: there is nothing to check
-# its signature against.
+# The binary a harness goes by, the developer team its signature must name,
+# and the companion programs it starts from its own folder -- each probed
+# with `--help`, and only when the installed version has it. A harness not
+# in this table is refused: there is nothing to check its signature against.
 case "$name" in
     codex)
         program=codex
         team=2DC432GLL2 # OpenAI OpCo, LLC
+        companions="codex-code-mode-host codex-exec-server"
         ;;
     claude|claude-code)
         program=claude
         team=Q6L2SF6YDW # Anthropic PBC
+        companions=""
         ;;
     *)
         refuse "no expected developer team is known for '$name'; add it to the table in $0 before repairing it"
@@ -77,14 +91,15 @@ esac
 
 timeout_s="${REPAIR_HARNESS_TIMEOUT:-10}"
 
-# `--version`, bounded: there is no GNU `timeout` on macOS. Answers 0 when it
-# exited zero in time, 124 when it did not answer, its status otherwise, and
-# leaves its first line of output (or why not) in `answered`.
+# `--version` (or the flag given), bounded: there is no GNU `timeout` on
+# macOS. Answers 0 when it exited zero in time, 124 when it did not answer,
+# its status otherwise, and leaves its first line of output (or why not) in
+# `answered`.
 answered=""
 answers() {
-    local bin="$1" out pid waited=0 status=0
+    local bin="$1" flag="${2:---version}" out pid waited=0 status=0
     out="$(mktemp "${TMPDIR:-/tmp}/repair-harness-XXXXXX")"
-    "$bin" --version >"$out" 2>&1 </dev/null &
+    "$bin" "$flag" >"$out" 2>&1 </dev/null &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
         if [ "$waited" -ge $((timeout_s * 10)) ]; then
@@ -129,6 +144,37 @@ verify_signature() {
     fi
 }
 
+# The same for every companion present in folder `$1`; `$2` prefixes the
+# name in a refusal.
+verify_companions() {
+    local dir="$1" what="$2" companion
+    for companion in $companions; do
+        [ -e "$dir/$companion" ] || continue
+        verify_signature "$dir/$companion" "$what$companion"
+    done
+}
+
+# The program `$1` by `--version`, and every companion present in folder
+# `$2` by `--help` -- they have no `--version`. Answers 0 when all of them
+# did, leaving the program's version in `answered`; otherwise leaves which
+# one did not, and why, there.
+all_answer() {
+    local main="$1" dir="$2" version companion
+    if ! answers "$main"; then
+        answered="$program --version: ${answered:-no output}"
+        return 1
+    fi
+    version="$answered"
+    for companion in $companions; do
+        [ -e "$dir/$companion" ] || continue
+        if ! answers "$dir/$companion" --help; then
+            answered="$companion --help: ${answered:-no output}"
+            return 1
+        fi
+    done
+    answered="$version"
+}
+
 # -- 1. where it is -----------------------------------------------------------
 
 link="$(command -v "$program" || true)"
@@ -148,6 +194,8 @@ rest="${rest#*/}"
 version="${rest%%/*}"
 inside="${rest#*/}"
 folder="$caskroom/$cask/$version"
+# The folder inside it the binary, and so its companions, sit in.
+inner="$(dirname "$inside")"
 [ -d "$folder" ] || refuse "$folder is not a directory"
 case "$version" in
     *.stuck|*.stuck.*|*.upgrading|*.repair.*)
@@ -158,13 +206,14 @@ say "install folder: $folder (cask $cask, version $version)"
 # -- 2. is it what it says it is --------------------------------------------
 
 verify_signature "$bin" "$program"
+verify_companions "$folder/$inner" ""
 say "signature verifies, team $team"
 
-if answers "$bin"; then
-    say "$program already answers --version ($answered); nothing to repair"
+if all_answer "$bin" "$folder/$inner"; then
+    say "$program already answers --version ($answered)${companions:+, and every companion present --help}; nothing to repair"
     exit 0
 fi
-say "$program does not answer --version: ${answered:-no output}"
+say "the install does not answer: $answered"
 
 stamp="$(date +%Y%m%d%H%M%S)"
 copy="$folder.repair.$stamp"
@@ -180,16 +229,21 @@ fi
 # -- 3. a fresh copy, beside it ------------------------------------------------
 
 # Same parent, so the renames below are renames on one filesystem. `-X`
-# leaves the extended attributes (the quarantine flag among them) behind;
-# the signature lives in the binary, not in an attribute.
+# leaves the extended attributes behind, but copyfile(3) carries the
+# quarantine flag over anyway, so clear it before the copy's first run:
+# once macOS has held a file at launch, clearing it afterwards changes
+# nothing (2026-10-28). The signature lives in the binary, not in an
+# attribute.
 cp -R -X "$folder" "$copy"
+xattr -dr com.apple.quarantine "$copy"
 say "copied to $copy"
 verify_signature "$copy/$inside" "the copy of $program"
+verify_companions "$copy/$inner" "the copy of "
 
 # -- 4. does the copy start --------------------------------------------------
 
-if ! answers "$copy/$inside"; then
-    refuse "the copy does not answer --version either (${answered:-no output}); left it at $copy, changed nothing else"
+if ! all_answer "$copy/$inside" "$copy/$inner"; then
+    refuse "the copy does not answer either ($answered); left it at $copy, changed nothing else"
 fi
 say "the copy answers: $answered"
 
@@ -204,10 +258,10 @@ say "swapped in; the old folder is kept at $stuck"
 
 # -- 6. and from where it always was ----------------------------------------
 
-if answers "$link"; then
+if all_answer "$link" "$folder/$inner"; then
     say "repaired: $link --version answers ($answered)"
 else
-    echo "repair-harness: swapped, but $link still does not answer --version (${answered:-no output})." >&2
+    echo "repair-harness: swapped, but the install still does not answer ($answered)." >&2
     echo "  the old folder is at $stuck; nothing was deleted" >&2
     exit 1
 fi
