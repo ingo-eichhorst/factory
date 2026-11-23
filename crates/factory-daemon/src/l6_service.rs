@@ -155,14 +155,20 @@ mod test_forwarders {
         ) -> Result<factory_assurance::metrics_service::PolicyInputs> {
             self.l6_service().metric_policy_inputs(snapshot, scope).await
         }
-        pub(crate) async fn load_catalogues_and_tags(
+        pub(crate) async fn load_policies_and_tags(
             &self,
         ) -> Result<(
-            Vec<factory_core::policy::Catalogue>,
-            Vec<factory_core::policy::Finding>,
+            factory_core::policy::Policies,
             std::collections::BTreeSet<String>,
         )> {
-            self.l6_service().load_catalogues_and_tags().await
+            self.l6_service().load_policies_and_tags().await
+        }
+        pub(crate) async fn policy_template(
+            &self,
+            name: &str,
+            scope: Option<&str>,
+        ) -> Result<factory_core::protocol::TemplateView> {
+            self.l6_service().policy_template(name, scope).await
         }
         pub(crate) async fn dataset_level_facts<S: CheckSource>(
             &self,

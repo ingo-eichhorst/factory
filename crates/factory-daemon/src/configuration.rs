@@ -6,8 +6,8 @@
 
 use factory_core::agent::Lifetime;
 use factory_core::config::{
-    refuse_bad_instances, refuse_misplaced_scope_policies, refuse_misplaced_scope_roles, AgentRef, Config,
-    Scope, ScopeAgent, CONFIG_FILE, FACTORY_DIR,
+    refuse_bad_instances, refuse_misplaced_scope_roles, AgentRef, Config, Scope, ScopeAgent,
+    CONFIG_FILE, FACTORY_DIR,
 };
 use factory_core::dashboard::{DashboardConfig, Tile};
 use factory_core::error::{FactoryError, Result};
@@ -40,7 +40,6 @@ fn read_document(path: &Path) -> Result<(String, Value, Scope)> {
     let document: Value = serde_yaml_ng::from_str(&text)
         .map_err(|error| bad(format!("parsing scope config {}: {error}", path.display())))?;
     refuse_misplaced_scope_roles(&document, path)?;
-    refuse_misplaced_scope_policies(&document, path)?;
     // Deliberately no `refuse_misplaced_scope_infrastructure` here, unlike
     // discovery's `read_scope`: this also reads the instance root's own file
     // when the roster edits the root scope, and that file is exactly where

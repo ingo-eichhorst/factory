@@ -163,6 +163,11 @@ pub struct Plan {
     /// Every registered scope's own config, relative to the root, `/`-
     /// separated. The root's own `.factory/config.yaml` is always taken.
     pub scope_configs: Vec<String>,
+    /// Every nested scope's own policy directory (#390), relative to the
+    /// root and `/`-separated -- `<scope>/.factory/policies`. A policy now
+    /// belongs to its scope, so a backup that only took the root's
+    /// `.factory/policies/` would lose every other scope's commitments.
+    pub scope_policies: Vec<String>,
     pub include_logs: bool,
     /// `infrastructure.backup.encrypt_to` (`#152`), already load-time
     /// validated -- `take` still re-parses it, cheaply, rather than trust a
@@ -315,6 +320,16 @@ pub fn take(plan: &Plan, destination: &Path, name: &str, at: DateTime<Utc>) -> R
     let optional = if plan.include_logs { &OPTIONAL[..] } else { &[] };
     for (group, dir, _) in AUTHORED.iter().chain(optional) {
         walk(&plan.root, dir.trim_end_matches('/'), *group, &mut entries, &mut excluded, &mut seen);
+    }
+    for dir in &plan.scope_policies {
+        walk(
+            &plan.root,
+            dir.trim_end_matches('/'),
+            Group::Policies,
+            &mut entries,
+            &mut excluded,
+            &mut seen,
+        );
     }
 
     // `#279`: every scope's own declared `backup.include`, resolved and
@@ -1051,18 +1066,29 @@ fn verify_loaders(root: &Path) -> Vec<VerifyCheck> {
     use factory_core::{goals, knowledge, policy, quality, ready, scenario};
     let mut out = Vec::new();
 
-    let (catalogues, findings) = policy::load_all(&policy::policies_dir(root));
+    // The root scope's own policies, the templates and the drafts (#390);
+    // every other scope's policy files are checked by their checksums.
+    let (policies, findings) = policy::load_all(&policy::policies_dir(root));
+    let (templates, template_findings) =
+        policy::load_templates(&policy::templates_dir(root), "templates/");
     let (drafts, draft_findings) = scenario::load_drafts(&scenario::drafts_dir(root));
     let unparsed = findings
         .iter()
+        .chain(&template_findings)
         .chain(&draft_findings)
         .filter(|f| f.kind == policy::FindingKind::ParseFailed)
         .map(|f| f.subject.clone())
         .collect();
-    let controls: usize = catalogues.iter().map(|c| c.controls.len()).sum();
+    let controls: usize = policies.iter().map(|c| c.controls.len()).sum();
     out.push(loaded(
         "policies",
-        format!("{}, {}, {}", count(catalogues.len(), "catalogue"), count(controls, "control"), count(drafts.len(), "draft")),
+        format!(
+            "{}, {}, {}, {}",
+            count(policies.len(), "root policy"),
+            count(controls, "control"),
+            count(templates.len(), "template"),
+            count(drafts.len(), "draft")
+        ),
         unparsed,
     ));
 
@@ -1216,7 +1242,12 @@ mod tests {
             fs::create_dir_all(f.join("intake")).unwrap();
             fs::create_dir_all(f.join("budgets")).unwrap();
             fs::create_dir_all(f.join("logs")).unwrap();
-            fs::create_dir_all(root.join("projects/demo/.factory")).unwrap();
+            fs::create_dir_all(root.join("projects/demo/.factory/policies")).unwrap();
+            fs::write(
+                root.join("projects/demo/.factory/policies/cra.yaml"),
+                "framework: cra\ntitle: CRA\nkind: regulation\n",
+            )
+            .unwrap();
             fs::write(f.join("config.yaml"), "version: 1\ninstance:\n  id: inst-1\n  name: Test Instance\n").unwrap();
             fs::write(
                 root.join("projects/demo/.factory/config.yaml"),
@@ -1263,6 +1294,7 @@ mod tests {
                 database: self.root.join(".factory/factory.sqlite"),
                 instance: ManifestInstance { id: "inst-1".into(), name: "Test Instance".into() },
                 scope_configs: vec!["projects/demo/.factory/config.yaml".into()],
+                scope_policies: vec!["projects/demo/.factory/policies".into()],
                 include_logs,
                 encrypt_to,
                 scope_includes,
@@ -1378,7 +1410,17 @@ mod tests {
                 ".factory/policies/broken.yaml",
                 ".factory/vex/demo/review.cdx.json",
                 "projects/demo/.factory/config.yaml",
+                "projects/demo/.factory/policies/cra.yaml",
             ]
+        );
+        assert_eq!(
+            manifest
+                .files
+                .iter()
+                .find(|f| f.path == "projects/demo/.factory/policies/cra.yaml")
+                .map(|f| f.group),
+            Some(Group::Policies),
+            "#390: a scope's own policies are backed up with the root's"
         );
         assert_eq!(manifest.database.integrity, "ok");
         assert_eq!(manifest.database.user_version, 4);
@@ -1412,7 +1454,10 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(left.len(), 1, "{left:?}");
-        assert_eq!(taken.files, 8);
+        assert_eq!(
+            taken.files, 9,
+            "a scope's own policy file is backed up too (#390)"
+        );
     }
 
     #[test]
@@ -1503,7 +1548,7 @@ mod tests {
         let into = base.join("restored");
         let restored = restore(&taken.path, "inst-1", &instance.root, &into, None).unwrap();
         assert_eq!(restored.into, into.canonicalize().unwrap());
-        assert_eq!(restored.files, 8);
+        assert_eq!(restored.files, 9);
         assert_eq!(fs::read(into.join(".factory/budgets/limits.yaml")).unwrap(), fs::read(instance.root.join(".factory/budgets/limits.yaml")).unwrap());
         assert!(!restored.checks.iter().any(|c| c.status == CheckStatus::Fail));
         assert!(factory_core::config::Factory::load(&into).is_ok());

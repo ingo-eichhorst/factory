@@ -55,16 +55,17 @@ pub struct ScenarioBaseline {
 pub struct ScenarioResult {
     pub scenario: crate::scenario::Scenario,
     /// This scenario's own findings -- its load-time validation, its own
-    /// staleness check, and its own `overlay_chain` findings -- a subset of
+    /// staleness check, and its own `overlay_policies` findings -- a subset of
     /// `ScenariosReport::findings` repeated here so a card can show just its
     /// own without re-filtering the whole report's list by subject.
     pub findings: Vec<crate::scenario::Finding>,
     /// Empty when the scenario carries no `policy:` overlay at all -- there
     /// is nothing to diff.
     pub policy: Vec<ScenarioScopeDelta>,
-    /// `policy`, aggregated over the whole asked subtree the same way
-    /// `PolicyReport::rollup` aggregates per-scope statuses --
-    /// `scenario::policy_delta` over each side's own `policy::worst_across_scopes`.
+    /// `policy`, aggregated over the whole asked subtree: which controls
+    /// change is read off each side's `policy::worst_across_scopes`, and
+    /// `per_framework` counts every (scope, control) pair, exactly as
+    /// `PolicyReport::rollup` does (#390).
     pub policy_subtree: crate::scenario::PolicyDelta,
     pub drivers: ScenarioDrivers,
     /// The backlog `forecast` was run against, and where it came from --
@@ -171,7 +172,7 @@ pub struct ScenariosReport {
     /// catalogue mistake and an applicability one.
     pub findings: Vec<crate::scenario::Finding>,
     /// `policy::load_all`'s and `scenario::load_drafts`'s own catalogue
-    /// findings, plus every scope's `policy::applicable`/`evidence_findings`
+    /// findings, plus the overlay's own and every scope's `evidence_findings`
     /// output across both the baseline and every scenario's own evaluation,
     /// deduplicated.
     pub policy_findings: Vec<crate::policy::Finding>,

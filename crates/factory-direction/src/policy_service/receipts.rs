@@ -1,7 +1,7 @@
 //! L6 live reporting clocks and policy receipt commands. Lower evidence is
 //! pulled through typed fact capabilities; own receipts stay append-only.
 use super::Service;
-use crate::{policy, reporting_clock};
+use crate::reporting_clock;
 use chrono::Utc;
 use factory_kernel::{
     resolve_scope, scope_subtree, Attestation, ClockMark, ConfirmedSecurityReport, ControlRef,
@@ -125,13 +125,14 @@ impl Service<'_> {
         // and refuses one that names no scope at all.
         let target = resolve_scope(&self.intent.config.scopes, &scope)?;
         let scope = target.name.clone();
-        let (catalogues, _findings, _tags) = self.intent.catalogues_with_tags(knowledge).await?;
-        let chain = self.intent.config.chain(&scope);
-        let (applied, _findings) = policy::applicable(&catalogues, &chain);
+        // Recorded in the scope that owns the control (#390): its own
+        // policy must commit it to `control`.
+        let (policies, _tags) = self.intent.policies_with_tags(knowledge).await?;
+        let applied = policies.applied(&scope);
         let found = applied
             .iter()
             .find(|a| a.control == control)
-            .ok_or_else(|| self.intent.config.not_applying(&control, target))?;
+            .ok_or_else(|| self.intent.config.not_owned(&policies, &control, target))?;
         if let Some(na) = &found.not_applicable {
             return Err(FactoryError::BadRequest(format!(
                 "{control} is marked not applicable at {:?}: {}",
@@ -251,7 +252,7 @@ impl Service<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{policy_intent, policy_store::PolicyStore};
+    use crate::{policy, policy_intent, policy_store::PolicyStore};
     use factory_kernel::{FactProvider, IntakeSource, SourceKind, L2, L4, L5};
     use std::{
         path::PathBuf,
@@ -269,8 +270,14 @@ mod tests {
         fn new() -> Self {
             let root =
                 std::env::temp_dir().join(format!("factory-clock-owner-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(policy::policies_dir(&root)).unwrap();
-            std::fs::write(policy::policies_dir(&root).join("cra.yaml"), "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {id: art-14, title: Reporting, evidence: [{check: attestation}]}\n  - {id: manual, title: Manual, evidence: [{check: attestation}]}\n").unwrap();
+            // Both scopes own the same CRA policy (#390): nothing is inherited.
+            for dir in [
+                policy::policies_dir(&root),
+                policy::policies_dir(&root.join("projects/demo")),
+            ] {
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("cra.yaml"), "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - {id: art-14, title: Reporting, evidence: [{check: attestation}]}\n  - {id: manual, title: Manual, evidence: [{check: attestation}]}\n").unwrap();
+            }
             let store = PolicyStore::open(&root.join("receipts.sqlite")).unwrap();
             Self { root, store }
         }
@@ -288,7 +295,7 @@ mod tests {
                     policies: Default::default(),
                 })
                 .collect(),
-                root_policies: serde_yaml_ng::from_str("frameworks: [cra]").unwrap(),
+                root_policies: Default::default(),
                 root_name: Some("company".into()),
                 instance_name: "instance".into(),
             };

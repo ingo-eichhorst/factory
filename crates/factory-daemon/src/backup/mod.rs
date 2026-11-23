@@ -265,6 +265,14 @@ impl L1Service<'_> {
                     }
                 })
                 .collect(),
+            scope_policies: factory
+                .config
+                .scopes
+                .iter()
+                .map(|s| s.path.to_string_lossy().replace('\\', "/"))
+                .filter(|dir| !dir.is_empty() && dir != "." && !dir.starts_with('/'))
+                .map(|dir| format!("{}/{FACTORY_DIR}/policies", dir.trim_end_matches('/')))
+                .collect(),
             include_logs: config.include_logs,
             encrypt_to: config.encrypt_to.clone(),
             scope_includes: factory.config.backup_includes(),
@@ -1264,7 +1272,7 @@ mod tests {
     /// report to prove the lazy evidence wiring end to end, not just
     /// `resolve_backup_fact` on its own.
     fn engine_backing_up_with_backup_policy(keep: &str, destination: &str) -> (Arc<Engine>, PathBuf) {
-        use factory_core::config::{Config, Instance, PolicyDeclaration};
+        use factory_core::config::{Config, Instance};
         use factory_plugins::{Registry, SqliteStore};
         let base = std::env::temp_dir().join(format!("factory-backup-policy-engine-{}", uuid::Uuid::new_v4()));
         let root = base.join("instance");
@@ -1292,7 +1300,6 @@ mod tests {
             instance: Instance { id: "test".into(), name: "test".into() },
             scope: Some(company.clone()),
             scopes: vec![company],
-            policies: PolicyDeclaration { frameworks: vec!["dsgvo".to_string()], ..Default::default() },
             infrastructure: serde_yaml_ng::from_str(&format!(
                 "backup:\n  destination: {}\n  keep: {keep}\n",
                 destination.display()

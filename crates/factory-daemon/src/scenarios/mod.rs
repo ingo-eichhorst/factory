@@ -218,7 +218,7 @@ mod tests {
 
     use super::*;
     use factory_core::adapter::TaskStore;
-    use factory_core::config::{Config, Instance, PolicyDeclaration};
+    use factory_core::config::{Config, Instance};
     use factory_plugins::{Registry, SqliteStore};
     use std::path::PathBuf;
 
@@ -301,7 +301,12 @@ mod tests {
     fn test_engine() -> Arc<Engine> {
         let root = std::env::temp_dir().join(format!("factory-scenarios-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".factory/policies/drafts")).unwrap();
-        std::fs::write(root.join(".factory/policies/cra.yaml"), CRA_YAML).unwrap();
+        // Every scope owns the same CRA policy (#390): nothing is inherited.
+        for path in [".", "projects", "projects/demo", "other"] {
+            let dir = factory_core::policy::scope_policies_dir(&root, std::path::Path::new(path));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("cra.yaml"), CRA_YAML).unwrap();
+        }
         std::fs::write(root.join(".factory/policies/drafts/ai-act.yaml"), AI_ACT_DRAFT_YAML).unwrap();
 
         std::fs::create_dir_all(root.join(".factory/knowledge")).unwrap();
@@ -314,8 +319,10 @@ mod tests {
         std::fs::write(root.join(".factory/goals/2026-q4.yaml"), GOALS_CYCLE_YAML).unwrap();
 
         let mut config = Config {
-            instance: Instance { id: "test".into(), name: "test".into() },
-            policies: PolicyDeclaration { frameworks: vec!["cra".to_string()], ..Default::default() },
+            instance: Instance {
+                id: "test".into(),
+                name: "test".into(),
+            },
             ..Default::default()
         };
         config.scopes = vec![
@@ -377,13 +384,19 @@ mod tests {
     async fn a_draft_that_collides_with_a_real_framework_is_dropped_and_reported() {
         let engine = test_engine();
         // A second draft, alongside `drafts/ai-act.yaml`, whose own
-        // `framework` collides with the real `cra` catalogue -- its file
-        // stem has to match its own `framework` (`policy::load_all`'s own
-        // rule, which `load_drafts` shares) for it to load at all.
+        // `framework` collides with the real `cra` policy every scope owns
+        // -- its file stem has to match its own `framework` for it to load
+        // at all -- and a scenario that adds it (#390: a draft is resolved
+        // per scope, so the collision shows where a scope already has one).
         let snapshot = engine.factory_snapshot();
         std::fs::write(
             snapshot.root.join(".factory/policies/drafts/cra.yaml"),
             "framework: cra\ntitle: Fake CRA\nkind: regulation\ncontrols: []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            snapshot.root.join(".factory/scenarios/shadow.yaml"),
+            "name: shadow\ntitle: Shadow\nkind: [policy]\npolicy: {add_frameworks: [cra]}\n",
         )
         .unwrap();
 

@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   applicabilityRows,
   applicabilityRule,
+  notSelectedRows,
+  templateRows,
   attestBody,
   canRemediate,
   checkTarget,
@@ -254,7 +256,7 @@ test("findingsByKind groups by the wire's snake_case kind, and findingLabel tran
   const groups = findingsByKind(report.findings);
   assert.deepEqual([...groups.keys()], ["loosening_has_no_effect", "unknown_control"]);
   assert.equal(groups.get("unknown_control").length, 1);
-  assert.equal(findingLabel("unknown_control"), "Names a control that is not applicable");
+  assert.equal(findingLabel("unknown_control"), "Names a control its template does not define");
   assert.equal(findingLabel("unknown_daemon_fact"), "Names a daemon fact nothing recognizes");
   assert.equal(findingLabel("unknown_secrets_location"), "Names a secrets location nothing recognizes");
   assert.equal(findingLabel("a_future_kind"), "a_future_kind", "an unknown kind falls back to the raw string");
@@ -500,44 +502,56 @@ test("attestBody refuses empty evidence or expiry with a sentence, and drops an 
   });
 });
 
-// `#332`: the shape `FrameworkApplicability` serializes to -- `restricted_by`,
-// `scopes` and `except` skipped when absent or empty, exactly as serde does.
-test("applicabilityRule ports FrameworkApplicability::describe's rule word for word", () => {
+// #390: the shape `FrameworkApplicability` serializes to -- `no_policy`
+// skipped when empty, exactly as serde does.
+test("applicabilityRule ports FrameworkApplicability::describe word for word", () => {
   assert.equal(
-    applicabilityRule({ framework: "cra", bound_by: [], covers: [], restricted_by: "company", except: ["finance"], excluded: ["finance"] }),
-    "the instance root (company) binds it to the whole tree minus the finance subtree(s)",
+    applicabilityRule({ framework: "cra", covers: ["irrlicht", "factory"], no_policy: ["projects"] }),
+    "policy at irrlicht, factory; no policy at projects",
   );
-  assert.equal(
-    applicabilityRule({ framework: "finance", bound_by: ["company"], covers: ["finance"], restricted_by: "company", scopes: ["finance"] }),
-    "the instance root (company) binds it to only the finance subtree(s)",
-  );
-  assert.equal(
-    applicabilityRule({ framework: "x", bound_by: [], covers: [], restricted_by: "company", scopes: [] }),
-    "the instance root (company) binds it to no configured scope",
-  );
-  assert.equal(applicabilityRule({ framework: "gdpr", bound_by: ["company", "demo"], covers: ["demo"] }), "bound by company, demo");
+  assert.equal(applicabilityRule({ framework: "cra", covers: ["company"] }), "policy at company");
 });
 
-test("applicabilityRows draws nothing until the root restricts a framework, then names every one", () => {
-  const unrestricted = { applicability: [{ framework: "cra", bound_by: ["company"], covers: ["company"] }] };
-  assert.deepEqual(applicabilityRows(unrestricted), []);
+test("applicabilityRows draws nothing for one owning scope alone, then names every framework", () => {
+  const alone = { applicability: [{ framework: "cra", covers: ["company"] }] };
+  assert.deepEqual(applicabilityRows(alone), []);
   assert.deepEqual(applicabilityRows({}), []);
   const report = {
     catalogues: [{ framework: "cra", title: "Cyber Resilience Act", kind: "regulation", controls: 3 }],
     applicability: [
-      { framework: "cra", bound_by: [], covers: [], restricted_by: "company", except: ["finance"], excluded: ["finance"] },
-      { framework: "dsgvo", bound_by: ["company"], covers: ["finance"] },
+      { framework: "cra", covers: ["irrlicht", "factory"], no_policy: ["projects"] },
+      { framework: "dsgvo", covers: ["finance"] },
     ],
   };
   assert.deepEqual(applicabilityRows(report), [
     {
       framework: "cra",
       title: "Cyber Resilience Act",
-      rule: "the instance root (company) binds it to the whole tree minus the finance subtree(s)",
-      covers: [],
-      excluded: ["finance"],
+      rule: "policy at irrlicht, factory; no policy at projects",
+      covers: ["irrlicht", "factory"],
+      noPolicy: ["projects"],
     },
-    { framework: "dsgvo", title: "dsgvo", rule: "bound by company", covers: ["finance"], excluded: [] },
+    { framework: "dsgvo", title: "dsgvo", rule: "policy at finance", covers: ["finance"], noPolicy: [] },
   ]);
-  assert.equal(findingLabel("unknown_scope"), "Restricts a framework to a scope nothing is called");
+  assert.equal(findingLabel("legacy_policies"), "A policies: block Factory no longer reads");
+  assert.equal(findingLabel("unknown_scope"), "unknown_scope", "a kind this build no longer has falls back to its raw spelling");
+});
+
+test("notSelectedRows lists every unselected template control by scope, and templateRows who uses each", () => {
+  const report = {
+    rows: [
+      { scope: "web", statuses: [], not_selected: [{ control: "cra/hw", title: "Hardware" }] },
+      { scope: "app", statuses: [], not_selected: [{ control: "cra/b", title: "B" }, { control: "cra/a", title: "A" }] },
+      { scope: "bare", statuses: [] },
+    ],
+    templates: [{ template: "cra", title: "Cyber Resilience Act", kind: "regulation", controls: 12, used_by: ["app", "web"] }],
+  };
+  assert.deepEqual(
+    notSelectedRows(report).map((r) => `${r.scope} ${r.control}`),
+    ["app cra/a", "app cra/b", "web cra/hw"],
+  );
+  assert.deepEqual(templateRows(report), [
+    { template: "cra", title: "Cyber Resilience Act", kind: "regulation", controls: 12, usedBy: ["app", "web"] },
+  ]);
+  assert.deepEqual(templateRows({}), []);
 });

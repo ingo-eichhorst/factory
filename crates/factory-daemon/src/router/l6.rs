@@ -57,6 +57,12 @@ impl Engine {
                 let (filename, body) = l6.policy_export_render(scope.as_deref(), &format).await?;
                 Ok(Payload::PolicyExport { format, filename, body })
             }
+            Request::PolicyTemplates => Ok(Payload::PolicyTemplates {
+                templates: l6.policy_templates().await?,
+            }),
+            Request::PolicyTemplate { name, scope } => Ok(Payload::PolicyTemplate {
+                view: l6.policy_template(&name, scope.as_deref()).await?,
+            }),
             Request::Dashboard { scope } => self.dashboard_payload(scope.as_deref()),
             Request::DashboardSet { scope, tiles } => {
                 let scope = self.set_dashboard(&scope, tiles)?;

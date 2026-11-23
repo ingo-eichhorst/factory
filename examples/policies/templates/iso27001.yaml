@@ -1,0 +1,53 @@
+# A starter template for ISO/IEC 27001:2022 Annex A (#390). The norm's text
+# is copyrighted, so this carries only the Annex A ids and titles in our own
+# words (ADR 0004) -- never the norm's wording. It is a starter set of the
+# controls a software company most often has to evidence, not the whole of
+# Annex A: extend it, in your own words, to every control your Statement of
+# Applicability has to account for. Copy it to
+# `<root>/.factory/policies/templates/iso27001.yaml` to use it.
+template: iso27001
+title: ISO/IEC 27001 (Annex A, starter set)
+kind: standard
+controls:
+  - id: a-5-1
+    title: Written information-security policies, approved and communicated
+  - id: a-5-9
+    title: Inventory of information assets and what they depend on
+  - id: a-5-15
+    title: Rules for who may access what
+  - id: a-5-23
+    title: Security of the cloud services the company relies on
+  - id: a-5-24
+    title: Incidents are planned for and handled
+  - id: a-5-30
+    title: Systems the business needs can keep running after a disruption
+  - id: a-5-34
+    title: Personal data is protected as law requires
+    maps_to: [dsgvo/art-32]
+  - id: a-6-3
+    title: People are made aware of, and trained in, information security
+  - id: a-8-2
+    title: Privileged access is limited and controlled
+  - id: a-8-5
+    title: Authentication is secure
+  - id: a-8-8
+    title: Technical vulnerabilities are found, judged and fixed
+  - id: a-8-9
+    title: Configuration is defined and kept under control
+  - id: a-8-13
+    title: Information is backed up, and restores are tested
+    maps_to: [dsgvo/art-32-restore]
+  - id: a-8-15
+    title: Activity is logged and logs are protected
+  - id: a-8-16
+    title: Systems are monitored for unusual behaviour
+  - id: a-8-24
+    title: Cryptography is used where it is needed, with keys managed
+  - id: a-8-25
+    title: Development follows a secure life cycle
+  - id: a-8-28
+    title: Code is written securely
+  - id: a-8-29
+    title: Security is tested during development and before acceptance
+  - id: a-8-32
+    title: Changes are controlled

@@ -84,37 +84,56 @@ export function frameworkCards(report) {
 
 // ------------------------------------------------------------ applicability
 
-/// The rule half of `FrameworkApplicability::describe` (`policy_report.rs`,
-/// `#332`), ported word for word so this tab, `factory policy` and the
-/// export say the same thing: the subtrees the instance root bound a
-/// restricted framework to, or the layers binding an unrestricted one.
+/// `FrameworkApplicability::describe` (`policy_report.rs`, #390), ported word
+/// for word so this tab, `factory policy` and the export say the same thing:
+/// the scopes in the subtree with their own policy for a framework, and every
+/// scope without one -- listed, never counted as compliant.
 export function applicabilityRule(a) {
-  if (a.restricted_by) {
-    let set = a.scopes == null
-      ? "the whole tree"
-      : a.scopes.length === 0
-        ? "no configured scope"
-        : `only the ${a.scopes.join(", ")} subtree(s)`;
-    if ((a.except || []).length) set += ` minus the ${a.except.join(", ")} subtree(s)`;
-    return `the instance root (${a.restricted_by}) binds it to ${set}`;
-  }
-  return `bound by ${(a.bound_by || []).join(", ")}`;
+  let line = `policy at ${(a.covers || []).join(", ")}`;
+  if ((a.no_policy || []).length) line += `; no policy at ${a.no_policy.join(", ")}`;
+  return line;
 }
 
 /// One row per framework in `report.applicability` -- or none while the
-/// root restricts nothing, the same rule `factory policy` prints its
-/// APPLICABILITY section by: every framework then applies wherever it is
-/// bound, which the cards already say. A framework excluded at the asked
-/// scope has no card, so this row is where it shows instead.
+/// selected scope is the only one with anything to say, the same rule
+/// `factory policy` prints its APPLICABILITY section by: a policy belongs
+/// to one scope (#390), so the aggregate says which scopes own one and
+/// which have none whenever there is more than one scope to speak of.
 export function applicabilityRows(report) {
   const entries = report.applicability || [];
-  if (!entries.some((a) => a.restricted_by)) return [];
+  if (!entries.some((a) => (a.no_policy || []).length || (a.covers || []).length > 1)) return [];
   return entries.map((a) => ({
     framework: a.framework,
     title: frameworkTitle(report.catalogues, a.framework),
     rule: applicabilityRule(a),
     covers: a.covers || [],
-    excluded: a.excluded || [],
+    noPolicy: a.no_policy || [],
+  }));
+}
+
+/// Every template control a scope's own policy neither picked nor marked
+/// n/a (#390), one row per (scope, control): listed so a Statement of
+/// Applicability accounts for the whole template, never counted.
+export function notSelectedRows(report) {
+  const rows = [];
+  for (const row of report.rows || []) {
+    for (const c of row.not_selected || []) {
+      rows.push({ scope: row.scope, control: c.control, title: c.title });
+    }
+  }
+  rows.sort((a, b) => a.scope.localeCompare(b.scope) || a.control.localeCompare(b.control));
+  return rows;
+}
+
+/// The templates on disk (#390) and the scopes picking from each -- what a
+/// scope may choose its controls from.
+export function templateRows(report) {
+  return (report.templates || []).map((t) => ({
+    template: t.template,
+    title: t.title,
+    kind: t.kind,
+    controls: t.controls,
+    usedBy: t.used_by || [],
   }));
 }
 
@@ -153,11 +172,11 @@ export function gapRows(report) {
   return rows;
 }
 
-/// Every control marked `n/a` somewhere in the asked-about subtree, with the
-/// title `report.not_applicable` itself does not carry -- `NotApplicableEntry`
-/// is `{control, scope, rationale}` alone, so the title is recovered from
-/// any row's own `ControlStatus` for that control (present in every row,
-/// whatever its status, `n/a` included).
+/// Every control marked `n/a` in the asked-about subtree, by the scope whose
+/// own policy marked it (#390), with the title `report.not_applicable`
+/// itself does not carry -- `NotApplicableEntry` is `{control, scope,
+/// rationale}` alone, so the title is recovered from any row's own
+/// `ControlStatus` for that control (`n/a` included).
 export function notApplicableRows(report) {
   const titles = new Map();
   for (const row of report.rows || []) {
@@ -183,17 +202,23 @@ export function notApplicableRows(report) {
 /// of (including `ambiguous_check_target`, left as its raw wire spelling)
 /// falls back to the raw string rather than hiding it.
 const FINDING_LABELS = {
-  parse_failed: "Catalogue failed to parse",
+  parse_failed: "Policy or template failed to parse",
   duplicate_control: "Duplicate control id",
-  framework_mismatch: "Framework name does not match the file",
+  framework_mismatch: "Name does not match the file",
   unknown_maps_to: "maps_to names a control nothing defines",
-  unknown_framework: "Names a framework with no loaded catalogue",
-  unknown_control: "Names a control that is not applicable",
+  unknown_framework: "Names a framework with no draft or template",
+  unknown_control: "Names a control its template does not define",
   loosening_has_no_effect: "A tighten did not shorten the freshness window",
   empty_rationale: "n/a declared with no rationale",
   unknown_daemon_fact: "Names a daemon fact nothing recognizes",
   unknown_secrets_location: "Names a secrets location nothing recognizes",
-  unknown_scope: "Restricts a framework to a scope nothing is called",
+  unknown_template: "Names a template nothing defines",
+  template_evidence: "A template carries evidence",
+  no_evidence: "A picked control names no evidence",
+  template_override: "Overrides a field that comes from the template",
+  missing_field: "A policy or control has no title or kind",
+  legacy_policies: "A policies: block Factory no longer reads",
+  no_owning_scope: "A root policy with no root scope to own it",
 };
 export function findingLabel(kind) {
   return FINDING_LABELS[kind] || kind;

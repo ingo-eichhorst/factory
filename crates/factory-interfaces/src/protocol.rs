@@ -949,9 +949,9 @@ pub enum Request {
         #[serde(default)]
         scope: Option<String>,
     },
-    /// One control's full detail at `scope`: its catalogue data, its status
-    /// there, and its whole attestation history for that scope and its
-    /// ancestors. Read-only.
+    /// One control's full detail in `scope`, the scope that owns it (#390):
+    /// its data as that scope's policy states it, its status there, and its
+    /// whole attestation history at that scope. Read-only.
     #[serde(rename = "policy.control")]
     PolicyControl {
         control: factory_direction::policy::ControlRef,
@@ -1022,6 +1022,19 @@ pub enum Request {
         #[serde(default)]
         scope: Option<String>,
         format: String,
+    },
+    /// Every template in `.factory/policies/templates/` -- the lists of
+    /// possible controls a scope picks its policy from (#390). Read-only.
+    #[serde(rename = "policy.templates")]
+    PolicyTemplates,
+    /// One template, and per scope -- `scope` alone, or every scope whose
+    /// policy picks from it -- whether each control is selected, `n/a` or
+    /// not selected (#390). Read-only.
+    #[serde(rename = "policy.template")]
+    PolicyTemplate {
+        name: String,
+        #[serde(default)]
+        scope: Option<String>,
     },
     /// Every named metric, computed fresh (`factory-daemon`'s `metrics.rs`)
     /// -- lazy like a policy fact: only the ids actually asked are computed.
@@ -1592,6 +1605,8 @@ impl Request {
             Request::PolicyWithdraw { .. } |
             Request::PolicyRemediate { .. } |
             Request::PolicyExport { .. } |
+            Request::PolicyTemplates |
+            Request::PolicyTemplate { .. } |
             Request::Dashboard { .. } |
             Request::DashboardSet { .. } |
             Request::DashboardReset { .. } |
@@ -1978,6 +1993,14 @@ pub enum Payload {
         format: String,
         filename: String,
         body: String,
+    },
+    /// The answer to `Request::PolicyTemplates`.
+    PolicyTemplates {
+        templates: Vec<factory_direction::policy_report::TemplateSummary>,
+    },
+    /// The answer to `Request::PolicyTemplate`.
+    PolicyTemplate {
+        view: factory_direction::policy_report::TemplateView,
     },
     /// The answer to `Request::Metrics`: every requested (or implied)
     /// metric's computed value, a history series for the ones that have
@@ -2445,8 +2468,9 @@ pub struct RoleBoard {
 
 // Canonical L6 response data; transport envelopes stay outside the ladder.
 pub use factory_direction::policy_report::{
-    CatalogueSummary, NotApplicableEntry, PolicyControlDetail, PolicyReport, ScopePolicy,
-    WorkflowEnforcement, WorkflowEnforcementFinding,
+    CatalogueSummary, FrameworkApplicability, NotApplicableEntry, PolicyControlDetail,
+    PolicyReport, ScopePolicy, Selection, TemplateControlSelection, TemplateScopeSelection,
+    TemplateSummary, TemplateView, WorkflowEnforcement, WorkflowEnforcementFinding,
 };
 
 pub use factory_assurance::metrics::MetricDefView;

@@ -457,7 +457,7 @@ pub const AUTHORED: [(Group, &str, &str); 9] = [
     (
         Group::Policies,
         ".factory/policies/",
-        "policy catalogues, drafts included",
+        "the root scope's policies, templates and drafts",
     ),
     (Group::Goals, ".factory/goals/", "direction and cycle files"),
     (Group::Scenarios, ".factory/scenarios/", "scenario files"),

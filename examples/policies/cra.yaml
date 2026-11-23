@@ -1,66 +1,61 @@
-# A small, valid example catalogue for the EU Cyber Resilience Act, in the
-# shape `factory_core::policy::load_all` reads from
-# `<root>/.factory/policies/<framework>.yaml`. The text of the controls
-# below is our own wording of the CRA's public Annex I requirements, not a
-# copy of the regulation itself -- see `.specs/adr/0004-policy-controls.md`.
+# An example scope policy (#390): what one scope -- here a project that
+# ships software -- commits to under the CRA, at
+# `<scope>/.factory/policies/cra.yaml`. It applies to that scope only;
+# nothing is inherited down the tree, and a parent scope shows it in its
+# aggregate. (Saved at the instance root, `<root>/.factory/policies/`, it is
+# the root scope's own policy.)
 #
-# `maps_to` is left off every control here: it names equivalent controls in
-# other frameworks (ISO/IEC 27001, BSI IT-Grundschutz), and this directory
-# only carries the CRA catalogue, so a cross-framework reference here would
-# be exactly the "maps_to naming nothing known" case `load_all` reports as a
-# finding. Add the other frameworks' files alongside this one before wiring
-# `maps_to` back in.
+# `template: cra` picks controls from `templates/cra.yaml` by id: each one
+# inherits its title, kind, `maps_to` and remediation from there, and this
+# file names only this scope's own evidence -- its tasks, workflows,
+# metrics, datasets. A template control left out is listed as "not
+# selected" (never counted); one that does not apply here is marked
+# `not_applicable` with a rationale.
 framework: cra
-title: Cyber Resilience Act
-kind: regulation
+template: cra
 controls:
   - id: annex-i-2-1
-    title: Identify and document components (SBOM)
-    max_age: 30d
     remediation: |
-      Add a scheduled task that exports a software bill of materials and
-      publishes it as a knowledge page tagged control/cra/annex-i-2-1.
+      Add the `sbom-export` task (weekly) that runs
+      `examples/factory-dependency-scan.sh built` and attaches its SBOM.
     evidence:
       - check: knowledge
-      - check: attestation
       - check: task
         task: sbom-export
         max_age: 30d
 
   - id: annex-i-2-2
-    title: Vulnerability handling procedure is documented
     evidence:
       - check: knowledge
       - check: attestation
 
   - id: annex-i-2-3
-    title: Known exploitable vulnerabilities are tracked and remediated
-    max_age: 7d
-    remediation: |
-      Add a scheduled task that runs a vulnerability scan and records the
-      result.
     evidence:
+      - check: dependencies
+        sbom_max_age: 30d
+        max_open: { critical: 0, high: 0 }
+        exploited_open: 0
       - check: task
         task: vuln-scan
         max_age: 7d
-      - check: attestation
 
   - id: annex-i-2-4
-    title: Security updates are provided without undue delay
     evidence:
       - check: attestation
 
   - id: annex-i-2-5
-    title: A coordinated vulnerability disclosure policy is published
     evidence:
       - check: knowledge
 
+  - id: annex-i-1-2-d
+    evidence:
+      - check: roles
+        forbid: [policy.attest]
+      - check: sandbox
+
   - id: art-14
-    title: Actively exploited vulnerabilities and severe incidents are reported (Art. 14)
-    remediation: |
-      Submit the early warning or notification the CRA Art. 14 reporting
-      clock (`factory policy clock`) is waiting on, then record it with
-      `factory policy attest cra/art-14 --scope <scope> --evidence <pointer>
-      --clock-item <item> --deadline <early-warning|notification>`.
     evidence:
       - check: attestation
+
+  - id: annex-i-1-2-l
+    not_applicable: "The product keeps no security log of its own; the host's is out of scope"

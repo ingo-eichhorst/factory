@@ -603,8 +603,8 @@ fn task_inventory_links_follow_real_shell_completion_and_restart() {
     let mut daemon = provision();
     daemon.sigterm();
     let path = daemon.root.join(".factory/config.yaml");
-    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    config["policies"] = serde_yaml_ng::to_value(json!({"frameworks": ["house"]})).unwrap();
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     config["quality"] = serde_yaml_ng::to_value(json!(["inventory"])).unwrap();
     std::fs::write(&path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
     std::fs::create_dir_all(daemon.root.join(".factory/policies")).unwrap();
@@ -1485,9 +1485,12 @@ fn promotion_is_pinned_policy_gated_owner_approved_and_verified_after_restart() 
     let marker = daemon.root.join(".factory/promoted");
     let permit = daemon.root.join(".factory/gate-allowed");
     let config_path = daemon.root.join(".factory/config.yaml");
-    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    config["scope"]["agents"] = serde_yaml_ng::from_str("[{ name: releaser, harness: shell, lifetime: task, role: foreman, max_sessions: 1 }]").unwrap();
-    config["policies"] = serde_yaml_ng::from_str("{ frameworks: [house] }").unwrap();
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["scope"]["agents"] = serde_yaml_ng::from_str(
+        "[{ name: releaser, harness: shell, lifetime: task, role: foreman, max_sessions: 1 }]",
+    )
+    .unwrap();
     config["scope"]["environments"] = serde_yaml_ng::to_value(json!([
         { "name": "staging", "promotes_to": "production", "checks": [{ "name": "source", "kind": "command", "command": "true", "every": "5s", "timeout": "2s" }] },
         { "name": "production", "checks": [{ "name": "installed", "kind": "command", "command": format!("test -f '{}'", marker.display()), "every": "5s", "timeout": "2s" }],
@@ -2533,7 +2536,6 @@ fn policy_intent_rereads_catalogues_and_receipts_after_shell_completion_and_rest
     let config_path = daemon.root.join(".factory/config.yaml");
     let mut config: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    config["policies"] = serde_yaml_ng::from_str("frameworks: [cra]").unwrap();
     std::fs::write(&config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
     let directory = daemon.root.join(".factory/policies");
     std::fs::create_dir_all(&directory).unwrap();
@@ -2667,7 +2669,6 @@ fn policy_service_uses_live_l5_check_results_and_maps_real_reported_runs_after_r
     let config_path = daemon.root.join(".factory/config.yaml");
     let mut config: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    config["policies"] = serde_yaml_ng::from_str("frameworks: [cra]").unwrap();
     std::fs::write(config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
     let directory = daemon.root.join(".factory/policies");
     std::fs::create_dir_all(&directory).unwrap();
@@ -2869,7 +2870,6 @@ fn policy_clock_owner_reads_confirmed_intake_and_keeps_receipts_through_real_res
     let config_path = daemon.root.join(".factory/config.yaml");
     let mut config: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    config["policies"] = serde_yaml_ng::from_str("frameworks: [cra]").unwrap();
     std::fs::write(config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
     let directory = daemon.root.join(".factory/policies");
     std::fs::create_dir_all(&directory).unwrap();
@@ -3010,7 +3010,6 @@ fn scenarios_owner_reads_live_files_metrics_and_promotes_id_only_work_through_tw
     let config_path = daemon.root.join(".factory/config.yaml");
     let mut config: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    config["policies"] = serde_yaml_ng::from_str("frameworks: [house]").unwrap();
     std::fs::write(config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
     let policies = daemon.root.join(".factory/policies");
     std::fs::create_dir_all(policies.join("drafts")).unwrap();
@@ -3175,8 +3174,8 @@ fn workflow_preview_owners_read_live_requirements_but_dispatch_freezes_its_own_p
     if missing_prerequisites() { return; }
     let mut daemon = provision(); daemon.sigterm();
     let path = daemon.root.join(".factory/config.yaml");
-    let mut config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    config["policies"] = serde_yaml_ng::from_str("frameworks: [house]").unwrap();
+    let mut config: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     config["quality"] = serde_yaml_ng::from_str("[base]").unwrap();
     config["scope"]["agents"] = serde_yaml_ng::from_str("[{name: critic, harness: shell, lifetime: task}]").unwrap();
     std::fs::write(path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();

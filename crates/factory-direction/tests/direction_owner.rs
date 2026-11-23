@@ -23,22 +23,13 @@ fn authored_policy_is_reread_and_lower_projection_keeps_requirements_and_waivers
     let dir = policy::policies_dir(&root);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("cra.yaml");
-    let text = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: tests\n    title: Tests\n    evidence: [{check: knowledge, tag: evidence/tests}]\n    requires:\n      - {applies_to: [release], step: tests, gate: cargo test}\n";
+    let text = "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n  - id: tests\n    title: Tests\n    not_applicable: No release product\n    evidence: [{check: knowledge, tag: evidence/tests}]\n    requires:\n      - {applies_to: [release], step: tests, gate: cargo test}\n";
     std::fs::write(&path, text).unwrap();
-    let (catalogues, findings) = policy::load_all(&dir);
-    assert!(findings.is_empty(), "{findings:?}");
     let control = policy::ControlRef::new("cra", "tests");
-    let chain = vec![policy::PolicyLayer {
-        scope: "demo".into(),
-        frameworks: vec!["cra".into()],
-        tighten: BTreeMap::new(),
-        not_applicable: vec![policy::NotApplicable {
-            control: control.clone(),
-            rationale: "No release product".into(),
-        }],
-    }];
-    let (applied, findings) = policy::applicable(&catalogues, &chain);
-    assert!(findings.is_empty(), "{findings:?}");
+    // The root scope "demo" owns `<root>/.factory/policies/cra.yaml` (#390).
+    let policies = policy::load(&root, &[("demo".into(), ".".into())]);
+    assert!(policies.findings.is_empty(), "{:?}", policies.findings);
+    let applied = policies.applied("demo");
     let source = &policy::plan_sources(&applied)[0];
     assert_eq!(source.source, "cra/tests");
     assert_eq!(source.requires, applied[0].requires);
@@ -55,9 +46,9 @@ fn authored_policy_is_reread_and_lower_projection_keeps_requirements_and_waivers
     let statuses = policy::evaluate(&applied, &policy::Evidence::default(), now());
     assert_eq!(statuses[0].status.kind(), policy::StatusKind::NotApplicable);
     std::fs::write(&path, text.replace("title: Tests", "title: Revised")).unwrap();
-    let (reloaded, _) = policy::load_all(&dir);
-    assert_eq!(reloaded[0].controls[0].title, "Revised");
-    assert_eq!(catalogues[0].controls[0].title, "Tests");
+    let reloaded = policy::load(&root, &[("demo".into(), ".".into())]);
+    assert_eq!(reloaded.applied("demo")[0].title, "Revised");
+    assert_eq!(applied[0].title, "Tests");
     std::fs::remove_dir_all(root).unwrap();
 }
 

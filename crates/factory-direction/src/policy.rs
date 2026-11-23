@@ -8,37 +8,28 @@
 //! runtime (ADR 0004, which design §8 explicitly defers). See
 //! `.specs/adr/0004-policy-controls.md` in the Business Factory root repo.
 //!
-//! ## Storage
+//! ## Storage and ownership (#390)
 //!
-//! A framework lives as one file, `<root>/.factory/policies/<framework>.yaml`
-//! -- authored content, like `.factory/knowledge/` and `.factory/datasets/`:
-//! hand-written, re-parsed on every read, never written by Factory.
-//! [`load_all`] walks the directory and returns every catalogue that parsed,
-//! plus a [`Finding`] for each one that did not. A missing directory is
-//! empty, not an error; one bad file never stops the others from loading.
+//! A policy belongs to one scope. A scope that needs one writes it in its
+//! own directory, `<scope>/.factory/policies/<framework>.yaml`; the root
+//! scope's own policies are `<root>/.factory/policies/<framework>.yaml`. A
+//! scope without one has none -- nothing is inherited down the tree, and a
+//! parent's view is the *aggregate* of its subtree, never a chain folded
+//! into its children. Each control states its evidence in that scope's own
+//! terms: its metrics, tasks, workflows, datasets.
 //!
-//! ## Applicability
+//! **Templates** (`<root>/.factory/policies/templates/<name>.yaml`) are
+//! lists of possible controls -- the CRA, ISO 27001, the GDPR, the AI Act
+//! -- with no evidence. A policy that names a `template:` picks controls
+//! from it by id, inheriting title, kind, `maps_to` and remediation; a
+//! template control it neither picks nor marks `n/a` is *not selected*,
+//! listed and never counted. A policy without a template declares its own
+//! controls. Neither `templates/` nor `drafts/` is ever read as a policy.
 //!
-//! Which frameworks apply to a scope, and any per-scope tightening or `n/a`,
-//! comes from the same root-to-leaf chain roles use
-//! (`Engine::roles_for` in `factory-daemon`), just for policies instead --
-//! parsing that chain out of the live config is `Config::policy_chain_for_scope`,
-//! `Factory::policy_chain` and `Engine::policy_chain`'s job (`#76`), not this
-//! module's. [`PolicyLayer`] is what that chain hands to [`applicable`]:
-//! one layer per scope, root first. Unlike roles, where the nearest
-//! definition wins outright, a layer may only *add* a framework or *tighten*
-//! a control -- shorten a `max_age`, mark something `n/a` with a rationale --
-//! never drop or relax something an ancestor already committed the company
-//! to. A layer that tries to loosen something, or names a framework or
-//! control nothing applicable resolves to, is not refused -- the file (or
-//! scope) that did it keeps working, but a [`Finding`] says so.
-//!
-//! The one exception is the root's, and it happens before this module sees
-//! a chain (`#332`): the instance root may say per framework which subtrees
-//! it applies to (`scopes`/`except`), and `policy_intent::chain_for_scope`
-//! narrows the root's layer to what applies at the scope asked about. So a
-//! [`PolicyLayer`] here is always already resolved, and a nested layer still
-//! only adds or tightens -- it has no way to exclude anything.
+//! Everything here is authored content, like `.factory/knowledge/`:
+//! hand-written, re-parsed on every read, never written by Factory. [`load`]
+//! reads the whole instance; every mistake is a [`Finding`], and one bad
+//! file never stops the others from loading.
 //!
 //! ## Evidence and evaluation
 //!
@@ -172,63 +163,139 @@ pub use factory_kernel::{Attestation, ControlRef, Withdrawal};
 pub type ControlStatus = factory_assurance::checks::EvaluationResult<Kind>;
 pub use factory_kernel::{KNOWN_DAEMON_FACTS, KNOWN_SECRETS_LOCATIONS};
 
-/// One control within a framework: something that is either currently
-/// evidenced or is not.
+// ============================================================== templates
+
+/// A list of possible controls -- the CRA, ISO 27001, the GDPR, the AI Act
+/// -- with no evidence (#390). A template only helps a scope pick its
+/// controls; the scope's own policy translates each one it picks into that
+/// scope's evidence. Authored at `<root>/.factory/policies/templates/<name>.yaml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Template {
+    /// Must equal the file's stem, like a policy's `framework`.
+    pub template: String,
+    pub title: String,
+    pub kind: Kind,
+    #[serde(default)]
+    pub controls: Vec<TemplateControl>,
+}
+
+/// One possible control: an id, our own title, and what a scope picking it
+/// inherits -- never evidence, which only a scope can name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateControl {
+    /// `[a-z0-9][a-z0-9-]*`, the id a scope's policy picks it by.
+    pub id: String,
+    pub title: String,
+    /// Overrides the template's own `kind` for this control alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<Kind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maps_to: Vec<ControlRef>,
+    /// Generic guidance on what usually closes it; a scope may override it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+/// The template file as written. `evidence:` is accepted on a control only
+/// so the loader can name the mistake -- [`FindingKind::TemplateEvidence`]
+/// -- instead of failing the whole file over it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTemplate {
+    template: String,
+    title: String,
+    kind: Kind,
+    #[serde(default)]
+    controls: Vec<RawTemplateControl>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTemplateControl {
+    id: String,
+    title: String,
+    #[serde(default)]
+    kind: Option<Kind>,
+    #[serde(default)]
+    maps_to: Vec<ControlRef>,
+    #[serde(default)]
+    remediation: Option<String>,
+    #[serde(default)]
+    evidence: Option<serde::de::IgnoredAny>,
+}
+
+// ======================================================== a scope's policy
+
+/// One control in a scope's own policy. Picked from the policy's template by
+/// `id`, it inherits the template's title, kind, `maps_to` and remediation
+/// and states only this scope's evidence; declared by the policy itself (no
+/// template, the finance shape), it carries its own title.
 // `#278`: no `Eq` -- `evidence: Vec<Check>` can carry a `Check::Metric`,
-// whose `above`/`below` are `Option<f64>`, and `f64` has no `Eq`. Quality's
-// own `MetricMeasure`/`Measure`/`QualityScenario` already dropped `Eq` for
-// exactly this reason.
+// whose `above`/`below` are `Option<f64>`, and `f64` has no `Eq`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Control {
     /// `[a-z0-9][a-z0-9-]*`, referenced elsewhere as `<framework>/<id>`.
     pub id: String,
-    pub title: String,
-    /// Overrides the catalogue's own `kind` for this control alone.
+    /// Required on a control the policy declares itself; a picked template
+    /// control takes the template's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Overrides the policy's own `kind` for this control alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<Kind>,
     /// The default freshness window for this control's evidence, folded
-    /// into the minimum `applicable` computes alongside every check's own
-    /// `max_age` and every scope's `tighten`.
+    /// into the minimum with every check's own `max_age`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age: Option<Duration>,
-    /// Equivalent controls in other frameworks: evidence that satisfies this
-    /// control also satisfies these, one hop, and the other way around.
+    /// Equivalent controls in other frameworks of the same scope: evidence
+    /// that satisfies this control also satisfies these, one hop, and the
+    /// other way around.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub maps_to: Vec<ControlRef>,
-    /// Free text a later ticket (`#83`) offers when this control is `open`.
+    /// What the remediation task (`#83`) says closes it. On a picked
+    /// control, this scope's own instructions replace the template's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
     #[serde(default)]
     pub evidence: Vec<Check>,
     /// The steps work of a given category must pass through for this
-    /// control to hold (`#118`): folded into a scope's control plan by
+    /// control to hold (`#118`): folded into the scope's control plan by
     /// `control_plan::resolve`, injected at dispatch, and proved by an
-    /// attestation before a run counts as `done`. Evidence says the plant
-    /// is compliant; `requires` says what every run on it must carry.
+    /// attestation before a run counts as `done`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<factory_assurance::control_plan::Requirement>,
+    /// The control does not apply in this scope, and why. An empty
+    /// rationale is a finding, and the control stays applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_applicable: Option<String>,
 }
 
-/// One framework's whole catalogue, exactly as authored at
-/// `<root>/.factory/policies/<framework>.yaml`.
-// `#278`: no `Eq`, for the same reason as `Control` -- `controls: Vec<Control>`.
+/// One scope's policy for one framework, exactly as authored at
+/// `<scope>/.factory/policies/<framework>.yaml` (#390). It applies to that
+/// scope only; nothing is inherited down the tree.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Catalogue {
-    /// Must equal the file's stem -- checked by `load_all`, not here, since
-    /// only the loader knows the path a value came from.
+pub struct PolicyFile {
+    /// Must equal the file's stem -- checked by the loader, which alone
+    /// knows the path a value came from.
     pub framework: String,
-    pub title: String,
-    pub kind: Kind,
+    /// The template this policy picks its controls from, by id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Required without a template; with one, the template's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Required without a template; with one, the template's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<Kind>,
     #[serde(default)]
     pub controls: Vec<Control>,
 }
 
-/// One of the four things `load_all` checks for. A finding never stops
-/// another file, or another control in the same file, from loading --
-/// `applicable`'s findings share this type and this same property: a
-/// mistake at one scope is reported, not allowed to take the rest down.
+/// What `load_*` and [`resolve`] check for. A finding never stops another
+/// file, or another control in the same file, from loading: a mistake in
+/// one scope's policy is reported, not allowed to take the rest down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
@@ -236,60 +303,77 @@ pub enum FindingKind {
     DuplicateControl,
     FrameworkMismatch,
     UnknownMapsTo,
+    /// A scenario overlay's `add_frameworks` names no draft or template.
     UnknownFramework,
+    /// A policy picks a control its template does not define, or a
+    /// scenario overlay tightens one the scope does not have.
     UnknownControl,
+    /// A scenario overlay's `tighten` does not shorten the window.
     LooseningHasNoEffect,
     EmptyRationale,
     /// A `task` or `workflow` check named something that matched more than
     /// one task's title, or more than one workflow's name, in the evaluated
-    /// scope -- see [`evidence_findings`]. `evaluate` also reports the same
-    /// control `open` over it, but the mistake is in the catalogue (or the
-    /// scope's tasks), not in the evidence, so it is a finding too.
+    /// scope -- see [`evidence_findings`].
     AmbiguousCheckTarget,
     /// A `daemon` check named a `fact` outside [`KNOWN_DAEMON_FACTS`].
     UnknownDaemonFact,
     /// A `secrets` check's `absent` named a location outside
     /// [`KNOWN_SECRETS_LOCATIONS`].
     UnknownSecretsLocation,
-    /// A `requires:` entry that cannot do what it says -- a gate with no
-    /// command, a category that is not a name. Kept, never dropped: see
+    /// A `requires:` entry that cannot do what it says -- see
     /// `control_plan::Requirement::problems`.
     BadRequirement,
-    /// An `attested` check's `category` or `step` is not a name
-    /// (`control_plan::is_name`) -- it could never match a run's own
-    /// `category`/`RequiredStep::step`, so the check can never be
-    /// satisfied. `#158`. `#278` reuses this same kind for a `metric`
-    /// check with neither `above` nor `below`: another check that could
-    /// never be satisfied as written.
+    /// A check that could never be satisfied as written (`#158`, `#278`).
     BadCheckTarget,
     /// `#278`: a `metric` check names `compliance.*`, `open_controls.*` or
-    /// `quality.*` -- computed from this same evaluation's own output, so
-    /// judging a control by it would be circular.
+    /// `quality.*` -- computed from this same evaluation's own output.
     CircularMetric,
     /// `#278`: a `metric` check names an id this build has never heard of.
     UnknownMetric,
-    /// `#278`: a `metric` check names an id this build knows but cannot
-    /// compute yet.
+    /// `#278`: a `metric` check names an id this build cannot compute yet.
     UnavailableMetric,
-    /// `#332`: the root's `scopes` or `except` for a framework names no
-    /// configured scope. The config still loads and the framework applies
-    /// as if the name were absent -- `policy_intent::applicability_findings`.
-    UnknownScope,
+    /// #390: a policy names a `template:` no template file defines. Its
+    /// controls still load, each under its own title (or its id).
+    UnknownTemplate,
+    /// #390: a template control carries `evidence:`. Only a scope's policy
+    /// names evidence; the template's is ignored.
+    TemplateEvidence,
+    /// #390: a control picked from a template names no evidence. It stays
+    /// in the policy, and open.
+    NoEvidence,
+    /// #390: a picked control sets `title`, `kind` or `maps_to`, which come
+    /// from the template. The template's value holds.
+    TemplateOverride,
+    /// #390: a policy without a template, or one of its own controls, has
+    /// no `title`/`kind`. A default is used and the finding says which.
+    MissingField,
+    /// #390: a root `policies:` block or a nested `scope.policies` -- the
+    /// shape Factory no longer reads. The daemon starts; the finding names
+    /// the migration.
+    LegacyPolicies,
+    /// #390: a policy file at the instance root when the root is not a
+    /// configured scope, so no scope owns it.
+    NoOwningScope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     pub kind: FindingKind,
-    /// The file (`load_all`) or the scope (`applicable`) the finding is
-    /// about -- the two callers name different kinds of thing here, but
-    /// both are "where to go look".
+    /// Where to go look: the file a loader read, relative to the instance
+    /// root, or the scope an evaluation or a config block is about.
     pub subject: String,
     pub detail: String,
 }
 
-/// `<root>/.factory/policies`, the catalogue directory.
+/// `<root>/.factory/policies`: the root scope's own policies, with the
+/// `templates/` and `drafts/` directories beneath it.
 pub fn policies_dir(root: &Path) -> PathBuf {
     root.join(".factory").join("policies")
+}
+
+/// `<root>/.factory/policies/templates`, the template directory (#390).
+pub fn templates_dir(root: &Path) -> PathBuf {
+    policies_dir(root).join("templates")
 }
 
 /// Whatever in `check` names something outside a fixed vocabulary -- a
@@ -298,7 +382,7 @@ pub fn policies_dir(root: &Path) -> PathBuf {
 /// on after the name of whatever holds the check (`<control> names daemon
 /// fact ...`). Neither vocabulary depends on live evidence, so a caller can
 /// catch the mistake when the file loads rather than only once a report is
-/// evaluated: [`load_all`] for a catalogue, `quality::load` for a quality
+/// evaluated: the policy loader, and `quality::load` for a quality
 /// profile's check measures.
 pub fn check_vocabulary(check: &Check) -> Vec<(FindingKind, String)> {
     use factory_assurance::checks::VocabularyFinding;
@@ -318,201 +402,185 @@ pub fn check_vocabulary(check: &Check) -> Vec<(FindingKind, String)> {
         .collect()
 }
 
-/// Load every `<framework>.yaml` in `dir`. A missing directory is empty, not
-/// an error. Each file is independent: one that fails to parse, names a
-/// `framework` other than its own file stem, or repeats a control `id` is a
-/// [`Finding`] naming the file, and every other file still loads. A
-/// `maps_to` that names a control found in none of the files that did load
-/// is a second-pass finding, checked once every file that could load has.
-pub fn load_all(dir: &Path) -> (Vec<Catalogue>, Vec<Finding>) {
-    let mut findings = Vec::new();
-    let mut by_framework: BTreeMap<String, Catalogue> = BTreeMap::new();
-
+/// Every `*.yaml` directly in `dir`, sorted. Never recurses, so
+/// `templates/` and `drafts/` beneath a policies directory are never read
+/// as policies.
+fn yaml_files(dir: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(read) => read
             .flatten()
             .map(|entry| entry.path())
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("yaml"))
+            .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("yaml"))
             .collect(),
         Err(_) => Vec::new(),
     };
     paths.sort();
+    paths
+}
 
-    for path in &paths {
-        let file_name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let stem = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
+fn file_name_and_stem(path: &Path) -> (String, String) {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    (name, stem)
+}
 
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) => {
-                findings.push(Finding {
-                    kind: FindingKind::ParseFailed,
-                    subject: file_name,
-                    detail: format!("reading: {e}"),
-                });
-                continue;
-            }
-        };
-        let catalogue: Catalogue = match serde_yaml_ng::from_str(&text) {
-            Ok(c) => c,
-            Err(e) => {
-                findings.push(Finding {
-                    kind: FindingKind::ParseFailed,
-                    subject: file_name,
-                    detail: format!("parsing: {e}"),
-                });
-                continue;
-            }
-        };
-        if catalogue.framework != stem {
-            findings.push(Finding {
-                kind: FindingKind::FrameworkMismatch,
-                subject: file_name,
-                detail: format!(
-                    "framework {:?} does not match the file name {:?}",
-                    catalogue.framework, stem
-                ),
-            });
-            continue;
-        }
+fn read_yaml<T: serde::de::DeserializeOwned>(path: &Path, subject: &str) -> Result<T, Finding> {
+    let text = std::fs::read_to_string(path).map_err(|e| Finding {
+        kind: FindingKind::ParseFailed,
+        subject: subject.to_owned(),
+        detail: format!("reading: {e}"),
+    })?;
+    serde_yaml_ng::from_str(&text).map_err(|e| Finding {
+        kind: FindingKind::ParseFailed,
+        subject: subject.to_owned(),
+        detail: format!("parsing: {e}"),
+    })
+}
 
-        let mut seen_ids: BTreeSet<String> = BTreeSet::new();
-        let mut controls = Vec::with_capacity(catalogue.controls.len());
-        for control in catalogue.controls {
-            if !seen_ids.insert(control.id.clone()) {
-                findings.push(Finding {
-                    kind: FindingKind::DuplicateControl,
-                    subject: file_name.clone(),
-                    detail: format!("duplicate control id {:?}", control.id),
-                });
-                continue;
-            }
-            // `daemon`'s `fact` and `secrets`' `absent` are each a fixed,
-            // known vocabulary (`KNOWN_DAEMON_FACTS`/`KNOWN_SECRETS_LOCATIONS`)
-            // that never depends on live evidence, so an unknown name is
-            // caught here, at parse time, rather than only once a report is
-            // evaluated.
-            for check in &control.evidence {
-                for (kind, detail) in check_vocabulary(check) {
-                    findings.push(Finding {
-                        kind,
-                        subject: file_name.clone(),
-                        detail: format!("{}/{} {detail}", catalogue.framework, control.id),
-                    });
-                }
-            }
-            for requirement in &control.requires {
-                for detail in requirement.problems() {
-                    findings.push(Finding {
-                        kind: FindingKind::BadRequirement,
-                        subject: file_name.clone(),
-                        detail: format!("{}/{} {detail}", catalogue.framework, control.id),
-                    });
-                }
-            }
-            controls.push(control);
-        }
-
-        by_framework.insert(
-            catalogue.framework.clone(),
-            Catalogue {
-                controls,
-                ..catalogue
-            },
-        );
-    }
-
-    // Second pass: `maps_to` often points across frameworks, so it can only
-    // be checked once every file that could load has -- a target in a
-    // sibling file that itself failed to parse is exactly the "naming
-    // nothing known" case, not a false positive to special-case around.
-    let known: BTreeSet<ControlRef> = by_framework
-        .values()
-        .flat_map(|cat| {
-            cat.controls
-                .iter()
-                .map(|ctl| ControlRef::new(cat.framework.clone(), ctl.id.clone()))
-        })
-        .collect();
-    for cat in by_framework.values() {
-        let file_name = format!("{}.yaml", cat.framework);
-        for ctl in &cat.controls {
-            for target in &ctl.maps_to {
-                if !known.contains(target) {
-                    findings.push(Finding {
-                        kind: FindingKind::UnknownMapsTo,
-                        subject: file_name.clone(),
-                        detail: format!(
-                            "{}/{} maps_to {target}, which is not a control in any loaded catalogue",
-                            cat.framework, ctl.id
-                        ),
-                    });
-                }
-            }
-        }
-    }
-
+fn sort_findings(findings: &mut Vec<Finding>) {
     findings.sort_by(|a, b| {
         a.subject
             .cmp(&b.subject)
             .then(a.kind.cmp(&b.kind))
             .then(a.detail.cmp(&b.detail))
     });
-    (by_framework.into_values().collect(), findings)
+    findings.dedup();
 }
 
-// ============================================================ applicability
-
-/// A control's `max_age` narrowed at one scope. Never widens it -- see
-/// [`applicable`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Tighten {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_age: Option<Duration>,
+/// Every template in `dir` (`<root>/.factory/policies/templates`). A
+/// missing directory is empty. A file that fails to parse, names a
+/// `template` other than its own stem, or repeats a control id is a
+/// finding; a control carrying `evidence:` is a finding and loads without
+/// it. `subject_prefix` is prepended to each file name in a finding.
+pub fn load_templates(dir: &Path, subject_prefix: &str) -> (Vec<Template>, Vec<Finding>) {
+    let mut findings = Vec::new();
+    let mut templates = Vec::new();
+    for path in yaml_files(dir) {
+        let (file_name, stem) = file_name_and_stem(&path);
+        let subject = format!("{subject_prefix}{file_name}");
+        let raw: RawTemplate = match read_yaml(&path, &subject) {
+            Ok(raw) => raw,
+            Err(finding) => {
+                findings.push(finding);
+                continue;
+            }
+        };
+        if raw.template != stem {
+            findings.push(Finding {
+                kind: FindingKind::FrameworkMismatch,
+                subject,
+                detail: format!(
+                    "template {:?} does not match the file name {stem:?}",
+                    raw.template
+                ),
+            });
+            continue;
+        }
+        let mut seen = BTreeSet::new();
+        let mut controls = Vec::with_capacity(raw.controls.len());
+        for control in raw.controls {
+            if !seen.insert(control.id.clone()) {
+                findings.push(Finding {
+                    kind: FindingKind::DuplicateControl,
+                    subject: subject.clone(),
+                    detail: format!("duplicate control id {:?}", control.id),
+                });
+                continue;
+            }
+            if control.evidence.is_some() {
+                findings.push(Finding {
+                    kind: FindingKind::TemplateEvidence,
+                    subject: subject.clone(),
+                    detail: format!(
+                        "{}/{} carries evidence, which a template never does: a scope's own policy names its \
+                         evidence. Move it to the policy of each scope that picks the control",
+                        raw.template, control.id
+                    ),
+                });
+            }
+            controls.push(TemplateControl {
+                id: control.id,
+                title: control.title,
+                kind: control.kind,
+                maps_to: control.maps_to,
+                remediation: control.remediation,
+            });
+        }
+        templates.push(Template {
+            template: raw.template,
+            title: raw.title,
+            kind: raw.kind,
+            controls,
+        });
+    }
+    sort_findings(&mut findings);
+    (templates, findings)
 }
 
-/// A control marked as not applying, from the scope that declared it down.
+/// Read one policy file. A file that fails to parse, or names a `framework`
+/// other than its stem, is a finding.
+pub fn read_policy_file(path: &Path, subject: &str) -> Result<PolicyFile, Finding> {
+    let (_, stem) = file_name_and_stem(path);
+    let file: PolicyFile = read_yaml(path, subject)?;
+    if file.framework != stem {
+        return Err(Finding {
+            kind: FindingKind::FrameworkMismatch,
+            subject: subject.to_owned(),
+            detail: format!(
+                "framework {:?} does not match the file name {stem:?}",
+                file.framework
+            ),
+        });
+    }
+    Ok(file)
+}
+
+/// A template control the scope's policy neither picked nor marked `n/a`.
+/// Listed, never counted -- so a Statement of Applicability still accounts
+/// for every control of the template.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NotApplicable {
+pub struct NotSelected {
     pub control: ControlRef,
-    pub rationale: String,
+    pub title: String,
 }
 
-/// One scope's own policy declarations. `applicable` is handed a chain of
-/// these, root first -- the same shape `Engine::roles_for` walks for roles,
-/// just carrying additive-only data instead of nearest-wins overrides.
-/// Built from the live config by `Config::policy_chain_for_scope`,
-/// `Factory::policy_chain` and `Engine::policy_chain` (`#76`); the config-side
-/// declaration this is converted from (`PolicyDeclaration`, minus `scope`,
-/// which the chain builder fills in) lives in `factory-core::config`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyLayer {
+/// One scope's policy for one framework, resolved: every control it picked
+/// or declared (`n/a` ones included), and every template control it left
+/// unselected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OwnedPolicy {
+    /// The scope that owns it -- the only scope it applies to.
     pub scope: String,
-    #[serde(default)]
-    pub frameworks: Vec<String>,
-    #[serde(default)]
-    pub tighten: BTreeMap<ControlRef, Tighten>,
-    #[serde(default)]
-    pub not_applicable: Vec<NotApplicable>,
+    pub framework: String,
+    pub title: String,
+    pub kind: Kind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Where it was read from, relative to the instance root.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file: String,
+    pub controls: Vec<Applied>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_selected: Vec<NotSelected>,
 }
 
-/// Which scope declared a control not applicable, and why.
+/// Which scope declared a control not applicable, and why -- always the
+/// scope that owns the policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppliedNotApplicable {
     pub scope: String,
     pub rationale: String,
 }
 
-/// One control as it applies at the scope `applicable` was asked about:
-/// its evidence checks exactly as the catalogue wrote them, and the
-/// freshness window and `n/a` status after folding in every layer of the
-/// chain.
+/// One control as it applies in the scope that owns it: its title, kind and
+/// `maps_to` (the template's, for a picked control), the scope's own
+/// evidence, the freshness window, and its `n/a` state.
 // `#278`: no `Eq`, for the same reason as `Control` -- `evidence: Vec<Check>`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Applied {
@@ -520,30 +588,19 @@ pub struct Applied {
     pub title: String,
     pub kind: Kind,
     pub maps_to: Vec<ControlRef>,
-    /// Exactly as the catalogue wrote it -- a `Task`/`Workflow`/`Gate`
-    /// check's own `max_age` here has *not* been tightened by any layer.
-    /// Whatever reads freshness for a check reads this control's own
-    /// `max_age` field below, not a check's -- `direct_status` does exactly
-    /// this for `task`/`workflow`/`gate`; reading a check's own field
-    /// instead would silently ignore a scope's `tighten`.
+    /// Exactly as the scope's policy wrote it.
     pub evidence: Vec<Check>,
-    /// The minimum of the control's own `max_age`, every one of its checks'
-    /// own `max_age`, and every layer's `tighten` for it -- `None` when
-    /// nothing in any of those ever set one. This, not a `Check` variant's
-    /// own `max_age` field, is the effective freshness window to check
-    /// evidence against.
+    /// The minimum of the control's own `max_age` and every one of its
+    /// checks' own `max_age` -- `None` when none sets one. This, not a
+    /// `Check` variant's own field, is the window evidence is checked
+    /// against.
     pub max_age: Option<Duration>,
     pub not_applicable: Option<AppliedNotApplicable>,
-    /// The catalogue's own `remediation:` text for this control, carried
-    /// through unchanged -- no layer tightens or overrides it, the same as
-    /// `title`. `Engine::policy_remediate` (`#83`) is the one reader; kept
-    /// here rather than looked up separately so a caller that already has
-    /// an `Applied` (or a `PolicyControlDetail` built from one) never needs
-    /// a second pass over the catalogue just for this field.
+    /// The scope's own `remediation:`, or the template's for a picked
+    /// control that has none. `Engine::policy_remediate` (`#83`) reads it.
     pub remediation: Option<String>,
-    /// The catalogue's own `requires:` for this control, unchanged -- like
-    /// `remediation`, no layer edits it. `control_plan::resolve` reads it,
-    /// and a control `n/a` here waives it there, by name.
+    /// The scope's own `requires:` for this control. `control_plan::resolve`
+    /// reads it, and a control `n/a` here waives it there, by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<factory_assurance::control_plan::Requirement>,
 }
@@ -556,174 +613,472 @@ fn min_duration(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
     }
 }
 
-/// The framework names named anywhere in `chain`, deduplicated and sorted --
-/// what `AgentContext::factory_guide` (`factory-core::adapter::agent`) names
-/// to an agent as the frameworks its scope is committed to. Deliberately
-/// cheaper than [`applicable`]: it reads only the chain a dispatch already
-/// resolved (`Engine::policy_chain`), never touches disk to load a
-/// catalogue, and never checks a name against one -- a framework with no
-/// loaded catalogue is still named here, the same way it is still a
-/// [`Finding`] `applicable` reports rather than silently drops. The guide is
-/// a plain restatement of what the config commits the scope to, not a report
-/// on whether that commitment resolved to something real.
-pub fn frameworks_in_chain(chain: &[PolicyLayer]) -> Vec<String> {
-    chain
-        .iter()
-        .flat_map(|layer| layer.frameworks.iter().cloned())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+/// What `file` commits `scope` to (#390). Pure: the template list is handed
+/// in, and every mistake is a finding against `subject`, never a refusal.
+///
+/// - With a `template:`, a control picks the template control of the same
+///   id and inherits its title, kind, `maps_to` and remediation; the
+///   scope's own `remediation:` replaces the template's. An id the template
+///   does not define is a finding and is skipped. A picked control with no
+///   evidence is a finding and stays open. Every template control neither
+///   picked nor marked `n/a` is listed as not selected.
+/// - An unknown template is a finding; the controls still load, each under
+///   its own title, or its id when it has none.
+/// - Without a template, every control is the policy's own and needs a
+///   `title`.
+/// - `not_applicable` needs a non-empty rationale; an empty one is a
+///   finding and the control stays applicable.
+pub fn resolve(
+    file: &PolicyFile,
+    scope: &str,
+    subject: &str,
+    templates: &[Template],
+) -> (OwnedPolicy, Vec<Finding>) {
+    let mut findings = Vec::new();
+    let mut finding = |kind, detail: String| {
+        findings.push(Finding {
+            kind,
+            subject: subject.to_owned(),
+            detail,
+        })
+    };
+    let framework = &file.framework;
+    let template = match &file.template {
+        Some(name) => {
+            let found = templates.iter().find(|t| &t.template == name);
+            if found.is_none() {
+                finding(
+                    FindingKind::UnknownTemplate,
+                    format!(
+                        "{framework} names template {name:?}, which no file in .factory/policies/templates/ defines; \
+                         its controls load under their own titles"
+                    ),
+                );
+            }
+            found
+        }
+        None => None,
+    };
+    let title = match (&file.title, template) {
+        (Some(title), _) => title.clone(),
+        (None, Some(t)) => t.title.clone(),
+        (None, None) => {
+            // An unknown template already has its own finding.
+            if file.template.is_none() {
+                finding(
+                    FindingKind::MissingField,
+                    format!("{framework} has no `title` and no template to take one from; its name is used"),
+                );
+            }
+            framework.clone()
+        }
+    };
+    let kind = match (file.kind, template) {
+        (Some(kind), _) => kind,
+        (None, Some(t)) => t.kind,
+        (None, None) => {
+            if file.template.is_none() {
+                finding(
+                    FindingKind::MissingField,
+                    format!(
+                        "{framework} has no `kind` and no template to take one from; it counts as a regulation"
+                    ),
+                );
+            }
+            Kind::Regulation
+        }
+    };
+
+    let mut seen = BTreeSet::new();
+    let mut controls = Vec::with_capacity(file.controls.len());
+    for control in &file.controls {
+        let control_ref = ControlRef::new(framework.clone(), control.id.clone());
+        if !seen.insert(control.id.clone()) {
+            finding(
+                FindingKind::DuplicateControl,
+                format!("duplicate control id {:?}", control.id),
+            );
+            continue;
+        }
+        let picked = match template {
+            Some(t) => match t.controls.iter().find(|c| c.id == control.id) {
+                Some(picked) => Some((t, picked)),
+                None => {
+                    finding(
+                        FindingKind::UnknownControl,
+                        format!(
+                            "{control_ref} is not a control of template {:?}; it is not loaded",
+                            t.template
+                        ),
+                    );
+                    continue;
+                }
+            },
+            None => None,
+        };
+        let not_applicable = match control.not_applicable.as_deref() {
+            Some(rationale) if rationale.trim().is_empty() => {
+                finding(
+                    FindingKind::EmptyRationale,
+                    format!("{control_ref} marked not applicable with no rationale; it stays applicable"),
+                );
+                None
+            }
+            Some(rationale) => Some(AppliedNotApplicable {
+                scope: scope.to_owned(),
+                rationale: rationale.to_owned(),
+            }),
+            None => None,
+        };
+        let (title, kind, maps_to, remediation) = match picked {
+            Some((t, picked)) => {
+                let overridden: Vec<&str> = [
+                    ("title", control.title.is_some()),
+                    ("kind", control.kind.is_some()),
+                    ("maps_to", !control.maps_to.is_empty()),
+                ]
+                .into_iter()
+                .filter_map(|(field, set)| set.then_some(field))
+                .collect();
+                if !overridden.is_empty() {
+                    finding(
+                        FindingKind::TemplateOverride,
+                        format!(
+                            "{control_ref} sets {}, which come(s) from template {:?}; the template's value holds",
+                            overridden.join(", "),
+                            t.template
+                        ),
+                    );
+                }
+                if control.evidence.is_empty() && not_applicable.is_none() {
+                    finding(
+                        FindingKind::NoEvidence,
+                        format!(
+                            "{control_ref} is picked from template {:?} with no evidence; it stays open until \
+                             this scope names its evidence",
+                            t.template
+                        ),
+                    );
+                }
+                (
+                    picked.title.clone(),
+                    picked.kind.unwrap_or(t.kind),
+                    picked.maps_to.clone(),
+                    control
+                        .remediation
+                        .clone()
+                        .or_else(|| picked.remediation.clone()),
+                )
+            }
+            None => {
+                let title = match &control.title {
+                    Some(title) => title.clone(),
+                    None => {
+                        if file.template.is_none() {
+                            finding(
+                                FindingKind::MissingField,
+                                format!("{control_ref} has no `title`; its id is used"),
+                            );
+                        }
+                        control.id.clone()
+                    }
+                };
+                (
+                    title,
+                    control.kind.unwrap_or(kind),
+                    control.maps_to.clone(),
+                    control.remediation.clone(),
+                )
+            }
+        };
+        for check in &control.evidence {
+            for (kind, detail) in check_vocabulary(check) {
+                finding(kind, format!("{control_ref} {detail}"));
+            }
+        }
+        for requirement in &control.requires {
+            for detail in requirement.problems() {
+                finding(
+                    FindingKind::BadRequirement,
+                    format!("{control_ref} {detail}"),
+                );
+            }
+        }
+        let max_age = control.evidence.iter().fold(control.max_age, |acc, check| {
+            min_duration(acc, check.own_max_age())
+        });
+        controls.push(Applied {
+            control: control_ref,
+            title,
+            kind,
+            maps_to,
+            evidence: control.evidence.clone(),
+            max_age,
+            not_applicable,
+            remediation,
+            requires: control.requires.clone(),
+        });
+    }
+    controls.sort_by(|a, b| a.control.cmp(&b.control));
+    let not_selected = template
+        .map(|t| {
+            t.controls
+                .iter()
+                .filter(|c| !seen.contains(&c.id))
+                .map(|c| NotSelected {
+                    control: ControlRef::new(framework.clone(), c.id.clone()),
+                    title: c.title.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (
+        OwnedPolicy {
+            scope: scope.to_owned(),
+            framework: framework.clone(),
+            title,
+            kind,
+            template: file.template.clone(),
+            file: subject.to_owned(),
+            controls,
+            not_selected,
+        },
+        findings,
+    )
 }
 
-/// Every control that applies at the scope `chain`'s last layer names,
-/// folding in every layer's tightening and `n/a` declarations -- add or
-/// tighten only, by construction:
-///
-/// - Frameworks are the union across the whole chain; nothing in a layer can
-///   remove one.
-/// - A control's effective `max_age` is the minimum of the catalogue's own
-///   value, every one of its checks' own value, and every layer's
-///   `tighten` for it, walked root to leaf. A `tighten` that does not lower
-///   that running minimum has no effect and is a [`Finding`].
-/// - `n/a` requires a non-empty `rationale`; an empty one is a finding and
-///   is ignored (the control stays applicable). The first declaration found
-///   walking root to leaf is the one that holds.
-/// - A framework, or a `tighten`/`not_applicable` control, that names
-///   nothing in `catalogues` is a finding; the rest of that layer still
-///   applies.
-pub fn applicable(catalogues: &[Catalogue], chain: &[PolicyLayer]) -> (Vec<Applied>, Vec<Finding>) {
+/// Every policy in one directory -- one scope's `.factory/policies/`,
+/// owned by `scope` -- resolved against `templates`. A missing directory is
+/// empty; one bad file never stops the others. `subject_prefix` is
+/// prepended to each file name in a finding and in `OwnedPolicy::file`.
+/// `maps_to` is checked by the caller, once every scope has loaded.
+pub fn load_dir(
+    dir: &Path,
+    subject_prefix: &str,
+    scope: &str,
+    templates: &[Template],
+) -> (Vec<OwnedPolicy>, Vec<Finding>) {
     let mut findings = Vec::new();
-    let by_framework: BTreeMap<&str, &Catalogue> = catalogues
-        .iter()
-        .map(|c| (c.framework.as_str(), c))
-        .collect();
-
-    let mut framework_names: BTreeSet<String> = BTreeSet::new();
-    for layer in chain {
-        for fw in &layer.frameworks {
-            if by_framework.contains_key(fw.as_str()) {
-                framework_names.insert(fw.clone());
-            } else {
-                findings.push(Finding {
-                    kind: FindingKind::UnknownFramework,
-                    subject: layer.scope.clone(),
-                    detail: format!("names framework {fw:?}, which has no loaded catalogue"),
-                });
+    let mut policies = Vec::new();
+    for path in yaml_files(dir) {
+        let (file_name, _) = file_name_and_stem(&path);
+        let subject = format!("{subject_prefix}{file_name}");
+        match read_policy_file(&path, &subject) {
+            Ok(file) => {
+                let (policy, own) = resolve(&file, scope, &subject, templates);
+                findings.extend(own);
+                policies.push(policy);
             }
+            Err(finding) => findings.push(finding),
         }
     }
+    (policies, findings)
+}
 
-    let known_controls: BTreeSet<ControlRef> = framework_names
+/// One directory's policies with no templates and its own `maps_to` checked
+/// against itself: the single-directory view a test, the backup verifier
+/// and the draft loader read.
+pub fn load_all(dir: &Path) -> (Vec<OwnedPolicy>, Vec<Finding>) {
+    let (policies, mut findings) = load_dir(dir, "", "", &[]);
+    findings.extend(maps_to_findings(&[], &policies));
+    sort_findings(&mut findings);
+    (policies, findings)
+}
+
+/// Every `maps_to` that names a control no loaded template or policy
+/// defines. Checked once everything has loaded: a target in a file that
+/// failed to parse is exactly the "naming nothing known" case.
+pub fn maps_to_findings(templates: &[Template], policies: &[OwnedPolicy]) -> Vec<Finding> {
+    let mut known: BTreeSet<ControlRef> = templates
         .iter()
-        .filter_map(|fw| by_framework.get(fw.as_str()))
-        .flat_map(|cat| {
-            cat.controls
+        .flat_map(|t| {
+            t.controls
                 .iter()
-                .map(|ctl| ControlRef::new(cat.framework.clone(), ctl.id.clone()))
+                .map(|c| ControlRef::new(t.template.clone(), c.id.clone()))
         })
         .collect();
-
-    for layer in chain {
-        for control in layer.tighten.keys() {
-            if !known_controls.contains(control) {
+    for policy in policies {
+        known.extend(policy.controls.iter().map(|c| c.control.clone()));
+        known.extend(policy.not_selected.iter().map(|c| c.control.clone()));
+    }
+    let mut findings = Vec::new();
+    for t in templates {
+        for c in &t.controls {
+            for target in c.maps_to.iter().filter(|target| !known.contains(target)) {
                 findings.push(Finding {
-                    kind: FindingKind::UnknownControl,
-                    subject: layer.scope.clone(),
-                    detail: format!("tightens {control}, which is not an applicable control"),
-                });
-            }
-        }
-        for na in &layer.not_applicable {
-            if !known_controls.contains(&na.control) {
-                findings.push(Finding {
-                    kind: FindingKind::UnknownControl,
-                    subject: layer.scope.clone(),
+                    kind: FindingKind::UnknownMapsTo,
+                    subject: format!(".factory/policies/templates/{}.yaml", t.template),
                     detail: format!(
-                        "marks {} not applicable, which is not an applicable control",
-                        na.control
+                        "{}/{} maps_to {target}, which is not a control in any loaded template or policy",
+                        t.template, c.id
                     ),
                 });
             }
         }
     }
-
-    let mut applied = Vec::new();
-    for fw in &framework_names {
-        let cat = by_framework[fw.as_str()];
-        for control in &cat.controls {
-            let control_ref = ControlRef::new(cat.framework.clone(), control.id.clone());
-
-            let mut not_applicable = None;
-            for layer in chain {
-                let Some(na) = layer
-                    .not_applicable
-                    .iter()
-                    .find(|na| na.control == control_ref)
-                else {
-                    continue;
-                };
-                if na.rationale.trim().is_empty() {
-                    findings.push(Finding {
-                        kind: FindingKind::EmptyRationale,
-                        subject: layer.scope.clone(),
-                        detail: format!("{control_ref} marked not applicable with no rationale"),
-                    });
-                    continue;
-                }
-                not_applicable = Some(AppliedNotApplicable {
-                    scope: layer.scope.clone(),
-                    rationale: na.rationale.clone(),
+    for policy in policies {
+        for applied in &policy.controls {
+            for target in applied
+                .maps_to
+                .iter()
+                .filter(|target| !known.contains(target))
+            {
+                findings.push(Finding {
+                    kind: FindingKind::UnknownMapsTo,
+                    subject: policy.file.clone(),
+                    detail: format!(
+                        "{} maps_to {target}, which is not a control in any loaded template or policy",
+                        applied.control
+                    ),
                 });
-                break;
             }
+        }
+    }
+    findings
+}
 
-            let base = control.evidence.iter().fold(control.max_age, |acc, check| {
-                min_duration(acc, check.own_max_age())
-            });
-            let mut max_age = base;
-            for layer in chain {
-                let Some(tighten) = layer.tighten.get(&control_ref) else {
-                    continue;
-                };
-                let Some(new_age) = tighten.max_age else {
-                    continue;
-                };
-                match max_age {
-                    Some(current) if new_age >= current => {
-                        findings.push(Finding {
-                            kind: FindingKind::LooseningHasNoEffect,
-                            subject: layer.scope.clone(),
-                            detail: format!(
-                                "tightens {control_ref} to {new_age}, which is not shorter than the existing {current}"
-                            ),
-                        });
-                    }
-                    _ => max_age = Some(new_age),
-                }
-            }
+/// Every policy the instance has, read fresh: the templates, then each
+/// scope's own `.factory/policies/` (#390). `scopes` is `(name, path)`, the
+/// path relative to `root` (or absolute). The root scope's own directory is
+/// `<root>/.factory/policies`; a policy file there when no configured scope
+/// sits at the root is owned by nobody and is a finding.
+#[derive(Debug, Clone, Default)]
+pub struct Policies {
+    pub templates: Vec<Template>,
+    /// Every scope's policies, each knowing its owner, in scope order then
+    /// framework order.
+    pub owned: Vec<OwnedPolicy>,
+    pub findings: Vec<Finding>,
+}
 
-            applied.push(Applied {
-                control: control_ref,
-                title: control.title.clone(),
-                kind: control.kind.unwrap_or(cat.kind),
-                maps_to: control.maps_to.clone(),
-                evidence: control.evidence.clone(),
-                max_age,
-                not_applicable,
-                remediation: control.remediation.clone(),
-                requires: control.requires.clone(),
+impl Policies {
+    /// `scope`'s own policies -- nothing from an ancestor or a descendant.
+    pub fn of<'a>(&'a self, scope: &'a str) -> impl Iterator<Item = &'a OwnedPolicy> + 'a {
+        self.owned.iter().filter(move |p| p.scope == scope)
+    }
+
+    /// Every control `scope`'s own policies commit it to, `n/a` included,
+    /// sorted by control.
+    pub fn applied(&self, scope: &str) -> Vec<Applied> {
+        let mut applied: Vec<Applied> = self
+            .of(scope)
+            .flat_map(|p| p.controls.iter().cloned())
+            .collect();
+        applied.sort_by(|a, b| a.control.cmp(&b.control));
+        applied
+    }
+
+    /// The frameworks `scope` has a policy for, sorted.
+    pub fn frameworks(&self, scope: &str) -> Vec<String> {
+        self.of(scope)
+            .map(|p| p.framework.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub fn template(&self, name: &str) -> Option<&Template> {
+        self.templates.iter().find(|t| t.template == name)
+    }
+}
+
+/// A scope path relative to the instance root, `/`-separated, with `.`
+/// components dropped -- empty for the root itself.
+fn relative_label(root: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    relative
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `<scope>/.factory/policies`, for a scope path relative to `root`.
+pub fn scope_policies_dir(root: &Path, scope_path: &Path) -> PathBuf {
+    policies_dir(&root.join(scope_path))
+}
+
+/// The frameworks a scope has a policy file for -- the stems of the
+/// `*.yaml` directly in its `.factory/policies/`, sorted. What the agent
+/// guide names (`AgentContext::factory_guide`): a plain listing, never a
+/// parse, so a dispatch never pays for loading a policy.
+pub fn policy_frameworks(root: &Path, scope_path: &Path) -> Vec<String> {
+    yaml_files(&scope_policies_dir(root, scope_path))
+        .iter()
+        .map(|path| file_name_and_stem(path).1)
+        .collect()
+}
+
+pub fn load(root: &Path, scopes: &[(String, PathBuf)]) -> Policies {
+    let (templates, mut findings) =
+        load_templates(&templates_dir(root), ".factory/policies/templates/");
+    let mut owned = Vec::new();
+    let mut seen_dirs: BTreeSet<String> = BTreeSet::new();
+    for (name, path) in scopes {
+        let label = relative_label(root, &root.join(path));
+        if !seen_dirs.insert(label.clone()) {
+            continue;
+        }
+        let prefix = if label.is_empty() {
+            ".factory/policies/".to_owned()
+        } else {
+            format!("{label}/.factory/policies/")
+        };
+        let (policies, own) = load_dir(&scope_policies_dir(root, path), &prefix, name, &templates);
+        owned.extend(policies);
+        findings.extend(own);
+    }
+    if !seen_dirs.contains("") {
+        for path in yaml_files(&policies_dir(root)) {
+            let (file_name, _) = file_name_and_stem(&path);
+            findings.push(Finding {
+                kind: FindingKind::NoOwningScope,
+                subject: format!(".factory/policies/{file_name}"),
+                detail: "a policy at the instance root belongs to the root scope, and the root is not a \
+                         configured scope: give the root config a `scope:` block, or move the file into \
+                         the `.factory/policies/` of the scope it is for"
+                    .to_owned(),
             });
         }
     }
+    findings.extend(maps_to_findings(&templates, &owned));
+    sort_findings(&mut findings);
+    Policies {
+        templates,
+        owned,
+        findings,
+    }
+}
 
-    applied.sort_by(|a, b| a.control.cmp(&b.control));
-    findings.sort_by(|a, b| {
-        a.subject
-            .cmp(&b.subject)
-            .then(a.kind.cmp(&b.kind))
-            .then(a.detail.cmp(&b.detail))
-    });
-    (applied, findings)
+/// A control's `max_age` narrowed by a scenario overlay (`scenario.rs`).
+/// Never widens it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tighten {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<Duration>,
+}
+
+/// A skeleton policy for `scope` picking every control of `template`,
+/// printed for a person to fill in (`factory policy template skeleton`) --
+/// Factory never writes authored content itself. Each control is left with
+/// an empty `evidence: []` to translate into the scope's own terms.
+pub fn skeleton(template: &Template, framework: Option<&str>) -> String {
+    let mut out = format!(
+        "# Save as <scope>/.factory/policies/{}.yaml, then give every control this scope's own evidence,\n\
+         # mark it `not_applicable: \"<rationale>\"`, or delete it (it is then listed as not selected).\n\
+         framework: {}\ntemplate: {}\ncontrols:\n",
+        framework.unwrap_or(&template.template),
+        framework.unwrap_or(&template.template),
+        template.template
+    );
+    for control in &template.controls {
+        out.push_str(&format!(
+            "  - id: {}            # {}\n    evidence: []\n",
+            control.id, control.title
+        ));
+    }
+    out
 }
 
 // ================================================================ evidence
@@ -1151,17 +1506,17 @@ mod tests {
 
     #[test]
     fn kind_best_practice_parses_from_its_hyphenated_spelling_and_its_alias() {
-        let hyphenated: Catalogue = serde_yaml_ng::from_str(
+        let hyphenated: PolicyFile = serde_yaml_ng::from_str(
             "framework: house\ntitle: House rules\nkind: best-practice\ncontrols: []\n",
         )
         .unwrap();
-        assert_eq!(hyphenated.kind, Kind::BestPractice);
+        assert_eq!(hyphenated.kind, Some(Kind::BestPractice));
 
-        let aliased: Catalogue = serde_yaml_ng::from_str(
+        let aliased: PolicyFile = serde_yaml_ng::from_str(
             "framework: house\ntitle: House rules\nkind: best_practice\ncontrols: []\n",
         )
         .unwrap();
-        assert_eq!(aliased.kind, Kind::BestPractice);
+        assert_eq!(aliased.kind, Some(Kind::BestPractice));
 
         assert_eq!(
             serde_json::to_string(&Kind::BestPractice).unwrap(),
@@ -1170,17 +1525,38 @@ mod tests {
     }
 
     #[test]
-    fn examples_policies_cra_loads_with_no_findings() {
+    fn the_shipped_templates_and_example_scope_policy_load_with_no_findings() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/policies");
-        let (catalogues, findings) = load_all(&dir);
-        assert_eq!(findings, Vec::new(), "{findings:?}");
-        assert_eq!(catalogues.len(), 1);
-        assert_eq!(catalogues[0].framework, "cra");
-        assert!(
-            catalogues[0].controls.len() >= 3,
-            "{:?}",
-            catalogues[0].controls
+        let (templates, mut findings) = load_templates(&dir.join("templates"), "templates/");
+        assert_eq!(
+            templates
+                .iter()
+                .map(|t| t.template.as_str())
+                .collect::<Vec<_>>(),
+            ["ai-act", "cra", "dsgvo", "iso27001"]
         );
+        let (policies, own) = load_dir(&dir, "", "demo", &templates);
+        findings.extend(own);
+        findings.extend(maps_to_findings(&templates, &policies));
+        assert_eq!(findings, Vec::new(), "{findings:?}");
+        assert_eq!(policies.len(), 1);
+        let cra = &policies[0];
+        assert_eq!(
+            (cra.framework.as_str(), cra.template.as_deref()),
+            ("cra", Some("cra"))
+        );
+        assert!(cra.controls.len() >= 6, "{:?}", cra.controls);
+        assert!(cra.controls.iter().any(|c| c.not_applicable.is_some()));
+        assert!(
+            !cra.not_selected.is_empty(),
+            "the example leaves some controls unselected"
+        );
+        // The draft resolves against the same templates with no finding.
+        let draft =
+            read_policy_file(&dir.join("drafts/ai-act.yaml"), "drafts/ai-act.yaml").unwrap();
+        let (owned, draft_findings) = resolve(&draft, "demo", "drafts/ai-act.yaml", &templates);
+        assert!(draft_findings.is_empty(), "{draft_findings:?}");
+        assert_eq!(owned.controls.len(), 5);
     }
 
     #[test]
@@ -1480,201 +1856,292 @@ mod tests {
         );
     }
 
-    // -- applicable ----------------------------------------------------------
+    // -- templates and resolve (#390) ---------------------------------------
 
-    fn cra_catalogue(controls: Vec<Control>) -> Catalogue {
-        Catalogue {
-            framework: "cra".to_string(),
-            title: "Cyber Resilience Act".to_string(),
-            kind: Kind::Regulation,
-            controls,
-        }
+    const TEMPLATE: &str =
+        "template: cra\ntitle: Cyber Resilience Act\nkind: regulation\ncontrols:\n\
+        \x20 - {id: sbom, title: SBOM, maps_to: [iso27001/a-8-8], remediation: Generic guidance}\n\
+        \x20 - {id: vulns, title: Vulnerabilities, kind: best-practice}\n\
+        \x20 - {id: hw, title: Hardware}\n\
+        \x20 - {id: left, title: Left out}\n";
+
+    fn templates() -> Vec<Template> {
+        let dir = tempdir("templates");
+        write(&dir, "cra.yaml", TEMPLATE);
+        let (templates, findings) = load_templates(&dir, "");
+        assert!(findings.is_empty(), "{findings:?}");
+        std::fs::remove_dir_all(&dir).ok();
+        templates
     }
 
-    fn control(id: &str) -> Control {
-        Control {
-            id: id.to_string(),
-            title: format!("Control {id}"),
-            kind: None,
-            max_age: None,
-            maps_to: Vec::new(),
-            remediation: None,
-            evidence: vec![Check::Knowledge { tag: None }],
-            requires: Vec::new(),
-        }
+    fn file(raw: &str) -> PolicyFile {
+        serde_yaml_ng::from_str(raw).unwrap()
     }
 
-    fn layer(scope: &str, frameworks: &[&str]) -> PolicyLayer {
-        PolicyLayer {
-            scope: scope.to_string(),
-            frameworks: frameworks.iter().map(|f| f.to_string()).collect(),
-            tighten: BTreeMap::new(),
-            not_applicable: Vec::new(),
-        }
-    }
-
-    // -- frameworks_in_chain --------------------------------------------------
-
-    #[test]
-    fn frameworks_in_chain_is_the_deduplicated_sorted_union() {
-        let chain = vec![
-            layer("root", &["cra", "gdpr"]),
-            layer("root/demo", &["gdpr", "iso27001"]),
-        ];
-        assert_eq!(frameworks_in_chain(&chain), vec!["cra", "gdpr", "iso27001"]);
+    fn kinds(findings: &[Finding]) -> Vec<FindingKind> {
+        findings.iter().map(|f| f.kind).collect()
     }
 
     #[test]
-    fn frameworks_in_chain_is_empty_for_an_empty_chain_or_one_with_nothing_declared() {
-        assert_eq!(frameworks_in_chain(&[]), Vec::<String>::new());
+    fn a_picked_control_inherits_from_the_template_and_its_own_remediation_wins() {
+        let policy = file(
+            "framework: cra\ntemplate: cra\ncontrols:\n\
+             \x20 - {id: sbom, evidence: [{check: task, task: sbom-export, max_age: 30d}]}\n\
+             \x20 - {id: vulns, remediation: Run the scanner, evidence: [{check: attestation}]}\n",
+        );
+        let (owned, findings) = resolve(&policy, "irrlicht", "cra.yaml", &templates());
+        assert!(findings.is_empty(), "{findings:?}");
         assert_eq!(
-            frameworks_in_chain(&[layer("root", &[])]),
-            Vec::<String>::new()
+            (owned.title.as_str(), owned.kind),
+            ("Cyber Resilience Act", Kind::Regulation)
+        );
+        assert_eq!(owned.template.as_deref(), Some("cra"));
+        let sbom = &owned.controls[0];
+        assert_eq!(sbom.control, ControlRef::new("cra", "sbom"));
+        assert_eq!(sbom.title, "SBOM");
+        assert_eq!(sbom.kind, Kind::Regulation);
+        assert_eq!(sbom.maps_to, [ControlRef::new("iso27001", "a-8-8")]);
+        assert_eq!(sbom.remediation.as_deref(), Some("Generic guidance"));
+        assert_eq!(sbom.max_age, Some("30d".parse().unwrap()));
+        let vulns = &owned.controls[1];
+        assert_eq!(
+            vulns.kind,
+            Kind::BestPractice,
+            "the template control's own kind"
+        );
+        assert_eq!(
+            vulns.remediation.as_deref(),
+            Some("Run the scanner"),
+            "the scope's own wins"
+        );
+        assert_eq!(
+            owned
+                .not_selected
+                .iter()
+                .map(|c| c.control.to_string())
+                .collect::<Vec<_>>(),
+            ["cra/hw", "cra/left"],
+            "every template control neither picked nor n/a, never a control"
+        );
+        assert_eq!(owned.not_selected[0].title, "Hardware");
+    }
+
+    #[test]
+    fn two_scopes_bind_the_same_template_control_to_their_own_evidence() {
+        let templates = templates();
+        let a = resolve(
+            &file("framework: cra\ntemplate: cra\ncontrols: [{id: sbom, evidence: [{check: task, task: irrlicht-sbom}]}]\n"),
+            "irrlicht",
+            "a",
+            &templates,
+        )
+        .0;
+        let b = resolve(
+            &file("framework: cra\ntemplate: cra\ncontrols: [{id: sbom, evidence: [{check: task, task: factory-sbom}]}]\n"),
+            "factory",
+            "b",
+            &templates,
+        )
+        .0;
+        assert_eq!(a.controls[0].control, b.controls[0].control);
+        assert_ne!(a.controls[0].evidence, b.controls[0].evidence);
+        assert_eq!(
+            (a.scope.as_str(), b.scope.as_str()),
+            ("irrlicht", "factory")
         );
     }
 
     #[test]
-    fn frameworks_in_chain_names_a_framework_with_no_loaded_catalogue() {
-        // Unlike `applicable`, this never checks a name against a loaded
-        // catalogue -- it is a plain restatement of the config, findings are
-        // `applicable`'s job.
-        let chain = vec![layer("root", &["not-a-real-framework"])];
-        assert_eq!(frameworks_in_chain(&chain), vec!["not-a-real-framework"]);
+    fn an_unknown_template_or_template_control_is_a_finding() {
+        let unknown = file("framework: cra\ntemplate: crx\ncontrols: [{id: sbom, evidence: [{check: attestation}]}]\n");
+        let (owned, findings) = resolve(&unknown, "s", "cra.yaml", &templates());
+        assert_eq!(kinds(&findings), [FindingKind::UnknownTemplate]);
+        assert_eq!(owned.controls.len(), 1, "its controls still load");
+        assert_eq!(
+            owned.controls[0].title, "sbom",
+            "under its id, lacking a title"
+        );
+        assert_eq!(owned.kind, Kind::Regulation);
+
+        let typo = file("framework: cra\ntemplate: cra\ncontrols: [{id: sbomm, evidence: [{check: attestation}]}]\n");
+        let (owned, findings) = resolve(&typo, "s", "cra.yaml", &templates());
+        assert_eq!(kinds(&findings), [FindingKind::UnknownControl]);
+        assert!(findings[0].detail.contains("cra/sbomm"), "{findings:?}");
+        assert!(owned.controls.is_empty());
+        assert_eq!(
+            owned.not_selected.len(),
+            4,
+            "the real control is not selected"
+        );
     }
 
     #[test]
-    fn frameworks_are_the_union_down_the_chain_and_never_shrink() {
-        let catalogues = vec![
-            cra_catalogue(vec![control("a")]),
-            Catalogue {
-                framework: "gdpr".to_string(),
-                title: "GDPR".to_string(),
-                kind: Kind::Regulation,
-                controls: vec![control("b")],
-            },
-        ];
-        let chain = vec![layer("root", &["cra"]), layer("root/demo", &["gdpr"])];
-        let (applied, findings) = applicable(&catalogues, &chain);
-        assert!(findings.is_empty(), "{findings:?}");
-        let frameworks: BTreeSet<&str> = applied
+    fn a_picked_control_with_no_evidence_is_a_finding_and_stays_open() {
+        let policy = file("framework: cra\ntemplate: cra\ncontrols: [{id: sbom}]\n");
+        let (owned, findings) = resolve(&policy, "s", "cra.yaml", &templates());
+        assert_eq!(kinds(&findings), [FindingKind::NoEvidence]);
+        assert_eq!(owned.controls.len(), 1, "kept, so it is counted");
+        let statuses = evaluate(&owned.controls, &Evidence::default(), Utc::now());
+        assert_eq!(statuses[0].status.kind(), StatusKind::Open);
+    }
+
+    #[test]
+    fn not_applicable_needs_a_rationale_and_names_the_owning_scope() {
+        let policy = file(
+            "framework: cra\ntemplate: cra\ncontrols:\n\
+             \x20 - {id: hw, not_applicable: No hardware ships}\n\
+             \x20 - {id: sbom, not_applicable: '  ', evidence: [{check: attestation}]}\n",
+        );
+        let (owned, findings) = resolve(&policy, "irrlicht", "cra.yaml", &templates());
+        assert_eq!(kinds(&findings), [FindingKind::EmptyRationale]);
+        let hw = owned
+            .controls
             .iter()
-            .map(|a| a.control.framework.as_str())
-            .collect();
-        assert_eq!(frameworks, BTreeSet::from(["cra", "gdpr"]));
-    }
-
-    #[test]
-    fn a_framework_named_with_no_catalogue_is_a_finding() {
-        let (applied, findings) = applicable(&[], &[layer("root", &["cra"])]);
-        assert!(applied.is_empty());
-        assert_eq!(findings[0].kind, FindingKind::UnknownFramework);
-    }
-
-    #[test]
-    fn max_age_is_the_minimum_of_the_catalogue_the_checks_and_every_tighten() {
-        let mut ctl = control("a");
-        ctl.max_age = Some("30d".parse().unwrap());
-        ctl.evidence = vec![Check::Task {
-            task: "sbom-export".to_string(),
-            max_age: Some("20d".parse().unwrap()),
-        }];
-        let catalogues = vec![cra_catalogue(vec![ctl])];
-
-        let mut root = layer("root", &["cra"]);
-        root.tighten.insert(
-            ControlRef::new("cra", "a"),
-            Tighten {
-                max_age: Some("14d".parse().unwrap()),
-            },
-        );
-        let mut leaf = layer("root/demo", &[]);
-        leaf.tighten.insert(
-            ControlRef::new("cra", "a"),
-            Tighten {
-                max_age: Some("7d".parse().unwrap()),
-            },
-        );
-        let chain = vec![root, leaf];
-
-        let (applied, findings) = applicable(&catalogues, &chain);
-        assert!(findings.is_empty(), "{findings:?}");
-        assert_eq!(applied[0].max_age, Some("7d".parse().unwrap()));
-    }
-
-    #[test]
-    fn a_tighten_that_does_not_lower_the_running_minimum_has_no_effect_and_is_a_finding() {
-        let mut ctl = control("a");
-        ctl.max_age = Some("7d".parse().unwrap());
-        let catalogues = vec![cra_catalogue(vec![ctl])];
-
-        let mut leaf = layer("root", &["cra"]);
-        leaf.tighten.insert(
-            ControlRef::new("cra", "a"),
-            Tighten {
-                max_age: Some("30d".parse().unwrap()),
-            },
-        );
-        let (applied, findings) = applicable(&catalogues, &[leaf]);
+            .find(|c| c.control.id == "hw")
+            .unwrap();
         assert_eq!(
-            applied[0].max_age,
-            Some("7d".parse().unwrap()),
-            "the looser value has no effect"
+            hw.not_applicable,
+            Some(AppliedNotApplicable {
+                scope: "irrlicht".into(),
+                rationale: "No hardware ships".into()
+            })
         );
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].kind, FindingKind::LooseningHasNoEffect);
-    }
-
-    #[test]
-    fn not_applicable_requires_a_rationale() {
-        let catalogues = vec![cra_catalogue(vec![control("a")])];
-        let mut leaf = layer("root", &["cra"]);
-        leaf.not_applicable.push(NotApplicable {
-            control: ControlRef::new("cra", "a"),
-            rationale: "   ".to_string(),
-        });
-        let (applied, findings) = applicable(&catalogues, &[leaf]);
+        let sbom = owned
+            .controls
+            .iter()
+            .find(|c| c.control.id == "sbom")
+            .unwrap();
         assert!(
-            applied[0].not_applicable.is_none(),
-            "empty rationale is ignored"
+            sbom.not_applicable.is_none(),
+            "an empty rationale leaves it applicable"
         );
-        assert_eq!(findings[0].kind, FindingKind::EmptyRationale);
+        assert!(
+            !owned.not_selected.iter().any(|c| c.control.id == "hw"),
+            "an n/a control is accounted for, not unselected"
+        );
     }
 
     #[test]
-    fn not_applicable_with_a_rationale_holds_and_names_the_declaring_scope() {
-        let catalogues = vec![cra_catalogue(vec![control("a")])];
-        let mut root = layer("root", &["cra"]);
-        root.not_applicable.push(NotApplicable {
-            control: ControlRef::new("cra", "a"),
-            rationale: "we ship no hardware".to_string(),
-        });
-        let leaf = layer("root/demo", &[]);
-        let (applied, findings) = applicable(&catalogues, &[root, leaf]);
+    fn a_policy_without_a_template_declares_its_own_controls() {
+        let finance = file(
+            "framework: finance\ntitle: Finance\nkind: best-practice\ncontrols:\n\
+             \x20 - id: belege\n    title: Every booking has its receipt\n    kind: regulation\n    max_age: 35d\n\
+             \x20   evidence: [{check: metric, metric: reported.finance.bookings_without_beleg, below: 0, max_age: 40d}]\n\
+             \x20 - {id: close, title: Monthly close, evidence: [{check: task, task: Monatsabschluss Finanzen}]}\n",
+        );
+        let (owned, findings) = resolve(&finance, "finance", "finance.yaml", &[]);
         assert!(findings.is_empty(), "{findings:?}");
-        let na = applied[0].not_applicable.as_ref().unwrap();
-        assert_eq!(na.scope, "root");
-        assert_eq!(na.rationale, "we ship no hardware");
+        assert_eq!(
+            (owned.title.as_str(), owned.kind),
+            ("Finance", Kind::BestPractice)
+        );
+        assert!(owned.not_selected.is_empty());
+        let belege = &owned.controls[0];
+        assert_eq!(belege.title, "Every booking has its receipt");
+        assert_eq!(belege.kind, Kind::Regulation);
+        assert_eq!(
+            belege.max_age,
+            Some("35d".parse().unwrap()),
+            "the minimum of control and checks"
+        );
+        assert_eq!(
+            owned.controls[1].kind,
+            Kind::BestPractice,
+            "the policy's own kind"
+        );
+
+        let bare =
+            file("framework: house\ncontrols: [{id: a, evidence: [{check: attestation}]}]\n");
+        let (owned, findings) = resolve(&bare, "s", "house.yaml", &[]);
+        assert_eq!(kinds(&findings), [FindingKind::MissingField; 3]);
+        assert_eq!(
+            (owned.title.as_str(), owned.kind),
+            ("house", Kind::Regulation)
+        );
+        assert_eq!(owned.controls[0].title, "a");
     }
 
     #[test]
-    fn a_tighten_or_not_applicable_naming_an_unknown_control_is_a_finding() {
-        let catalogues = vec![cra_catalogue(vec![control("a")])];
-        let mut leaf = layer("root", &["cra"]);
-        leaf.tighten.insert(
-            ControlRef::new("cra", "no-such-control"),
-            Tighten {
-                max_age: Some("1d".parse().unwrap()),
-            },
+    fn a_picked_control_overriding_template_fields_is_a_finding_and_the_template_holds() {
+        let policy = file(
+            "framework: cra\ntemplate: cra\ncontrols:\n\
+             \x20 - {id: sbom, title: Mine, kind: best-practice, evidence: [{check: attestation}]}\n",
         );
-        leaf.not_applicable.push(NotApplicable {
-            control: ControlRef::new("gdpr", "x"),
-            rationale: "n/a".to_string(),
-        });
-        let (_, findings) = applicable(&catalogues, &[leaf]);
-        assert_eq!(findings.len(), 2);
-        assert!(findings
-            .iter()
-            .all(|f| f.kind == FindingKind::UnknownControl));
+        let (owned, findings) = resolve(&policy, "s", "cra.yaml", &templates());
+        assert_eq!(kinds(&findings), [FindingKind::TemplateOverride]);
+        assert!(findings[0].detail.contains("title, kind"), "{findings:?}");
+        assert_eq!(owned.controls[0].title, "SBOM");
+        assert_eq!(owned.controls[0].kind, Kind::Regulation);
+    }
+
+    #[test]
+    fn a_template_with_evidence_is_a_finding_and_loads_without_it() {
+        let dir = tempdir("template-evidence");
+        write(
+            &dir,
+            "cra.yaml",
+            "template: cra\ntitle: CRA\nkind: regulation\ncontrols:\n\
+             \x20 - {id: sbom, title: SBOM, evidence: [{check: task, task: sbom-export}]}\n",
+        );
+        write(
+            &dir,
+            "iso.yaml",
+            "template: iso27001\ntitle: ISO\nkind: standard\n",
+        );
+        let (templates, findings) = load_templates(&dir, ".factory/policies/templates/");
+        assert_eq!(
+            kinds(&findings),
+            [
+                FindingKind::TemplateEvidence,
+                FindingKind::FrameworkMismatch
+            ]
+        );
+        assert_eq!(findings[0].subject, ".factory/policies/templates/cra.yaml");
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].controls[0].id, "sbom");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn templates_and_drafts_beneath_a_policies_dir_are_never_policies() {
+        let dir = tempdir("subdirs");
+        write(
+            &dir,
+            "house.yaml",
+            "framework: house\ntitle: House\nkind: best-practice\n",
+        );
+        write(&dir.join("templates"), "cra.yaml", TEMPLATE);
+        write(
+            &dir.join("drafts"),
+            "next.yaml",
+            "framework: next\ntitle: Next\nkind: regulation\n",
+        );
+        let (policies, findings) = load_all(&dir);
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(
+            policies
+                .iter()
+                .map(|p| p.framework.as_str())
+                .collect::<Vec<_>>(),
+            ["house"]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_skeleton_picks_every_template_control_and_parses_as_a_policy() {
+        let templates = templates();
+        let text = skeleton(&templates[0], None);
+        let parsed = file(&text);
+        assert_eq!(parsed.template.as_deref(), Some("cra"));
+        assert_eq!(parsed.controls.len(), 4);
+        let (owned, findings) = resolve(&parsed, "s", "cra.yaml", &templates);
+        assert_eq!(
+            kinds(&findings),
+            [FindingKind::NoEvidence; 4],
+            "every control still needs its evidence"
+        );
+        assert!(owned.not_selected.is_empty());
     }
 
     // -- evaluate ----------------------------------------------------------
@@ -3968,27 +4435,18 @@ mod tests {
     }
 
     #[test]
-    fn a_scope_tighten_on_attested_max_age_is_honoured_by_evaluate() {
-        // The catalogue's own `attested` check names 30d; a scope tightens
-        // it to 7d. `direct_status` must read `applied.max_age` (7d, the
-        // tightened value), never the check's own raw field (30d) --
-        // otherwise a run 10 days old would wrongly read `satisfied`.
-        let mut ctl = control("a");
-        ctl.evidence = vec![Check::Attested {
-            category: "feature".to_string(),
-            step: "tests".to_string(),
-            max_age: "30d".parse().unwrap(),
-        }];
-        let catalogues = vec![cra_catalogue(vec![ctl])];
-        let mut root = layer("root", &["cra"]);
-        root.tighten.insert(
-            ControlRef::new("cra", "a"),
-            Tighten {
-                max_age: Some("7d".parse().unwrap()),
-            },
+    fn a_control_max_age_shorter_than_its_attested_check_is_honoured_by_evaluate() {
+        // The `attested` check names 30d; the control itself says 7d.
+        // `direct_status` must read `applied.max_age` (7d, the minimum),
+        // never the check's own raw field (30d) -- otherwise a run 10 days
+        // old would wrongly read `satisfied`.
+        let policy = file(
+            "framework: cra\ntitle: CRA\nkind: regulation\ncontrols:\n\
+             \x20 - {id: a, title: A, max_age: 7d, evidence: [{check: attested, category: feature, step: tests, max_age: 30d}]}\n",
         );
-        let (applied, findings) = applicable(&catalogues, &[root]);
+        let (owned, findings) = resolve(&policy, "root", "cra.yaml", &[]);
         assert!(findings.is_empty(), "{findings:?}");
+        let applied = owned.controls;
         assert_eq!(applied[0].max_age, Some("7d".parse().unwrap()));
 
         let now = Utc::now();

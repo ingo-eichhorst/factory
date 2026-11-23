@@ -471,14 +471,13 @@ impl Engine {
         })
     }
 
-    /// Every policy layer in effect for `scope` right now, root first --
-    /// resolved from the live snapshot on every call for the same reason
-    /// `roles_for` is: a scope-config write holds from the next request with
-    /// nothing to invalidate. Folded into a status by `policy::applicable`
-    /// and `policy::evaluate` -- see `policy_report`, `policy_control` and
-    /// `policy_attest` in `policies/mod.rs`, which are every caller.
-    pub fn policy_chain(&self, scope: &str) -> Vec<factory_core::policy::PolicyLayer> {
-        self.factory_snapshot().policy_chain(scope)
+    /// The frameworks `scope` has its own policy for right now (#390) --
+    /// the stems of its `.factory/policies/*.yaml`, read on every call so a
+    /// new file holds from the next dispatch with nothing to invalidate.
+    /// What the agent guide names; never an ancestor's, since nothing is
+    /// inherited.
+    pub fn policy_frameworks(&self, scope: &str) -> Vec<String> {
+        self.factory_snapshot().policy_frameworks(scope)
     }
 
     /// The instance root's own `roles:`, after a write to its config.
@@ -2270,29 +2269,23 @@ mod tests {
         std::fs::remove_dir_all(scope_dir).ok();
     }
 
-    /// `policy_chain` delegates to `Factory::policy_chain` on the live
-    /// snapshot, the same way `roles_for` delegates for roles -- never a
-    /// second, flat copy of the chain.
+    /// `policy_frameworks` reads the scope's own `.factory/policies/` off
+    /// the live snapshot (#390): a legacy `policies:` block binds nothing.
     #[tokio::test]
-    async fn policy_chain_delegates_to_the_live_snapshot() {
-        let scope_dir = temp_dir("policy-chain");
+    async fn policy_frameworks_are_the_scopes_own_policy_files_only() {
+        let scope_dir = temp_dir("policy-frameworks");
         let engine = test_engine(scope_dir.clone());
         {
             let mut factory = engine.shared.factory.write().unwrap();
-            factory.config.policies = PolicyDeclaration {
-                frameworks: vec!["cra".into()],
-                ..Default::default()
-            };
-            factory.config.scopes[0].policies = PolicyDeclaration {
-                frameworks: vec!["gdpr".into()],
-                ..Default::default()
-            };
+            factory.config.policies =
+                serde_yaml_ng::from_str::<PolicyDeclaration>("frameworks: [cra]").unwrap();
         }
-
-        let chain = engine.policy_chain("demo");
-        assert_eq!(chain, engine.factory_snapshot().policy_chain("demo"));
-        let scopes: Vec<&str> = chain.iter().map(|l| l.scope.as_str()).collect();
-        assert_eq!(scopes, vec!["test", "demo"], "root layer, then the scope's own");
+        assert!(engine.policy_frameworks("demo").is_empty());
+        let scope_path = engine.factory_snapshot().scope_path("demo").unwrap();
+        let dir = factory_core::policy::policies_dir(&scope_path);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("gdpr.yaml"), "framework: gdpr\n").unwrap();
+        assert_eq!(engine.policy_frameworks("demo"), ["gdpr"]);
 
         std::fs::remove_dir_all(scope_dir).ok();
     }

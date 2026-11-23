@@ -1,0 +1,56 @@
+# A starter template for the EU Cyber Resilience Act (#390): a list of
+# possible controls with no evidence. A scope that ships a product with
+# digital elements picks the controls that apply to it in its own
+# `<scope>/.factory/policies/cra.yaml` (`template: cra`) and gives each one
+# that scope's own evidence -- see `../cra.yaml`. Copy this file to
+# `<root>/.factory/policies/templates/cra.yaml` to use it.
+#
+# Titles are our own wording of the CRA's public Annex I requirements and
+# Art. 14, not a copy of the regulation (ADR 0004). A template never carries
+# `evidence:`; one that does is a finding.
+template: cra
+title: Cyber Resilience Act
+kind: regulation
+controls:
+  - id: annex-i-1-2-a
+    title: Made available without known exploitable vulnerabilities
+    maps_to: [iso27001/a-8-8]
+  - id: annex-i-1-2-b
+    title: Secure by default configuration, with a way back to the original state
+  - id: annex-i-1-2-c
+    title: Vulnerabilities can be fixed through security updates
+  - id: annex-i-1-2-d
+    title: Protected against unauthorised access by appropriate control mechanisms
+    maps_to: [iso27001/a-8-5]
+  - id: annex-i-1-2-e
+    title: Confidentiality of stored, transmitted and processed data is protected
+    maps_to: [iso27001/a-8-24]
+  - id: annex-i-1-2-l
+    title: Security-relevant activity is recorded and monitored
+    maps_to: [iso27001/a-8-15]
+  - id: annex-i-2-1
+    title: Identify and document components (SBOM)
+    maps_to: [iso27001/a-5-9]
+    remediation: |
+      Add a scheduled task that exports a software bill of materials, and
+      name it as this control's `task` evidence.
+  - id: annex-i-2-2
+    title: Vulnerability handling procedure is documented
+  - id: annex-i-2-3
+    title: Known exploitable vulnerabilities are tracked and remediated
+    maps_to: [iso27001/a-8-8]
+    remediation: |
+      Add a scheduled task that runs a vulnerability scan and records the
+      result, and name it as this control's `task` evidence.
+  - id: annex-i-2-4
+    title: Security updates are provided without undue delay
+  - id: annex-i-2-5
+    title: A coordinated vulnerability disclosure policy is published
+  - id: art-14
+    title: Actively exploited vulnerabilities and severe incidents are reported (Art. 14)
+    maps_to: [iso27001/a-5-24]
+    remediation: |
+      Submit the early warning or notification the CRA Art. 14 reporting
+      clock (`factory policy clock`) is waiting on, then record it with
+      `factory policy attest cra/art-14 --scope <scope> --evidence <pointer>
+      --clock-item <item> --deadline <early-warning|notification>`.
