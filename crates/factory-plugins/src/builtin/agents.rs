@@ -3,9 +3,10 @@
 
 use async_trait::async_trait;
 use factory_core::adapter::agent::{
-    memory_section, truncate_tail, Agent, AgentContext, LaunchKind, LaunchSpec, ResumeSpec,
-    UpstreamOutput, UPSTREAM_RESULT_BYTE_CAP,
+    memory_section, truncate_tail, Agent, AgentContext, LaunchKind, LaunchSpec, LiveConversation,
+    ResumeSpec, UpstreamOutput, UPSTREAM_RESULT_BYTE_CAP,
 };
+use std::path::{Path, PathBuf};
 use factory_core::adapter::KnowledgeHints;
 use factory_core::error::{FactoryError, Result};
 use factory_core::harness::HealthProbe;
@@ -164,17 +165,26 @@ impl Agent for HarnessAgent {
 
     /// Claude Code writes `<config>/sessions/<pid>.json` for every process it
     /// runs, and its `sessionId` is the conversation that process is in --
-    /// the config directory being `CLAUDE_CONFIG_DIR`, else `~/.claude`. No
-    /// other harness this build ships keeps one by process.
-    fn live_conversation(&self, pid: u32) -> Option<String> {
-        if self.harness != "claude" {
-            return None;
-        }
-        let config = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .filter(|dir| !dir.is_empty())
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".claude")))?;
-        claude_conversation_of(&config.join("sessions"), pid).filter(|id| self.resume_spec(id).is_some())
+    /// the config directory being `CLAUDE_CONFIG_DIR`, else `~/.claude`.
+    /// codex holds `<home>/thread-writer-locks/<thread>.lock` open for the
+    /// thread it writes -- `<home>` being `CODEX_HOME`, else `~/.codex` --
+    /// read from the files the process has open. pi and OpenCode keep no
+    /// record by process.
+    fn live_conversation(&self, pid: u32) -> Option<LiveConversation> {
+        let home = |var: &str, dir: &str| {
+            std::env::var_os(var)
+                .filter(|dir| !dir.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(dir)))
+        };
+        let found = match self.harness.as_str() {
+            "claude" => claude_conversation_of(&home("CLAUDE_CONFIG_DIR", ".claude")?.join("sessions"), pid)
+                .map(LiveConversation::In),
+            "codex" => codex_conversation_of(&home("CODEX_HOME", ".codex")?, &open_files(pid)?),
+            _ => None,
+        }?;
+        let (LiveConversation::In(id) | LiveConversation::Empty(id)) = &found;
+        self.resume_spec(id).is_some().then_some(found)
     }
 
     async fn prompt(&self, ctx: &AgentContext) -> Result<String> {
@@ -569,13 +579,95 @@ fn shell_single_quote(s: &str) -> Option<String> {
 /// The `sessionId` in Claude Code's `<sessions>/<pid>.json`, when that file
 /// is there and says it is this process's: a record left by an earlier
 /// process that happened to have the same pid names another `pid`.
-fn claude_conversation_of(sessions: &std::path::Path, pid: u32) -> Option<String> {
+fn claude_conversation_of(sessions: &Path, pid: u32) -> Option<String> {
     let text = std::fs::read_to_string(sessions.join(format!("{pid}.json"))).ok()?;
     let record: serde_json::Value = serde_json::from_str(&text).ok()?;
     if record.get("pid").and_then(serde_json::Value::as_u64).is_some_and(|p| p != u64::from(pid)) {
         return None;
     }
     record.get("sessionId").and_then(serde_json::Value::as_str).map(str::to_string)
+}
+
+/// The thread a codex process writes, named by the one
+/// `<home>/thread-writer-locks/<thread>.lock` among the files it has open --
+/// a process holding several (a sub-agent's as well) does not say which is
+/// its own. codex writes a thread's rollout,
+/// `<home>/sessions/YYYY/MM/DD/rollout-<time>-<thread>.jsonl`, at its first
+/// turn: a thread with no rollout there or in `archived_sessions` is one
+/// nothing has been said in. A home with no `sessions` folder to look in
+/// says nothing either way.
+fn codex_conversation_of(home: &Path, open: &[PathBuf]) -> Option<LiveConversation> {
+    let locks = std::fs::canonicalize(home.join("thread-writer-locks")).ok()?;
+    let mut threads: Vec<&str> = open
+        .iter()
+        .filter(|path| path.parent() == Some(locks.as_path()))
+        .filter_map(|path| path.file_name()?.to_str()?.strip_suffix(".lock"))
+        .filter(|thread| !thread.starts_with('.'))
+        .collect();
+    threads.sort_unstable();
+    threads.dedup();
+    let [thread] = threads[..] else { return None };
+    let suffix = format!("-{thread}.jsonl");
+    let written = holds_rollout(&home.join("sessions"), &suffix, 3)?
+        || holds_rollout(&home.join("archived_sessions"), &suffix, 3).unwrap_or(false);
+    let thread = thread.to_string();
+    Some(if written { LiveConversation::In(thread) } else { LiveConversation::Empty(thread) })
+}
+
+/// Whether `dir`, or a folder in it up to `depth` levels down, holds a
+/// `rollout-…<suffix>` file. `None` when `dir` itself cannot be read.
+fn holds_rollout(dir: &Path, suffix: &str, depth: u8) -> Option<bool> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    Some(entries.flatten().any(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            depth > 0 && holds_rollout(&path, suffix, depth - 1).unwrap_or(false)
+        } else {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(suffix))
+        }
+    }))
+}
+
+/// The files a process has open, as the system names them: `/proc/<pid>/fd`
+/// on Linux, `lsof` elsewhere, given five seconds to answer.
+#[cfg(target_os = "linux")]
+fn open_files(pid: u32) -> Option<Vec<PathBuf>> {
+    let entries = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
+    Some(entries.flatten().filter_map(|entry| std::fs::read_link(entry.path()).ok()).collect())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_files(pid: u32) -> Option<Vec<PathBuf>> {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+    let mut child = std::process::Command::new("lsof")
+        .args(["-w", "-n", "-P", "-F", "n", "-a", "-p", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        stdout.read_to_string(&mut out).map(|_| out)
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let out = reader.join().ok()?.ok()?;
+    Some(out.lines().filter_map(|line| line.strip_prefix('n')).map(PathBuf::from).collect())
 }
 
 #[cfg(test)]
@@ -617,11 +709,56 @@ mod tests {
         assert_eq!(claude_conversation_of(&sessions, 7), None);
         assert_eq!(claude_conversation_of(&sessions, 9), None);
         assert_eq!(claude_conversation_of(&sessions, 1), None, "no record at all");
-        // Only claude keeps one; the others say so rather than guess.
-        for harness in ["codex", "pi", "opencode"] {
+        // pi and OpenCode keep none; they say so rather than guess.
+        for harness in ["pi", "opencode"] {
             assert_eq!(HarnessAgent::new(harness, harness, "test").live_conversation(4242), None);
         }
         std::fs::remove_dir_all(sessions).ok();
+    }
+
+    #[test]
+    fn a_codex_process_names_the_thread_whose_writer_lock_it_holds_and_whether_anything_was_said_in_it() {
+        let root = std::env::temp_dir().join(format!("factory-codex-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("thread-writer-locks")).unwrap();
+        std::fs::create_dir_all(root.join("sessions/2026/10/30")).unwrap();
+        // What lsof names: the real path, which a temp dir on macOS is not.
+        let home = std::fs::canonicalize(&root).unwrap();
+        let lock = |thread: &str| home.join("thread-writer-locks").join(format!("{thread}.lock"));
+        let spoken = "01a18d71-bf32-7211-acd8-c839e211cff5";
+        let silent = "01a18d99-debd-7291-ab5f-6d4ee91faaa4";
+        std::fs::write(home.join(format!("sessions/2026/10/30/rollout-2026-10-30T16-33-24-{spoken}.jsonl")), "{}\n").unwrap();
+        let other = [home.join("logs_2.sqlite"), home.join("thread-writer-locks/.coordination.lock")];
+
+        let open = |locks: &[&str]| -> Vec<PathBuf> { other.iter().cloned().chain(locks.iter().map(|t| lock(t))).collect() };
+        assert_eq!(codex_conversation_of(&root, &open(&[spoken])), Some(LiveConversation::In(spoken.into())));
+        assert_eq!(codex_conversation_of(&root, &open(&[silent])), Some(LiveConversation::Empty(silent.into())));
+        // Two threads in one process: which is its own is not said.
+        assert_eq!(codex_conversation_of(&root, &open(&[spoken, silent])), None);
+        assert_eq!(codex_conversation_of(&root, &open(&[])), None, "no thread at all");
+        // A lock of the same name somewhere else is not codex's.
+        assert_eq!(codex_conversation_of(&root, &[root.join("elsewhere").join(format!("{silent}.lock"))]), None);
+
+        // An archived rollout is still something said.
+        std::fs::create_dir_all(home.join("archived_sessions")).unwrap();
+        std::fs::write(home.join(format!("archived_sessions/rollout-2026-10-30T17-17-13-{silent}.jsonl")), "{}\n").unwrap();
+        assert_eq!(codex_conversation_of(&root, &open(&[silent])), Some(LiveConversation::In(silent.into())));
+
+        // With no sessions folder to look in, an empty thread is not assumed.
+        std::fs::remove_dir_all(home.join("sessions")).unwrap();
+        std::fs::remove_dir_all(home.join("archived_sessions")).unwrap();
+        assert_eq!(codex_conversation_of(&root, &open(&[silent])), None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn open_files_names_a_file_this_process_holds() {
+        let path = std::env::temp_dir().join(format!("factory-open-files-{}", uuid::Uuid::new_v4()));
+        let held = std::fs::File::create(&path).unwrap();
+        let real = std::fs::canonicalize(&path).unwrap();
+        let open = open_files(std::process::id()).expect("the system names this process's files");
+        assert!(open.contains(&real), "{real:?} not in {open:?}");
+        drop(held);
+        std::fs::remove_file(path).ok();
     }
 
     fn sample_task() -> Task {

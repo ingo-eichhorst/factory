@@ -1230,10 +1230,22 @@ pub trait Agent: Send + Sync {
     /// "the latest conversation in this directory": `None`, the default and
     /// what a plugin gets, means this harness keeps no such record, and the
     /// restart says it found no conversation rather than guessing one.
-    fn live_conversation(&self, pid: u32) -> Option<String> {
+    fn live_conversation(&self, pid: u32) -> Option<LiveConversation> {
         let _ = pid;
         None
     }
+}
+
+/// What `Agent::live_conversation` hands back: the conversation a running
+/// process is in, and whether there is anything in it to go back to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveConversation {
+    /// This one, which `resume_spec` opens again.
+    In(String),
+    /// One nothing has been said in yet: the harness has written no record
+    /// of it that a resume could open, so a fresh start loses nothing. codex
+    /// keeps a thread in memory until its first turn.
+    Empty(String),
 }
 
 /// What `Agent::resume_spec` hands back: the extra arguments that make the

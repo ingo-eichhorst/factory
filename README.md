@@ -250,8 +250,15 @@ The conversation is the one the runtime's usage saw this instance's harness
 running as -- the same reading `factory task run --continue` resumes a run
 from -- and, when that names none, the one the harness itself keeps for the
 process in the session: Claude Code's `~/.claude/sessions/<pid>.json`
-(`CLAUDE_CONFIG_DIR` if set), with herdr naming the pane's processes. It is
-written on the instance's row before anything is stopped. With none found, or
+(`CLAUDE_CONFIG_DIR` if set), or the `thread-writer-locks/<thread>.lock` a
+codex process holds open in `~/.codex` (`CODEX_HOME` if set; asked of `lsof`,
+of `/proc` on Linux), with herdr naming the pane's processes. It is written on
+the instance's row before anything is stopped. codex writes a thread's
+rollout at its first turn, so a thread with none under `sessions/` or
+`archived_sessions/` has had nothing said in it: there is nothing to resume
+and nothing to lose, and the restart starts it fresh without `--fresh` and
+says so (`demo/codex restarted fresh: nothing had been said in conversation
+01a18d99-…`). With none found, or
 an adapter with no resume (`--resume <id>` for claude, `resume <id>` for
 codex, `--session <id>` for pi), the restart is refused unless `--fresh`, and
 the reason says what was asked and what answered. Before stopping anything it
